@@ -46,6 +46,11 @@ htmlcov/
 .env
 .env.local
 
+# Database
+*.db
+*.db-shm
+*.db-wal
+
 # Workflow files
 test-users.md
 test-users.json

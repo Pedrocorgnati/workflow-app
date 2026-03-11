@@ -6,13 +6,12 @@ build-backend = "hatchling.build"
 name = "workflow-app"
 version = "0.1.0"
 description = "Workflow App — Claude Code pipeline orchestrator"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "PySide6>=6.6.0",
     "SQLAlchemy>=2.0.0",
     "python-statemachine>=2.0.0",
     "pyte>=0.8.0",
-    "claude-agent-sdk>=0.0.1",  # TODO: check exact package name
 ]
 
 [project.optional-dependencies]
@@ -29,3 +28,7 @@ packages = ["src/workflow_app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.envs.default.scripts]
+db-seed = "python3 scripts/seed.py"
+db-reset = "python3 scripts/seed.py --reset"
