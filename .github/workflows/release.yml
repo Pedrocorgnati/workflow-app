@@ -1,0 +1,100 @@
+name: Release — Build & Publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de versao (ex: v1.0.0)"
+        required: true
+
+jobs:
+  build:
+    name: Build binario (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: workflow-app-linux
+            executable: dist/workflow-app
+          - os: macos-latest
+            artifact_name: workflow-app-macos
+            executable: dist/workflow-app
+          - os: windows-latest
+            artifact_name: workflow-app-windows
+            executable: dist/workflow-app.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Install PyInstaller
+        run: uv run pip install pyinstaller
+
+      # PySide6 on Linux needs system libs
+      - name: Install system libs (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libgl1 libglib2.0-0 libxkbcommon-x11-0
+
+      - name: Build executavel
+        run: |
+          uv run pyinstaller \
+            --onefile \
+            --name workflow-app \
+            --hidden-import PySide6.QtCore \
+            --hidden-import PySide6.QtWidgets \
+            --hidden-import PySide6.QtGui \
+            --hidden-import workflow_app \
+            src/workflow_app/main.py
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.executable }}
+          retention-days: 7
+
+  publish-release:
+    name: Publicar GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download todos os binarios
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-release/
+
+      - name: Listar artefatos
+        run: find dist-release/ -type f
+
+      - name: Criar GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          name: "Workflow App ${{ github.ref_name || inputs.tag }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: true
+          files: |
+            dist-release/workflow-app-linux/workflow-app
+            dist-release/workflow-app-macos/workflow-app
+            dist-release/workflow-app-windows/workflow-app.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

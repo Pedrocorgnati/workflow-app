@@ -12,9 +12,9 @@ Colors per DESIGN.md section 2.3:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPropertyAnimation, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QWidget
 
 from workflow_app.domain import CommandStatus
 

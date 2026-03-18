@@ -1,0 +1,16 @@
+## Android
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+/build/
+/captures/
+/app/release/
+*.keystore
+*.jks
+keystore.properties
+
+## Gradle cache
+.gradle
+build/

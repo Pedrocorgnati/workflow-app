@@ -45,6 +45,7 @@ htmlcov/
 # Environment
 .env
 .env.local
+.env.docker
 
 # Database
 *.db
@@ -58,3 +59,7 @@ test-users.json
 # Asset placeholders
 public/images/
 assets/images/
+
+# Load test results
+tests/load/results/*.json
+tests/load/results/*.html

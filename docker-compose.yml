@@ -1,0 +1,123 @@
+# ============================================================
+# Workflow App — Docker Compose (desenvolvimento / CI local)
+# ============================================================
+# Aplicação desktop Python/PySide6 — sem servidor web ou banco externo.
+# Uso: docker compose run test
+#      docker compose run lint
+#      docker compose run typecheck
+#
+# NÃO inclui docker-compose.prod.yml (hosting=desktop).
+# ============================================================
+
+services:
+
+  # ── Testes (pytest headless) ───────────────────────────────
+  test:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      # Evita sobrescrever o .venv do container com o do host
+      - workflow_venv:/app/.venv
+    environment:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
+      # Banco em memória para testes (sobrescreve DB_PATH se definido)
+      DB_PATH: ""
+    command: uv run pytest tests/ -v --timeout=30
+    profiles:
+      - test
+
+  # ── Lint (ruff) ────────────────────────────────────────────
+  lint:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - workflow_venv:/app/.venv
+    environment:
+      QT_QPA_PLATFORM: offscreen
+    command: uv run ruff check src/ tests/
+    profiles:
+      - lint
+
+  # ── Type check (mypy) ──────────────────────────────────────
+  typecheck:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - workflow_venv:/app/.venv
+    environment:
+      QT_QPA_PLATFORM: offscreen
+    command: uv run mypy src/ --ignore-missing-imports --no-error-summary
+    profiles:
+      - typecheck
+
+  # ── CI completo (lint + typecheck + test em sequência) ─────
+  ci:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - workflow_venv:/app/.venv
+    environment:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
+    command: >
+      sh -c "
+        uv run ruff check src/ tests/ &&
+        uv run mypy src/ --ignore-missing-imports --no-error-summary &&
+        uv run pytest tests/ -v --timeout=30
+      "
+    profiles:
+      - ci
+
+  # ── WebSocket Server — testes de integração do bridge (workflow-mobile) ───
+  ws-test:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - workflow_venv:/app/.venv
+    environment:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
+      DB_PATH: ""
+      # Força bind em 127.0.0.1 para testes (sem interface Tailscale no container)
+      WS_BIND_HOST: "127.0.0.1"
+      WS_PORT: "8765"
+    command: uv run pytest tests/integration/ -v --timeout=60 -k "websocket or remote_server or ws_bridge"
+    profiles:
+      - ws-test
+
+  # ── CI completo com WebSocket (lint + typecheck + test + ws-test) ──────────
+  ci-full:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - workflow_venv:/app/.venv
+    environment:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
+      DB_PATH: ""
+      WS_BIND_HOST: "127.0.0.1"
+      WS_PORT: "8765"
+    command: >
+      sh -c "
+        uv run ruff check src/ tests/ &&
+        uv run mypy src/ --ignore-missing-imports --no-error-summary &&
+        uv run pytest tests/ -v --timeout=60
+      "
+    profiles:
+      - ci-full
+
+volumes:
+  workflow_venv:

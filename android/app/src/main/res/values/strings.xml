@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Workflow App</string>
+
+    <!-- ConnectionBar -->
+    <string name="connection_ip_label">IP do servidor</string>
+    <string name="connection_ip_placeholder">100.x.x.x</string>
+    <string name="connection_port_label">Porta</string>
+    <string name="connection_port_placeholder">18765</string>
+    <string name="connection_btn_connect">Conectar</string>
+    <string name="connection_btn_connecting">Conectando\u2026</string>
+    <string name="connection_btn_disconnect">Desconectar</string>
+    <string name="connection_status_connected">Conectado</string>
+    <string name="connection_status_reconnecting">Reconectando</string>
+    <string name="connection_status_connecting">Conectando</string>
+    <string name="connection_status_disconnected">Desconectado</string>
+
+    <!-- InteractionCard -->
+    <string name="interaction_response_label">Resposta</string>
+    <string name="interaction_send">Enviar</string>
+    <string name="interaction_quick_ok">OK</string>
+    <string name="interaction_quick_yes">Sim</string>
+    <string name="interaction_quick_no">Não</string>
+    <string name="interaction_quick_cancel">Cancelar</string>
+
+    <!-- IdleState -->
+    <string name="idle_no_pipeline">Nenhum pipeline ativo</string>
+    <string name="idle_last_pipeline">Último: %1$s</string>
+
+    <!-- OutputArea -->
+    <string name="output_waiting">Aguardando output\u2026</string>
+</resources>

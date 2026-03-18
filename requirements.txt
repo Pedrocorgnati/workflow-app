@@ -3,6 +3,7 @@ PySide6>=6.6.0
 SQLAlchemy>=2.0.0
 python-statemachine>=2.0.0
 pyte>=0.8.0
+claude-agent-sdk>=0.1.48
 
 # Dependências de desenvolvimento
 pytest>=7.0

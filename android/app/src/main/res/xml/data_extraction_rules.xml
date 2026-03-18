@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ backup exclusion rules -->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Exclude encrypted connection prefs (contains last-used IP/port) -->
+        <exclude domain="sharedpref" path="connection_prefs_encrypted.xml" />
+        <!-- Exclude plain connection settings used by ConnectionManager (legacy fallback) -->
+        <exclude domain="sharedpref" path="remote_settings.xml" />
+        <!-- Exclude encrypted connection settings used by ConnectionManager -->
+        <exclude domain="sharedpref" path="remote_settings_encrypted.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="connection_prefs_encrypted.xml" />
+        <exclude domain="sharedpref" path="remote_settings.xml" />
+        <exclude domain="sharedpref" path="remote_settings_encrypted.xml" />
+    </device-transfer>
+</data-extraction-rules>

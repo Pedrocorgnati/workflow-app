@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network Security Config — Workflow Remote App
+
+    Design rationale:
+    This app connects exclusively to a user-owned PC on the local network via
+    WebSocket (ws://).  The IP address is provided at runtime by the user, so
+    it cannot be enumerated in this config.  Because ALL network traffic is
+    LAN-only and intentionally unencrypted (TLS termination on a self-hosted
+    LAN server is complex for end users), cleartext is permitted globally.
+
+    Future: migrate to wss:// with a self-signed cert + user trust workflow,
+    then restrict cleartext to localhost/10.0.2.2 only.
+-->
+<network-security-config>
+
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Debug: also trust user-installed CAs (mitmproxy / Charles Proxy) -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" />
+            <certificates src="system" />
+        </trust-anchors>
+    </debug-overrides>
+
+</network-security-config>

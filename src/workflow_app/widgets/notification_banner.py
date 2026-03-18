@@ -1,12 +1,15 @@
 """
 NotificationBanner — Inline error/info banner for dialogs.
 ToastNotification — Floating corner toast for main window.
+ToastManager — Connects SignalBus.toast_requested to ToastNotification.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPropertyAnimation, QRect, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+
+from workflow_app.signal_bus import signal_bus
 
 
 class NotificationBanner(QWidget):
@@ -118,3 +121,21 @@ class ToastNotification(QWidget):
         self.setVisible(True)
         self.raise_()
         self._timer.start(duration_ms)
+
+    # Alias for spec compatibility
+    show_message = show_toast
+
+
+class ToastManager:
+    """Connects SignalBus.toast_requested to a ToastNotification instance.
+
+    Usage in MainWindow.__init__:
+        self._toast_manager = ToastManager(self)
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        self._toast = ToastNotification(parent)
+        signal_bus.toast_requested.connect(self._on_toast)
+
+    def _on_toast(self, message: str, level: str) -> None:
+        self._toast.show_toast(message, level)

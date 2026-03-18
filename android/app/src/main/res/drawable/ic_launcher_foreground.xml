@@ -1,0 +1,25 @@
+<!--
+@ASSET_PLACEHOLDER
+name: ic_launcher_foreground
+type: image
+extension: xml (adaptive icon foreground layer)
+format: 1:1 (108x108dp safe zone 72x72dp)
+description: App icon foreground for Workflow App Android. Symbol representing a pipeline/workflow — interconnected nodes or a play/arrow motif on transparent background. Used as adaptive icon foreground layer visible on all launchers.
+context: App launcher icon, task switcher, notification
+style: Flat, minimal, single color or duotone
+mood: Technical, precise, reliable
+colors: PrimaryAmber (#D4A574) on transparent background
+elements: Stylized pipeline or workflow symbol (connected nodes, arrow flow)
+avoid: Text, gradients, photographic elements, complexity
+-->
+<vector
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- PLACEHOLDER: replace with final icon before release -->
+    <path
+        android:fillColor="#D4A574"
+        android:pathData="M54,30 L78,54 L54,78 L30,54 Z" />
+</vector>

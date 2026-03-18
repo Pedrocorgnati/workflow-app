@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and below backup exclusion rules -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="connection_prefs_encrypted.xml" />
+    <exclude domain="sharedpref" path="remote_settings.xml" />
+    <exclude domain="sharedpref" path="remote_settings_encrypted.xml" />
+</full-backup-content>

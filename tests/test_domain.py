@@ -40,3 +40,15 @@ def test_command_status_values():
 def test_pipeline_status_values():
     assert PipelineStatus.NAO_INICIADO.value == "nao_iniciado"
     assert PipelineStatus.CONCLUIDO.value == "concluido"
+
+
+def test_pipeline_status_has_interrompido():
+    assert hasattr(PipelineStatus, "INTERROMPIDO")
+    assert PipelineStatus.INTERROMPIDO.value == "interrompido"
+
+
+def test_enum_str_mixin():
+    """Enums must use str mixin for direct string comparison."""
+    assert CommandStatus.PENDENTE == "pendente"
+    assert PipelineStatus.CRIADO == "criado"
+    assert isinstance(CommandStatus.PENDENTE, str)

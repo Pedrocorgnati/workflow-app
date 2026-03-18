@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testes e cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Variáveis de ambiente (nunca incluir no build)
+.env
+.env.*
+!.env.example
+
+# Banco de dados
+*.db
+*.db-shm
+*.db-wal
+
+# Git
+.git/
+.github/
+.gitignore
+
+# Documentação e outputs do SystemForge
+output/
+README.md
+CHANGELOG.md
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Assets não usados em testes
+public/images/
+assets/images/

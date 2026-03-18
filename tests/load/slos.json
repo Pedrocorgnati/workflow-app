@@ -1,0 +1,45 @@
+{
+  "_comment": "SLOs extraídos do PRD e das constantes do protocolo (remote/constants.py).",
+  "_ref": "INT-020 (latência), INT-015 (dedup), PRD seção RNF",
+  "global": {
+    "error_rate_max": 0.01,
+    "rate_limit_msg_per_s": 20,
+    "max_message_bytes": 65536,
+    "max_dedup_entries": 10000,
+    "single_client_mode": true
+  },
+  "scenarios": {
+    "sync_request_latency": {
+      "description": "sync_request → pipeline_state round-trip (PC side only)",
+      "p95_ms": 100,
+      "p99_ms": 200,
+      "comment": "PC budget contribution: THROTTLE_PC_MS=100ms. Total budget (INT-020): PC(100ms) + Tailscale(50ms) + Android(200ms) = 350ms. Ceiling: 500ms."
+    },
+    "control_ack_latency": {
+      "description": "control (play/pause/skip) → control_ack round-trip",
+      "p95_ms": 100,
+      "p99_ms": 200
+    },
+    "rate_limit_boundary": {
+      "description": "Burst de mensagens acima de 20 msg/s — servidor deve descartar sem fechar conexão",
+      "rate_limit_msg_per_s": 20,
+      "expected_drop_above_limit": true,
+      "accepted_close_codes": [1008]
+    },
+    "large_message_handling": {
+      "description": "Mensagens próximas ao limite de 64KB",
+      "max_bytes_accepted": 65535,
+      "max_bytes_discarded": 65537
+    },
+    "end_to_end_budget": {
+      "description": "Budget completo da cadeia (INT-020)",
+      "ceiling_ms": 500,
+      "budget_breakdown": {
+        "pc_throttle_ms": 100,
+        "tailscale_estimated_ms": 50,
+        "android_render_ms": 200,
+        "total_estimated_ms": 350
+      }
+    }
+  }
+}

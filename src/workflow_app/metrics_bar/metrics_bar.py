@@ -1,36 +1,98 @@
 """
-MetricsBar — 48px top toolbar for pipeline controls and metrics.
+MetricsBar — 48px top toolbar for project, instance selection, navigation and metrics.
 
 Layout (left to right):
-  [+] [▶] [⏸] │ N/M [progress bar] HH:MM:SS │ ~Xk tokens [err badge] │ [🕐][▤][⚙]
+  [project pill / Selecionar] │ [clauded] [clauded2] [codex] [codex-high] │ [Workflow] [Comandos] [Toolbox] │ (metrics) │ (stretch) │ [📡] [⚙]
+
+Git info: overlay label, bottom-right corner, updated via git_info_updated signal.
 
 Specs:
   Height: 48px fixed
   Background: #27272A
   Border-bottom: 1px solid #3F3F46
-  Buttons: 32×32px
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QProgressBar,
     QPushButton,
-    QSizePolicy,
     QWidget,
 )
 
-from workflow_app.signal_bus import signal_bus
+# ─── Styles ───────────────────────────────────────────────────────────────── #
+
+_INSTANCE_SELECTED = (
+    "QPushButton {"
+    "  background-color: transparent;"
+    "  color: #FBBF24;"
+    "  border: 2px solid #FBBF24;"
+    "  border-radius: 4px;"
+    "  padding: 2px 10px;"
+    "  font-size: 11px;"
+    "  font-weight: 700;"
+    "}"
+    "QPushButton:hover {"
+    "  background-color: rgba(251, 191, 36, 0.15);"
+    "  color: #FDE68A;"
+    "}"
+)
+_INSTANCE_UNSELECTED = (
+    "QPushButton {"
+    "  background-color: transparent;"
+    "  color: #A1A1AA;"
+    "  border: 1px solid #52525B;"
+    "  border-radius: 4px;"
+    "  padding: 2px 10px;"
+    "  font-size: 11px;"
+    "}"
+    "QPushButton:hover {"
+    "  color: #FAFAFA;"
+    "  background-color: #3F3F46;"
+    "}"
+)
+
+_NAV_ACTIVE = (
+    "QPushButton {"
+    "  background-color: #FBBF24;"
+    "  color: #18181B;"
+    "  border: none;"
+    "  border-radius: 4px;"
+    "  padding: 0 14px;"
+    "  font-weight: 700;"
+    "}"
+)
+_NAV_INACTIVE = (
+    "QPushButton {"
+    "  background-color: transparent;"
+    "  color: #A1A1AA;"
+    "  border: 1px solid #3F3F46;"
+    "  border-radius: 4px;"
+    "  padding: 0 14px;"
+    "}"
+    "QPushButton:hover {"
+    "  color: #FAFAFA;"
+    "  background-color: #3F3F46;"
+    "}"
+)
 
 
 class MetricsBar(QWidget):
-    """48px pipeline control and metrics toolbar."""
+    """48px project selector, instance selection, and navigation toolbar."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Toolbox
+    config_change_requested = Signal(str)   # path of selected .json
+    config_unload_requested = Signal()      # user clicked ✕ on project pill
+
+    def __init__(self, signal_bus=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("MetricsBar")
         self.setFixedHeight(48)
@@ -38,19 +100,32 @@ class MetricsBar(QWidget):
             "background-color: #27272A; border-bottom: 1px solid #3F3F46;"
         )
 
-        self._elapsed_seconds = 0
-        self._total = 0
-        self._completed = 0
-        self._errors = 0
-        self._tokens = 0
-        self._running = False
+        # Resolve signal bus: accept injected instance or fall back to singleton
+        if signal_bus is None:
+            from workflow_app.signal_bus import signal_bus as _default_bus
+            signal_bus = _default_bus
+        self._signal_bus = signal_bus
 
-        self._elapsed_timer = QTimer(self)
-        self._elapsed_timer.setInterval(1000)
-        self._elapsed_timer.timeout.connect(self._on_tick)
+        # Internal state
+        self._tool_use_count = 0
+        self._active_view: int = 0
+        self._selected_instance: int = 0
 
         self._setup_ui()
+        self._setup_git_overlay()
         self._connect_signals()
+
+        # Restore remote toggle state from persisted config
+        from workflow_app.config.app_config import AppConfig
+        if AppConfig.get("remote_mode_enabled", False):
+            self._btn_remote.setChecked(True)
+
+        # Reflect current project state (if a project was loaded before MetricsBar init)
+        from workflow_app.config.app_state import app_state
+        if app_state.has_config:
+            self._apply_project_loaded(app_state.project_name)
+        else:
+            self._apply_project_empty()
 
     # ─────────────────────────────────────────────────────────── UI ──── #
 
@@ -59,74 +134,180 @@ class MetricsBar(QWidget):
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(4)
 
-        # ── Controls ──────────────────────────────────────────────────── #
-        self._btn_new = self._make_icon_btn("＋", "Novo Pipeline (Ctrl+N)")
-        self._btn_run = self._make_icon_btn("▶", "Iniciar / Retomar (Ctrl+R)")
-        self._btn_pause = self._make_icon_btn("⏸", "Pausar (Ctrl+P)")
-        self._btn_run.setEnabled(False)
-        self._btn_pause.setEnabled(False)
+        # ── Project pill / select button ──────────────────────────────── #
+        self._project_pill = QWidget()
+        self._project_pill.setFixedHeight(28)
+        self._project_pill.setStyleSheet(
+            "QWidget { background: transparent; border: 1px solid #22C55E; border-radius: 5px; }"
+        )
+        _pl = QHBoxLayout(self._project_pill)
+        _pl.setContentsMargins(10, 0, 6, 0)
+        _pl.setSpacing(6)
+        self._project_name_lbl = QLabel("")
+        self._project_name_lbl.setStyleSheet(
+            "color: #22C55E; font-size: 11px; font-weight: 600; border: none;"
+        )
+        _pl.addWidget(self._project_name_lbl)
+        _proj_x = QPushButton("✕")
+        _proj_x.setFixedSize(16, 16)
+        _proj_x.setToolTip("Desvincular projeto")
+        _proj_x.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #EF4444; font-size: 10px; margin-top: 1px; }"
+            "QPushButton:hover { color: #FCA5A5; }"
+        )
+        _proj_x.clicked.connect(self._on_proj_unload)
+        _pl.addWidget(_proj_x)
 
-        layout.addWidget(self._btn_new)
-        layout.addWidget(self._btn_run)
-        layout.addWidget(self._btn_pause)
+        self._proj_select_btn = QPushButton("Selecionar Projeto...")
+        self._proj_select_btn.setFixedHeight(28)
+        self._proj_select_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #FBBF24; border: 1px solid #FBBF24;"
+            "  border-radius: 5px; font-size: 11px; font-weight: 600; padding: 0 10px; }"
+            "QPushButton:hover { background: rgba(251, 191, 36, 0.12); }"
+        )
+        self._proj_select_btn.clicked.connect(self._on_proj_select)
+
+        layout.addWidget(self._project_pill)
+        layout.addWidget(self._proj_select_btn)
+        layout.addSpacing(4)
         layout.addWidget(self._make_separator())
+        layout.addSpacing(4)
 
-        # ── Progress area ─────────────────────────────────────────────── #
-        self._counter_label = QLabel("0/0")
-        self._counter_label.setObjectName("MetricsBarCounter")
-        self._counter_label.setStyleSheet(
-            "color: #FBBF24; font-size: 12px; font-weight: 600;"
-            " min-width: 36px;"
-        )
-        layout.addWidget(self._counter_label)
+        # ── Instance toggle buttons (clauded group) ───────────────────── #
+        _instance_names = ["clauded", "clauded2", "codex", "codex-high"]
+        self._instance_btns: list[QPushButton] = []
 
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, 100)
-        self._progress_bar.setValue(0)
-        self._progress_bar.setFixedHeight(6)
-        self._progress_bar.setMinimumWidth(80)
-        self._progress_bar.setMaximumWidth(160)
-        self._progress_bar.setTextVisible(False)
-        layout.addWidget(self._progress_bar)
+        for i, name in enumerate(_instance_names):
+            btn = QPushButton(name)
+            btn.setFixedHeight(28)
+            btn.clicked.connect(lambda _checked=False, idx=i, n=name: self._on_instance_clicked(idx, n))
+            self._instance_btns.append(btn)
+            layout.addWidget(btn)
 
-        self._elapsed_label = QLabel("00:00")
-        self._elapsed_label.setObjectName("MetricsBarValue")
-        self._elapsed_label.setStyleSheet(
-            "color: #FAFAFA; font-size: 14px; font-family: monospace;"
-            " font-weight: 600; min-width: 56px;"
-        )
-        layout.addWidget(self._elapsed_label)
+        self._apply_instance_styles()
+        layout.addSpacing(4)
+        layout.addWidget(self._make_separator())
+        layout.addSpacing(4)
+
+        # ── Navigation buttons (Workflow | Comandos | Toolbox) ────────── #
+        font_nav = QFont("Inter", 10)
+        font_nav.setWeight(QFont.Weight.Medium)
+
+        self._btn_workflow = QPushButton("Workflow")
+        self._btn_workflow.setFixedHeight(28)
+        self._btn_workflow.setFont(font_nav)
+        self._btn_workflow.setMinimumWidth(80)
+        self._btn_workflow.clicked.connect(lambda: self._on_nav_clicked(0))
+        layout.addWidget(self._btn_workflow)
+
+        self._btn_comandos = QPushButton("Comandos")
+        self._btn_comandos.setFixedHeight(28)
+        self._btn_comandos.setFont(font_nav)
+        self._btn_comandos.setMinimumWidth(80)
+        self._btn_comandos.clicked.connect(lambda: self._on_nav_clicked(1))
+        layout.addWidget(self._btn_comandos)
+
+        self._btn_toolbox = QPushButton("Toolbox")
+        self._btn_toolbox.setFixedHeight(28)
+        self._btn_toolbox.setFont(font_nav)
+        self._btn_toolbox.setMinimumWidth(80)
+        self._btn_toolbox.clicked.connect(lambda: self._on_nav_clicked(2))
+        layout.addWidget(self._btn_toolbox)
+
+        self._nav_btns = [self._btn_workflow, self._btn_comandos, self._btn_toolbox]
+        self._apply_nav_styles()
+
         layout.addWidget(self._make_separator())
 
         # ── Token counter ─────────────────────────────────────────────── #
-        self._tokens_label = QLabel()
-        self._tokens_label.setObjectName("MetricsBarLabel")
-        self._tokens_label.setStyleSheet("color: #71717A; font-size: 12px;")
-        self._tokens_label.setVisible(False)
-        layout.addWidget(self._tokens_label)
+        self._lbl_tokens = QLabel()
+        self._lbl_tokens.setObjectName("MetricsBarTokens")
+        self._lbl_tokens.setStyleSheet("color: #71717A; font-size: 12px;")
+        self._lbl_tokens.setVisible(False)
+        layout.addWidget(self._lbl_tokens)
+
+        # ── Tool use counter ──────────────────────────────────────────── #
+        self._tool_use_label = QLabel()
+        self._tool_use_label.setObjectName("MetricsBarLabel")
+        self._tool_use_label.setStyleSheet("color: #71717A; font-size: 12px;")
+        self._tool_use_label.setVisible(False)
+        layout.addWidget(self._tool_use_label)
 
         # ── Error badge ───────────────────────────────────────────────── #
-        self._error_badge = QLabel()
-        self._error_badge.setStyleSheet(
+        self._lbl_errors = QLabel()
+        self._lbl_errors.setObjectName("MetricsBarErrors")
+        self._lbl_errors.setStyleSheet(
             "background-color: #EF4444; color: white; font-size: 11px;"
             " border-radius: 10px; padding: 2px 8px; font-weight: 600;"
         )
-        self._error_badge.setVisible(False)
-        layout.addWidget(self._error_badge)
+        self._lbl_errors.setVisible(False)
+        layout.addWidget(self._lbl_errors)
 
         layout.addStretch(1)
 
-        # ── Right controls ────────────────────────────────────────────── #
-        self._btn_history = self._make_icon_btn("🕐", "Histórico")
-        self._btn_history.setToolTip("Histórico de execuções")
-        self._btn_dry_run = self._make_icon_btn("▤", "Dry Run")
-        self._btn_dry_run.setToolTip("Validar sem executar")
-        self._btn_prefs = self._make_icon_btn("⚙", "Preferências")
-        self._btn_prefs.setToolTip("Preferências")
+        # ── Remote mode toggle ─────────────────────────────────────────── #
+        self._btn_remote = self._make_remote_toggle_btn()
 
-        layout.addWidget(self._btn_history)
-        layout.addWidget(self._btn_dry_run)
+        self._lbl_remote_addr = QLabel("")
+        self._lbl_remote_addr.setObjectName("RemoteAddressLabel")
+        self._lbl_remote_addr.setStyleSheet(
+            "color: #22C55E; font-family: monospace; font-size: 11px;"
+        )
+        self._lbl_remote_addr.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._lbl_remote_addr.setVisible(False)
+
+        self._btn_copy_ip = QPushButton("📋")
+        self._btn_copy_ip.setObjectName("CopyIpButton")
+        self._btn_copy_ip.setFixedSize(22, 22)
+        self._btn_copy_ip.setToolTip("Copiar IP:Porta")
+        self._btn_copy_ip.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  border-radius: 3px; font-size: 12px; color: #71717A; }"
+            "QPushButton:hover { background-color: #3F3F46; }"
+        )
+        self._btn_copy_ip.setVisible(False)
+
+        self._lbl_connection_badge = QLabel("● Conectado")
+        self._lbl_connection_badge.setObjectName("RemoteConnectionBadge")
+        self._lbl_connection_badge.setStyleSheet(
+            "color: #22C55E; font-size: 11px;"
+        )
+        self._lbl_connection_badge.setVisible(False)
+
+        layout.addWidget(self._btn_remote)
+        layout.addWidget(self._lbl_remote_addr)
+        layout.addWidget(self._btn_copy_ip)
+        layout.addWidget(self._lbl_connection_badge)
+
+        # ── Right controls ────────────────────────────────────────────── #
+        self._btn_prefs = self._make_icon_btn("⚙", "Preferências")
         layout.addWidget(self._btn_prefs)
+
+    def _setup_git_overlay(self) -> None:
+        """Configure overlay label for git info (bottom-right corner)."""
+        self._lbl_git_info = QLabel("", self)
+        self._lbl_git_info.setStyleSheet(
+            "color: #71717A; font-size: 10px; background: transparent;"
+            "font-family: 'JetBrains Mono', monospace;"
+        )
+        self._lbl_git_info.hide()
+
+    def _make_remote_toggle_btn(self) -> QPushButton:
+        btn = QPushButton("📡")
+        btn.setObjectName("RemoteToggleButton")
+        btn.setFixedSize(32, 32)
+        btn.setToolTip("Modo Remoto: ativa servidor WebSocket para controle via Android")
+        btn.setCheckable(True)
+        btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  border-radius: 4px; font-size: 15px; color: #71717A; }"
+            "QPushButton:hover { background-color: #3F3F46; }"
+            "QPushButton:checked { color: #22C55E;"
+            "  background-color: rgba(34, 197, 94, 0.1); }"
+        )
+        return btn
 
     def _make_icon_btn(self, icon: str, tooltip: str) -> QPushButton:
         btn = QPushButton(icon)
@@ -148,101 +329,215 @@ class MetricsBar(QWidget):
         sep.setStyleSheet("background-color: #3F3F46; margin: 8px 4px;")
         return sep
 
+    def resizeEvent(self, event) -> None:
+        """Reposition git info label on resize."""
+        super().resizeEvent(event)
+        if hasattr(self, "_lbl_git_info") and self._lbl_git_info.isVisible():
+            lbl = self._lbl_git_info
+            lbl.adjustSize()
+            x = self.width() - lbl.width() - 8
+            y = self.height() - lbl.height() - 2
+            lbl.move(max(0, x), max(0, y))
+
+    # ─────────────────────────────────── Instance buttons (Clauded etc.) ── #
+
+    def _on_instance_clicked(self, index: int, name: str) -> None:
+        """Type the instance name in the terminal (with Enter) and mark as selected."""
+        self._selected_instance = index
+        self._apply_instance_styles()
+        self._signal_bus.instance_selected.emit(name)
+        self._signal_bus.run_command_in_terminal.emit(name)
+
+    def _apply_instance_styles(self) -> None:
+        for i, btn in enumerate(self._instance_btns):
+            btn.setStyleSheet(
+                _INSTANCE_SELECTED if i == self._selected_instance else _INSTANCE_UNSELECTED
+            )
+
+    # ─────────────────────────────────── Navigation (Workflow etc.) ──── #
+
+    def _on_nav_clicked(self, index: int) -> None:
+        if index == self._active_view:
+            return
+        self._active_view = index
+        self._apply_nav_styles()
+        self.view_changed.emit(index)
+
+    def set_active_view(self, index: int) -> None:
+        """Switch nav highlight without emitting view_changed (for programmatic switches)."""
+        self._active_view = index
+        self._apply_nav_styles()
+
+    def _apply_nav_styles(self) -> None:
+        for i, btn in enumerate(self._nav_btns):
+            btn.setStyleSheet(_NAV_ACTIVE if i == self._active_view else _NAV_INACTIVE)
+
     # ─────────────────────────────────────────────────────── Signals ─── #
 
     def _connect_signals(self) -> None:
-        self._btn_new.clicked.connect(self._on_new_pipeline)
-        self._btn_run.clicked.connect(self._on_run)
-        self._btn_pause.clicked.connect(self._on_pause)
-        self._btn_history.clicked.connect(signal_bus.history_panel_toggled)
-        self._btn_prefs.clicked.connect(signal_bus.preferences_requested)
+        bus = self._signal_bus
 
-        signal_bus.pipeline_started.connect(self._on_pipeline_started)
-        signal_bus.pipeline_paused.connect(self._on_pipeline_paused)
-        signal_bus.pipeline_resumed.connect(self._on_pipeline_resumed)
-        signal_bus.pipeline_completed.connect(self._on_pipeline_completed)
-        signal_bus.pipeline_cancelled.connect(self._on_pipeline_stopped)
-        signal_bus.pipeline_ready.connect(self._on_pipeline_ready)
-        signal_bus.metrics_updated.connect(self._on_metrics_updated)
+        self._btn_prefs.clicked.connect(bus.preferences_requested)
+
+        self._btn_remote.clicked.connect(self._on_remote_toggled)
+        self._btn_copy_ip.clicked.connect(self._on_copy_ip)
+        bus.remote_server_started.connect(self._on_remote_server_started)
+        bus.remote_server_stopped.connect(self._on_remote_server_stopped)
+        bus.remote_client_connected.connect(self._on_remote_client_connected)
+        bus.remote_client_disconnected.connect(self._on_remote_client_disconnected)
+
+        bus.tool_use_started.connect(self._on_tool_use_started)
+        bus.tool_use_completed.connect(self._on_tool_use_completed)
+        bus.token_update.connect(self._on_token_update)
+        bus.metrics_snapshot.connect(self._on_metrics_snapshot)
+        bus.git_info_updated.connect(self._on_git_info_updated)
+
+        bus.config_loaded.connect(self._on_config_loaded_signal)
+        bus.config_unloaded.connect(self._apply_project_empty)
 
     # ─────────────────────────────────────────────────────── Slots ───── #
 
-    def _on_new_pipeline(self) -> None:
-        signal_bus.toast_requested.emit("Criar novo pipeline", "info")
+    _COPY_FEEDBACK_MS = 2000
 
-    def _on_run(self) -> None:
-        if self._running:
-            signal_bus.pipeline_resumed.emit()
+    def _on_remote_toggled(self, checked: bool) -> None:
+        from workflow_app.config.app_config import AppConfig
+        AppConfig.set("remote_mode_enabled", checked)
+        self._signal_bus.remote_mode_toggle_requested.emit(checked)
+        if not checked:
+            self._lbl_remote_addr.setVisible(False)
+            self._btn_copy_ip.setVisible(False)
+            self._lbl_connection_badge.setVisible(False)
+
+    def _on_copy_ip(self) -> None:
+        addr = self._lbl_remote_addr.text()
+        if addr:
+            QApplication.clipboard().setText(addr)
+            self._btn_copy_ip.setText("✓")
+            self._btn_copy_ip.setToolTip("Copiado!")
+            QTimer.singleShot(
+                self._COPY_FEEDBACK_MS,
+                lambda: (
+                    self._btn_copy_ip.setText("📋"),
+                    self._btn_copy_ip.setToolTip("Copiar IP:Porta"),
+                ),
+            )
+
+    def _on_remote_server_started(self, address: str) -> None:
+        self._btn_remote.setChecked(True)
+        self._lbl_remote_addr.setText(address)
+        self._lbl_remote_addr.setVisible(True)
+        self._btn_copy_ip.setVisible(True)
+
+    def _on_remote_server_stopped(self) -> None:
+        self._btn_remote.setChecked(False)
+        self._lbl_remote_addr.setText("")
+        self._lbl_remote_addr.setVisible(False)
+        self._btn_copy_ip.setVisible(False)
+        self._lbl_connection_badge.setVisible(False)
+
+    def _on_remote_client_connected(self) -> None:
+        self._lbl_connection_badge.setVisible(True)
+
+    def _on_remote_client_disconnected(self) -> None:
+        self._lbl_connection_badge.setVisible(False)
+
+    # ──────────────────────────────────────── Project widget slots ─── #
+
+    def _on_proj_select(self) -> None:
+        from workflow_app.config.app_state import app_state
+        start_dir = str(Path.cwd())
+        if app_state.has_config and app_state.config:
+            start_dir = str(Path(app_state.config.config_path).parent)
         else:
-            signal_bus.pipeline_started.emit()
+            candidate = Path(__file__).resolve()
+            while candidate != candidate.parent:
+                if (candidate / ".claude" / "projects").is_dir():
+                    start_dir = str(candidate / ".claude" / "projects")
+                    break
+                candidate = candidate.parent
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Selecionar project.json", start_dir,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if path:
+            self.config_change_requested.emit(path)
 
-    def _on_pause(self) -> None:
-        signal_bus.pipeline_paused.emit()
+    def _on_proj_unload(self) -> None:
+        self.config_unload_requested.emit()
 
-    def _on_pipeline_ready(self, commands: list) -> None:
-        self._total = len(commands)
-        self._completed = 0
-        self._errors = 0
-        self._update_counter()
-        self._btn_run.setEnabled(True)
+    def _on_config_loaded_signal(self, _path: str) -> None:
+        from workflow_app.config.app_state import app_state
+        if app_state.has_config:
+            self._apply_project_loaded(app_state.project_name)
 
-    def _on_pipeline_started(self) -> None:
-        self._running = True
-        self._elapsed_timer.start()
-        self._btn_run.setEnabled(False)
-        self._btn_pause.setEnabled(True)
+    def _apply_project_loaded(self, name: str) -> None:
+        self._project_name_lbl.setText(name)
+        self._project_pill.show()
+        self._proj_select_btn.hide()
 
-    def _on_pipeline_paused(self) -> None:
-        self._running = False
-        self._elapsed_timer.stop()
-        self._btn_run.setEnabled(True)
-        self._btn_pause.setEnabled(False)
+    def _apply_project_empty(self) -> None:
+        self._project_pill.hide()
+        self._proj_select_btn.show()
 
-    def _on_pipeline_resumed(self) -> None:
-        self._on_pipeline_started()
+    def _on_tool_use_started(self, tool_name: str) -> None:
+        self._tool_use_count += 1
+        self._tool_use_label.setText(f"Tools: {self._tool_use_count}")
+        self._tool_use_label.setVisible(True)
 
-    def _on_pipeline_completed(self) -> None:
-        self._running = False
-        self._elapsed_timer.stop()
-        self._btn_run.setEnabled(False)
-        self._btn_pause.setEnabled(False)
+    def _on_tool_use_completed(self, tool_name: str, duration_ms: int) -> None:
+        self._tool_use_label.setToolTip(f"Último: {tool_name} ({duration_ms}ms)")
 
-    def _on_pipeline_stopped(self) -> None:
-        self._on_pipeline_completed()
+    def _on_token_update(self, tokens_in: int, tokens_out: int, cost_usd: float) -> None:
+        def _fmt_k(n: int) -> str:
+            return f"{n // 1000}k" if n >= 1000 else str(n)
+        text = f"↑{_fmt_k(tokens_in)} ↓{_fmt_k(tokens_out)} ${cost_usd:.2f}"
+        self.set_tokens_text(text)
 
-    def _on_metrics_updated(self, completed: int, total: int) -> None:
-        self._completed = completed
-        self._total = total
-        self._update_counter()
+    def _on_metrics_snapshot(self, snapshot: object) -> None:
+        """Batch-update token/error widgets from a MetricsSnapshot."""
+        errors = getattr(snapshot, "error_commands", 0)
+        tokens_in = getattr(snapshot, "tokens_input", 0)
+        tokens_out = getattr(snapshot, "tokens_output", 0)
+        cost = getattr(snapshot, "cost_estimate_usd", 0.0)
 
-    def _on_tick(self) -> None:
-        self._elapsed_seconds += 1
-        hours = self._elapsed_seconds // 3600
-        minutes = (self._elapsed_seconds % 3600) // 60
-        seconds = self._elapsed_seconds % 60
-        if hours:
-            self._elapsed_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        self.set_errors_badge(errors)
+        if tokens_in > 0 or tokens_out > 0:
+            self._on_token_update(tokens_in, tokens_out, cost)
+
+    def _on_git_info_updated(self, info_text: str) -> None:
+        if info_text:
+            self._lbl_git_info.setText(info_text)
+            self._lbl_git_info.show()
+            self.resizeEvent(None)
         else:
-            self._elapsed_label.setText(f"{minutes:02d}:{seconds:02d}")
-        signal_bus.elapsed_tick.emit(self._elapsed_label.text())
+            self._lbl_git_info.hide()
 
-    def _update_counter(self) -> None:
-        self._counter_label.setText(f"{self._completed}/{self._total}")
-        pct = int(self._completed / self._total * 100) if self._total else 0
-        self._progress_bar.setValue(pct)
+    # ──────────────────────────────────────────────────── Public API ─── #
+
+    def set_tokens_text(self, text: str) -> None:
+        self._lbl_tokens.setText(text)
+        self._lbl_tokens.setVisible(True)
+
+    def set_errors_badge(self, count: int) -> None:
+        if count > 0:
+            self._lbl_errors.setText(f"{count} erros")
+            self._lbl_errors.setVisible(True)
+        else:
+            self._lbl_errors.setVisible(False)
+
+    # Backward-compat stubs (called by older code, now no-ops)
+    def set_progress_text(self, completed: int, total: int) -> None:
+        pass
+
+    def set_elapsed_text(self, hms_str: str) -> None:
+        pass
+
+    def set_estimate_text(self, text: str) -> None:
+        pass
 
     def update_tokens(self, tokens: int) -> None:
-        """Update token counter display."""
-        self._tokens = tokens
         if tokens > 0:
-            self._tokens_label.setText(f"~{tokens / 1000:.1f}k tok")
-            self._tokens_label.setVisible(True)
+            self.set_tokens_text(f"~{tokens / 1000:.1f}k tok")
 
     def update_errors(self, count: int) -> None:
-        """Update error badge count."""
-        self._errors = count
-        if count > 0:
-            self._error_badge.setText(f"{count} erro{'s' if count > 1 else ''}")
-            self._error_badge.setVisible(True)
-        else:
-            self._error_badge.setVisible(False)
+        self.set_errors_badge(count)

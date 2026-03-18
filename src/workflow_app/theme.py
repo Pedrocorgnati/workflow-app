@@ -45,16 +45,17 @@ QMainWindow, QDialog, QWidget {
 
 /* ─── Splitter ────────────────────────────────────────────── */
 QSplitter::handle {
-    background-color: #52525B;
-    width: 1px;
+    background-color: #3F3F46;
+}
+QSplitter::handle:hover {
+    background-color: #FBBF24;
 }
 
 /* ─── Sidebar / CommandQueue ──────────────────────────────── */
 #CommandQueueWidget {
     background-color: #18181B;
     border-left: 1px solid #3F3F46;
-    min-width: 240px;
-    max-width: 360px;
+    min-width: 200px;
 }
 
 #CommandQueueHeader {
@@ -73,13 +74,13 @@ QSplitter::handle {
     background-color: #18181B;
 }
 
-QPlainTextEdit#TerminalOutput {
-    background-color: #18181B;
-    color: #FAFAFA;
+QTextEdit#TerminalOutput {
+    background-color: #0D1117;
+    color: #E6EDF3;
     font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
     font-size: 13px;
     border: none;
-    selection-background-color: #3F3F46;
+    selection-background-color: #264F78;
 }
 
 /* ─── Command Items ───────────────────────────────────────── */
@@ -355,6 +356,10 @@ QDialog {
 
 #NotificationBanner[type="success"] {
     border-left-color: #34D399;
+}
+
+#NotificationBanner[type="warning"] {
+    border-left-color: #F97316;
 }
 
 /* ─── Metrics bar specific ────────────────────────────────── */

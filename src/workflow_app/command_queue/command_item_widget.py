@@ -12,18 +12,27 @@ Visual states per DESIGN.md 2.3:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from collections.abc import Callable
+
+from PySide6.QtCore import QMimeData, QPoint, Qt, Signal
+from PySide6.QtGui import QDrag, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QMenu,
     QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
-from workflow_app.domain import CommandSpec, CommandStatus, ModelName
+from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
 from workflow_app.widgets.model_badge import ModelBadge
-from workflow_app.widgets.status_badge import StatusDot
+
+# Error state colours (Graphite Amber theme)
+_COLOR_ERROR_BG = "#3F1010"
+_COLOR_ERROR_BORDER = "#7F1D1D"
+_COLOR_ERROR_TEXT = "#FCA5A5"
 
 _STATUS_SYMBOL: dict[CommandStatus, str] = {
     CommandStatus.PENDENTE:   "○",
@@ -39,16 +48,29 @@ class CommandItemWidget(QWidget):
     """One command row in the queue list."""
 
     # Signals
-    remove_requested = Signal(int)   # position
-    skip_requested = Signal(int)     # position
-    edit_model_requested = Signal(int)  # position
+    remove_requested = Signal(int)          # position
+    skip_requested = Signal(int)            # position
+    edit_model_requested = Signal(int)      # position
+    retry_requested = Signal(int)           # position (module-12/TASK-3)
+    cancel_requested = Signal()             # no arg — cancel whole pipeline
+    run_in_terminal_requested = Signal(str) # command name
 
-    def __init__(self, spec: CommandSpec, parent: QWidget | None = None) -> None:
+    # Minimum Manhattan distance before drag begins (px)
+    _DRAG_THRESHOLD = 10
+
+    def __init__(
+        self,
+        spec: CommandSpec,
+        can_reorder_fn: Callable[[int], bool] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("CommandItemWidget")
         self._spec = spec
         self._status = CommandStatus.PENDENTE
-        self.setFixedHeight(44)
+        self._can_reorder_fn: Callable[[int], bool] = can_reorder_fn or (lambda _pos: True)
+        self._drag_start_pos: QPoint | None = None
+        self.setMinimumHeight(44)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self._setup_ui()
@@ -56,46 +78,164 @@ class CommandItemWidget(QWidget):
     # ─────────────────────────────────────────────────────────── UI ──── #
 
     def _setup_ui(self) -> None:
-        layout = QHBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Main row
+        main_row_widget = QWidget()
+        layout = QHBoxLayout(main_row_widget)
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
 
-        # Status dot
-        self._dot = StatusDot(self._status, parent=self)
-        layout.addWidget(self._dot)
+        # Run in terminal button (green arrow)
+        self._run_btn = QPushButton("▶")
+        self._run_btn.setObjectName("IconButton")
+        self._run_btn.setFixedSize(16, 16)
+        self._run_btn.setToolTip("Executar no terminal")
+        self._run_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  color: #22C55E; font-size: 10px; }"
+            "QPushButton:hover { color: #86EFAC; }"
+        )
+        self._run_btn.clicked.connect(self._on_run_clicked)
+        layout.addWidget(self._run_btn)
 
-        # Command name
-        self._name_label = QLabel(self._spec.name)
+        # Copy button (blue clipboard icon) — copies the full command line
+        self._copy_btn = QPushButton("\u29C9")
+        self._copy_btn.setObjectName("IconButton")
+        self._copy_btn.setFixedSize(16, 16)
+        self._copy_btn.setToolTip("Copiar comando")
+        self._copy_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  color: #38BDF8; font-size: 12px; }"
+            "QPushButton:hover { color: #7DD3FC; }"
+        )
+        self._copy_btn.clicked.connect(self._on_copy_clicked)
+        layout.addWidget(self._copy_btn)
+
+        # Quick-delete button (red ✕) — next to copy button on the left side
+        self._delete_btn = QPushButton("✕")
+        self._delete_btn.setObjectName("IconButton")
+        self._delete_btn.setFixedSize(18, 18)
+        self._delete_btn.setToolTip("Remover da fila")
+        self._delete_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  color: #EF4444; font-size: 11px; font-weight: 700; }"
+            "QPushButton:hover { color: #FCA5A5; }"
+            "QPushButton:pressed { color: #DC2626; }"
+        )
+        self._delete_btn.clicked.connect(
+            lambda: self.remove_requested.emit(self._spec.position)
+        )
+        layout.addWidget(self._delete_btn)
+
+        # Command name (+ optional config path)
+        label_text = self._spec.name
+        if self._spec.config_path:
+            label_text += f" {self._spec.config_path}"
+        self._name_label = QLabel(label_text)
         self._name_label.setStyleSheet(
             "color: #FAFAFA; font-family: monospace; font-size: 13px;"
         )
         layout.addWidget(self._name_label, stretch=1)
 
-        # Model badge
-        self._model_badge = ModelBadge(self._spec.model, short=True, parent=self)
-        layout.addWidget(self._model_badge)
+        # Interaction type badge (auto / inter)
+        interaction_text = self._spec.interaction_badge_text()
+        self._interaction_badge = QLabel(interaction_text)
+        _is_auto = self._spec.interaction_type == InteractionType.AUTO
+        _inter_color = "#22C55E" if _is_auto else "#FBBF24"
+        self._interaction_badge.setStyleSheet(
+            f"color: {_inter_color}; font-size: 9px; font-weight: 600;"
+            " font-family: monospace; padding: 1px 4px;"
+            f" border: 1px solid {_inter_color}; border-radius: 3px;"
+        )
+        self._interaction_badge.setFixedHeight(18)
 
-        # Kebab menu button
-        self._menu_btn = QPushButton("⋮")
-        self._menu_btn.setObjectName("IconButton")
-        self._menu_btn.setFixedSize(20, 20)
-        self._menu_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  color: #71717A; font-size: 14px; }"
-            "QPushButton:hover { color: #FAFAFA; }"
+        # Model badge — hidden for /model and /clear commands
+        self._model_badge = ModelBadge(self._spec.model, short=True, parent=self)
+        _hide_badge = (
+            self._spec.name.lower().startswith("/model")
+            or self._spec.name.strip().lower() == "/clear"
         )
-        self._menu_btn.clicked.connect(
-            lambda: self._show_context_menu(self._menu_btn.mapToParent(QPoint(0, 20)))
+        if not _hide_badge:
+            layout.addWidget(self._model_badge)
+            layout.addWidget(self._interaction_badge)
+        else:
+            self._model_badge.setVisible(False)
+            self._interaction_badge.setVisible(False)
+        root.addWidget(main_row_widget)
+
+        # Dashed separator line
+        separator = QWidget()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(
+            "border: none; border-top: 1px dashed #3F3F46; background: transparent;"
         )
-        layout.addWidget(self._menu_btn)
+        root.addWidget(separator)
+
+        # Error row (hidden by default — shown only when status == ERRO)
+        self._error_row = QWidget()
+        self._error_row.setObjectName("ErrorRow")
+        er_layout = QHBoxLayout(self._error_row)
+        er_layout.setContentsMargins(10, 2, 10, 6)
+        er_layout.setSpacing(6)
+
+        self._error_label = QLabel()
+        self._error_label.setStyleSheet(f"color: {_COLOR_ERROR_TEXT}; font-size: 11px;")
+        self._error_label.setWordWrap(True)
+        er_layout.addWidget(self._error_label, stretch=1)
+
+        self._btn_retry = QPushButton("Retentar")
+        self._btn_retry.setFixedWidth(72)
+        self._btn_retry.setStyleSheet(
+            "QPushButton { background-color: #7F1D1D; color: #FCA5A5;"
+            "  border: 1px solid #991B1B; border-radius: 3px; font-size: 11px; padding: 2px 6px; }"
+            "QPushButton:hover { background-color: #991B1B; }"
+        )
+        self._btn_retry.clicked.connect(
+            lambda: self.retry_requested.emit(self._spec.position)
+        )
+        er_layout.addWidget(self._btn_retry)
+
+        self._btn_skip_err = QPushButton("Pular")
+        self._btn_skip_err.setFixedWidth(52)
+        self._btn_skip_err.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
+            "  border: 1px solid #52525B; border-radius: 3px; font-size: 11px; padding: 2px 6px; }"
+            "QPushButton:hover { background-color: #52525B; }"
+        )
+        self._btn_skip_err.clicked.connect(
+            lambda: self.skip_requested.emit(self._spec.position)
+        )
+        er_layout.addWidget(self._btn_skip_err)
+
+        self._btn_cancel_pipeline = QPushButton("Cancelar")
+        self._btn_cancel_pipeline.setFixedWidth(64)
+        self._btn_cancel_pipeline.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
+            "  border: 1px solid #52525B; border-radius: 3px; font-size: 11px; padding: 2px 6px; }"
+            "QPushButton:hover { background-color: #52525B; }"
+        )
+        self._btn_cancel_pipeline.clicked.connect(self.cancel_requested)
+        er_layout.addWidget(self._btn_cancel_pipeline)
+
+        self._error_row.setVisible(False)
+        root.addWidget(self._error_row)
 
         self._update_appearance()
 
     # ──────────────────────────────────────────────────── Public API ─── #
 
-    def set_status(self, status: CommandStatus) -> None:
+    def set_status(self, status: CommandStatus, error_message: str = "") -> None:
         self._status = status
-        self._dot.set_status(status)
+        # Show error row only for ERRO state
+        is_error = status == CommandStatus.ERRO
+        self._error_row.setVisible(is_error)
+        if is_error and error_message:
+            self._error_label.setText(error_message)
+        elif not is_error:
+            self._error_label.clear()
         self._update_appearance()
 
     def get_spec(self) -> CommandSpec:
@@ -111,8 +251,79 @@ class CommandItemWidget(QWidget):
         )
         self._model_badge.deleteLater()
         self._model_badge = ModelBadge(model, short=True, parent=self)
-        # Re-insert badge in layout (index 2)
-        self.layout().insertWidget(2, self._model_badge)
+        _hide_badge = (
+            self._spec.name.lower().startswith("/model")
+            or self._spec.name.strip().lower() == "/clear"
+        )
+        if not _hide_badge:
+            # Re-insert badge in layout (index 2)
+            self.layout().insertWidget(2, self._model_badge)
+        else:
+            self._model_badge.setVisible(False)
+
+    def _on_copy_clicked(self) -> None:
+        """Copy the full command line to the clipboard."""
+        text = f"{self._spec.name} {self._spec.config_path}".strip()
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
+
+    def _on_run_clicked(self) -> None:
+        """Emit run signal, turn button into amber dot, reveal quick-delete."""
+        self.run_in_terminal_requested.emit(
+            f"{self._spec.name} {self._spec.config_path}".strip()
+        )
+        self._mark_as_sent()
+
+    def _mark_as_sent(self) -> None:
+        """Visually mark this row as already sent to terminal."""
+        self._run_btn.setText("●")
+        self._run_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  color: #FBBF24; font-size: 11px; }"
+        )
+        self._run_btn.setEnabled(False)
+
+    def is_pending_run(self) -> bool:
+        """True if this row has not yet been sent to the terminal."""
+        return self._run_btn.isEnabled()
+
+    # ─────────────────────────────────────────── Drag-and-drop source ─── #
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._drag_start_pos is None:
+            return
+        delta = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+        if delta < self._DRAG_THRESHOLD:
+            return
+        if not self._can_reorder_fn(self._spec.position):
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(str(self._spec.position))
+        drag.setMimeData(mime)
+        # Renderiza o widget em um pixmap base
+        base = QPixmap(self.size())
+        base.fill(Qt.GlobalColor.transparent)
+        self.render(base)
+        # Aplica opacidade em um segundo pixmap
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setOpacity(0.7)
+        painter.drawPixmap(0, 0, base)
+        painter.end()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(self._drag_start_pos)
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_start_pos = None
 
     # ─────────────────────────────────────────────────────── Helpers ─── #
 
@@ -123,8 +334,7 @@ class CommandItemWidget(QWidget):
                 " text-decoration: line-through;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A;"
-                " border-bottom: 1px solid #3F3F46; }"
+                "QWidget#CommandItemWidget { background-color: #27272A; }"
             )
         elif self._status == CommandStatus.EXECUTANDO:
             self._name_label.setStyleSheet(
@@ -132,7 +342,6 @@ class CommandItemWidget(QWidget):
             )
             self.setStyleSheet(
                 "QWidget#CommandItemWidget { background-color: #27272A;"
-                " border-bottom: 1px solid #3F3F46;"
                 " border-left: 2px solid #38BDF8; }"
             )
         elif self._status == CommandStatus.CONCLUIDO:
@@ -140,24 +349,22 @@ class CommandItemWidget(QWidget):
                 "color: #A1A1AA; font-family: monospace; font-size: 13px;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A;"
-                " border-bottom: 1px solid #3F3F46; }"
+                "QWidget#CommandItemWidget { background-color: #27272A; }"
             )
         elif self._status == CommandStatus.ERRO:
             self._name_label.setStyleSheet(
                 "color: #FB7185; font-family: monospace; font-size: 13px;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A;"
-                " border-bottom: 1px solid #3F3F46; }"
+                f"QWidget#CommandItemWidget {{ background-color: {_COLOR_ERROR_BG};"
+                f" border: 1px solid {_COLOR_ERROR_BORDER}; border-radius: 2px; }}"
             )
         else:
             self._name_label.setStyleSheet(
                 "color: #FAFAFA; font-family: monospace; font-size: 13px;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A;"
-                " border-bottom: 1px solid #3F3F46; }"
+                "QWidget#CommandItemWidget { background-color: #27272A; }"
                 "QWidget#CommandItemWidget:hover { background-color: #3F3F46; }"
             )
 
