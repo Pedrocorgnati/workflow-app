@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
 
         # Pipeline execution state (RF03)
         self._pipeline_manager = None
+        self._testid_overlays: list = []
 
         self._settings = QSettings("SystemForge", "WorkflowApp")
         self._setup_ui()
@@ -139,17 +140,18 @@ class MainWindow(QMainWindow):
         self._toolbox_header = ToolboxHeader(parent=output_container)
         output_layout.addWidget(self._toolbox_header)
 
-        # Layout toggle button (row/column)
+        # Layout toggle button (row/column) + collapse chevron
         from PySide6.QtWidgets import QHBoxLayout as _HBox
         toggle_bar = QWidget()
         toggle_bar.setFixedHeight(22)
         toggle_bar.setStyleSheet("background-color: #1C1C1F; border-bottom: 1px solid #27272A;")
         toggle_layout = _HBox(toggle_bar)
         toggle_layout.setContentsMargins(4, 1, 4, 1)
-        toggle_layout.setSpacing(0)
+        toggle_layout.setSpacing(2)
         toggle_layout.addStretch()
         self._layout_toggle_btn = QPushButton("\u2B95 \u25A1\u25A1")  # ⮕ □□ (side by side)
         self._layout_toggle_btn.setToolTip("Alternar layout: colunas / linhas")
+        self._layout_toggle_btn.setProperty("testid", "terminal-layout-toggle")
         self._layout_toggle_btn.setFixedSize(36, 18)
         self._layout_toggle_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
@@ -161,9 +163,25 @@ class MainWindow(QMainWindow):
         self._layout_toggle_btn.clicked.connect(self._toggle_terminal_layout)
         self._terminal_is_vertical = True  # starts as vertical (column)
         toggle_layout.addWidget(self._layout_toggle_btn)
+
+        # Collapse chevron for autocast terminal
+        self._autocast_collapsed = False
+        self._collapse_chevron = QPushButton("\u25BE")  # ▾ expanded
+        self._collapse_chevron.setToolTip("Colapsar terminal Autocast")
+        self._collapse_chevron.setProperty("testid", "terminal-collapse-autocast")
+        self._collapse_chevron.setFixedSize(22, 18)
+        self._collapse_chevron.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #A78BFA;"
+            "  border: 1px solid #52525B; border-radius: 3px;"
+            "  font-size: 10px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
+        )
+        self._collapse_chevron.clicked.connect(self._toggle_autocast_collapse)
+        toggle_layout.addWidget(self._collapse_chevron)
         output_layout.addWidget(toggle_bar)
 
-        # Dual terminal: vertical splitter with autocast (top) + interactive (bottom)
+        # Dual terminal: splitter with interactive (top/left) + autocast (bottom/right)
         self._terminal_splitter = QSplitter(Qt.Orientation.Vertical)
         self._terminal_splitter.setHandleWidth(4)
         self._terminal_splitter.setChildrenCollapsible(False)
@@ -172,26 +190,11 @@ class MainWindow(QMainWindow):
             "QSplitter::handle:hover { background-color: #FBBF24; }"
         )
 
-        # Top: Autocast terminal (shows -p command output)
         from PySide6.QtWidgets import QLabel
-        autocast_wrapper = QWidget()
-        autocast_layout = QVBoxLayout(autocast_wrapper)
-        autocast_layout.setContentsMargins(0, 0, 0, 0)
-        autocast_layout.setSpacing(0)
-        autocast_label = QLabel(" AUTOCAST")
-        autocast_label.setFixedHeight(20)
-        autocast_label.setStyleSheet(
-            "QLabel { background-color: #1E1B4B; color: #A78BFA;"
-            "  font-size: 10px; font-weight: 700; padding-left: 6px; }"
-        )
-        autocast_layout.addWidget(autocast_label)
-        self._autocast_panel = OutputPanel(parent=autocast_wrapper, autocast_mode=True)
-        autocast_layout.addWidget(self._autocast_panel, stretch=1)
-        self._terminal_splitter.addWidget(autocast_wrapper)
 
-        # Bottom: Interactive terminal (user types here, interactive commands land here)
-        interactive_wrapper = QWidget()
-        interactive_layout = QVBoxLayout(interactive_wrapper)
+        # Top/Left: Interactive terminal (user types here)
+        self._interactive_wrapper = QWidget()
+        interactive_layout = QVBoxLayout(self._interactive_wrapper)
         interactive_layout.setContentsMargins(0, 0, 0, 0)
         interactive_layout.setSpacing(0)
         interactive_label = QLabel(" INTERACTIVE")
@@ -201,9 +204,27 @@ class MainWindow(QMainWindow):
             "  font-size: 10px; font-weight: 700; padding-left: 6px; }"
         )
         interactive_layout.addWidget(interactive_label)
-        self._output_panel = OutputPanel(parent=interactive_wrapper)
+        self._output_panel = OutputPanel(parent=self._interactive_wrapper)
+        self._output_panel.setProperty("testid", "terminal-interactive")
         interactive_layout.addWidget(self._output_panel, stretch=1)
-        self._terminal_splitter.addWidget(interactive_wrapper)
+        self._terminal_splitter.addWidget(self._interactive_wrapper)
+
+        # Bottom/Right: Autocast terminal (shows -p command output)
+        self._autocast_wrapper = QWidget()
+        autocast_layout = QVBoxLayout(self._autocast_wrapper)
+        autocast_layout.setContentsMargins(0, 0, 0, 0)
+        autocast_layout.setSpacing(0)
+        autocast_label = QLabel(" AUTOCAST")
+        autocast_label.setFixedHeight(20)
+        autocast_label.setStyleSheet(
+            "QLabel { background-color: #1E1B4B; color: #A78BFA;"
+            "  font-size: 10px; font-weight: 700; padding-left: 6px; }"
+        )
+        autocast_layout.addWidget(autocast_label)
+        self._autocast_panel = OutputPanel(parent=self._autocast_wrapper, autocast_mode=True)
+        self._autocast_panel.setProperty("testid", "terminal-autocast")
+        autocast_layout.addWidget(self._autocast_panel, stretch=1)
+        self._terminal_splitter.addWidget(self._autocast_wrapper)
 
         self._terminal_splitter.setSizes([350, 350])
         output_layout.addWidget(self._terminal_splitter, stretch=1)
@@ -214,6 +235,7 @@ class MainWindow(QMainWindow):
         self._left_tabs.addTab(self._history_panel, "Histórico")
 
         self._command_queue = CommandQueueWidget(parent=self)
+        self._command_queue.setProperty("testid", "main-command-queue")
         self._splitter.addWidget(self._command_queue)
         self._splitter.setStretchFactor(0, 1)
 
@@ -224,10 +246,12 @@ class MainWindow(QMainWindow):
 
         # ── Page 1: Comandos (TemplateBuilderWidget, full width) ──────── #
         self._template_builder = TemplateBuilderWidget(parent=self)
+        self._template_builder.setProperty("testid", "page-comandos")
         self._view_stack.addWidget(self._template_builder)  # index 1
 
         # ── Page 2: Toolbox (ToolboxTab, full width) ─────────────────── #
         self._toolbox_tab = ToolboxTab(parent=self)
+        self._toolbox_tab.setProperty("testid", "page-toolbox")
         self._view_stack.addWidget(self._toolbox_tab)  # index 2
 
         root_layout.addWidget(self._view_stack, stretch=1)
@@ -305,6 +329,31 @@ class MainWindow(QMainWindow):
             self._layout_toggle_btn.setText("\u2B95 \u25A1\u25A1")  # ⮕ □□ (side by side)
             self._layout_toggle_btn.setToolTip("Layout: empilhado. Clique para lado a lado")
             self._terminal_is_vertical = True
+        self._update_collapse_chevron()
+
+    def _toggle_autocast_collapse(self) -> None:
+        """Toggle collapse/expand of the autocast terminal."""
+        if self._autocast_collapsed:
+            self._autocast_wrapper.show()
+            if hasattr(self, "_saved_splitter_sizes"):
+                self._terminal_splitter.setSizes(self._saved_splitter_sizes)
+            else:
+                self._terminal_splitter.setSizes([350, 350])
+            self._autocast_collapsed = False
+            self._collapse_chevron.setToolTip("Colapsar terminal Autocast")
+        else:
+            self._saved_splitter_sizes = self._terminal_splitter.sizes()
+            self._autocast_wrapper.hide()
+            self._autocast_collapsed = True
+            self._collapse_chevron.setToolTip("Expandir terminal Autocast")
+        self._update_collapse_chevron()
+
+    def _update_collapse_chevron(self) -> None:
+        """Update chevron icon based on collapsed state."""
+        if self._autocast_collapsed:
+            self._collapse_chevron.setText("\u25B8")  # ▸ collapsed
+        else:
+            self._collapse_chevron.setText("\u25BE")  # ▾ expanded
 
     def _connect_signals(self) -> None:
         self._command_queue.new_pipeline_requested.connect(self._open_pipeline_creator)
@@ -317,6 +366,8 @@ class MainWindow(QMainWindow):
         signal_bus.pipeline_ready.connect(self._on_pipeline_ready)
         signal_bus.history_panel_toggled.connect(self._switch_to_history_tab)
         signal_bus.pipeline_started.connect(self._switch_to_output_tab)
+        signal_bus.datatest_toggled.connect(self._on_datatest_toggled)
+        signal_bus.focus_interactive_terminal.connect(self._on_focus_interactive_terminal)
         signal_bus.pipeline_completed.connect(self._refresh_history_list)
         signal_bus.permission_request_received.connect(self._on_permission_request)
         # _btn_new removed — pipeline creator accessible via command queue or Ctrl+N
@@ -484,6 +535,91 @@ class MainWindow(QMainWindow):
 
     def _show_toast(self, message: str, msg_type: str = "info") -> None:
         self._toast_notifier.show(message, msg_type)
+
+    # ─────────────────────────────────── DataTest overlay & terminal focus ─ #
+
+    def _on_focus_interactive_terminal(self) -> None:
+        """Switch to output tab and focus the interactive terminal."""
+        self._switch_to_output_tab()
+        self._output_panel._terminal.setFocus()
+
+    def _on_datatest_toggled(self, enabled: bool) -> None:
+        """Toggle data-testid overlay display on all widgets."""
+        if enabled:
+            self._show_testid_overlays()
+        else:
+            self._hide_testid_overlays()
+
+    def _show_testid_overlays(self) -> None:
+        """Walk all child widgets and show floating red testid overlay labels.
+
+        Overlays are parented to the central widget so they float beyond
+        their target widget bounds. Click an overlay to copy its text.
+        """
+        self._hide_testid_overlays()
+        from PySide6.QtCore import QPoint, QTimer
+        from PySide6.QtWidgets import QApplication as _QApp, QLabel as _Lbl
+
+        central = self.centralWidget()
+        used_positions: list[tuple[int, int, int, int]] = []  # x, y, w, h
+
+        _STYLE_NORMAL = (
+            "background-color: rgba(220, 38, 38, 0.9); color: white;"
+            " font-size: 11px; font-weight: 700; padding: 2px 6px;"
+            " border-radius: 3px; border: none;"
+        )
+        _STYLE_COPIED = (
+            "background-color: rgba(34, 197, 94, 0.9); color: white;"
+            " font-size: 11px; font-weight: 700; padding: 2px 6px;"
+            " border-radius: 3px; border: none;"
+        )
+
+        for widget in central.findChildren(QWidget):
+            testid = widget.property("testid")
+            if testid and not widget.property("_is_testid_overlay"):
+                testid_str = str(testid)
+
+                # Map widget position to central widget coordinates
+                try:
+                    pos = widget.mapTo(central, QPoint(0, 0))
+                except RuntimeError:
+                    continue
+                x, y = pos.x(), pos.y()
+
+                # Offset if overlapping with existing overlay
+                for ux, uy, uw, uh in used_positions:
+                    if abs(x - ux) < max(uw, 30) and abs(y - uy) < max(uh, 18):
+                        y = uy + uh + 2
+
+                overlay = _Lbl(testid_str, central)
+                overlay.setStyleSheet(_STYLE_NORMAL)
+                overlay.setProperty("_is_testid_overlay", True)
+                overlay.setCursor(Qt.CursorShape.PointingHandCursor)
+                overlay.setToolTip(f"Clique para copiar: {testid_str}")
+
+                # Click to copy to clipboard with visual feedback
+                def _make_click(lbl, text):
+                    def _handler(_event):
+                        _QApp.clipboard().setText(f'data-testid="{text}"')
+                        lbl.setStyleSheet(_STYLE_COPIED)
+                        QTimer.singleShot(600, lambda: lbl.setStyleSheet(_STYLE_NORMAL))
+                    return _handler
+
+                overlay.mousePressEvent = _make_click(overlay, testid_str)
+
+                overlay.adjustSize()
+                overlay.move(x, y)
+                overlay.show()
+                overlay.raise_()
+                used_positions.append((x, y, overlay.width(), overlay.height()))
+                self._testid_overlays.append(overlay)
+
+    def _hide_testid_overlays(self) -> None:
+        """Remove all testid overlay labels."""
+        for overlay in self._testid_overlays:
+            overlay.hide()
+            overlay.deleteLater()
+        self._testid_overlays.clear()
 
     def _on_permission_request(self, request_data: dict) -> None:
         """Show PermissionRequestDialog when the SDK needs user approval."""

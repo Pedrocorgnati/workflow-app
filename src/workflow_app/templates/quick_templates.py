@@ -179,12 +179,16 @@ TEMPLATE_MODULES: list[CommandSpec] = _inject_clears([
 # ─── Deploy (from z-templates/deploy.md) ─────────────────────────────────────── #
 
 TEMPLATE_DEPLOY: list[CommandSpec] = _inject_clears([
-    _spec("/ci-cd-create",          _S, _I, 1),
-    _spec("/supabase-sql-editor",   _S, _A, 2),
-    _spec("/infra-create",          _S, _I, 3),
-    _spec("/pre-deploy-testing",    _S, _I, 4),
-    _spec("/slo-create",            _S, _I, 5),
-    _spec("/changelog-create",      _H, _I, 6),
+    _spec("/ci-cd-create",          _S, _I,  1),
+    _spec("/supabase-sql-editor",   _S, _A,  2),
+    _spec("/infra-create",          _S, _I,  3),
+    _spec("/pre-deploy-testing",    _S, _I,  4),
+    _spec("/slo-create",            _S, _I,  5),
+    _spec("/staging-validate",      _S, _A,  6),
+    _spec("/monitoring-setup",      _S, _I,  7),
+    _spec("/post-deploy-verify",    _S, _A,  8),
+    _spec("/changelog-create",      _H, _A,  9),
+    _spec("/deploy-flow",           _S, _A, 10),
 ])
 
 # ─── Daily (from z-templates/daily.md) ────────────────────────────────────────── #
@@ -201,9 +205,12 @@ TEMPLATE_DAILY: list[CommandSpec] = [
 # ─── Marketing (from z-templates/mkt.md) ──────────────────────────────────────── #
 
 TEMPLATE_MKT: list[CommandSpec] = _inject_clears([
-    _spec("/mkt:portfolio-add", _H, _A, 1),
-    _spec("/mkt:linkedin-mkt",  _H, _A, 2),
-    _spec("/mkt:instagram-mkt", _H, _A, 3),
+    _spec("/docs-create",           _S, _A, 1),
+    _spec("/mkt:portfolio-add",     _H, _A, 2),
+    _spec("/mkt:linkedin-mkt",      _H, _A, 3),
+    _spec("/mkt:instagram-mkt",     _H, _A, 4),
+    _spec("/mkt:portfolio-publish", _H, _A, 5),
+    _spec("/handoff-create",        _H, _A, 6),
 ])
 
 # ─── Business (from z-templates/business.md) ──────────────────────────────────── #
@@ -230,7 +237,8 @@ _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
     ("/backend:report",       _O, _A),
     ("/validate-front-end",   _O, _A),
     ("/frontend:scan",        _S, _A),
-    ("/frontend:audit",       _O, _A),
+    ("/frontend:audit",        _O, _A),
+    ("/frontend:mobile-check", _S, _A),
     ("/frontend:assets-check", _S, _A),
     ("/frontend:report",      _O, _A),
     ("/qa-remediate",         _S, _A),
@@ -241,6 +249,7 @@ _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
     ("/compliance-check",     _S, _A),
     ("/mutation-test-create",  _H, _A),
     ("/review-language",      _H, _A),
+    ("/validate-stack",       _H, _A),
 ]
 
 _QA_NEXTJS: list[tuple[str, ModelName, InteractionType]] = [

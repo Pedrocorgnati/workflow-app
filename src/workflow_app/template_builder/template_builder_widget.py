@@ -91,7 +91,9 @@ COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] 
         ("/business:generate-pdf-docs", _H, _A),
     ]),
     ("F7 — Execução", [
+        ("/mobile-first-build",     _S, _A),
         ("/front-end-build",        _S, _A),
+        ("/data-test-id",           _S, _A),
         ("/auto-flow execute",      _S, _A),
         ("/execute-task",           _S, _A),
         ("/review-executed-task",   _S, _A),

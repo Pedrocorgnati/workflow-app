@@ -136,6 +136,7 @@ class MetricsBar(QWidget):
 
         # ── Project pill / select button ──────────────────────────────── #
         self._project_pill = QWidget()
+        self._project_pill.setProperty("testid", "metrics-project-pill")
         self._project_pill.setFixedHeight(28)
         self._project_pill.setStyleSheet(
             "QWidget { background: transparent; border: 1px solid #22C55E; border-radius: 5px; }"
@@ -159,6 +160,7 @@ class MetricsBar(QWidget):
         _pl.addWidget(_proj_x)
 
         self._proj_select_btn = QPushButton("Selecionar Projeto...")
+        self._proj_select_btn.setProperty("testid", "metrics-project-select")
         self._proj_select_btn.setFixedHeight(28)
         self._proj_select_btn.setStyleSheet(
             "QPushButton { background: transparent; color: #FBBF24; border: 1px solid #FBBF24;"
@@ -180,6 +182,7 @@ class MetricsBar(QWidget):
         for i, name in enumerate(_instance_names):
             btn = QPushButton(name)
             btn.setFixedHeight(28)
+            btn.setProperty("testid", f"metrics-instance-{name}")
             btn.clicked.connect(lambda _checked=False, idx=i, n=name: self._on_instance_clicked(idx, n))
             self._instance_btns.append(btn)
             layout.addWidget(btn)
@@ -197,6 +200,7 @@ class MetricsBar(QWidget):
         self._btn_workflow.setFixedHeight(28)
         self._btn_workflow.setFont(font_nav)
         self._btn_workflow.setMinimumWidth(80)
+        self._btn_workflow.setProperty("testid", "metrics-nav-workflow")
         self._btn_workflow.clicked.connect(lambda: self._on_nav_clicked(0))
         layout.addWidget(self._btn_workflow)
 
@@ -204,6 +208,7 @@ class MetricsBar(QWidget):
         self._btn_comandos.setFixedHeight(28)
         self._btn_comandos.setFont(font_nav)
         self._btn_comandos.setMinimumWidth(80)
+        self._btn_comandos.setProperty("testid", "metrics-nav-comandos")
         self._btn_comandos.clicked.connect(lambda: self._on_nav_clicked(1))
         layout.addWidget(self._btn_comandos)
 
@@ -211,6 +216,7 @@ class MetricsBar(QWidget):
         self._btn_toolbox.setFixedHeight(28)
         self._btn_toolbox.setFont(font_nav)
         self._btn_toolbox.setMinimumWidth(80)
+        self._btn_toolbox.setProperty("testid", "metrics-nav-toolbox")
         self._btn_toolbox.clicked.connect(lambda: self._on_nav_clicked(2))
         layout.addWidget(self._btn_toolbox)
 
@@ -281,8 +287,27 @@ class MetricsBar(QWidget):
         layout.addWidget(self._btn_copy_ip)
         layout.addWidget(self._lbl_connection_badge)
 
+        # ── DataTest toggle ───────────────────────────────────────────── #
+        self._btn_datatest = QPushButton("DataTest")
+        self._btn_datatest.setFixedHeight(28)
+        self._btn_datatest.setCheckable(True)
+        self._btn_datatest.setToolTip("Exibir data-testid em todos os componentes")
+        self._btn_datatest.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #71717A;"
+            "  border: 1px solid #52525B; border-radius: 4px;"
+            "  font-size: 10px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:hover { color: #FAFAFA; background-color: #3F3F46; }"
+            "QPushButton:checked { background-color: #DC2626; color: #FAFAFA;"
+            "  border-color: #DC2626; font-weight: 700; }"
+        )
+        self._btn_datatest.clicked.connect(
+            lambda checked: self._signal_bus.datatest_toggled.emit(checked)
+        )
+        layout.addWidget(self._btn_datatest)
+
         # ── Right controls ────────────────────────────────────────────── #
         self._btn_prefs = self._make_icon_btn("⚙", "Preferências")
+        self._btn_prefs.setProperty("testid", "metrics-settings")
         layout.addWidget(self._btn_prefs)
 
     def _setup_git_overlay(self) -> None:
@@ -297,6 +322,7 @@ class MetricsBar(QWidget):
     def _make_remote_toggle_btn(self) -> QPushButton:
         btn = QPushButton("📡")
         btn.setObjectName("RemoteToggleButton")
+        btn.setProperty("testid", "metrics-remote")
         btn.setFixedSize(32, 32)
         btn.setToolTip("Modo Remoto: ativa servidor WebSocket para controle via Android")
         btn.setCheckable(True)

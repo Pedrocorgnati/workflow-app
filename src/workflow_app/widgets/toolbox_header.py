@@ -126,6 +126,7 @@ class ToolboxHeader(QWidget):
     ) -> QWidget:
         section = QWidget()
         section.setStyleSheet("background-color: transparent;")
+        section.setProperty("testid", f"toolbox-section-{title.lower()}")
         layout = QVBoxLayout(section)
         layout.setContentsMargins(4, 3, 4, 3)
         layout.setSpacing(2)
@@ -157,7 +158,10 @@ class ToolboxHeader(QWidget):
             btn.setToolTip(f"{cmd} — {tip}")
             btn.setStyleSheet(_BTN_STYLE)
             btn.setFixedHeight(20)
-            btn.clicked.connect(lambda _checked=False, c=cmd: signal_bus.paste_text_in_terminal.emit(c))
+            btn.clicked.connect(lambda _checked=False, c=cmd: (
+                signal_bus.paste_text_in_terminal.emit(c),
+                signal_bus.focus_interactive_terminal.emit(),
+            ))
             grid.addWidget(btn, i // cols, i % cols)
 
         scroll.setWidget(container)
@@ -199,6 +203,7 @@ class ToolboxTab(QWidget):
     ) -> QWidget:
         col = QWidget()
         col.setStyleSheet("background-color: transparent;")
+        col.setProperty("testid", f"toolbox-col-{title.lower()}")
         layout = QVBoxLayout(col)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -264,7 +269,10 @@ class ToolboxTab(QWidget):
             f"QPushButton:hover {{ background-color: {accent}; color: #18181B; }}"
         )
         paste_btn.clicked.connect(
-            lambda _checked=False, c=cmd: signal_bus.paste_text_in_terminal.emit(c)
+            lambda _checked=False, c=cmd: (
+                signal_bus.paste_text_in_terminal.emit(c),
+                signal_bus.focus_interactive_terminal.emit(),
+            )
         )
         layout.addWidget(paste_btn)
 

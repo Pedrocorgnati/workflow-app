@@ -69,7 +69,9 @@ class DryRunValidator:
         "/execute-task",
         "/auto-flow execute",
         "/review-executed-task",
+        "/mobile-first-build",
         "/front-end-build",
+        "/data-test-id",
         "/review-executed-module",
     })
 

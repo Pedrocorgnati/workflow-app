@@ -6,9 +6,9 @@ Defines 9 read-only factory templates matching the header buttons:
   2. Brief: New     — Projeto novo completo F1→F3 (~27 commands)
   3. Brief: Feature — Feature em projeto existente (~27 commands)
   4. Modules        — Pipeline F4 (~8 commands)
-  5. Deploy         — CI/CD, infra, pre-deploy (~6 commands)
+  5. Deploy         — CI/CD, infra, pre-deploy, staging, monitoring (~10 commands)
   6. Daily          — Daily tasks pipeline (5 commands)
-  7. Marketing      — Portfolio, LinkedIn, Instagram (3 commands)
+  7. Marketing      — Docs, portfolio, LinkedIn, Instagram, handoff (~6 commands)
   8. Business       — Product brief, SOW, budget (~6 commands)
 
 QA templates (5 per stack) are available via the QA modal but not seeded
@@ -68,7 +68,7 @@ FACTORY_TEMPLATES: dict[str, tuple[str, list[CommandSpec]]] = {
         TEMPLATE_MODULES,
     ),
     "Deploy": (
-        "CI/CD, infra, pre-deploy testing, SLO, changelog. ~6 comandos.",
+        "CI/CD, infra, pre-deploy, SLO, staging, monitoring, post-deploy, changelog, deploy-flow. ~10 comandos.",
         TEMPLATE_DEPLOY,
     ),
     "Daily": (
@@ -76,7 +76,7 @@ FACTORY_TEMPLATES: dict[str, tuple[str, list[CommandSpec]]] = {
         TEMPLATE_DAILY,
     ),
     "Marketing": (
-        "Portfolio, LinkedIn, Instagram. 3 comandos.",
+        "Docs, portfolio, LinkedIn, Instagram, publish, handoff. ~6 comandos.",
         TEMPLATE_MKT,
     ),
     "Business": (

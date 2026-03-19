@@ -64,6 +64,18 @@ _SECTION_BTN_STYLE = (
     "QPushButton:pressed { background-color: #FBBF24; color: #18181B; border-color: #FBBF24; }"
 )
 
+_TAB_ACTIVE_STYLE = (
+    "QPushButton { background-color: #FBBF24; color: #18181B;"
+    "  border: none; border-radius: 3px;"
+    "  font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }"
+)
+_TAB_INACTIVE_STYLE = (
+    "QPushButton { background-color: transparent; color: #A1A1AA;"
+    "  border: none; border-radius: 3px;"
+    "  font-size: 10px; font-weight: 600; letter-spacing: 0.5px; }"
+    "QPushButton:hover { color: #D4D4D8; background-color: #2D2D30; }"
+)
+
 
 class _CollapsibleSection(QWidget):
     """Expandable/collapsible section with chevron header and 3-column button grid."""
@@ -74,6 +86,8 @@ class _CollapsibleSection(QWidget):
         expanded: bool = False,
         cols: int = 3,
         parent: QWidget | None = None,
+        *,
+        testid: str = "",
     ) -> None:
         super().__init__(parent)
         self._title = title
@@ -81,6 +95,8 @@ class _CollapsibleSection(QWidget):
         self._cols = cols
         self._row = 0
         self._col = 0
+        if testid:
+            self.setProperty("testid", testid)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -109,11 +125,13 @@ class _CollapsibleSection(QWidget):
         self._content.setVisible(self._expanded)
         self._toggle_btn.setText(self._header_text())
 
-    def add_button(self, label: str, tooltip: str, callback) -> QPushButton:
+    def add_button(self, label: str, tooltip: str, callback, *, testid: str = "") -> QPushButton:
         btn = QPushButton(label)
         btn.setToolTip(tooltip)
         btn.setStyleSheet(_SECTION_BTN_STYLE)
         btn.clicked.connect(callback)
+        if testid:
+            btn.setProperty("testid", testid)
         self._grid.addWidget(btn, self._row, self._col)
         self._col += 1
         if self._col >= self._cols:
@@ -196,7 +214,7 @@ class CommandQueueWidget(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Header — 4 collapsible chevron sections
+        # Header — tab row (Daily | Workflow | Auxiliar) + accordion content
         header = QWidget()
         header.setObjectName("CommandQueueHeader")
         header.setStyleSheet(
@@ -206,61 +224,84 @@ class CommandQueueWidget(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(0)
 
-        # ── Section 1: Workflow (expanded by default) ────────────────────────
-        sec_workflow = _CollapsibleSection("Workflow", expanded=True)
-        sec_workflow.add_button(
-            "daily", "Daily tasks: scan → plan → do → validate → review",
-            lambda: self._load_quick_template(TEMPLATE_DAILY, name="Daily"),
-        )
-        sec_workflow.add_button(
-            "json", "/project-json — Cria/atualiza project.json",
-            lambda: self._load_quick_template(TEMPLATE_JSON, name="JSON"),
-        )
-        sec_workflow.add_button(
-            "brief new", "/first-brief-create → intake → PRD (novo projeto)",
-            lambda: self._load_quick_template(TEMPLATE_BRIEF_NEW, name="Brief \u2014 Novo Projeto"),
-        )
-        sec_workflow.add_button(
-            "brief feat", "/feature-brief-create → intake → PRD (nova feature)",
-            lambda: self._load_quick_template(TEMPLATE_BRIEF_FEATURE, name="Brief \u2014 Feature"),
-        )
-        sec_workflow.add_button(
-            "modules", "Pipeline F4 de modules: core → blueprints → variants → structure",
-            lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
-        )
-        sec_workflow.add_button(
-            "wbs", "WBS dinâmico — analisa modules existentes e gera tasks",
-            self._on_wbs_clicked,
-        )
-        sec_workflow.add_button(
-            "qa", "QA + auditoria de stack (selecione a stack no modal)",
-            self._on_qa_clicked,
-        )
-        sec_workflow.add_button(
-            "deploy", "CI/CD, infra, pre-deploy, SLO, changelog",
-            lambda: self._load_quick_template(TEMPLATE_DEPLOY, name="Deploy"),
-        )
-        header_layout.addWidget(sec_workflow)
+        # ── Tab bar (3 buttons in a row) ─────────────────────────────────
+        tab_bar = QWidget()
+        tab_bar.setFixedHeight(28)
+        tab_bar.setStyleSheet("background-color: #1E1E21;")
+        tab_bar_layout = QHBoxLayout(tab_bar)
+        tab_bar_layout.setContentsMargins(4, 3, 4, 3)
+        tab_bar_layout.setSpacing(3)
 
-        # ── Section 2: Extra ─────────────────────────────────────────────────
-        sec_extra = _CollapsibleSection("Extra", expanded=False)
-        sec_extra.add_button(
-            "business", "Business: product-brief, SOW, budget, PDFs",
-            lambda: self._load_quick_template(TEMPLATE_BUSINESS, name="Business"),
-        )
-        sec_extra.add_button(
-            "mkt", "Marketing: portfolio, LinkedIn, Instagram",
-            lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
-        )
-        sec_extra.add_button(
-            "micro-arch", "Brief de feature + micro-arquitetura pontual",
-            self._on_micro_arch_clicked,
-        )
-        sec_extra.add_button(
-            "autocast-test", "Testa ciclo completo do autocast (5x AUTO + 1x INTERACTIVE + 2x AUTO)",
-            lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
-        )
-        header_layout.addWidget(sec_extra)
+        self._sec_tabs: list[QPushButton] = []
+        for i, label in enumerate(("Daily", "Workflow", "Auxiliar")):
+            btn = QPushButton(label.upper())
+            btn.setFixedHeight(22)
+            btn.setProperty("testid", f"queue-tab-{label.lower()}")
+            btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
+            tab_bar_layout.addWidget(btn, stretch=1)
+            self._sec_tabs.append(btn)
+
+        header_layout.addWidget(tab_bar)
+
+        # ── Section contents (only one visible at a time) ────────────────
+        self._sec_contents: list[QWidget] = []
+
+        # Daily
+        daily_content = self._build_section_grid([
+            ("daily", "Daily tasks: scan → plan → do → validate → review",
+             lambda: self._load_quick_template(TEMPLATE_DAILY, name="Daily"),
+             "queue-btn-daily"),
+            ("micro-json", "Configura project.json para micro-arquitetura",
+             self._on_micro_json_clicked, "queue-btn-micro-json"),
+            ("micro-arch", "Carrega pipeline de micro-arquitetura",
+             self._on_micro_arch_clicked, "queue-btn-micro-arch"),
+        ])
+        header_layout.addWidget(daily_content)
+        self._sec_contents.append(daily_content)
+
+        # Workflow
+        workflow_content = self._build_section_grid([
+            ("json", "/project-json — Cria/atualiza project.json",
+             lambda: self._load_quick_template(TEMPLATE_JSON, name="JSON"),
+             "queue-btn-json"),
+            ("brief new", "/first-brief-create → intake → PRD (novo projeto)",
+             lambda: self._load_quick_template(TEMPLATE_BRIEF_NEW, name="Brief \u2014 Novo Projeto"),
+             "queue-btn-brief-new"),
+            ("brief feat", "/feature-brief-create → intake → PRD (nova feature)",
+             lambda: self._load_quick_template(TEMPLATE_BRIEF_FEATURE, name="Brief \u2014 Feature"),
+             "queue-btn-brief-feat"),
+            ("modules", "Pipeline F4 de modules: core → blueprints → variants → structure",
+             lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
+             "queue-btn-modules"),
+            ("wbs", "WBS dinâmico — analisa modules existentes e gera tasks",
+             self._on_wbs_clicked, "queue-btn-wbs"),
+            ("qa", "QA + auditoria de stack (selecione a stack no modal)",
+             self._on_qa_clicked, "queue-btn-qa"),
+            ("deploy", "CI/CD, infra, pre-deploy, SLO, changelog",
+             lambda: self._load_quick_template(TEMPLATE_DEPLOY, name="Deploy"),
+             "queue-btn-deploy"),
+        ])
+        header_layout.addWidget(workflow_content)
+        self._sec_contents.append(workflow_content)
+
+        # Auxiliar
+        auxiliar_content = self._build_section_grid([
+            ("business", "Business: product-brief, SOW, budget, PDFs",
+             lambda: self._load_quick_template(TEMPLATE_BUSINESS, name="Business"),
+             "queue-btn-business"),
+            ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
+             lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
+             "queue-btn-mkt"),
+            ("autocast-test", "Testa ciclo completo do autocast",
+             lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
+             "queue-btn-autocast-test"),
+        ])
+        header_layout.addWidget(auxiliar_content)
+        self._sec_contents.append(auxiliar_content)
+
+        # Default: Workflow active (index 1)
+        self._active_section = 1
+        self._apply_section_styles()
 
         main_layout.addWidget(header)
 
@@ -274,6 +315,7 @@ class CommandQueueWidget(QWidget):
         pl.setContentsMargins(8, 5, 8, 5)
 
         self._play_btn = QPushButton("▶  Rodar próximo")
+        self._play_btn.setProperty("testid", "queue-play")
         self._play_btn.setFixedHeight(32)
         self._play_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
@@ -288,6 +330,7 @@ class CommandQueueWidget(QWidget):
 
         # Autocast button — runs all AUTO commands sequentially, stops on INTERACTIVE
         self._autocast_btn = QPushButton("Autocast")
+        self._autocast_btn.setProperty("testid", "queue-autocast")
         self._autocast_btn.setFixedHeight(32)
         self._autocast_btn.setToolTip(
             "Executa comandos automáticos em sequência.\n"
@@ -306,6 +349,7 @@ class CommandQueueWidget(QWidget):
 
         # Botão JSON — copia path do project.json para o clipboard
         self._json_btn = QPushButton("JSON")
+        self._json_btn.setProperty("testid", "queue-json-path")
         self._json_btn.setFixedHeight(32)
         self._json_btn.setToolTip("Copia o caminho do project.json\ne digita no terminal automaticamente")
         self._json_btn.setStyleSheet(
@@ -321,6 +365,7 @@ class CommandQueueWidget(QWidget):
 
         # Botão WS — copia workspace_root para o clipboard
         self._ws_btn = QPushButton("WS")
+        self._ws_btn.setProperty("testid", "queue-ws-path")
         self._ws_btn.setFixedHeight(32)
         self._ws_btn.setToolTip("Copia o workspace_root do projeto\ne digita no terminal automaticamente")
         self._ws_btn.setStyleSheet(
@@ -337,6 +382,7 @@ class CommandQueueWidget(QWidget):
 
         # Template indicator label — shows which template/button was clicked
         self._template_label = QLabel("")
+        self._template_label.setProperty("testid", "queue-template-label")
         self._template_label.setFixedHeight(28)
         self._template_label.setStyleSheet(
             "background-color: #1C1C1F; color: #A1A1AA;"
@@ -388,6 +434,7 @@ class CommandQueueWidget(QWidget):
         notepad_vl.addWidget(notepad_header)
 
         self._notepad_edit = QPlainTextEdit()
+        self._notepad_edit.setProperty("testid", "queue-notepad")
         self._notepad_edit.setPlaceholderText("Escreva aqui e clique Enviar…")
         self._notepad_edit.setStyleSheet(
             "QPlainTextEdit {"
@@ -407,6 +454,7 @@ class CommandQueueWidget(QWidget):
         send_bar_layout.addStretch()
 
         notepad_send_btn = QPushButton("➤")
+        notepad_send_btn.setProperty("testid", "queue-notepad-send")
         notepad_send_btn.setFixedSize(32, 32)
         notepad_send_btn.setToolTip("Enviar")
         notepad_send_btn.setStyleSheet(
@@ -565,6 +613,41 @@ class CommandQueueWidget(QWidget):
         signal_bus.instance_selected.connect(self._on_instance_selected)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
 
+    # ──────────────────────────────────── Section tabs (accordion) ─── #
+
+    def _build_section_grid(
+        self, buttons: list[tuple[str, str, object, str]], cols: int = 3
+    ) -> QWidget:
+        """Create a content widget with a 3-column grid of styled buttons."""
+        content = QWidget()
+        content.setStyleSheet("background-color: #27272A;")
+        grid = QGridLayout(content)
+        grid.setContentsMargins(5, 4, 5, 5)
+        grid.setSpacing(3)
+        for i, (label, tooltip, callback, testid) in enumerate(buttons):
+            btn = QPushButton(label)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(_SECTION_BTN_STYLE)
+            btn.clicked.connect(callback)
+            if testid:
+                btn.setProperty("testid", testid)
+            grid.addWidget(btn, i // cols, i % cols)
+        return content
+
+    def _switch_section(self, index: int) -> None:
+        """Switch to a section tab (accordion: only one open at a time)."""
+        if index == self._active_section:
+            return
+        self._active_section = index
+        self._apply_section_styles()
+
+    def _apply_section_styles(self) -> None:
+        """Update tab button styles and content visibility."""
+        for i, (btn, content) in enumerate(zip(self._sec_tabs, self._sec_contents)):
+            active = i == self._active_section
+            btn.setStyleSheet(_TAB_ACTIVE_STYLE if active else _TAB_INACTIVE_STYLE)
+            content.setVisible(active)
+
     # ──────────────────────────────────────────────────── Public API ─── #
 
     def set_pipeline_manager(self, pipeline_manager) -> None:
@@ -596,6 +679,7 @@ class CommandQueueWidget(QWidget):
             rel = abs_config
         QApplication.clipboard().setText(rel)
         signal_bus.paste_text_in_terminal.emit(rel)
+        signal_bus.focus_interactive_terminal.emit()
         signal_bus.toast_requested.emit("Caminho JSON copiado e digitado no terminal.", "info")
 
     def _on_copy_ws_path(self) -> None:
@@ -609,6 +693,7 @@ class CommandQueueWidget(QWidget):
         ws = app_state.config.workspace_root
         QApplication.clipboard().setText(ws)
         signal_bus.paste_text_in_terminal.emit(ws)
+        signal_bus.focus_interactive_terminal.emit()
         signal_bus.toast_requested.emit("workspace_root copiado e digitado no terminal.", "info")
 
     def _load_single_command(
@@ -669,18 +754,17 @@ class CommandQueueWidget(QWidget):
         if dlg.exec() == BriefTemplateDialog.Accepted:
             self._load_quick_template(dlg.selected_template)
 
-    def _on_micro_arch_clicked(self) -> None:
-        """Show name dialog, patch project JSON for feature paths, load micro-arch template."""
+    def _on_micro_json_clicked(self) -> None:
+        """Show name dialog and patch project JSON for feature paths (micro-json config)."""
         from pathlib import Path
 
         from workflow_app.config.app_state import app_state
         from workflow_app.config.config_parser import parse_config
         from workflow_app.dialogs.micro_arch_name_dialog import MicroArchNameDialog
-        from workflow_app.templates.quick_templates import _inject_clears
 
         if not app_state.has_config or not app_state.config:
             signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o Micro-Architecture.", "warning"
+                "Carregue um projeto antes de usar o Micro-JSON.", "warning"
             )
             return
 
@@ -767,9 +851,38 @@ class CommandQueueWidget(QWidget):
             signal_bus.toast_requested.emit(f"Erro ao recarregar config: {exc}", "error")
             return
 
+        signal_bus.toast_requested.emit(
+            f"Feature '{slug}' configurada. Paths: brief/docs/wbs → /features/{slug}", "success"
+        )
+
+    def _on_micro_arch_clicked(self) -> None:
+        """Load micro-architecture template using current feature config."""
+        from pathlib import Path
+
+        from workflow_app.config.app_state import app_state
+        from workflow_app.templates.quick_templates import _inject_clears
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar o Micro-Architecture.", "warning"
+            )
+            return
+
+        config = app_state.config
+
+        # Extract slug from wbs_root (expected: .../features/{slug})
+        wbs_parts = config.wbs_root.rstrip("/").split("/")
+        if len(wbs_parts) < 2 or wbs_parts[-2] != "features":
+            signal_bus.toast_requested.emit(
+                "Execute o Micro-JSON primeiro para configurar a feature.", "warning"
+            )
+            return
+
+        slug = wbs_parts[-1]
+
         # ── Compute next sequential number for micro-architecture dir ────
-        project_dir = Path(new_config.project_dir)
-        micro_arch_base = project_dir / new_config.wbs_root / "micro-architecture"
+        project_dir = Path(config.project_dir)
+        micro_arch_base = project_dir / config.wbs_root / "micro-architecture"
         next_n = 1
         if micro_arch_base.is_dir():
             existing_nums: list[int] = []
@@ -781,9 +894,9 @@ class CommandQueueWidget(QWidget):
             if existing_nums:
                 next_n = max(existing_nums) + 1
 
-        micro_arch_path = f"{new_config.wbs_root}/micro-architecture/{next_n}-{slug}"
+        micro_arch_path = f"{config.wbs_root}/micro-architecture/{next_n}-{slug}"
 
-        # ── Build dynamic template with execution path ───────────────────
+        # ── Build dynamic template ───────────────────────────────────────
         _O = ModelName.OPUS
         _S = ModelName.SONNET
         _I = InteractionType.INTERACTIVE
@@ -813,7 +926,7 @@ class CommandQueueWidget(QWidget):
         ])
 
         signal_bus.toast_requested.emit(
-            f"Feature '{slug}' configurada. Paths atualizados: brief/docs/wbs → /features/{slug}", "success"
+            f"Micro-Architecture '{slug}': {next_n}-{slug}", "success"
         )
         self._load_quick_template(template, name="Micro-Architecture")
 
@@ -1118,10 +1231,11 @@ class CommandQueueWidget(QWidget):
         signal_bus.interactive_advance_triggered.emit()
 
     def _on_notepad_send(self) -> None:
-        """Send notepad text to terminal (no Enter, no clear)."""
+        """Send notepad text to terminal (no Enter, no clear), then focus terminal."""
         text = self._notepad_edit.toPlainText()
         if text:
             signal_bus.paste_text_in_terminal.emit(text)
+            signal_bus.focus_interactive_terminal.emit()
 
     # ─────────────────────────────────────────────── Autocast ──────── #
 

@@ -165,6 +165,12 @@ class SignalBus(QObject):
     # Emitted when Android device disconnects
     remote_client_disconnected = Signal()
 
+    # --- DataTest debug mode ---
+    datatest_toggled = Signal(bool)        # True=show testid overlays, False=hide
+
+    # --- Terminal focus (switch to output + focus terminal widget) ---
+    focus_interactive_terminal = Signal()
+
 
 # Module-level singleton — always import `signal_bus`, never instantiate SignalBus directly
 signal_bus = SignalBus()

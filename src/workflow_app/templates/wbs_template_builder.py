@@ -91,12 +91,16 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/reforge-pipeline", _O, 0))
 
     # ── F7: Build phase ──────────────────────────────────────────────────────
+    specs.append(_spec("/mobile-first-build", _S, 0))
     specs.append(_spec("/front-end-build", _S, 0))
+    specs.append(_spec("/data-test-id", _S, 0))
     specs.append(_spec("/back-end-build", _S, 0))
     specs.append(_spec("/db-migration-create", _S, 0))
     specs.append(_spec("/create-assets", _H, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
+    specs.append(_spec("/update-tasks:analyse", _O, 0))
+    specs.append(_spec("/update-tasks:execute", _S, 0))
 
     # ── F7: Per-module execute + review ──────────────────────────────────────
     for module_path in modules:
@@ -127,6 +131,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/validate-front-end", _O, 0))
     specs.append(_spec("/frontend:scan", _S, 0))
     specs.append(_spec("/frontend:audit", _O, 0))
+    specs.append(_spec("/frontend:mobile-check", _S, 0))
     specs.append(_spec("/frontend:assets-check", _S, 0))
     specs.append(_spec("/frontend:report", _O, 0))
     specs.append(_spec("/qa-remediate", _S, 0))

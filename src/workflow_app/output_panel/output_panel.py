@@ -320,6 +320,8 @@ class OutputPanel(QWidget):
         layout.setSpacing(0)
 
         self._terminal = TerminalWidget()
+        self._terminal.setProperty("testid",
+            "terminal-autocast-output" if self._autocast_mode else "terminal-interactive-output")
         self._terminal.document().setMaximumBlockCount(self._max_lines)
         self._terminal.raw_key_pressed.connect(self._on_raw_key)
         layout.addWidget(self._terminal, stretch=1)

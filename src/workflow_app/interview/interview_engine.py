@@ -64,7 +64,9 @@ PIPELINE_COMMANDS: list[_PipelineEntry] = [
     ("/auto-flow create",      ModelName.SONNET, InteractionType.AUTO,        False, ["f5"]),
     ("/validate-pipeline",     ModelName.SONNET, InteractionType.AUTO,        False, ["f5"]),
     # F7 — Execution
+    ("/mobile-first-build",    ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
     ("/front-end-build",       ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
+    ("/data-test-id",          ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
     ("/create-assets",         ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7", "frontend"]),
     ("/create-mocks",          ModelName.SONNET, InteractionType.AUTO,        True,  ["f7"]),
     ("/github-linking",        ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7"]),
@@ -252,8 +254,15 @@ class InterviewEngine:
             entries.append(entry)
 
         if include_frontend and any(p in phases for p in ("f7", "frontend")):
-            entries.insert(max(len(entries) - 1, 0), (
+            idx = max(len(entries) - 1, 0)
+            entries.insert(idx, (
+                "/mobile-first-build", ModelName.SONNET, InteractionType.AUTO, False, ["f7", "frontend"]
+            ))
+            entries.insert(idx + 1, (
                 "/front-end-build", ModelName.SONNET, InteractionType.AUTO, False, ["f7", "frontend"]
+            ))
+            entries.insert(idx + 2, (
+                "/data-test-id", ModelName.SONNET, InteractionType.AUTO, False, ["f7", "frontend"]
             ))
         return self._build_from_entries(entries)
 
