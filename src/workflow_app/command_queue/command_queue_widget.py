@@ -34,6 +34,7 @@ from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
 from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
+    TEMPLATE_AUTO_IMPROOVE_LOOP,
     TEMPLATE_AUTOCAST_TEST,
     TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
@@ -202,6 +203,7 @@ class CommandQueueWidget(QWidget):
         self._pipeline_manager = None
         self._autocast_active = False
         self._autocast_pending_advance = False  # Guard against duplicate advances
+        self._loop_active = False  # Loop mode: restart queue when all commands finish
         self._cli_binary = "clauded"  # Active CLI instance (updated via instance_selected)
         self._autocast_workers: list = []  # Keep alive to prevent GC mid-run
         self._setup_ui()
@@ -292,6 +294,9 @@ class CommandQueueWidget(QWidget):
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
+            ("auto-improove", "/model Opus + 5x /auto-improove:cmd (use com Loop)",
+             lambda: self._load_quick_template(TEMPLATE_AUTO_IMPROOVE_LOOP, name="Auto-Improove Loop"),
+             "queue-btn-auto-improove"),
             ("autocast-test", "Testa ciclo completo do autocast",
              lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
              "queue-btn-autocast-test"),
@@ -346,6 +351,26 @@ class CommandQueueWidget(QWidget):
         )
         self._autocast_btn.clicked.connect(self._on_autocast_clicked)
         pl.addWidget(self._autocast_btn, stretch=2)
+
+        # Loop button — runs autocast in a loop (restarts queue when finished)
+        self._loop_btn = QPushButton("Loop")
+        self._loop_btn.setProperty("testid", "queue-loop")
+        self._loop_btn.setFixedHeight(32)
+        self._loop_btn.setToolTip(
+            "Executa comandos em loop contínuo.\n"
+            "Quando o último termina, reinicia pelo primeiro.\n"
+            "Clique 'Parar' para interromper."
+        )
+        self._loop_btn.setStyleSheet(
+            "QPushButton { background-color: #0891B2; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 11px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #0E7490; }"
+            "QPushButton:pressed { background-color: #155E75; }"
+            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+        )
+        self._loop_btn.clicked.connect(self._on_loop_clicked)
+        pl.addWidget(self._loop_btn, stretch=2)
 
         # Botão JSON — copia path do project.json para o clipboard
         self._json_btn = QPushButton("JSON")
@@ -1164,8 +1189,11 @@ class CommandQueueWidget(QWidget):
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.ERRO)
-        # Stop autocast on failure
-        if self._autocast_active:
+        # Stop autocast/loop on failure
+        if self._loop_active:
+            self._stop_loop()
+            signal_bus.toast_requested.emit("Loop: parado por erro", "warning")
+        elif self._autocast_active:
             self._stop_autocast()
             signal_bus.toast_requested.emit("Autocast: parado por erro", "warning")
 
@@ -1264,6 +1292,49 @@ class CommandQueueWidget(QWidget):
             self._stop_autocast()
         else:
             self._start_autocast()
+
+    def _on_loop_clicked(self) -> None:
+        """Toggle loop mode on/off."""
+        if self._loop_active:
+            self._stop_loop()
+        else:
+            self._start_loop()
+
+    def _start_loop(self) -> None:
+        """Activate loop mode and start autocast."""
+        self._loop_active = True
+        self._loop_btn.setText("Parar")
+        self._loop_btn.setStyleSheet(
+            "QPushButton { background-color: #DC2626; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 11px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #B91C1C; }"
+            "QPushButton:pressed { background-color: #991B1B; }"
+        )
+        signal_bus.toast_requested.emit("Loop ativado", "info")
+        # Start autocast if not already running
+        if not self._autocast_active:
+            self._start_autocast()
+
+    def _stop_loop(self) -> None:
+        """Deactivate loop mode and stop autocast."""
+        self._loop_active = False
+        self._loop_btn.setText("Loop")
+        self._loop_btn.setStyleSheet(
+            "QPushButton { background-color: #0891B2; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 11px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #0E7490; }"
+            "QPushButton:pressed { background-color: #155E75; }"
+            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+        )
+        if self._autocast_active:
+            self._stop_autocast()
+
+    def _reset_all_items_to_pending(self) -> None:
+        """Reset all items in the queue back to pending state for loop restart."""
+        for item in self._items:
+            item.reset_to_pending()
 
     def _start_autocast(self) -> None:
         """Activate autocast and trigger the first pending command."""
@@ -1385,6 +1456,12 @@ class CommandQueueWidget(QWidget):
 
         next_item = self._find_next_pending()
         if next_item is None:
+            if self._loop_active:
+                _logger.info("[Autocast] _autocast_advance: loop restart — resetting all items")
+                signal_bus.toast_requested.emit("Loop: reiniciando fila", "info")
+                self._reset_all_items_to_pending()
+                QTimer.singleShot(500, self._autocast_advance)
+                return
             _logger.info("[Autocast] _autocast_advance: no more pending items")
             self._stop_autocast()
             signal_bus.toast_requested.emit("Autocast: fila concluída", "success")

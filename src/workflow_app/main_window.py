@@ -551,8 +551,10 @@ class MainWindow(QMainWindow):
             self._hide_testid_overlays()
 
     def _show_testid_overlays(self) -> None:
-        """Walk all child widgets and show floating red testid overlay labels.
+        """Walk child widgets of the active tab and show floating red testid overlay labels.
 
+        Only scans widgets within the currently selected view tab
+        (0=Workflow, 1=Comandos, 2=Toolbox) plus the shared MetricsBar.
         Overlays are parented to the central widget so they float beyond
         their target widget bounds. Click an overlay to copy its text.
         """
@@ -574,7 +576,16 @@ class MainWindow(QMainWindow):
             " border-radius: 3px; border: none;"
         )
 
-        for widget in central.findChildren(QWidget):
+        # Only scan the active view's widget + metrics bar
+        active_page = self._view_stack.currentWidget()
+        scan_roots = [active_page, self._metrics_bar]
+        scan_widgets: list[QWidget] = []
+        for root in scan_roots:
+            if root:
+                scan_widgets.append(root)
+                scan_widgets.extend(root.findChildren(QWidget))
+
+        for widget in scan_widgets:
             testid = widget.property("testid")
             if testid and not widget.property("_is_testid_overlay"):
                 testid_str = str(testid)

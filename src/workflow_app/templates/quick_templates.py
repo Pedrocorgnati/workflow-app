@@ -389,6 +389,23 @@ TEMPLATE_AUTOCAST_TEST: list[CommandSpec] = _inject_clears([
     _spec("/test-autoflow-auto",        _S, _A, 8),
 ])
 
+# ─── Auto-Improove Loop (Auxiliar tab) ──────────────────────────────────────── #
+# Designed for /loop button — cycles continuously until stopped.
+
+TEMPLATE_AUTO_IMPROOVE_LOOP: list[CommandSpec] = [
+    _spec("/model Opus",          _O, _A,  1),
+    _spec("/clear",               _O, _A,  2),
+    _spec("/auto-improove:cmd",   _O, _A,  3),
+    _spec("/clear",               _O, _A,  4),
+    _spec("/auto-improove:cmd",   _O, _A,  5),
+    _spec("/clear",               _O, _A,  6),
+    _spec("/auto-improove:cmd",   _O, _A,  7),
+    _spec("/clear",               _O, _A,  8),
+    _spec("/auto-improove:cmd",   _O, _A,  9),
+    _spec("/clear",               _O, _A, 10),
+    _spec("/auto-improove:cmd",   _O, _A, 11),
+]
+
 # ─── Map for QA stack picker dialog ──────────────────────────────────────────── #
 
 QA_STACK_TEMPLATES: dict[str, list[CommandSpec]] = {

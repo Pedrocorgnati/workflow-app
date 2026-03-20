@@ -288,6 +288,17 @@ class CommandItemWidget(QWidget):
         """True if this row has not yet been sent to the terminal."""
         return self._run_btn.isEnabled()
 
+    def reset_to_pending(self) -> None:
+        """Reset this row back to pending state (for loop restart)."""
+        self._run_btn.setText("▶")
+        self._run_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  color: #22C55E; font-size: 10px; }"
+            "QPushButton:hover { color: #86EFAC; }"
+        )
+        self._run_btn.setEnabled(True)
+        self.set_status(CommandStatus.PENDENTE)
+
     # ─────────────────────────────────────────── Drag-and-drop source ─── #
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
