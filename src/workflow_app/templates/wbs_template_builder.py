@@ -68,8 +68,6 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     5. Per-module: auto-flow execute + review-executed-module
     6. milestone-checklist-review, reforge:prepare, reforge:fix
     7. F8: env-creation, create-test-user, seed-data-create, docker-create, integration-test-create
-    8. F9: QA pipeline (qa:prep → qa:report, backend/frontend validation)
-
     Args:
         wbs_root: relative path to wbs root (e.g. "output/wbs/my-project")
         project_dir: absolute path to project directory
@@ -84,6 +82,9 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
 
     specs: list[CommandSpec] = []
 
+    # ── /clear at the start ───────────────────────────────────────────────────
+    specs.append(_spec("/clear", _S, 0))
+
     # ── F5: Create per-module + validate ─────────────────────────────────────
     for module_path in modules:
         specs.append(_spec(f"/auto-flow create {module_path}", _S, 0))
@@ -93,13 +94,15 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     # ── F7: Build phase ──────────────────────────────────────────────────────
     specs.append(_spec("/mobile-first-build", _S, 0))
     specs.append(_spec("/front-end-build", _S, 0))
+    specs.append(_spec("/front-end-review", _S, 0))
     specs.append(_spec("/data-test-id", _S, 0))
     specs.append(_spec("/back-end-build", _S, 0))
+    specs.append(_spec("/build-verify", _H, 0))
     specs.append(_spec("/db-migration-create", _S, 0))
     specs.append(_spec("/create-assets", _H, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
-    specs.append(_spec("/update-tasks:analyse", _O, 0))
+    specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
     # ── F7: Per-module execute + review ──────────────────────────────────────
@@ -118,29 +121,8 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/seed-data-create", _S, 0))
     specs.append(_spec("/docker-create", _S, 0))
     specs.append(_spec("/integration-test-create", _S, 0))
-
-    # ── F9: QA pipeline ─────────────────────────────────────────────────────
-    specs.append(_spec("/qa:prep", _S, 0))
-    specs.append(_spec("/qa:trace", _O, 0))
-    specs.append(_spec("/qa:report", _S, 0))
-    specs.append(_spec("/validate-billing", _O, 0))
-    specs.append(_spec("/backend:scan", _S, 0))
-    specs.append(_spec("/backend:audit", _O, 0))
-    specs.append(_spec("/backend:test-check", _S, 0))
-    specs.append(_spec("/backend:report", _O, 0))
-    specs.append(_spec("/validate-front-end", _O, 0))
-    specs.append(_spec("/frontend:scan", _S, 0))
-    specs.append(_spec("/frontend:audit", _O, 0))
-    specs.append(_spec("/frontend:mobile-check", _S, 0))
-    specs.append(_spec("/frontend:assets-check", _S, 0))
-    specs.append(_spec("/frontend:report", _O, 0))
-    specs.append(_spec("/qa-remediate", _S, 0))
-    specs.append(_spec("/load-test-create", _S, 0))
-    specs.append(_spec("/tech-debt-audit", _S, 0))
-    specs.append(_spec("/dependency-audit", _S, 0))
-    specs.append(_spec("/secrets-scan", _H, 0))
-    specs.append(_spec("/compliance-check", _S, 0))
-    specs.append(_spec("/mutation-test-create", _H, 0))
+    specs.append(_spec("/dev-bootstrap-create", _H, 0))
+    specs.append(_spec("/infra-smoke-check", _H, 0))
 
     # ── Renumber positions 1..N ──────────────────────────────────────────────
     for i, spec in enumerate(specs, start=1):

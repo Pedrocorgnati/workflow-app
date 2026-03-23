@@ -75,7 +75,7 @@ _MODEL_MAP_WF: dict[str, ModelName] = {
 }
 _INTERACTIVE_CMDS = frozenset({
     # F1 — Brief (genuine interviews)
-    "/project-json", "/create-flow", "/first-brief-create",
+    "/project-json", "/first-brief-create",
     "/feature-brief-create", "/module-brief-create", "/intake:enhance",
     "/tech-feasibility",
     # F2 — PRD (genuine interviews)

@@ -8,7 +8,7 @@ Responsável pelo ciclo de vida do SYSTEM-PROGRESS.md:
   - expand_progress()  — adiciona seções F5-F7 com módulos reais do WBS
   - add_deploy_section() — acrescenta seção F11 de deploy
 
-Substitui /create-flow, /update-flow e /deploy-flow para uso programático.
+Substitui /deploy-flow para uso programático.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class SystemProgressWriter:
     Gera e mantém SYSTEM-PROGRESS.md em docs_root.
 
     O workflow-app é autoridade sobre este arquivo — substitui
-    /create-flow, /update-flow e /deploy-flow do SystemForge CLI.
+    /deploy-flow do SystemForge CLI.
 
     Todas as operações são idempotentes e preservam marcadores existentes.
 
@@ -179,7 +179,7 @@ class SystemProgressWriter:
         """
         Adiciona seções F5-F7 ao SYSTEM-PROGRESS.md com os módulos do WBS.
 
-        Equivalente ao que /update-flow fazia manualmente.
+        Equivalente ao que o pipeline fazia manualmente.
         Idempotente: não duplica seções já presentes.
 
         Args:

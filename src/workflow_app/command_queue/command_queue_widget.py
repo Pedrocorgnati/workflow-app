@@ -131,8 +131,6 @@ class _CollapsibleSection(QWidget):
         btn.setToolTip(tooltip)
         btn.setStyleSheet(_SECTION_BTN_STYLE)
         btn.clicked.connect(callback)
-        if testid:
-            btn.setProperty("testid", testid)
         self._grid.addWidget(btn, self._row, self._col)
         self._col += 1
         if self._col >= self._cols:
@@ -238,7 +236,6 @@ class CommandQueueWidget(QWidget):
         for i, label in enumerate(("Daily", "Workflow", "Auxiliar")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
-            btn.setProperty("testid", f"queue-tab-{label.lower()}")
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
             tab_bar_layout.addWidget(btn, stretch=1)
             self._sec_tabs.append(btn)
@@ -300,6 +297,12 @@ class CommandQueueWidget(QWidget):
             ("autocast-test", "Testa ciclo completo do autocast",
              lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
              "queue-btn-autocast-test"),
+            ("Sonnet", "Envia /model sonnet no terminal",
+             lambda: signal_bus.run_command_in_terminal.emit("/model sonnet"),
+             "queue-btn-model-sonnet"),
+            ("Opus", "Envia /model opus no terminal",
+             lambda: signal_bus.run_command_in_terminal.emit("/model opus"),
+             "queue-btn-model-opus"),
         ])
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
@@ -320,7 +323,6 @@ class CommandQueueWidget(QWidget):
         pl.setContentsMargins(8, 5, 8, 5)
 
         self._play_btn = QPushButton("▶  Rodar próximo")
-        self._play_btn.setProperty("testid", "queue-play")
         self._play_btn.setFixedHeight(32)
         self._play_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
@@ -335,7 +337,6 @@ class CommandQueueWidget(QWidget):
 
         # Autocast button — runs all AUTO commands sequentially, stops on INTERACTIVE
         self._autocast_btn = QPushButton("Autocast")
-        self._autocast_btn.setProperty("testid", "queue-autocast")
         self._autocast_btn.setFixedHeight(32)
         self._autocast_btn.setToolTip(
             "Executa comandos automáticos em sequência.\n"
@@ -354,7 +355,6 @@ class CommandQueueWidget(QWidget):
 
         # Loop button — runs autocast in a loop (restarts queue when finished)
         self._loop_btn = QPushButton("Loop")
-        self._loop_btn.setProperty("testid", "queue-loop")
         self._loop_btn.setFixedHeight(32)
         self._loop_btn.setToolTip(
             "Executa comandos em loop contínuo.\n"
@@ -374,7 +374,6 @@ class CommandQueueWidget(QWidget):
 
         # Botão JSON — copia path do project.json para o clipboard
         self._json_btn = QPushButton("JSON")
-        self._json_btn.setProperty("testid", "queue-json-path")
         self._json_btn.setFixedHeight(32)
         self._json_btn.setToolTip("Copia o caminho do project.json\ne digita no terminal automaticamente")
         self._json_btn.setStyleSheet(
@@ -390,7 +389,6 @@ class CommandQueueWidget(QWidget):
 
         # Botão WS — copia workspace_root para o clipboard
         self._ws_btn = QPushButton("WS")
-        self._ws_btn.setProperty("testid", "queue-ws-path")
         self._ws_btn.setFixedHeight(32)
         self._ws_btn.setToolTip("Copia o workspace_root do projeto\ne digita no terminal automaticamente")
         self._ws_btn.setStyleSheet(
@@ -416,6 +414,18 @@ class CommandQueueWidget(QWidget):
         )
         self._template_label.setVisible(False)
         main_layout.addWidget(self._template_label)
+
+        # Last command played — shows the last ▶ command, one token per line
+        self._last_cmd_label = QLabel("")
+        self._last_cmd_label.setProperty("testid", "queue-last-command")
+        self._last_cmd_label.setStyleSheet(
+            "background-color: #1C1C1F; color: #D4D4D8;"
+            " border-bottom: 1px solid #3F3F46;"
+            " padding: 4px 10px; font-size: 11px; font-family: monospace;"
+        )
+        self._last_cmd_label.setWordWrap(True)
+        self._last_cmd_label.setVisible(False)
+        main_layout.addWidget(self._last_cmd_label)
 
         # Stacked content (empty state vs list)
         self._content_stack = QWidget()
@@ -479,7 +489,6 @@ class CommandQueueWidget(QWidget):
         send_bar_layout.addStretch()
 
         notepad_send_btn = QPushButton("➤")
-        notepad_send_btn.setProperty("testid", "queue-notepad-send")
         notepad_send_btn.setFixedSize(32, 32)
         notepad_send_btn.setToolTip("Enviar")
         notepad_send_btn.setStyleSheet(
@@ -654,8 +663,6 @@ class CommandQueueWidget(QWidget):
             btn.setToolTip(tooltip)
             btn.setStyleSheet(_SECTION_BTN_STYLE)
             btn.clicked.connect(callback)
-            if testid:
-                btn.setProperty("testid", testid)
             grid.addWidget(btn, i // cols, i % cols)
         return content
 
@@ -990,6 +997,12 @@ class CommandQueueWidget(QWidget):
         if dlg.exec() == QAStackDialog.Accepted:
             self._load_quick_template(dlg.selected_template, name="QA")
 
+    def _on_run_command(self, cmd_text: str) -> None:
+        """Update last-command label with the command that was just played."""
+        parts = cmd_text.strip().split()
+        self._last_cmd_label.setText("\n".join(parts))
+        self._last_cmd_label.setVisible(True)
+
     def load_pipeline(self, specs: list[CommandSpec]) -> None:
         """Populate the queue with CommandSpec objects."""
         # Clear existing
@@ -1036,6 +1049,7 @@ class CommandQueueWidget(QWidget):
             item.deleteLater()
         self._items.clear()
         self._template_label.setVisible(False)
+        self._last_cmd_label.setVisible(False)
         self._empty_widget.setVisible(True)
         self._list_widget.setVisible(False)
 
@@ -1053,6 +1067,7 @@ class CommandQueueWidget(QWidget):
         item.retry_requested.connect(self._on_retry_requested)
         item.cancel_requested.connect(self._on_cancel_requested)
         item.run_in_terminal_requested.connect(signal_bus.run_command_in_terminal)
+        item.run_in_terminal_requested.connect(self._on_run_command)
         return item
 
     # ──────────────────────────────────────── Queue state persistence ─ #

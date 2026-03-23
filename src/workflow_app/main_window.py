@@ -151,7 +151,6 @@ class MainWindow(QMainWindow):
         toggle_layout.addStretch()
         self._layout_toggle_btn = QPushButton("\u2B95 \u25A1\u25A1")  # ⮕ □□ (side by side)
         self._layout_toggle_btn.setToolTip("Alternar layout: colunas / linhas")
-        self._layout_toggle_btn.setProperty("testid", "terminal-layout-toggle")
         self._layout_toggle_btn.setFixedSize(36, 18)
         self._layout_toggle_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
@@ -168,7 +167,6 @@ class MainWindow(QMainWindow):
         self._autocast_collapsed = False
         self._collapse_chevron = QPushButton("\u25BE")  # ▾ expanded
         self._collapse_chevron.setToolTip("Colapsar terminal Autocast")
-        self._collapse_chevron.setProperty("testid", "terminal-collapse-autocast")
         self._collapse_chevron.setFixedSize(22, 18)
         self._collapse_chevron.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #A78BFA;"

@@ -44,7 +44,6 @@ _A = InteractionType.AUTO
 COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] = [
     ("F1 — Brief", [
         ("/project-json",           _S, _I),
-        ("/create-flow",            _H, _I),
         ("/first-brief-create",     _O, _I),
         ("/feature-brief-create",   _O, _I),
         ("/intake:analyze",         _S, _A),

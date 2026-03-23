@@ -109,13 +109,15 @@ TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
     _spec("/first-brief-create",        _O, _I,  1),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",            _O, _I,  3),
-    _spec("/tech-feasibility",          _O, _I,  4),
-    _spec("/break-intake",              _S, _A,  5),
-    _spec("/prd-create",                _O, _I,  6),
+    _spec("/intake:front-end",          _O, _I,  4),
+    _spec("/tech-feasibility",          _O, _I,  5),
+    _spec("/break-intake",              _S, _A,  6),
+    _spec("/prd-create",                _O, _I,  7),
     _spec("/user-stories-create",       _S, _I,  7),
     _spec("/hld-create",                _O, _I,  8),
     _spec("/lld-create",                _O, _I,  9),
-    _spec("/api-contract-create",       _O, _A, 10),
+    _spec("/core-docs-check",           _S, _A, 10),
+    _spec("/api-contract-create",       _S, _A, 11),
     _spec("/threat-model-create",       _O, _A, 11),
     _spec("/privacy-assessment-create", _S, _I, 12),
     _spec("/error-catalog-create",      _S, _A, 13),
@@ -124,17 +126,18 @@ TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
     _spec("/i18n-spec-create",          _S, _I, 16),
     _spec("/deep-research-1",           _O, _A, 17),
     _spec("/deep-research-2",           _O, _A, 18),
-    _spec("/adr-create",                _O, _I, 19),
+    _spec("/adr-create",                _S, _I, 19),
     _spec("/fdd-create",                _O, _I, 20),
     _spec("/c4-diagram-create",         _H, _A, 21),
     _spec("/mermaid-diagram-create",    _H, _A, 22),
     _spec("/design-create",             _O, _I, 23),
     _spec("/review-prd-flow",           _O, _I, 24),
-    _spec("/auto-flow rocks",           _O, _A, 25),
+    _spec("/auto-flow rocks",           _S, _A, 25),
     _spec("/create-scaffolds",          _O, _I, 26),
     _spec("/create-blueprints",         _O, _I, 27),
-    _spec("/create-guardrails",         _O, _I, 28),
+    _spec("/create-guardrails",         _S, _I, 28),
     _spec("/create-integrations",       _O, _I, 29),
+    _spec("/review-optimization",       _S, _A, 30),
 ])
 
 # ─── Brief: Feature (from z-templates/start.md [feature]) ───────────────────── #
@@ -143,29 +146,32 @@ TEMPLATE_BRIEF_FEATURE: list[CommandSpec] = _inject_clears([
     _spec("/feature-brief-create",      _O, _I,  1),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",            _O, _I,  3),
-    _spec("/tech-feasibility",          _O, _I,  4),
-    _spec("/break-intake",              _S, _A,  5),
-    _spec("/prd-create",                _O, _I,  6),
-    _spec("/user-stories-create",       _S, _I,  7),
-    _spec("/lld-create",                _O, _I,  8),
-    _spec("/error-catalog-create",      _S, _A,  9),
-    _spec("/notification-spec-create",  _S, _I, 10),
-    _spec("/adr-create",                _O, _I, 11),
-    _spec("/fdd-create",                _O, _I, 12),
-    _spec("/c4-diagram-create",         _H, _A, 13),
-    _spec("/mermaid-diagram-create",    _H, _A, 14),
-    _spec("/design-create",             _O, _I, 15),
-    _spec("/review-prd-flow",           _O, _I, 16),
-    _spec("/auto-flow rocks",           _O, _A, 17),
-    _spec("/create-scaffolds",          _O, _I, 18),
+    _spec("/intake:front-end",          _O, _I,  4),
+    _spec("/tech-feasibility",          _O, _I,  5),
+    _spec("/break-intake",              _S, _A,  6),
+    _spec("/prd-create",                _O, _I,  7),
+    _spec("/user-stories-create",       _S, _I,  8),
+    _spec("/lld-create",                _O, _I,  9),
+    _spec("/error-catalog-create",      _S, _A, 10),
+    _spec("/notification-spec-create",  _S, _I, 11),
+    _spec("/adr-create",                _S, _I, 12),
+    _spec("/fdd-create",                _O, _I, 13),
+    _spec("/c4-diagram-create",         _H, _A, 14),
+    _spec("/mermaid-diagram-create",    _H, _A, 15),
+    _spec("/design-create",             _O, _I, 16),
+    _spec("/review-prd-flow",           _O, _I, 17),
+    _spec("/auto-flow rocks",           _S, _A, 18),
+    _spec("/create-scaffolds",          _O, _I, 19),
     _spec("/create-blueprints",         _O, _I, 19),
-    _spec("/create-guardrails",         _O, _I, 20),
+    _spec("/create-guardrails",         _S, _I, 20),
     _spec("/create-integrations",       _O, _I, 21),
+    _spec("/review-optimization",       _S, _A, 22),
 ])
 
 # ─── Modules (from z-templates/modules.md) ───────────────────────────────────── #
 
 TEMPLATE_MODULES: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                     _S, _A, 0),
     _spec("/modules:create-core",       _O, _I, 1),
     _spec("/modules:create-blueprints", _S, _A, 2),
     _spec("/modules:create-variants",   _O, _I, 3),
@@ -179,16 +185,19 @@ TEMPLATE_MODULES: list[CommandSpec] = _inject_clears([
 # ─── Deploy (from z-templates/deploy.md) ─────────────────────────────────────── #
 
 TEMPLATE_DEPLOY: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                 _S, _A,  0),
     _spec("/ci-cd-create",          _S, _I,  1),
     _spec("/supabase-sql-editor",   _S, _A,  2),
     _spec("/infra-create",          _S, _I,  3),
     _spec("/pre-deploy-testing",    _S, _I,  4),
-    _spec("/slo-create",            _S, _I,  5),
+    _spec("/deploy-checklist",      _S, _I,  5),
+    _spec("/slo-create",            _S, _I,  6),
     _spec("/staging-validate",      _S, _A,  6),
     _spec("/monitoring-setup",      _S, _I,  7),
     _spec("/post-deploy-verify",    _S, _A,  8),
     _spec("/changelog-create",      _H, _A,  9),
-    _spec("/deploy-flow",           _S, _A, 10),
+    _spec("/deploy-flow",                _S, _A, 10),
+    _spec("/marketing-readiness-check",  _S, _A, 11),
 ])
 
 # ─── Daily (from z-templates/daily.md) ────────────────────────────────────────── #
@@ -207,20 +216,21 @@ TEMPLATE_DAILY: list[CommandSpec] = [
 TEMPLATE_MKT: list[CommandSpec] = _inject_clears([
     _spec("/docs-create",           _S, _A, 1),
     _spec("/mkt:portfolio-add",     _H, _A, 2),
-    _spec("/mkt:linkedin-mkt",      _H, _A, 3),
+    _spec("/mkt:linkedin-mkt",      _S, _A, 3),
     _spec("/mkt:instagram-mkt",     _H, _A, 4),
     _spec("/mkt:portfolio-publish", _H, _A, 5),
-    _spec("/handoff-create",        _H, _A, 6),
+    _spec("/handoff-create",        _S, _A, 6),
 ])
 
 # ─── Business (from z-templates/business.md) ──────────────────────────────────── #
 
 TEMPLATE_BUSINESS: list[CommandSpec] = _inject_clears([
-    _spec("/business:product-brief-create",  _O, _A, 1),
+    _spec("/business:product-brief-create",  _S, _A, 1),
     _spec("/business:sow-create",            _O, _I, 2),
     _spec("/business:create-budget",         _S, _I, 3),
     _spec("/business:simple-budget",         _S, _I, 4),
-    _spec("/business:generate-pdf-docs",     _H, _A, 5),
+    _spec("/business:upsell-suggestion",    _O, _I, 5),
+    _spec("/business:generate-pdf-docs",     _H, _A, 6),
     _spec("/business:generate-json-project", _H, _A, 6),
 ])
 
@@ -234,21 +244,22 @@ _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
     ("/backend:scan",         _S, _A),
     ("/backend:audit",        _O, _A),
     ("/backend:test-check",   _S, _A),
-    ("/backend:report",       _O, _A),
+    ("/backend:report",       _S, _A),
     ("/validate-front-end",   _O, _A),
     ("/frontend:scan",        _S, _A),
     ("/frontend:audit",        _O, _A),
     ("/frontend:mobile-check", _S, _A),
     ("/frontend:assets-check", _S, _A),
-    ("/frontend:report",      _O, _A),
+    ("/frontend:report",      _S, _A),
     ("/qa-remediate",         _S, _A),
+    ("/qa:summary",           _S, _A),
     ("/load-test-create",     _S, _A),
     ("/tech-debt-audit",      _S, _A),
     ("/dependency-audit",     _S, _A),
     ("/secrets-scan",         _H, _A),
     ("/compliance-check",     _S, _A),
     ("/mutation-test-create",  _H, _A),
-    ("/review-language",      _H, _A),
+    ("/review-language",      _S, _A),
     ("/validate-stack",       _H, _A),
 ]
 
@@ -272,6 +283,8 @@ _QA_NEXTJS: list[tuple[str, ModelName, InteractionType]] = [
     ("/nextjs:nextjs-components",  _S, _A),
     ("/nextjs:configuration",      _S, _A),
     ("/final-review",              _S, _A),
+    ("/validation-remediate",      _S, _A),
+    ("/validation-summary",        _S, _A),
 ]
 
 _QA_TYPESCRIPT: list[tuple[str, ModelName, InteractionType]] = [
@@ -290,6 +303,8 @@ _QA_TYPESCRIPT: list[tuple[str, ModelName, InteractionType]] = [
     ("/typescript:security",        _S, _A),
     ("/typescript:configuration",   _S, _A),
     ("/final-review",              _S, _A),
+    ("/validation-remediate",      _S, _A),
+    ("/validation-summary",        _S, _A),
 ]
 
 _QA_PYTHON: list[tuple[str, ModelName, InteractionType]] = [
@@ -310,6 +325,8 @@ _QA_PYTHON: list[tuple[str, ModelName, InteractionType]] = [
     ("/python:security",        _S, _A),
     ("/python:configuration",   _S, _A),
     ("/final-review",          _S, _A),
+    ("/validation-remediate",  _S, _A),
+    ("/validation-summary",    _S, _A),
 ]
 
 _QA_ANDROID: list[tuple[str, ModelName, InteractionType]] = [
@@ -329,6 +346,8 @@ _QA_ANDROID: list[tuple[str, ModelName, InteractionType]] = [
     ("/android:configuration",  _S, _A),
     ("/android:testing",        _S, _A),
     ("/final-review",          _S, _A),
+    ("/validation-remediate",  _S, _A),
+    ("/validation-summary",    _S, _A),
 ]
 
 _QA_REACT_NATIVE: list[tuple[str, ModelName, InteractionType]] = [
@@ -348,13 +367,18 @@ _QA_REACT_NATIVE: list[tuple[str, ModelName, InteractionType]] = [
     ("/reactnative:scalability",     _S, _A),
     ("/reactnative:ci-cd",           _S, _A),
     ("/final-review",               _S, _A),
+    ("/validation-remediate",       _S, _A),
+    ("/validation-summary",         _S, _A),
 ]
 
 
 def _build_qa_template(stack_cmds: list[tuple[str, ModelName, InteractionType]]) -> list[CommandSpec]:
     """Build a QA template by combining base QA commands with stack-specific ones."""
     base_specs = [_spec(name, model, interaction, i + 1) for i, (name, model, interaction) in enumerate(_QA_BASE + stack_cmds)]
-    return _inject_clears(base_specs)
+    result = _inject_clears(base_specs)
+    # Prepend /clear at the start of QA templates
+    result.insert(0, CommandSpec(name="/clear", interaction_type=_A, position=0))
+    return result
 
 
 TEMPLATE_QA_NEXTJS: list[CommandSpec] = _build_qa_template(_QA_NEXTJS)
@@ -371,7 +395,7 @@ TEMPLATE_MICRO_ARCHITECTURE: list[CommandSpec] = _inject_clears([
     _spec("/intake:analyze",                     _S, _A, 2),
     _spec("/intake:enhance",                     _O, _I, 3),
     _spec("/micro-architecture",                 _S, _I, 4),
-    _spec("/review-created-micro-architecture",  _O, _A, 5),
+    _spec("/review-created-micro-architecture",  _S, _A, 5),
     _spec("/auto-flow execute",                  _S, _A, 6),
     _spec("/review-executed-micro-architecture", _O, _A, 7),
 ])

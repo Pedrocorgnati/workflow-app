@@ -50,7 +50,7 @@ def test_no_f2_returns_error():
 
 def test_no_f2_without_f7_also_invalid():
     """Queue with only F1/F3 commands (no F2, no F7) is also invalid."""
-    cmds = [_cmd("/project-json"), _cmd("/create-flow")]
+    cmds = [_cmd("/project-json")]
     report = DryRunValidator().validate(cmds)
     assert not report.is_valid
     assert any("F2" in e or "documentação" in e for e in report.errors)

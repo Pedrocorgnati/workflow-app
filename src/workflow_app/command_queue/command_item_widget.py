@@ -130,13 +130,11 @@ class CommandItemWidget(QWidget):
         )
         layout.addWidget(self._delete_btn)
 
-        # Command name (+ optional config path)
-        label_text = self._spec.name
-        if self._spec.config_path:
-            label_text += f" {self._spec.config_path}"
-        self._name_label = QLabel(label_text)
+        # Command name (+ optional config path) — one token per line
+        parts = f"{self._spec.name} {self._spec.config_path}".strip().split()
+        self._name_label = QLabel("\n".join(parts))
         self._name_label.setStyleSheet(
-            "color: #FAFAFA; font-family: monospace; font-size: 13px;"
+            "color: #FAFAFA; font-family: monospace; font-size: 11px;"
         )
         layout.addWidget(self._name_label, stretch=1)
 
@@ -341,7 +339,7 @@ class CommandItemWidget(QWidget):
     def _update_appearance(self) -> None:
         if self._status == CommandStatus.PULADO:
             self._name_label.setStyleSheet(
-                "color: #52525B; font-family: monospace; font-size: 13px;"
+                "color: #52525B; font-family: monospace; font-size: 11px;"
                 " text-decoration: line-through;"
             )
             self.setStyleSheet(
@@ -349,7 +347,7 @@ class CommandItemWidget(QWidget):
             )
         elif self._status == CommandStatus.EXECUTANDO:
             self._name_label.setStyleSheet(
-                "color: #FAFAFA; font-family: monospace; font-size: 13px;"
+                "color: #FAFAFA; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
                 "QWidget#CommandItemWidget { background-color: #27272A;"
@@ -357,14 +355,14 @@ class CommandItemWidget(QWidget):
             )
         elif self._status == CommandStatus.CONCLUIDO:
             self._name_label.setStyleSheet(
-                "color: #A1A1AA; font-family: monospace; font-size: 13px;"
+                "color: #A1A1AA; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
                 "QWidget#CommandItemWidget { background-color: #27272A; }"
             )
         elif self._status == CommandStatus.ERRO:
             self._name_label.setStyleSheet(
-                "color: #FB7185; font-family: monospace; font-size: 13px;"
+                "color: #FB7185; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
                 f"QWidget#CommandItemWidget {{ background-color: {_COLOR_ERROR_BG};"
@@ -372,7 +370,7 @@ class CommandItemWidget(QWidget):
             )
         else:
             self._name_label.setStyleSheet(
-                "color: #FAFAFA; font-family: monospace; font-size: 13px;"
+                "color: #FAFAFA; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
                 "QWidget#CommandItemWidget { background-color: #27272A; }"

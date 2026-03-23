@@ -1,7 +1,7 @@
 """
 InterviewEngine — Guided interview for pipeline creation (module-04/TASK-1).
 
-Replicates the /create-flow SystemForge logic:
+Replicates the SystemForge pipeline logic:
   Maps project_type + stack + has_frontend + active_phases → list[CommandSpec]
 
 Usage:
@@ -43,7 +43,6 @@ _PipelineEntry = tuple[str, ModelName, InteractionType, bool, list[str]]
 PIPELINE_COMMANDS: list[_PipelineEntry] = [
     # F1 — Brief
     ("/project-json",          ModelName.SONNET, InteractionType.INTERACTIVE, False, ["f1"]),
-    ("/create-flow",           ModelName.HAIKU,  InteractionType.INTERACTIVE, False, ["f1"]),
     ("/first-brief-create",    ModelName.OPUS,   InteractionType.INTERACTIVE, False, ["f1"]),
     ("/intake:analyze",        ModelName.SONNET, InteractionType.AUTO,        True,  ["f1"]),
     ("/intake:enhance",        ModelName.OPUS,   InteractionType.INTERACTIVE, True,  ["f1"]),
@@ -153,7 +152,7 @@ class InterviewEngine:
     """
     Generates a CommandSpec list from interview answers.
 
-    Implements the same logic as /create-flow, mapping:
+    Implements the pipeline logic, mapping:
       project_type + stack + has_frontend + active_phases → list[CommandSpec]
     """
 
