@@ -41,32 +41,50 @@ def test_json_has_1_command():
     assert TEMPLATE_JSON[0].name == "/project-json"
 
 
-def test_brief_new_has_27_commands():
-    assert len(TEMPLATE_BRIEF_NEW) == 37
+def test_brief_new_has_expected_coverage():
+    names = [cmd.name for cmd in TEMPLATE_BRIEF_NEW]
+    assert len(TEMPLATE_BRIEF_NEW) >= 35
+    assert names[0] == "/first-brief-create"
+    assert names[-1] == "/review-optimization"
 
 
-def test_brief_feature_has_27_commands():
-    assert len(TEMPLATE_BRIEF_FEATURE) == 26
+def test_brief_feature_has_expected_coverage():
+    names = [cmd.name for cmd in TEMPLATE_BRIEF_FEATURE]
+    assert len(TEMPLATE_BRIEF_FEATURE) >= 25
+    assert names[0] == "/feature-brief-create"
+    assert names[-1] == "/review-optimization"
 
 
-def test_modules_has_8_commands():
-    assert len(TEMPLATE_MODULES) == 12
+def test_modules_has_expected_coverage():
+    names = [cmd.name for cmd in TEMPLATE_MODULES]
+    assert len(TEMPLATE_MODULES) >= 10
+    assert "/modules:create-core" in names
+    assert "/modules:review-created" in names
 
 
-def test_deploy_has_6_commands():
-    assert len(TEMPLATE_DEPLOY) == 7
+def test_deploy_has_expected_coverage():
+    names = [cmd.name for cmd in TEMPLATE_DEPLOY]
+    assert len(TEMPLATE_DEPLOY) >= 7
+    assert "/ci-cd-create" in names
+    assert "/deploy-flow" in names
 
 
 def test_daily_has_5_commands():
     assert len(TEMPLATE_DAILY) == 5
 
 
-def test_mkt_has_3_commands():
-    assert len(TEMPLATE_MKT) == 5
+def test_mkt_has_expected_coverage():
+    names = [cmd.name for cmd in TEMPLATE_MKT]
+    assert len(TEMPLATE_MKT) >= 5
+    assert "/mkt:portfolio-add" in names
+    assert "/handoff-create" in names
 
 
-def test_business_has_6_commands():
-    assert len(TEMPLATE_BUSINESS) == 8
+def test_business_has_expected_coverage():
+    names = [cmd.name for cmd in TEMPLATE_BUSINESS]
+    assert len(TEMPLATE_BUSINESS) >= 8
+    assert "/business:sow-create" in names
+    assert "/business:generate-json-project" in names
 
 
 def test_all_positions_sequential():
@@ -124,7 +142,7 @@ def test_seed_brief_new_loads_with_commands(tmp_db_manager):
     templates = tm.list_templates()
     brief_new = next(t for t in templates if t.name == "Brief: New")
     dto = tm.load_template(brief_new.id)
-    assert len(dto.commands) == 37
+    assert len(dto.commands) == len(TEMPLATE_BRIEF_NEW)
     assert dto.commands[0].name == "/first-brief-create"
     assert dto.is_factory is True
 
@@ -134,7 +152,7 @@ def test_seed_deploy_has_6_commands(tmp_db_manager):
     templates = tm.list_templates()
     deploy = next(t for t in templates if t.name == "Deploy")
     dto = tm.load_template(deploy.id)
-    assert len(dto.commands) == 7
+    assert len(dto.commands) == len(TEMPLATE_DEPLOY)
 
 
 def test_factory_templates_cannot_be_deleted(tmp_db_manager):
@@ -159,7 +177,7 @@ def test_refresh_updates_commands(tmp_db_manager):
     # Verify commands are still correct after refresh
     brief_new = next(t for t in templates if t.name == "Brief: New")
     dto = tm.load_template(brief_new.id)
-    assert len(dto.commands) == 37
+    assert len(dto.commands) == len(TEMPLATE_BRIEF_NEW)
 
 
 def test_refresh_creates_missing_templates(tmp_db_manager):

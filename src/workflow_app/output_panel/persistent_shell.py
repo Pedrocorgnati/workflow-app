@@ -12,23 +12,15 @@ import codecs
 import fcntl
 import logging
 import os
-import re
 import struct
 import subprocess
 import termios
 
 from PySide6.QtCore import QObject, QSocketNotifier, Signal
 
-from workflow_app.signal_bus import signal_bus
-
 logger = logging.getLogger(__name__)
 
 _SHELL = os.environ.get("SHELL", "/bin/bash")
-_AUTOCAST_SENTINEL = "##SF_DONE##"
-# Match sentinel with optional command ID: ##SF_DONE_[n]## (only at line start)
-_SENTINEL_RE = re.compile(r"##SF_DONE(?:_\d+)?##")
-# Strip ANSI escape sequences before sentinel matching (CSI, DEC private, OSC)
-_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07]*\x07)")
 
 
 class PersistentShell(QObject):
@@ -44,7 +36,6 @@ class PersistentShell(QObject):
         self._master_fd: int | None = None
         self._proc: subprocess.Popen | None = None
         self._notifier: QSocketNotifier | None = None
-        self._last_sentinel_id: int | None = -1  # Track last sentinel ID to avoid duplicates (-1 = no sentinel seen)
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     def start(self) -> None:
@@ -115,10 +106,10 @@ class PersistentShell(QObject):
 
     def resize(self, cols: int, rows: int) -> None:
         """Resize the PTY."""
-        if self._master_fd is None:
-            return
         self._cols = cols
         self._rows = rows
+        if self._master_fd is None:
+            return
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
         try:
             fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
@@ -149,33 +140,6 @@ class PersistentShell(QObject):
             # that may be split across multiple os.read() calls (e.g. accented chars).
             text = self._utf8_decoder.decode(data)
             if text:
-                # Strip ANSI escape codes before matching so terminal
-                # formatting doesn't prevent sentinel detection.
-                clean = _ANSI_RE.sub("", text)
-                # Log chunks that might contain the sentinel
-                if "SF_DONE" in clean or "##" in clean:
-                    logger.info("[PersistentShell] Chunk with ## detected (clean): %r", clean[:300])
-                match = _SENTINEL_RE.search(clean)
-                if match:
-                    logger.info("[PersistentShell] Sentinel detected in output: %r", match.group(0))
-                    # Extract sentinel ID if present (e.g. "##SF_DONE_3##" → 3)
-                    sentinel_str = match.group(0)
-                    if "_" in sentinel_str:
-                        try:
-                            sentinel_id = int(sentinel_str.split("_")[-1].rstrip("#"))
-                        except (ValueError, IndexError):
-                            sentinel_id = None
-                    else:
-                        # No ID — every bare ##SF_DONE## is a unique event
-                        sentinel_id = None
-
-                    # Emit for every sentinel. Dedup only numbered sentinels.
-                    if sentinel_id is None or sentinel_id != self._last_sentinel_id:
-                        self._last_sentinel_id = sentinel_id
-                        logger.info("[PersistentShell] Emitting autocast_command_done (id=%s)", sentinel_id)
-                        signal_bus.autocast_command_done.emit()
-                    else:
-                        logger.info("[PersistentShell] Sentinel DEDUPED (id=%s == last=%s)", sentinel_id, self._last_sentinel_id)
                 self.output_received.emit(text)
         except OSError:
             pass

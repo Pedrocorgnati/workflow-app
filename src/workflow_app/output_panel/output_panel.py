@@ -25,7 +25,14 @@ from typing import Any
 
 import pyte
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QKeyEvent,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QMenu,
@@ -168,6 +175,7 @@ class TerminalWidget(QTextEdit):
         if not font.exactMatch():
             font = QFont("Courier New", 12)
         self.setFont(font)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.setStyleSheet(
             "QTextEdit#TerminalOutput {"
             "  background-color: #0D1117;"
@@ -273,6 +281,7 @@ class OutputPanel(QWidget):
     def __init__(self, parent: QWidget | None = None, autocast_mode: bool = False) -> None:
         super().__init__(parent)
         self._autocast_mode = autocast_mode
+        self._channel = "autocast" if autocast_mode else "interactive"
         self.setObjectName("AutocastPanel" if autocast_mode else "OutputPanel")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -283,6 +292,8 @@ class OutputPanel(QWidget):
         self._pipeline_runner: object | None = None  # active PtyRunner, if any
         self._live_view_start_block: int = -1
         self._runner_active: bool = False
+        self._cols: int = _TERMINAL_COLS
+        self._rows: int = _TERMINAL_ROWS
 
         # Cache QTextCharFormat instances keyed by style tuple to avoid
         # re-allocation on every flush (important at 20 fps).
@@ -290,7 +301,7 @@ class OutputPanel(QWidget):
 
         # ── pyte virtual terminal ─────────────────────────────────────── #
         self._screen = pyte.HistoryScreen(
-            _TERMINAL_COLS, _TERMINAL_ROWS, history=5000
+            self._cols, self._rows, history=5000
         )
         self._stream = pyte.ByteStream(self._screen)
         self._history_cursor = 0
@@ -301,16 +312,19 @@ class OutputPanel(QWidget):
         self._render_timer.timeout.connect(self._flush_pyte)
 
         # ── Persistent shell ──────────────────────────────────────────── #
-        self._shell = PersistentShell(
-            cols=_TERMINAL_COLS, rows=_TERMINAL_ROWS, cwd=_find_systemforge_root()
-        )
-        self._shell.output_received.connect(self._on_chunk)
+        self._shell: PersistentShell | None = None
+        if not self._autocast_mode:
+            self._shell = PersistentShell(
+                cols=self._cols, rows=self._rows, cwd=_find_systemforge_root()
+            )
+            self._shell.output_received.connect(self._on_chunk)
 
         self._setup_ui()
         self._connect_signals()
 
         # Start the shell
-        self._shell.start()
+        if self._shell is not None:
+            self._shell.start()
 
     # ─────────────────────────────────────────────────────────── UI ──── #
 
@@ -324,16 +338,70 @@ class OutputPanel(QWidget):
             "terminal-autocast-output" if self._autocast_mode else "terminal-interactive-output")
         self._terminal.document().setMaximumBlockCount(self._max_lines)
         self._terminal.raw_key_pressed.connect(self._on_raw_key)
+        self._terminal.viewport().installEventFilter(self)
         layout.addWidget(self._terminal, stretch=1)
+        QTimer.singleShot(0, self._recompute_terminal_geometry)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._recompute_terminal_geometry()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self._terminal.viewport() and event.type() == QEvent.Type.Resize:
+            self._recompute_terminal_geometry()
+        return super().eventFilter(obj, event)
+
+    def _recompute_terminal_geometry(self) -> None:
+        try:
+            viewport = self._terminal.viewport()
+        except RuntimeError:
+            return
+        if viewport is None:
+            return
+        width = viewport.width()
+        height = viewport.height()
+        if width <= 0 or height <= 0:
+            return
+
+        metrics = QFontMetricsF(self._terminal.font())
+        char_w = metrics.averageCharWidth()
+        if char_w <= 0:
+            char_w = metrics.horizontalAdvance("M")
+        char_w = max(1.0, float(char_w))
+        line_h = max(1.0, float(metrics.lineSpacing()))
+        cols = max(20, int(width / char_w))
+        rows = max(5, int(height / line_h))
+        if cols == self._cols and rows == self._rows:
+            return
+        self._cols = cols
+        self._rows = rows
+
+        # Resize pyte screen (preserves buffer where possible)
+        try:
+            self._screen.resize(lines=rows, columns=cols)
+        except Exception:  # noqa: BLE001
+            self._screen = pyte.HistoryScreen(cols, rows, history=5000)
+            self._stream = pyte.ByteStream(self._screen)
+            self._history_cursor = 0
+            self._has_pending_render = False
+            self._live_view_start_block = -1
+
+        # Resize shell PTY and active pipeline runner
+        if self._shell is not None:
+            self._shell.resize(cols, rows)
+        if self._pipeline_runner is not None:
+            resize = getattr(self._pipeline_runner, "resize", None)
+            if callable(resize):
+                resize(cols, rows)
 
     # ─────────────────────────────────────────────────────── Signals ─── #
 
     def _connect_signals(self) -> None:
-        if self._autocast_mode:
-            # Autocast terminal: receives autocast commands and output
-            signal_bus.output_appended.connect(self.append_output)
-            signal_bus.run_autocast_in_terminal.connect(self._shell.run_command)
-        else:
+        signal_bus.terminal_output_chunk_received.connect(self._on_terminal_output_chunk)
+        signal_bus.terminal_session_started.connect(self._on_terminal_session_started)
+        signal_bus.terminal_session_finished.connect(self._on_terminal_session_finished)
+        signal_bus.terminal_worker_changed.connect(self._on_terminal_worker_changed)
+        if not self._autocast_mode:
             # Interactive terminal: receives interactive commands + keyboard input
             signal_bus.output_cleared.connect(self.clear)
             signal_bus.pipeline_started.connect(self._on_pipeline_started)
@@ -343,8 +411,8 @@ class OutputPanel(QWidget):
             signal_bus.current_worker_changed.connect(self.set_current_worker)
             signal_bus.command_status_changed.connect(self._on_command_status_changed)
             signal_bus.pipeline_error_occurred.connect(self._on_pipeline_error)
-            signal_bus.run_command_in_terminal.connect(self._shell.run_command)
-            signal_bus.paste_text_in_terminal.connect(self._shell.send_text)
+            signal_bus.run_command_in_terminal.connect(self._run_shell_command)
+            signal_bus.paste_text_in_terminal.connect(self._on_paste_text)
 
     # ─────────────────────────────────────────────────────── Key routing ─ #
 
@@ -354,8 +422,53 @@ class OutputPanel(QWidget):
             send = getattr(self._pipeline_runner, "send_raw", None)
             if callable(send):
                 send(data)
-        else:
+        elif self._shell is not None:
             self._shell.send_raw(data)
+
+    def _on_paste_text(self, text: str) -> None:
+        """Route pasted text to the active PTY session or the shell."""
+        if not text:
+            return
+        if self._runner_active and self._pipeline_runner is not None:
+            send = getattr(self._pipeline_runner, "send_raw", None)
+            if callable(send):
+                send(text.encode("utf-8", errors="replace"))
+                return
+        if self._shell is not None:
+            self._shell.send_text(text)
+
+    def _run_shell_command(self, command: str) -> None:
+        """Send a command to the persistent shell, when available."""
+        if self._shell is not None:
+            self._shell.run_command(command)
+
+    def _on_terminal_output_chunk(self, channel: str, chunk: str) -> None:
+        """Render a PTY chunk for the bound terminal channel."""
+        if channel == self._channel:
+            self._on_chunk(chunk)
+
+    def _on_terminal_session_started(self, channel: str) -> None:
+        """Attach this panel to an externally managed PTY session."""
+        if channel != self._channel:
+            return
+        self._runner_active = True
+        self._reset_pyte()
+
+    def _on_terminal_session_finished(self, channel: str) -> None:
+        """Detach this panel from an externally managed PTY session."""
+        if channel != self._channel:
+            return
+        self._render_timer.stop()
+        if self._has_pending_render:
+            self._flush_pyte()
+        self._runner_active = False
+        self._pipeline_runner = None
+        self._reset_pyte()
+
+    def _on_terminal_worker_changed(self, channel: str, worker: object) -> None:
+        """Update the PTY target for keyboard routing on this panel."""
+        if channel == self._channel:
+            self.set_current_worker(worker)
 
     # ──────────────────────────────────────── pyte color rendering helpers ─ #
 
@@ -433,8 +546,10 @@ class OutputPanel(QWidget):
             elif ch is None:
                 items.append((_DEFAULT_STYLE_KEY, char_data))
             else:
+                # Aggressive fix: disable underline entirely because QTextEdit
+                # renders underlined spaces as full-width stripes.
                 key = (ch.fg, ch.bg, ch.bold, ch.italics,
-                       ch.underscore, ch.strikethrough, ch.reverse)
+                       False, ch.strikethrough, ch.reverse)
                 items.append((key, char_data))
 
         # Strip trailing whitespace-with-default-style (saves space in document)
@@ -580,7 +695,7 @@ class OutputPanel(QWidget):
     def _reset_pyte(self) -> None:
         """Reset pyte state (keeps terminal text intact)."""
         self._screen = pyte.HistoryScreen(
-            _TERMINAL_COLS, _TERMINAL_ROWS, history=5000
+            self._cols, self._rows, history=5000
         )
         self._stream = pyte.ByteStream(self._screen)
         self._history_cursor = 0
@@ -610,6 +725,9 @@ class OutputPanel(QWidget):
 
     def set_current_worker(self, worker: object) -> None:
         self._pipeline_runner = worker
+        resize = getattr(worker, "resize", None)
+        if callable(resize):
+            resize(self._cols, self._rows)
 
     def _append_to_terminal(self, text: str) -> None:
         """Insert plain system text (pipeline status messages) at the end."""
@@ -624,5 +742,6 @@ class OutputPanel(QWidget):
         sb.setValue(sb.maximum())
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._shell.terminate()
+        if self._shell is not None:
+            self._shell.terminate()
         super().closeEvent(event)

@@ -86,12 +86,14 @@ class PtyRunner(QObject):
     command_completed = Signal(str, bool)  # (command_name, success)
     error_occurred = Signal(str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, cols: int = 220, rows: int = 50, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._master_fd: int | None = None
         self._proc: subprocess.Popen | None = None
         self._command_name: str = ""
         self._notifier: QSocketNotifier | None = None
+        self._cols = cols
+        self._rows = rows
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(100)
@@ -121,20 +123,56 @@ class PtyRunner(QObject):
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         env["TERM"] = "xterm-256color"
-        env["COLUMNS"] = "220"
-        env["LINES"] = "50"
+        env["COLUMNS"] = str(self._cols)
+        env["LINES"] = str(self._rows)
 
         args = [self._binary, self._command_name]
         if config_path:
             args.append(config_path)
         args += ["--permission-mode", cli_permission, "--model", cli_model]
 
+        self.start_process(
+            argv=args,
+            command_name=self._command_name,
+            cwd=cwd,
+            env_overrides=env,
+        )
+
+    def start_process(
+        self,
+        *,
+        argv: list[str] | tuple[str, ...],
+        command_name: str,
+        cwd: str | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        """Launch an arbitrary PTY-backed process.
+
+        This is used by Autocast, which must run the actual CLI process and
+        advance only when the subprocess exits.
+        """
+        if not argv:
+            msg = "Falha ao iniciar processo: argv vazio"
+            logger.error("[PtyRunner] %s", msg)
+            self.error_occurred.emit(msg)
+            self.command_completed.emit(command_name, False)
+            return
+
+        self._command_name = command_name
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        env["TERM"] = "xterm-256color"
+        env["COLUMNS"] = str(self._cols)
+        env["LINES"] = str(self._rows)
+        if env_overrides:
+            env.update(env_overrides)
+
         # Create PTY pair
         master_fd, slave_fd = os.openpty()
         self._master_fd = master_fd
 
         # Set terminal size on the slave so programs behave correctly
-        winsize = struct.pack("HHHH", 50, 220, 0, 0)  # rows, cols, x, y
+        winsize = struct.pack("HHHH", self._rows, self._cols, 0, 0)  # rows, cols, x, y
         try:
             fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
         except OSError:
@@ -142,14 +180,14 @@ class PtyRunner(QObject):
 
         logger.info(
             "[PtyRunner] Starting: %s %s (cwd=%s)",
-            self._binary,
-            " ".join(args[1:]),
+            argv[0],
+            " ".join(str(part) for part in argv[1:]),
             cwd,
         )
 
         try:
             self._proc = subprocess.Popen(
-                args,
+                list(argv),
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -200,6 +238,18 @@ class PtyRunner(QObject):
                 os.write(self._master_fd, data)
             except OSError as exc:
                 logger.warning("[PtyRunner] send_raw failed: %s", exc)
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Resize the PTY (or cache size for next start)."""
+        self._cols = cols
+        self._rows = rows
+        if self._master_fd is None:
+            return
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        try:
+            fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
+        except OSError:
+            pass
 
     def terminate(self) -> None:
         """Kill the running process."""

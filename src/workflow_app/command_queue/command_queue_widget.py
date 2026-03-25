@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
+from pathlib import Path
 import re
 
-from PySide6.QtCore import QEvent, QPoint, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,9 +31,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app.command_queue.autocast_cli import build_launch_plan
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
 from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
+from workflow_app.sdk.pty_runner import PtyRunner
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
     TEMPLATE_AUTO_IMPROOVE_LOOP,
@@ -76,6 +80,8 @@ _TAB_INACTIVE_STYLE = (
     "  font-size: 10px; font-weight: 600; letter-spacing: 0.5px; }"
     "QPushButton:hover { color: #D4D4D8; background-color: #2D2D30; }"
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _CollapsibleSection(QWidget):
@@ -200,10 +206,11 @@ class CommandQueueWidget(QWidget):
         self._items: list[CommandItemWidget] = []
         self._pipeline_manager = None
         self._autocast_active = False
-        self._autocast_pending_advance = False  # Guard against duplicate advances
         self._loop_active = False  # Loop mode: restart queue when all commands finish
         self._cli_binary = "clauded"  # Active CLI instance (updated via instance_selected)
-        self._autocast_workers: list = []  # Keep alive to prevent GC mid-run
+        self._autocast_runner: PtyRunner | None = None
+        self._autocast_current_item: CommandItemWidget | None = None
+        self._autocast_stop_requested = False
         self._setup_ui()
         self._connect_signals()
 
@@ -643,7 +650,6 @@ class CommandQueueWidget(QWidget):
         signal_bus.command_skipped.connect(self._on_command_skipped)
         signal_bus.pipeline_error_occurred.connect(self._on_pipeline_error_with_message)
         signal_bus.interactive_advance_ready.connect(self._on_interactive_advance_ready)
-        signal_bus.autocast_command_done.connect(self._on_autocast_terminal_done)
         signal_bus.instance_selected.connect(self._on_instance_selected)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
 
@@ -1286,21 +1292,6 @@ class CommandQueueWidget(QWidget):
         """Track the active CLI binary for autocast command building."""
         self._cli_binary = name
 
-    def _on_autocast_terminal_done(self) -> None:
-        """Called when ##SF_DONE## sentinel is detected in terminal output."""
-        import logging
-        _logger = logging.getLogger(__name__)
-        _logger.info("[Autocast] _on_autocast_terminal_done called. active=%s, pending=%s",
-                     self._autocast_active, self._autocast_pending_advance)
-        if self._autocast_active and not self._autocast_pending_advance:
-            self._autocast_pending_advance = True
-            from PySide6.QtCore import QTimer
-            _logger.info("[Autocast] Scheduling _autocast_advance in 300ms")
-            QTimer.singleShot(300, self._autocast_advance)
-        else:
-            _logger.info("[Autocast] SKIPPED advance (active=%s, pending=%s)",
-                         self._autocast_active, self._autocast_pending_advance)
-
     def _on_autocast_clicked(self) -> None:
         """Toggle autocast mode on/off."""
         if self._autocast_active:
@@ -1353,212 +1344,213 @@ class CommandQueueWidget(QWidget):
 
     def _start_autocast(self) -> None:
         """Activate autocast and trigger the first pending command."""
-        import logging as _log
-        _log.getLogger(__name__).info("[Autocast] _start_autocast called")
-        self._autocast_active = True
-        self._autocast_btn.setText("Parar")
-        self._autocast_btn.setStyleSheet(
-            "QPushButton { background-color: #DC2626; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #B91C1C; }"
-            "QPushButton:pressed { background-color: #991B1B; }"
-        )
-        signal_bus.toast_requested.emit("Autocast ativado", "info")
-        # Use _autocast_advance instead of run_next_pending so /model and /clear
-        # are handled with timed auto-advance from the very first command.
-        self._autocast_advance()
-
-    def _stop_autocast(self) -> None:
-        """Deactivate autocast and restore button label."""
-        import logging as _log
-        import traceback
-        _log.getLogger(__name__).info("[Autocast] _stop_autocast called from:\n%s", "".join(traceback.format_stack()[-4:-1]))
-        self._autocast_active = False
-        self._autocast_pending_advance = False
-        self._autocast_btn.setText("Autocast")
-        self._autocast_btn.setStyleSheet(
-            "QPushButton { background-color: #7C3AED; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #6D28D9; }"
-            "QPushButton:pressed { background-color: #5B21B6; }"
-            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
-        )
-
-    @staticmethod
-    def _same_context_group(name_a: str, name_b: str) -> bool:
-        """True if two commands belong to the same context group.
-
-        Groups are sub-pipelines where each step benefits from shared
-        conversation context (avoids re-reading the same files):
-          - /qa:prep → /qa:trace → /qa:report
-          - /backend:scan → /backend:audit → /backend:test-check → /backend:report
-          - /frontend:scan → /frontend:audit → /frontend:assets-check → /frontend:report
-          - /deep-research-1 → /deep-research-2
-          - /c4-diagram-create → /mermaid-diagram-create
-          - /daily:* (all daily steps share context)
-        """
-        a, b = name_a.lower(), name_b.lower()
-        for prefix in ("/qa:", "/backend:", "/frontend:", "/daily:"):
-            if a.startswith(prefix) and b.startswith(prefix):
-                return True
-        if a.startswith("/deep-research") and b.startswith("/deep-research"):
-            return True
-        if "diagram-create" in a and "diagram-create" in b:
-            return True
-        return False
-
-    def _collect_context_group(self, start_item) -> list:
-        """Collect consecutive AUTO items in the same context group.
-
-        Starts from *start_item* and walks forward through pending items,
-        skipping /model and /clear rows, collecting AUTO commands that
-        belong to the same context group. Stops at the first INTERACTIVE
-        command or a command outside the group.
-
-        Returns a list of (item, spec) tuples.
-        """
-        group = [(start_item, start_item.get_spec())]
-        start_name = start_item.get_spec().name.strip()
-
-        # Walk remaining pending items after start_item
-        found_start = False
-        for item in self._items:
-            if item is start_item:
-                found_start = True
-                continue
-            if not found_start or not item.is_pending_run():
-                continue
-
-            spec = item.get_spec()
-            name_lower = spec.name.strip().lower()
-
-            # Skip /model and /clear — they're no-ops between group members
-            if name_lower.startswith("/model") or name_lower == "/clear":
-                group.append((item, spec))
-                continue
-
-            # Stop if INTERACTIVE or outside group
-            if spec.interaction_type == InteractionType.INTERACTIVE:
-                break
-            if not self._same_context_group(start_name, spec.name.strip()):
-                break
-
-            group.append((item, spec))
-        return group
-
-    def _autocast_advance(self) -> None:
-        """Called after a command completes while autocast is active.
-
-        Handles three execution modes:
-        - /model, /clear: skip (no-op, 300ms delay).
-        - INTERACTIVE: run in terminal, stop autocast.
-        - AUTO isolated: run via ``-p`` with sentinel.
-        - AUTO context group: chain consecutive group members with ``&&``
-          in a single ``-p`` call so they share conversation context.
-        """
-        import logging as _log
-        _logger = _log.getLogger(__name__)
-
-        if not self._autocast_active:
-            _logger.info("[Autocast] _autocast_advance: NOT active, returning")
+        if self._autocast_runner is not None or any(
+            item._status == CommandStatus.EXECUTANDO for item in self._items
+        ):
+            signal_bus.toast_requested.emit(
+                "Há um comando em execução. Aguarde ou pare a execução atual.",
+                "warning",
+            )
             return
 
-        self._autocast_pending_advance = False  # Reset guard
+        logger.info("[Autocast] starting with instance=%s", self._cli_binary)
+        self._autocast_stop_requested = False
+        self._autocast_active = True
+        self._set_autocast_button_state(True)
+        signal_bus.toast_requested.emit("Autocast ativado", "info")
+        self._autocast_advance()
 
-        from PySide6.QtCore import QTimer
+    def _set_autocast_button_state(self, active: bool) -> None:
+        """Render the Autocast button for the current run state."""
+        self._autocast_btn.setText("Parar" if active else "Autocast")
+        if active:
+            self._autocast_btn.setStyleSheet(
+                "QPushButton { background-color: #DC2626; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #B91C1C; }"
+                "QPushButton:pressed { background-color: #991B1B; }"
+            )
+        else:
+            self._autocast_btn.setStyleSheet(
+                "QPushButton { background-color: #7C3AED; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #6D28D9; }"
+                "QPushButton:pressed { background-color: #5B21B6; }"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+
+    def _finish_autocast_ui(self) -> None:
+        """Reset the Autocast button state without touching the runner."""
+        self._autocast_active = False
+        self._set_autocast_button_state(False)
+
+    def _stop_autocast(self) -> None:
+        """Stop autocast and terminate the active PTY session, if any."""
+        logger.info("[Autocast] stop requested")
+        self._finish_autocast_ui()
+        runner = self._autocast_runner
+        item = self._autocast_current_item
+        if runner is None:
+            self._autocast_stop_requested = False
+            return
+        self._autocast_stop_requested = True
+        if item is not None and item._status == CommandStatus.EXECUTANDO:
+            item.reset_to_pending()
+        runner.terminate()
+
+    def _resolve_autocast_cwd(self) -> str:
+        """Return the project root where slash commands should run."""
+        from workflow_app.config.app_state import app_state
+
+        if app_state.has_config and app_state.config:
+            return str(app_state.config.project_dir)
+
+        cwd = Path.cwd()
+        for candidate in (cwd, *cwd.parents):
+            if (
+                (candidate / ".claude" / "commands").is_dir()
+                and (candidate / "CLAUDE.md").is_file()
+            ):
+                return str(candidate)
+        return str(cwd)
+
+    def _create_autocast_runner(self) -> PtyRunner:
+        """Factory extracted for tests."""
+        return PtyRunner()
+
+    def _start_autocast_command(self, item: CommandItemWidget, spec: CommandSpec) -> bool:
+        """Launch one queue item in its own PTY-backed subprocess."""
+        try:
+            plan = build_launch_plan(spec, self._cli_binary)
+        except ValueError as exc:
+            signal_bus.toast_requested.emit(str(exc), "warning")
+            self._finish_autocast_ui()
+            return False
+
+        runner = self._create_autocast_runner()
+        channel = plan.channel
+        self._autocast_runner = runner
+        self._autocast_current_item = item
+        self._autocast_stop_requested = False
+
+        item._mark_as_sent()
+        item.set_status(CommandStatus.EXECUTANDO)
+
+        runner.output_received.connect(
+            lambda chunk, ch=channel: signal_bus.terminal_output_chunk_received.emit(ch, chunk)
+        )
+        runner.error_occurred.connect(self._on_autocast_runner_error)
+        runner.command_completed.connect(
+            lambda _name, ok, ch=channel: self._on_autocast_runner_completed(ch, ok)
+        )
+
+        signal_bus.terminal_worker_changed.emit(channel, runner)
+        signal_bus.terminal_session_started.emit(channel)
+        signal_bus.terminal_output_chunk_received.emit(
+            channel,
+            f"\n\x1b[32m$\x1b[0m {plan.display_command}\n",
+        )
+        if channel == "interactive":
+            signal_bus.toast_requested.emit(
+                f"Autocast: aguardando {spec.name} (interativo)",
+                "info",
+            )
+            signal_bus.focus_interactive_terminal.emit()
+
+        runner.start_process(
+            argv=list(plan.argv),
+            command_name=spec.name,
+            cwd=self._resolve_autocast_cwd(),
+            env_overrides=plan.env_overrides,
+        )
+        return True
+
+    def _on_autocast_runner_error(self, message: str) -> None:
+        """Show the concrete runner error on the active queue item."""
+        item = self._autocast_current_item
+        if item is not None and item._status == CommandStatus.EXECUTANDO:
+            item.set_status(CommandStatus.ERRO, error_message=message)
+        logger.error("[Autocast] runner error: %s", message)
+
+    def _on_autocast_runner_completed(self, channel: str, success: bool) -> None:
+        """Advance the queue based on the real subprocess exit status."""
+        item = self._autocast_current_item
+        self._autocast_runner = None
+        self._autocast_current_item = None
+        signal_bus.terminal_session_finished.emit(channel)
+
+        if self._autocast_stop_requested:
+            self._autocast_stop_requested = False
+            return
+
+        if item is None:
+            return
+
+        if success:
+            item.set_status(CommandStatus.CONCLUIDO)
+            signal_bus.terminal_output_chunk_received.emit(channel, "\n✓ Concluído\n")
+            if self._autocast_active:
+                self._autocast_advance()
+            return
+
+        if item._status != CommandStatus.ERRO:
+            item.set_status(CommandStatus.ERRO)
+        signal_bus.terminal_output_chunk_received.emit(channel, "\n✕ Erro\n")
+
+        if self._loop_active:
+            self._loop_active = False
+            self._loop_btn.setText("Loop")
+            self._loop_btn.setStyleSheet(
+                "QPushButton { background-color: #0891B2; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #0E7490; }"
+                "QPushButton:pressed { background-color: #155E75; }"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            signal_bus.toast_requested.emit("Loop: parado por erro", "warning")
+
+        if self._autocast_active:
+            self._finish_autocast_ui()
+            signal_bus.toast_requested.emit("Autocast: parado por erro", "warning")
+
+    def _autocast_advance(self) -> None:
+        """Advance to the next queue item when the current subprocess exits."""
+        if not self._autocast_active:
+            return
 
         next_item = self._find_next_pending()
         if next_item is None:
             if self._loop_active:
-                _logger.info("[Autocast] _autocast_advance: loop restart — resetting all items")
                 signal_bus.toast_requested.emit("Loop: reiniciando fila", "info")
                 self._reset_all_items_to_pending()
-                QTimer.singleShot(500, self._autocast_advance)
+                QTimer.singleShot(300, self._autocast_advance)
                 return
-            _logger.info("[Autocast] _autocast_advance: no more pending items")
-            self._stop_autocast()
+            self._finish_autocast_ui()
             signal_bus.toast_requested.emit("Autocast: fila concluída", "success")
             return
 
         spec = next_item.get_spec()
         name_lower = spec.name.strip().lower()
-        cli = self._cli_binary
-        _logger.info("[Autocast] _autocast_advance: next=%s interaction=%s model=%s",
-                     spec.name, spec.interaction_type, spec.model)
 
-        model_map = {"Opus": "opus", "Sonnet": "sonnet", "Haiku": "haiku"}
-
-        def _build_p_cmd(s) -> str:
-            """Build ``cli -p "prompt" --model X`` string."""
-            prompt_parts = [s.name]
-            if s.config_path:
-                prompt_parts.append(s.config_path)
-            prompt = " ".join(prompt_parts)
-            escaped = prompt.replace('"', '\\"')
-            model_flag = model_map.get(s.model.value, "sonnet")
-            return f'{cli} -p "{escaped}" --model {model_flag}'
-
-        def _build_interactive_cmd(s) -> str:
-            """Build ``cli /cmd config --model X`` string (no -p)."""
-            parts = [cli, s.name]
-            if s.config_path:
-                parts.append(s.config_path)
-            model_flag = model_map.get(s.model.value, "sonnet")
-            parts.extend(["--model", model_flag])
-            return " ".join(parts)
-
-        # /model and /clear are CLI built-ins — no-ops in autocast.
-        if name_lower.startswith("/model") or name_lower == "/clear":
-            next_item._mark_as_sent()
-            QTimer.singleShot(300, self._autocast_advance)
-            return
-
-        is_interactive = spec.interaction_type == InteractionType.INTERACTIVE
-
-        # Sentinel: use a subshell wrapper that traps EXIT to guarantee
-        # the sentinel is always emitted, even if the command is killed.
-        _SENTINEL_WRAPPER = (
-            '(trap \'printf "\\043\\043SF_DONE\\043\\043\\n"\' EXIT; {cmd})'
+        logger.info(
+            "[Autocast] next=%s interaction=%s model=%s",
+            spec.name,
+            spec.interaction_type,
+            spec.model,
         )
 
-        if is_interactive:
-            # Run interactive command in the interactive terminal (no -p)
-            # with sentinel so autocast resumes automatically when it finishes.
-            signal_bus.toast_requested.emit(
-                f"Autocast: aguardando {spec.name} (interativo)", "info"
-            )
-            cmd = _build_interactive_cmd(spec)
-            wrapped = _SENTINEL_WRAPPER.format(cmd=cmd)
-            _logger.info("[Autocast] Sending INTERACTIVE to terminal: %s", wrapped)
-            signal_bus.run_command_in_terminal.emit(wrapped)
+        # /model and /clear are queue helpers only; each real subprocess already
+        # receives its own model/config, so these rows complete immediately.
+        if name_lower.startswith("/model") or name_lower == "/clear":
             next_item._mark_as_sent()
-            # Do NOT stop autocast — sentinel will trigger _autocast_advance
-        else:
-            # Check if this command starts a context group
-            group = self._collect_context_group(next_item)
-            # Filter out /model and /clear from the group for command building
-            real_cmds = [(item, s) for item, s in group
-                         if not s.name.strip().lower().startswith("/model")
-                         and s.name.strip().lower() != "/clear"]
+            next_item.set_status(CommandStatus.CONCLUIDO)
+            QTimer.singleShot(0, self._autocast_advance)
+            return
 
-            if len(real_cmds) > 1:
-                # Context group: chain with && in a single terminal command.
-                cmd_parts = [_build_p_cmd(s) for _, s in real_cmds]
-                chained = " && ".join(cmd_parts)
-                names = [s.name for _, s in real_cmds]
-                _logger.info("[Autocast] Context group (%d cmds): %s", len(real_cmds), names)
-            else:
-                chained = _build_p_cmd(spec)
-
-            wrapped = _SENTINEL_WRAPPER.format(cmd=chained)
-            _logger.info("[Autocast] Sending to autocast terminal: %s", wrapped)
-            signal_bus.run_autocast_in_terminal.emit(wrapped)
-
-            # Mark all items in the group as sent
-            for item, _ in group:
-                item._mark_as_sent()
+        self._start_autocast_command(next_item, spec)
 
     def _find_next_pending(self) -> CommandItemWidget | None:
         """Find the first item not yet sent to terminal."""
@@ -1566,43 +1558,3 @@ class CommandQueueWidget(QWidget):
             if item.is_pending_run():
                 return item
         return None
-
-    def _start_autocast_worker(self, spec) -> None:
-        """Spawn an AutocastWorker subprocess for an AUTO command."""
-        import pathlib
-
-        from workflow_app.command_queue.autocast_worker import AutocastWorker
-
-        # Resolve systemForge root as cwd (where .claude/commands live)
-        cwd: str | None = None
-        candidate = pathlib.Path(__file__).resolve().parent
-        while candidate != candidate.parent:
-            if (
-                (candidate / ".claude" / "commands").is_dir()
-                and (candidate / "CLAUDE.md").is_file()
-            ):
-                cwd = str(candidate)
-                break
-            candidate = candidate.parent
-
-        worker = AutocastWorker(
-            binary=self._cli_binary,
-            command=spec.name,
-            config_path=spec.config_path,
-            cwd=cwd,
-        )
-        worker.output_chunk.connect(signal_bus.output_appended.emit)
-        worker.finished.connect(self._on_autocast_worker_finished)
-        # Clean up finished workers from the list
-        worker.finished.connect(lambda _ok, w=worker: self._autocast_workers.remove(w))
-        self._autocast_workers.append(worker)
-        worker.start()
-
-    def _on_autocast_worker_finished(self, success: bool) -> None:
-        """Called when AutocastWorker subprocess exits."""
-        if not success:
-            signal_bus.toast_requested.emit("Autocast: comando retornou erro", "warning")
-        if self._autocast_active and not self._autocast_pending_advance:
-            self._autocast_pending_advance = True
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(300, self._autocast_advance)

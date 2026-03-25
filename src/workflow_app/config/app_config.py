@@ -11,8 +11,11 @@ Module: module-11/TASK-4
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class AppConfig:
@@ -79,8 +82,11 @@ class AppConfig:
 
     @classmethod
     def _save(cls) -> None:
-        cls._CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        cls._CONFIG_PATH.write_text(
-            json.dumps(cls._cache, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        try:
+            cls._CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            cls._CONFIG_PATH.write_text(
+                json.dumps(cls._cache, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("AppConfig: failed to persist %s: %s", cls._CONFIG_PATH, exc)

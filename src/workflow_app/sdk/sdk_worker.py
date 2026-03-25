@@ -18,6 +18,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import queue
 
 from PySide6.QtCore import QThread, Signal
 
@@ -60,11 +61,9 @@ class SDKWorker(QThread, ToolUseHookMixin):
             )
         self._permission_mode = permission_mode
         self._sdk_adapter: object | None = None
-            # Queue for user input in interactive sessions.
-        # Created before asyncio.run() so it is compatible with the new loop.
-        self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._user_input_queue: queue.Queue[str] = queue.Queue()
         # Reference to the running asyncio event loop (set in _execute).
-        # Needed for thread-safe queue operations from the Qt main thread.
+        # Kept for tool hooks and other integrations.
         self._loop: asyncio.AbstractEventLoop | None = None
         # Tool start times for hook timing (keyed by tool_name)
         self._tool_start_times: dict[str, float | None] = {}
@@ -94,18 +93,17 @@ class SDKWorker(QThread, ToolUseHookMixin):
     def send_user_input(self, text: str) -> None:
         """Called by the Qt thread to send user input to the asyncio loop.
 
-        Uses call_soon_threadsafe() so the queue operation is scheduled safely
-        on the asyncio event loop running in this QThread.
-        Forwards to both the internal queue (legacy) and the SDK adapter
-        (for AskUserQuestion can_use_tool intercept).
+        The response is delivered to two consumers:
+          - the SDK adapter, for AskUserQuestion/can_use_tool flows
+          - the worker-local queue, for interactive_prompt chunks handled here
+
+        A standard thread-safe queue is used because it is deterministic across
+        Qt tests and does not depend on extra helper threads.
         """
-        # Forward to SDK adapter first (handles AskUserQuestion via can_use_tool)
-        self._sdk_adapter.send_user_input(text)
-        # Also feed the queue for _execute_interactive compatibility
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._user_input_queue.put_nowait, text)
-        else:
-            self._user_input_queue.put_nowait(text)
+        adapter_send = getattr(self._sdk_adapter, "send_user_input", None)
+        if callable(adapter_send):
+            adapter_send(text)
+        self._user_input_queue.put(text)
 
     # ── QThread interface ─────────────────────────────────────────────── #
 
@@ -180,26 +178,24 @@ class SDKWorker(QThread, ToolUseHookMixin):
                 # Notify UI to show input widget
                 self.interactive_prompt.emit(getattr(chunk, "text", ""))
                 # Suspend until user responds (or timeout)
-                user_text = await self._wait_for_user_input()
-                # Forward to SDK adapter
-                if hasattr(self._sdk_adapter, "send_user_input"):
-                    self._sdk_adapter.send_user_input(user_text)
+                await self._wait_for_user_input()
             elif hasattr(chunk, "type"):
                 await self._handle_tool_event(chunk)
 
     async def _wait_for_user_input(self) -> str:
         """Wait up to 300s for user input via the asyncio queue."""
-        try:
-            text = await asyncio.wait_for(
-                self._user_input_queue.get(),
-                timeout=300.0,
-            )
-        except asyncio.TimeoutError:
-            self.error_occurred.emit(
-                "Timeout de interação: nenhuma resposta em 300s"
-            )
-            raise
-        return text
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 300.0
+        while True:
+            try:
+                return self._user_input_queue.get_nowait()
+            except queue.Empty:
+                if loop.time() >= deadline:
+                    self.error_occurred.emit(
+                        "Timeout de interação: nenhuma resposta em 300s"
+                    )
+                    raise asyncio.TimeoutError()
+                await asyncio.sleep(0.05)
 
     async def _handle_tool_event(self, event) -> None:
         """Process tool_use_start/tool_use_end events from the SDK."""

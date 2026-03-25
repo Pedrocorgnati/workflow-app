@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from workflow_app.config.app_state import app_state
 from workflow_app.config.config_bar import ConfigBar
@@ -30,12 +31,11 @@ def reset_state():
     app_state.clear_config()
     yield
     app_state.clear_config()
-    # Desconecta signals pendentes
-    for sig in (signal_bus.config_loaded, signal_bus.config_unloaded):
-        try:
-            sig.disconnect()
-        except (RuntimeError, TypeError):
-            pass
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, ConfigBar):
+            widget.close()
+            widget.deleteLater()
+    QApplication.processEvents()
 
 
 class TestConfigBarEmptyState:

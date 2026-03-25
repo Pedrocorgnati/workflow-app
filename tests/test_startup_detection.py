@@ -7,9 +7,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from workflow_app.config.app_state import AppState, app_state
 from workflow_app.config.config_parser import PipelineConfig
+
+
+def _safe_disconnect(signal, slot) -> None:
+    try:
+        signal.disconnect(slot)
+    except (RuntimeError, TypeError):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +26,10 @@ def reset_app_state():
     app_state.clear_config()
     yield
     app_state.clear_config()
+    for widget in QApplication.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    QApplication.processEvents()
 
 
 def _make_pipeline_config(tmp_path: Path, name: str = "test-app") -> PipelineConfig:
@@ -108,16 +120,14 @@ class TestMainWindowStartup:
             window = MainWindow()
 
         received_paths = []
-        signal_bus.config_loaded.connect(received_paths.append)
+        slot = received_paths.append
+        signal_bus.config_loaded.connect(slot)
 
         try:
             window._load_config(str(cfg_path))
             assert received_paths == [str(cfg_path.resolve())]
         finally:
-            try:
-                signal_bus.config_loaded.disconnect(received_paths.append)
-            except RuntimeError:
-                pass
+            _safe_disconnect(signal_bus.config_loaded, slot)
 
     def test_load_config_updates_app_state(self, qapp, tmp_path):
         """_load_config atualiza o AppState global."""
@@ -154,13 +164,14 @@ class TestMainWindowStartup:
 
         from workflow_app.signal_bus import signal_bus
         toasts = []
-        signal_bus.toast_requested.connect(lambda m, t: toasts.append((m, t)))
+        slot = lambda m, t: toasts.append((m, t))
+        signal_bus.toast_requested.connect(slot)
         try:
             window._load_config("/nao/existe/project.json")
             assert not app_state.has_config
             assert any("Falha" in m for m, t in toasts)
         finally:
-            signal_bus.toast_requested.disconnect()
+            _safe_disconnect(signal_bus.toast_requested, slot)
 
     def test_unload_config(self, qapp, tmp_path):
         """_unload_config limpa o AppState e emite config_unloaded."""
@@ -174,7 +185,8 @@ class TestMainWindowStartup:
 
         from workflow_app.signal_bus import signal_bus
         unloaded = []
-        signal_bus.config_unloaded.connect(lambda: unloaded.append(True))
+        slot = lambda: unloaded.append(True)
+        signal_bus.config_unloaded.connect(slot)
 
         try:
             window._unload_config()
@@ -182,4 +194,4 @@ class TestMainWindowStartup:
             assert unloaded == [True]
             assert window.windowTitle() == "SystemForge Desktop — Sem Projeto"
         finally:
-            signal_bus.config_unloaded.disconnect()
+            _safe_disconnect(signal_bus.config_unloaded, slot)

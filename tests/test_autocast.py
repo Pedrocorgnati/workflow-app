@@ -1,16 +1,13 @@
 """
-Tests for autocast signals and sentinel detection (module-12/TASK-1).
+Tests for autocast signals and pipeline-manager integration.
 
 Covers:
   - SignalBus.autocast_advancing signal exists and emits str
   - SignalBus.interactive_advance_ready signal exists and emits int
   - SignalBus.pipeline_all_completed signal exists and emits int
-  - Sentinel regex matches in PTY output (with/without ANSI codes)
   - instance_selected signal propagation
 """
 from __future__ import annotations
-
-import re
 
 import pytest
 
@@ -180,144 +177,6 @@ class TestPipelineManagerAutocastSignals:
         manager._on_pipeline_completed()
 
         mock_bus.pipeline_all_completed.emit.assert_called_once_with(exec_id)
-
-
-# ─────────────────────────── Sentinel detection ─── #
-
-class TestSentinelRegex:
-    """Validate sentinel regex matches real PTY output patterns."""
-
-    @pytest.fixture()
-    def sentinel_re(self):
-        from workflow_app.output_panel.persistent_shell import _SENTINEL_RE
-        return _SENTINEL_RE
-
-    @pytest.fixture()
-    def ansi_re(self):
-        from workflow_app.output_panel.persistent_shell import _ANSI_RE
-        return _ANSI_RE
-
-    def test_plain_sentinel_on_own_line(self, sentinel_re):
-        text = "some output\r\n##SF_DONE_2##\r\n$ "
-        assert sentinel_re.search(text) is not None
-
-    def test_sentinel_without_id(self, sentinel_re):
-        text = "output\r\n##SF_DONE##\r\n"
-        assert sentinel_re.search(text) is not None
-
-    def test_sentinel_at_text_start(self, sentinel_re):
-        text = "##SF_DONE_1##\r\n$ "
-        assert sentinel_re.search(text) is not None
-
-    def test_sentinel_after_lf_only(self, sentinel_re):
-        text = "output\n##SF_DONE_5##\n"
-        assert sentinel_re.search(text) is not None
-
-    def test_sentinel_matched_anywhere(self, sentinel_re):
-        """Sentinel matches anywhere in text — false positives from command
-        echo are prevented by using printf with octal escapes, not by the regex."""
-        text = '$ echo "##SF_DONE_2##"\r\n'
-        assert sentinel_re.search(text) is not None
-
-    def test_ansi_stripped_before_match(self, sentinel_re, ansi_re):
-        """ANSI codes before sentinel are stripped, allowing regex to match."""
-        text = "output\r\n\x1b[0m\x1b[?2004l##SF_DONE_3##\r\n"
-        clean = ansi_re.sub("", text)
-        assert sentinel_re.search(clean) is not None
-
-    def test_sentinel_id_extraction(self, sentinel_re):
-        text = "\r\n##SF_DONE_7##\r\n"
-        match = sentinel_re.search(text)
-        assert match is not None
-        sentinel_str = match.group(0)
-        sentinel_id = int(sentinel_str.split("_")[-1].rstrip("#"))
-        assert sentinel_id == 7
-
-
-# ─────────────────────────── AutocastWorker ─── #
-
-class TestAutocastWorker:
-    """AutocastWorker runs subprocess and emits output + finished signal."""
-
-    @pytest.fixture()
-    def mock_binary(self, tmp_path):
-        """Create a temporary mock binary that prints a line and exits 0."""
-        import os, stat
-        script = tmp_path / "mock_clauded.sh"
-        script.write_text('#!/bin/sh\necho "hello autocast"\n')
-        script.chmod(script.stat().st_mode | stat.S_IEXEC)
-        return str(script)
-
-    @pytest.fixture()
-    def mock_binary_fail(self, tmp_path):
-        """Create a temporary mock binary that exits non-zero."""
-        import os, stat
-        script = tmp_path / "mock_fail.sh"
-        script.write_text("#!/bin/sh\nexit 1\n")
-        script.chmod(script.stat().st_mode | stat.S_IEXEC)
-        return str(script)
-
-    def test_worker_runs_echo_command(self, qtbot, mock_binary):
-        """Worker streams stdout and emits finished(True) for successful command."""
-        from workflow_app.command_queue.autocast_worker import AutocastWorker
-
-        worker = AutocastWorker(
-            binary=mock_binary,
-            command="/test-cmd",
-            config_path="",
-            cwd=None,
-        )
-        chunks: list[str] = []
-        finished_vals: list[bool] = []
-        worker.output_chunk.connect(chunks.append)
-        worker.finished.connect(finished_vals.append)
-
-        with qtbot.waitSignal(worker.finished, timeout=5000):
-            worker.start()
-
-        assert finished_vals == [True]
-        assert any("hello autocast" in c for c in chunks)
-
-    def test_worker_emits_false_on_nonzero_exit(self, qtbot, mock_binary_fail):
-        """Worker emits finished(False) when command exits with non-zero code."""
-        from workflow_app.command_queue.autocast_worker import AutocastWorker
-
-        worker = AutocastWorker(
-            binary=mock_binary_fail,
-            command="/cmd",
-            config_path="",
-            cwd=None,
-        )
-        finished_vals: list[bool] = []
-        worker.finished.connect(finished_vals.append)
-
-        with qtbot.waitSignal(worker.finished, timeout=5000):
-            worker.start()
-
-        assert finished_vals == [False]
-
-    def test_worker_emits_false_on_missing_binary(self, qtbot):
-        """Worker emits finished(False) when binary is not found."""
-        from workflow_app.command_queue.autocast_worker import AutocastWorker
-
-        worker = AutocastWorker(
-            binary="/nonexistent_binary_xyz",
-            command="/cmd",
-            config_path="",
-            cwd=None,
-        )
-        chunks: list[str] = []
-        finished_vals: list[bool] = []
-        worker.output_chunk.connect(chunks.append)
-        worker.finished.connect(finished_vals.append)
-
-        with qtbot.waitSignal(worker.finished, timeout=5000):
-            worker.start()
-
-        assert finished_vals == [False]
-        # Shell reports "command not found" (exit 127); any output is acceptable
-        # as long as the worker correctly emits finished(False).
-        assert len(chunks) >= 0  # output may be empty or contain shell error
 
 
 # ─────────────────────────── Instance selection ─── #

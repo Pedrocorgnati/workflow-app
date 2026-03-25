@@ -13,9 +13,12 @@ else:
         import tomli as tomllib  # type: ignore[no-redef]
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_pyproject_has_required_fields():
     """pyproject.toml deve ter campos obrigatórios."""
-    p = Path("pyproject.toml")
+    p = PROJECT_ROOT / "pyproject.toml"
     assert p.exists(), "pyproject.toml não encontrado"
     with open(p, "rb") as f:
         data = tomllib.load(f)
@@ -26,7 +29,7 @@ def test_pyproject_has_required_fields():
 
 def test_makefile_exists():
     """Makefile deve existir com targets run/test/lint."""
-    makefile = Path("Makefile")
+    makefile = PROJECT_ROOT / "Makefile"
     assert makefile.exists(), "Makefile não encontrado"
     content = makefile.read_text()
     assert "run:" in content
@@ -36,7 +39,7 @@ def test_makefile_exists():
 
 def test_gitignore_exists():
     """.gitignore deve existir com entradas essenciais."""
-    gitignore = Path(".gitignore")
+    gitignore = PROJECT_ROOT / ".gitignore"
     assert gitignore.exists(), ".gitignore não encontrado"
     content = gitignore.read_text()
     assert "__pycache__" in content
@@ -56,18 +59,18 @@ def test_src_structure():
         "src/workflow_app/main_window.py",
     ]
     for path_str in required:
-        p = Path(path_str)
+        p = PROJECT_ROOT / path_str
         assert p.exists(), f"Required file missing: {path_str}"
 
 
 def test_assets_icon_exists():
     """assets/icon.svg deve existir."""
-    assert Path("assets/icon.svg").exists(), "assets/icon.svg não encontrado"
+    assert (PROJECT_ROOT / "assets" / "icon.svg").exists(), "assets/icon.svg não encontrado"
 
 
 def test_tests_conftest_exists():
     """tests/conftest.py deve existir com fixtures."""
-    conftest = Path("tests/conftest.py")
+    conftest = PROJECT_ROOT / "tests" / "conftest.py"
     assert conftest.exists(), "tests/conftest.py não encontrado"
     content = conftest.read_text()
     assert "qapp" in content

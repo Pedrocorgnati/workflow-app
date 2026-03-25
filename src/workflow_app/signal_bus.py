@@ -44,7 +44,6 @@ class SignalBus(QObject):
     command_status_changed = Signal(int, str)
 
     # --- Output / Streaming ---
-    output_appended = Signal(str)         # raw vt100 text chunk
     output_cleared = Signal()
     # Chunk of text received from Claude process (pyte feed)
     output_chunk_received = Signal(str)
@@ -142,16 +141,17 @@ class SignalBus(QObject):
 
     # --- Terminal (run command directly in persistent shell) ---
     run_command_in_terminal = Signal(str)     # command name (sends text + Enter) — interactive terminal
-    run_autocast_in_terminal = Signal(str)    # command for autocast terminal (top panel, -p mode)
     paste_text_in_terminal = Signal(str)      # text only (no Enter — inserts inline)
+    # Generic PTY sessions bound to a concrete terminal channel.
+    # channel values used by the app: "interactive" | "autocast"
+    terminal_output_chunk_received = Signal(str, str)  # channel, chunk
+    terminal_session_started = Signal(str)             # channel
+    terminal_session_finished = Signal(str)            # channel
+    terminal_worker_changed = Signal(str, object)      # channel, runner
 
     # --- Instance selection (MetricsBar → CommandQueueWidget) ---
     # Emitted when user selects a CLI instance (e.g. "clauded", "codex")
     instance_selected = Signal(str)          # binary_name
-
-    # --- Autocast terminal sentinel ---
-    # Emitted by PersistentShell when ##SF_DONE## marker is detected in output
-    autocast_command_done = Signal()
 
     # --- Remote Server (workflow-mobile feature) ---
     # Emitted when user toggles the remote mode button (True=start, False=stop)

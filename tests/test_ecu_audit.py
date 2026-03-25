@@ -1,6 +1,11 @@
 """ECU Audit — Zero Órfãos, Zero Silêncio, Zero Estados Indefinidos (module-16/TASK-3)."""
 from __future__ import annotations
 
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_main_window_has_setup_ui_method():
     """MainWindow deve ter _setup_ui definido como método."""
@@ -37,9 +42,7 @@ def test_design_tokens_importable():
 
 def test_theme_file_exists():
     """theme.py deve existir e conter estilos."""
-    from pathlib import Path
-
-    theme_path = Path("src/workflow_app/theme.py")
+    theme_path = PROJECT_ROOT / "src" / "workflow_app" / "theme.py"
     assert theme_path.exists(), "theme.py não encontrado"
 
 
