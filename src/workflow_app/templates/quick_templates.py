@@ -196,8 +196,8 @@ TEMPLATE_DEPLOY: list[CommandSpec] = _inject_clears([
     _spec("/monitoring-setup",      _S, _I,  7),
     _spec("/post-deploy-verify",    _S, _A,  8),
     _spec("/changelog-create",      _H, _A,  9),
-    _spec("/deploy-flow",                _S, _A, 10),
-    _spec("/marketing-readiness-check",  _S, _A, 11),
+    _spec("/deploy-flow",           _S, _A, 10),
+    _spec("/marketing-readiness-check", _S, _A, 11),
 ])
 
 # ─── Daily (from z-templates/daily.md) ────────────────────────────────────────── #
@@ -229,9 +229,10 @@ TEMPLATE_BUSINESS: list[CommandSpec] = _inject_clears([
     _spec("/business:sow-create",            _O, _I, 2),
     _spec("/business:create-budget",         _S, _I, 3),
     _spec("/business:simple-budget",         _S, _I, 4),
-    _spec("/business:upsell-suggestion",    _O, _I, 5),
-    _spec("/business:generate-pdf-docs",     _H, _A, 6),
-    _spec("/business:generate-json-project", _H, _A, 6),
+    _spec("/business:create-parallel-work",  _S, _I, 5),
+    _spec("/business:upsell-suggestion",    _O, _I, 6),
+    _spec("/business:generate-pdf-docs",     _H, _A, 7),
+    _spec("/business:generate-json-project", _H, _A, 7),
 ])
 
 # ─── QA Templates per stack (from z-templates/qa.md) ──────────────────────────── #

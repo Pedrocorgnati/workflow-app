@@ -99,7 +99,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/back-end-build", _S, 0))
     specs.append(_spec("/build-verify", _H, 0))
     specs.append(_spec("/db-migration-create", _S, 0))
-    specs.append(_spec("/create-assets", _H, 0))
+    specs.append(_spec("/create-assets", _S, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
     specs.append(_spec("/update-tasks:analyse", _S, 0))
@@ -111,6 +111,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
         specs.append(_spec(f"/review-executed-module {module_path}", _O, 0))
 
     # ── F7: Post-execution ───────────────────────────────────────────────────
+    specs.append(_spec("/review-executed-task", _S, 0))
     specs.append(_spec("/milestone-checklist-review", _S, 0))
     specs.append(_spec("/reforge:prepare", _S, 0))
     specs.append(_spec("/reforge:fix", _O, 0))

@@ -2,7 +2,7 @@
 MetricsBar — 48px top toolbar for project, instance selection, navigation and metrics.
 
 Layout (left to right):
-  [project pill / Selecionar] │ [clauded] [clauded2] [codex] [codex-high] │ [Workflow] [Comandos] [Toolbox] │ (metrics) │ (stretch) │ [📡] [⚙]
+  [project pill / Selecionar] │ [clauded] [clauded2] [codex] [codex-high] [codex-ultra] │ [Workflow] [Comandos] [Toolbox] │ (metrics) │ (stretch) │ [📡] [⚙]
 
 Git info: overlay label, bottom-right corner, updated via git_info_updated signal.
 
@@ -175,7 +175,7 @@ class MetricsBar(QWidget):
         layout.addSpacing(4)
 
         # ── Instance toggle buttons (clauded group) ───────────────────── #
-        _instance_names = ["clauded", "clauded2", "codex", "codex-high"]
+        _instance_names = ["clauded", "clauded2", "codex", "codex-high", "codex-ultra"]
         self._instance_btns: list[QPushButton] = []
 
         for i, name in enumerate(_instance_names):
