@@ -136,28 +136,36 @@ class MetricsBar(QWidget):
 
         # ── Project pill / select button ──────────────────────────────── #
         self._project_pill = QWidget()
+        self._project_pill.setObjectName("ProjectPill")
         self._project_pill.setProperty("testid", "metrics-project-pill")
         self._project_pill.setFixedHeight(28)
         self._project_pill.setStyleSheet(
-            "QWidget { background: transparent; border: 1px solid #22C55E; border-radius: 5px; }"
+            "QWidget#ProjectPill { background: transparent; border: 1px solid #22C55E; border-radius: 5px; }"
         )
         _pl = QHBoxLayout(self._project_pill)
         _pl.setContentsMargins(10, 0, 6, 0)
         _pl.setSpacing(6)
+        _pl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self._project_name_lbl = QLabel("")
+        self._project_name_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+        self._project_name_lbl.setContentsMargins(0, 0, 0, 0)
         self._project_name_lbl.setStyleSheet(
-            "color: #22C55E; font-size: 11px; font-weight: 600; border: none;"
+            "color: #22C55E; font-size: 11px; font-weight: 600;"
+            " border: none; background: transparent; padding: 0; margin: 0;"
         )
         _pl.addWidget(self._project_name_lbl)
-        _proj_x = QPushButton("✕")
-        _proj_x.setFixedSize(16, 16)
-        _proj_x.setToolTip("Desvincular projeto")
-        _proj_x.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #EF4444; font-size: 10px; margin-top: 1px; }"
+        self._proj_x = QPushButton("✕")
+        self._proj_x.setFixedSize(16, 16)
+        self._proj_x.setToolTip("Desvincular projeto")
+        self._proj_x.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._proj_x.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #EF4444; font-size: 12px; font-weight: 700; }"
             "QPushButton:hover { color: #FCA5A5; }"
         )
-        _proj_x.clicked.connect(self._on_proj_unload)
-        _pl.addWidget(_proj_x)
+        self._proj_x.clicked.connect(self._on_proj_unload)
+        _pl.addWidget(self._proj_x)
 
         self._proj_select_btn = QPushButton("Selecionar Projeto...")
         self._proj_select_btn.setFixedHeight(28)
@@ -195,6 +203,7 @@ class MetricsBar(QWidget):
         font_nav.setWeight(QFont.Weight.Medium)
 
         self._btn_workflow = QPushButton("Workflow")
+        self._btn_workflow.setProperty("testid", "nav-btn-workflow")
         self._btn_workflow.setFixedHeight(28)
         self._btn_workflow.setFont(font_nav)
         self._btn_workflow.setMinimumWidth(80)
@@ -202,6 +211,7 @@ class MetricsBar(QWidget):
         layout.addWidget(self._btn_workflow)
 
         self._btn_comandos = QPushButton("Comandos")
+        self._btn_comandos.setProperty("testid", "nav-btn-comandos")
         self._btn_comandos.setFixedHeight(28)
         self._btn_comandos.setFont(font_nav)
         self._btn_comandos.setMinimumWidth(80)
@@ -209,6 +219,7 @@ class MetricsBar(QWidget):
         layout.addWidget(self._btn_comandos)
 
         self._btn_toolbox = QPushButton("Toolbox")
+        self._btn_toolbox.setProperty("testid", "nav-btn-toolbox")
         self._btn_toolbox.setFixedHeight(28)
         self._btn_toolbox.setFont(font_nav)
         self._btn_toolbox.setMinimumWidth(80)
@@ -284,24 +295,26 @@ class MetricsBar(QWidget):
 
         # ── DataTest toggle ───────────────────────────────────────────── #
         self._btn_datatest = QPushButton("DataTest")
-        self._btn_datatest.setFixedHeight(28)
+        self._btn_datatest.setFixedSize(68, 32)
         self._btn_datatest.setCheckable(True)
         self._btn_datatest.setToolTip("Exibir data-testid em todos os componentes")
         self._btn_datatest.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #71717A;"
-            "  border: 1px solid #52525B; border-radius: 4px;"
-            "  font-size: 10px; font-weight: 600; padding: 0 8px; }"
-            "QPushButton:hover { color: #FAFAFA; background-color: #3F3F46; }"
+            "QPushButton { background-color: transparent; color: #A1A1AA;"
+            "  border: 1px solid #52525B; border-radius: 6px;"
+            "  font-size: 11px; font-weight: 600; padding: 0 6px; }"
+            "QPushButton:hover { color: #FAFAFA; background-color: #3F3F46;"
+            "  border-color: #71717A; }"
             "QPushButton:checked { background-color: #DC2626; color: #FAFAFA;"
             "  border-color: #DC2626; font-weight: 700; }"
         )
+        self._btn_datatest.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_datatest.clicked.connect(
             lambda checked: self._signal_bus.datatest_toggled.emit(checked)
         )
         layout.addWidget(self._btn_datatest)
 
         # ── Right controls ────────────────────────────────────────────── #
-        self._btn_prefs = self._make_icon_btn("⚙", "Preferências")
+        self._btn_prefs = self._make_icon_btn("\u2699\uFE0F", "Preferências")
         layout.addWidget(self._btn_prefs)
 
     def _setup_git_overlay(self) -> None:
@@ -314,29 +327,36 @@ class MetricsBar(QWidget):
         self._lbl_git_info.hide()
 
     def _make_remote_toggle_btn(self) -> QPushButton:
-        btn = QPushButton("📡")
+        btn = QPushButton("◉")  # U+25C9 Fisheye — BMP, no emoji font needed
         btn.setObjectName("RemoteToggleButton")
-        btn.setFixedSize(32, 32)
+        btn.setFixedSize(36, 32)
         btn.setToolTip("Modo Remoto: ativa servidor WebSocket para controle via Android")
         btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  border-radius: 4px; font-size: 15px; color: #71717A; }"
-            "QPushButton:hover { background-color: #3F3F46; }"
-            "QPushButton:checked { color: #22C55E;"
-            "  background-color: rgba(34, 197, 94, 0.1); }"
+            "QPushButton { background-color: transparent; border: 1px solid transparent;"
+            "  border-radius: 6px; font-size: 18px; color: #D4D4D8; }"
+            "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA;"
+            "  border-color: #52525B; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
+            "QPushButton:checked { color: #22C55E; font-size: 18px;"
+            "  background-color: rgba(34, 197, 94, 0.15);"
+            "  border: 1px solid rgba(34, 197, 94, 0.3); }"
         )
         return btn
 
     def _make_icon_btn(self, icon: str, tooltip: str) -> QPushButton:
         btn = QPushButton(icon)
         btn.setObjectName("IconButton")
-        btn.setFixedSize(32, 32)
+        btn.setFixedSize(36, 32)
         btn.setToolTip(tooltip)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  border-radius: 4px; font-size: 15px; color: #FAFAFA; }"
-            "QPushButton:hover { background-color: #3F3F46; }"
+            "QPushButton { background-color: transparent; border: 1px solid transparent;"
+            "  border-radius: 6px; font-size: 18px; color: #D4D4D8; }"
+            "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA;"
+            "  border-color: #52525B; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
             "QPushButton:disabled { color: #52525B; }"
         )
         return btn
@@ -492,6 +512,8 @@ class MetricsBar(QWidget):
     def _apply_project_loaded(self, name: str) -> None:
         self._project_name_lbl.setText(name)
         self._project_pill.show()
+        self._project_name_lbl.show()
+        self._proj_x.show()
         self._proj_select_btn.hide()
 
     def _apply_project_empty(self) -> None:

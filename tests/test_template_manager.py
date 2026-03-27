@@ -48,9 +48,9 @@ def sample_commands():
 
 
 def test_list_templates_has_factory_by_default(tm):
-    """DatabaseManager.setup() seeds 9 factory templates automatically."""
+    """DatabaseManager.setup() seeds 10 factory templates automatically."""
     result = tm.list_templates()
-    assert len(result) == 9
+    assert len(result) == 10
     assert all(t.is_factory for t in result)
 
 
@@ -71,9 +71,9 @@ def test_list_templates_factory_first(tm, sample_commands):
     """Factory templates appear before custom ones."""
     tm.save_custom_template("Custom Z", "desc", sample_commands)
     result = tm.list_templates()
-    # Factory templates come first (9), then custom (1)
+    # Factory templates come first (10), then custom (1)
     factory_count = sum(1 for t in result if t.is_factory)
-    assert factory_count == 9
+    assert factory_count == 10
     assert result[-1].is_factory is False
     assert result[-1].name == "Custom Z"
 

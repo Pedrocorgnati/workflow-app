@@ -32,6 +32,7 @@ from workflow_app.db.models import Template, TemplateCommand
 from workflow_app.domain import CommandSpec, TemplateType
 from workflow_app.templates._mapping import interaction_to_db, model_name_to_db
 from workflow_app.templates.quick_templates import (
+    TEMPLATE_BLOG,
     TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
@@ -86,6 +87,10 @@ FACTORY_TEMPLATES: dict[str, tuple[str, list[CommandSpec]]] = {
     "Micro-Architecture": (
         "Brief de feature + micro-arquitetura pontual: feature-brief → intake → micro-architecture + review. 5 comandos.",
         TEMPLATE_MICRO_ARCHITECTURE,
+    ),
+    "Blog SEO": (
+        "Pipeline completo de blog SEO: estratégia → keywords → clusters → artigos → review → deploy. 14 comandos.",
+        TEMPLATE_BLOG,
     ),
 }
 

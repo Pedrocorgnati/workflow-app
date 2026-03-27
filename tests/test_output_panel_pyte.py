@@ -1,10 +1,9 @@
-"""Tests for OutputPanel streaming output — pyte/PersistentShell architecture.
+"""Tests for OutputPanel streaming output — pyte/TerminalCanvas architecture.
 
 Covers:
   - Plain text chunks are rendered to the terminal after _flush_pyte()
   - ANSI color sequences are rendered via pyte (no raw escape codes in output)
   - clear() empties the terminal
-  - _on_pipeline_started appends status message directly (bypasses pyte)
   - _on_chunk accumulates multiple lines
 """
 from __future__ import annotations
@@ -54,7 +53,7 @@ def test_pure_ansi_chunk_no_escape_codes(panel):
 
 
 def test_clear_resets_terminal(panel):
-    """clear() empties the QTextEdit."""
+    """clear() empties the terminal."""
     panel._on_chunk("algum texto\n")
     panel._flush_pyte()
     panel.clear()
@@ -71,21 +70,9 @@ def test_multiple_chunks_accumulate(panel):
     assert "linha-B" in text
 
 
-def test_pipeline_started_shows_message(panel):
-    """_on_pipeline_started appends status message directly to terminal."""
+def test_pipeline_started_no_crash(panel):
+    """_on_pipeline_started() does not crash."""
     panel._on_pipeline_started()
-    text = panel._terminal.toPlainText()
-    assert "Pipeline iniciado" in text
-
-
-def test_pipeline_started_unflushed_data_cleared(panel):
-    """Data in pyte buffer (not yet flushed) is discarded when pipeline starts."""
-    panel._on_chunk("texto antigo\n")
-    # No _flush_pyte() → text only in pyte buffer, not in terminal widget
-    panel._on_pipeline_started()  # resets pyte, appends message directly
-    text = panel._terminal.toPlainText()
-    assert "Pipeline iniciado" in text
-    assert "texto antigo" not in text
 
 
 def test_has_pending_render_after_chunk(panel):

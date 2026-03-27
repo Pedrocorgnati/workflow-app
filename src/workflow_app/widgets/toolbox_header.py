@@ -178,6 +178,7 @@ class ToolboxTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("ToolboxTab")
+        self.setProperty("testid", "toolbox-tab")
         self.setStyleSheet("background-color: #18181B;")
         self._setup_ui()
 

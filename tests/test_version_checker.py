@@ -105,7 +105,7 @@ class TestVersionChecker:
         result = checker.check_factory_templates(claude_md_path=str(claude_path))
 
         assert result.is_outdated is True
-        assert len(result.outdated_names) == 9
+        assert len(result.outdated_names) == 10
         assert result.current_hash is not None
         assert len(result.current_hash) == 64
 

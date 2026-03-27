@@ -83,6 +83,11 @@ QTextEdit#TerminalOutput {
     selection-background-color: #264F78;
 }
 
+#TerminalCanvas {
+    background-color: #0D1117;
+    border: none;
+}
+
 /* ─── Command Items ───────────────────────────────────────── */
 #CommandItemWidget {
     background-color: #27272A;

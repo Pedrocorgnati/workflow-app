@@ -62,7 +62,7 @@ def test_resolve_instance_profile_for_clauded2_sets_dedicated_env():
 
 def test_build_launch_plan_for_auto_command_uses_print_mode():
     plan = build_launch_plan(_spec("/prd-create"), "clauded")
-    assert plan.channel == "autocast"
+    assert plan.channel == "interactive"
     assert plan.argv[:3] == (
         "claude",
         "--dangerously-skip-permissions",

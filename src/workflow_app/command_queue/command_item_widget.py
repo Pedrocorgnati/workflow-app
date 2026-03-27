@@ -68,6 +68,7 @@ class CommandItemWidget(QWidget):
         self.setObjectName("CommandItemWidget")
         self._spec = spec
         self._status = CommandStatus.PENDENTE
+        self._highlighted: bool = False
         self._can_reorder_fn: Callable[[int], bool] = can_reorder_fn or (lambda _pos: True)
         self._drag_start_pos: QPoint | None = None
         self.setMinimumHeight(44)
@@ -239,6 +240,17 @@ class CommandItemWidget(QWidget):
     def get_spec(self) -> CommandSpec:
         return self._spec
 
+    def command_text(self) -> str:
+        """Return the full command text (name + config_path), space-separated."""
+        return f"{self._spec.name} {self._spec.config_path}".strip()
+
+    def set_highlighted(self, highlighted: bool) -> None:
+        """Mark this item as the 'current' command (matches queue-last-command)."""
+        if self._highlighted == highlighted:
+            return
+        self._highlighted = highlighted
+        self._update_appearance()
+
     def set_model(self, model: ModelName) -> None:
         self._spec = CommandSpec(
             name=self._spec.name,
@@ -337,43 +349,56 @@ class CommandItemWidget(QWidget):
     # ─────────────────────────────────────────────────────── Helpers ─── #
 
     def _update_appearance(self) -> None:
+        # Highlight border for the row matching the last-played command
+        _hl = (
+            " border-top: 2px solid #E4E4E7; border-bottom: 2px solid #E4E4E7;"
+            if self._highlighted else ""
+        )
+
         if self._status == CommandStatus.PULADO:
             self._name_label.setStyleSheet(
                 "color: #52525B; font-family: monospace; font-size: 11px;"
                 " text-decoration: line-through;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A; }"
+                f"QWidget#CommandItemWidget {{ background-color: #27272A;{_hl} }}"
             )
         elif self._status == CommandStatus.EXECUTANDO:
             self._name_label.setStyleSheet(
                 "color: #FAFAFA; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A;"
-                " border-left: 2px solid #38BDF8; }"
+                f"QWidget#CommandItemWidget {{ background-color: #27272A;"
+                f" border-left: 2px solid #38BDF8;{_hl} }}"
             )
         elif self._status == CommandStatus.CONCLUIDO:
             self._name_label.setStyleSheet(
                 "color: #A1A1AA; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A; }"
+                f"QWidget#CommandItemWidget {{ background-color: #27272A;{_hl} }}"
             )
         elif self._status == CommandStatus.ERRO:
             self._name_label.setStyleSheet(
                 "color: #FB7185; font-family: monospace; font-size: 11px;"
             )
-            self.setStyleSheet(
-                f"QWidget#CommandItemWidget {{ background-color: {_COLOR_ERROR_BG};"
-                f" border: 1px solid {_COLOR_ERROR_BORDER}; border-radius: 2px; }}"
-            )
+            if self._highlighted:
+                self.setStyleSheet(
+                    f"QWidget#CommandItemWidget {{ background-color: {_COLOR_ERROR_BG};"
+                    f" border: 1px solid {_COLOR_ERROR_BORDER}; border-radius: 2px;"
+                    f" border-top: 2px solid #E4E4E7; border-bottom: 2px solid #E4E4E7; }}"
+                )
+            else:
+                self.setStyleSheet(
+                    f"QWidget#CommandItemWidget {{ background-color: {_COLOR_ERROR_BG};"
+                    f" border: 1px solid {_COLOR_ERROR_BORDER}; border-radius: 2px; }}"
+                )
         else:
             self._name_label.setStyleSheet(
                 "color: #FAFAFA; font-family: monospace; font-size: 11px;"
             )
             self.setStyleSheet(
-                "QWidget#CommandItemWidget { background-color: #27272A; }"
+                f"QWidget#CommandItemWidget {{ background-color: #27272A;{_hl} }}"
                 "QWidget#CommandItemWidget:hover { background-color: #3F3F46; }"
             )
 

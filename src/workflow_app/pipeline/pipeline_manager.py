@@ -147,6 +147,7 @@ class PipelineManager:
         """Cancel pipeline: stop current runner and mark as CANCELADO."""
         if self._current_runner is not None:
             self._current_runner.terminate()
+        self._disconnect_pipeline_signals()
         if self._pipeline_exec_id:
             self._log_pipeline_event("cancelled")
             self._update_pipeline_status(PipelineStatus.CANCELADO)
@@ -556,6 +557,17 @@ class PipelineManager:
 
     # ── Internal: pipeline completion ────────────────────────────────── #
 
+    def _disconnect_pipeline_signals(self) -> None:
+        """Disconnect per-pipeline signal connections to prevent leaks."""
+        for sig, slot in (
+            (self._signal_bus.interactive_advance_triggered, self.interactive_advance),
+            (self._signal_bus.interactive_input_requested, self._on_interaction_detected),
+        ):
+            try:
+                sig.disconnect(slot)
+            except RuntimeError:
+                pass
+
     def _on_pipeline_completed(self) -> None:
         """All commands done — update PipelineExecution and emit signal."""
         from workflow_app.db.models import PipelineExecution
@@ -581,11 +593,7 @@ class PipelineManager:
             )
             session.commit()
 
-        # Disconnect per-pipeline signals to avoid duplicate connections on restart
-        try:
-            self._signal_bus.interactive_input_requested.disconnect(self._on_interaction_detected)
-        except RuntimeError:
-            pass
+        self._disconnect_pipeline_signals()
 
         self._log_pipeline_event("pipeline_completed")
         self._signal_bus.pipeline_status_changed.emit(

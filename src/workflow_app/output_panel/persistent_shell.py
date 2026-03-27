@@ -54,6 +54,7 @@ class PersistentShell(QObject):
 
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
         env["COLUMNS"] = str(self._cols)
         env["LINES"] = str(self._rows)
         # Remove CLAUDECODE so sub-claude CLIs work inside the shell
@@ -135,7 +136,7 @@ class PersistentShell(QObject):
         if self._master_fd is None:
             return
         try:
-            data = os.read(self._master_fd, 4096)
+            data = os.read(self._master_fd, 65536)
             # Use incremental decoder to handle multi-byte UTF-8 sequences
             # that may be split across multiple os.read() calls (e.g. accented chars).
             text = self._utf8_decoder.decode(data)

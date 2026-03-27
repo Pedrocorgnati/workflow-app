@@ -40,6 +40,7 @@ from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
     TEMPLATE_AUTO_IMPROOVE_LOOP,
     TEMPLATE_AUTOCAST_TEST,
+    TEMPLATE_BLOG,
     TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
@@ -240,9 +241,11 @@ class CommandQueueWidget(QWidget):
         tab_bar_layout.setSpacing(3)
 
         self._sec_tabs: list[QPushButton] = []
+        _tab_testids = ("queue-tab-daily", "queue-tab-workflow", "queue-tab-auxiliar")
         for i, label in enumerate(("Daily", "Workflow", "Auxiliar")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
+            btn.setProperty("testid", _tab_testids[i])
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
             tab_bar_layout.addWidget(btn, stretch=1)
             self._sec_tabs.append(btn)
@@ -261,6 +264,9 @@ class CommandQueueWidget(QWidget):
              self._on_micro_json_clicked, "queue-btn-micro-json"),
             ("micro-arch", "Carrega pipeline de micro-arquitetura",
              self._on_micro_arch_clicked, "queue-btn-micro-arch"),
+            ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
+             lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
+             "queue-btn-blog"),
         ])
         header_layout.addWidget(daily_content)
         self._sec_contents.append(daily_content)
@@ -298,6 +304,8 @@ class CommandQueueWidget(QWidget):
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
+            ("delivery", "Delivery por milestone — analisa BUDGET.md",
+             self._on_delivery_clicked, "queue-btn-delivery"),
             ("auto-improove", "/model Opus + 5x /auto-improove:cmd (use com Loop)",
              lambda: self._load_quick_template(TEMPLATE_AUTO_IMPROOVE_LOOP, name="Auto-Improove Loop"),
              "queue-btn-auto-improove"),
@@ -330,6 +338,7 @@ class CommandQueueWidget(QWidget):
         pl.setContentsMargins(8, 5, 8, 5)
 
         self._play_btn = QPushButton("▶  Rodar próximo")
+        self._play_btn.setProperty("testid", "queue-btn-play-next")
         self._play_btn.setFixedHeight(32)
         self._play_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
@@ -344,6 +353,7 @@ class CommandQueueWidget(QWidget):
 
         # Autocast button — runs all AUTO commands sequentially, stops on INTERACTIVE
         self._autocast_btn = QPushButton("Autocast")
+        self._autocast_btn.setProperty("testid", "queue-btn-autocast")
         self._autocast_btn.setFixedHeight(32)
         self._autocast_btn.setToolTip(
             "Executa comandos automáticos em sequência.\n"
@@ -362,6 +372,7 @@ class CommandQueueWidget(QWidget):
 
         # Loop button — runs autocast in a loop (restarts queue when finished)
         self._loop_btn = QPushButton("Loop")
+        self._loop_btn.setProperty("testid", "queue-btn-loop")
         self._loop_btn.setFixedHeight(32)
         self._loop_btn.setToolTip(
             "Executa comandos em loop contínuo.\n"
@@ -381,6 +392,7 @@ class CommandQueueWidget(QWidget):
 
         # Botão JSON — copia path do project.json para o clipboard
         self._json_btn = QPushButton("JSON")
+        self._json_btn.setProperty("testid", "queue-btn-json-path")
         self._json_btn.setFixedHeight(32)
         self._json_btn.setToolTip("Copia o caminho do project.json\ne digita no terminal automaticamente")
         self._json_btn.setStyleSheet(
@@ -396,6 +408,7 @@ class CommandQueueWidget(QWidget):
 
         # Botão WS — copia workspace_root para o clipboard
         self._ws_btn = QPushButton("WS")
+        self._ws_btn.setProperty("testid", "queue-btn-ws-path")
         self._ws_btn.setFixedHeight(32)
         self._ws_btn.setToolTip("Copia o workspace_root do projeto\ne digita no terminal automaticamente")
         self._ws_btn.setStyleSheet(
@@ -478,6 +491,9 @@ class CommandQueueWidget(QWidget):
         self._notepad_edit = QPlainTextEdit()
         self._notepad_edit.setProperty("testid", "queue-notepad")
         self._notepad_edit.setPlaceholderText("Escreva aqui e clique Enviar…")
+        self._notepad_edit.setAttribute(
+            Qt.WidgetAttribute.WA_InputMethodEnabled, True,
+        )
         self._notepad_edit.setStyleSheet(
             "QPlainTextEdit {"
             "  background-color: #18181B; color: #FAFAFA;"
@@ -571,9 +587,11 @@ class CommandQueueWidget(QWidget):
         )
 
         self._items_container = _DroppableContainer()
+        self._items_container.setProperty("testid", "queue-command-list")
         self._items_container.setStyleSheet("background-color: #18181B;")
         self._items_container.setAcceptDrops(True)
         self._items_container.installEventFilter(self)
+        self._notepad_edit.installEventFilter(self)
         self._items_layout = QVBoxLayout(self._items_container)
         self._items_layout.setContentsMargins(0, 0, 0, 0)
         self._items_layout.setSpacing(0)
@@ -600,6 +618,7 @@ class CommandQueueWidget(QWidget):
         al.addWidget(add_btn)
 
         save_btn = QPushButton("💾 Salvar")
+        save_btn.setProperty("testid", "queue-btn-save")
         save_btn.setToolTip("Salvar fila no JSON do projeto (Ctrl+S)")
         save_btn.setFixedHeight(26)
         save_btn.setStyleSheet(
@@ -668,6 +687,8 @@ class CommandQueueWidget(QWidget):
             btn = QPushButton(label)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(_SECTION_BTN_STYLE)
+            if testid:
+                btn.setProperty("testid", testid)
             btn.clicked.connect(callback)
             grid.addWidget(btn, i // cols, i % cols)
         return content
@@ -1003,11 +1024,44 @@ class CommandQueueWidget(QWidget):
         if dlg.exec() == QAStackDialog.Accepted:
             self._load_quick_template(dlg.selected_template, name="QA")
 
+    def _on_delivery_clicked(self) -> None:
+        """Build Delivery template dynamically from BUDGET.md milestones."""
+        from workflow_app.config.app_state import app_state
+        from workflow_app.templates.quick_templates import _inject_clears
+        from workflow_app.templates.delivery_template_builder import build_delivery_template
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar o Delivery.", "warning"
+            )
+            return
+
+        config = app_state.config
+        template = build_delivery_template(
+            docs_root=config.docs_root,
+            project_dir=str(config.project_dir),
+        )
+
+        if not template:
+            signal_bus.toast_requested.emit(
+                "Nenhuma milestone encontrada em BUDGET.md. Execute /business:create-budget primeiro.",
+                "warning",
+            )
+            return
+
+        self._load_quick_template(_inject_clears(template), name="Delivery")
+
     def _on_run_command(self, cmd_text: str) -> None:
-        """Update last-command label with the command that was just played."""
+        """Update last-command label and highlight the matching queue row."""
         parts = cmd_text.strip().split()
         self._last_cmd_label.setText("\n".join(parts))
         self._last_cmd_label.setVisible(True)
+        self._highlight_current_command(cmd_text.strip())
+
+    def _highlight_current_command(self, cmd_text: str) -> None:
+        """Highlight the queue row whose command matches cmd_text."""
+        for item in self._items:
+            item.set_highlighted(item.command_text() == cmd_text)
 
     def load_pipeline(self, specs: list[CommandSpec]) -> None:
         """Populate the queue with CommandSpec objects."""
@@ -1075,6 +1129,33 @@ class CommandQueueWidget(QWidget):
         item.run_in_terminal_requested.connect(signal_bus.run_command_in_terminal)
         item.run_in_terminal_requested.connect(self._on_run_command)
         return item
+
+    # ──────────────────────────────────────── Quick-save helpers ─────── #
+
+    def get_template_label_text(self) -> str:
+        """Return the current template label text (strip leading icon/space)."""
+        text = self._template_label.text().strip()
+        # Remove leading emoji + space (e.g. "  📋  Brief — Novo Projeto")
+        for prefix in ("📋", "🔎"):
+            if prefix in text:
+                text = text.split(prefix, 1)[-1].strip()
+        return text
+
+    def get_last_command_text(self) -> str:
+        """Return the current last-command label text."""
+        return self._last_cmd_label.text().strip()
+
+    def find_last_valid_command(self) -> str:
+        """Walk the queue backwards from the last executed item to find
+        a command that is not /model or /clear."""
+        _skip = ("/model", "/clear")
+        for item in reversed(self._items):
+            if not item.is_pending_run():
+                name = item.get_spec().name.strip()
+                name_lower = name.lower()
+                if not any(name_lower.startswith(s) for s in _skip):
+                    return name
+        return ""
 
     # ──────────────────────────────────────── Queue state persistence ─ #
 
@@ -1149,6 +1230,11 @@ class CommandQueueWidget(QWidget):
         return True
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        # Reset input method on notepad focus to prevent rare IME freeze
+        if obj is self._notepad_edit and event.type() == QEvent.Type.FocusIn:
+            im = QApplication.inputMethod()
+            if im is not None:
+                im.reset()
         if obj is self._items_container:
             if event.type() == QEvent.Type.DragEnter:
                 if event.mimeData().hasText():
@@ -1452,12 +1538,12 @@ class CommandQueueWidget(QWidget):
             channel,
             f"\n\x1b[32m$\x1b[0m {plan.display_command}\n",
         )
-        if channel == "interactive":
+        signal_bus.focus_interactive_terminal.emit()
+        if spec.interaction_type == InteractionType.INTERACTIVE:
             signal_bus.toast_requested.emit(
                 f"Autocast: aguardando {spec.name} (interativo)",
                 "info",
             )
-            signal_bus.focus_interactive_terminal.emit()
 
         runner.start_process(
             argv=list(plan.argv),

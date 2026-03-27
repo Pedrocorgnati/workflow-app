@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QIcon, QKeySequence
@@ -60,6 +61,11 @@ from workflow_app.widgets.version_update_banner import VersionUpdateBanner
 
 logger = logging.getLogger(__name__)
 
+# ── Directory shortcuts for the Workspace terminal label bar ─────────────── #
+# main_window.py lives at: .../systemForge/ai-forge/workflow-app/src/workflow_app/
+_WORKFLOW_APP_DIR = str(Path(__file__).resolve().parents[2])  # .../ai-forge/workflow-app
+_SYSTEMFORGE_DIR  = str(Path(__file__).resolve().parents[4])  # .../systemForge
+
 
 class MainWindow(QMainWindow):
     """Main application window."""
@@ -78,6 +84,7 @@ class MainWindow(QMainWindow):
         # Pipeline execution state (RF03)
         self._pipeline_manager = None
         self._testid_overlays: list = []
+        self._datatest_active = False
 
         self._settings = QSettings("SystemForge", "WorkflowApp")
         self._setup_ui()
@@ -107,6 +114,7 @@ class MainWindow(QMainWindow):
         # MetricsBar (48px)
         self._metrics_bar = MetricsBar(parent=self)
         root_layout.addWidget(self._metrics_bar)
+        root_layout.addSpacing(5)
 
         # ConfigBar (hidden — project selector moved into MetricsBar)
         self._config_bar = ConfigBar(parent=self)
@@ -143,37 +151,46 @@ class MainWindow(QMainWindow):
         # Layout toggle button (row/column) + collapse chevron
         from PySide6.QtWidgets import QHBoxLayout as _HBox
         toggle_bar = QWidget()
-        toggle_bar.setFixedHeight(22)
+        toggle_bar.setFixedHeight(32)
         toggle_bar.setStyleSheet("background-color: #1C1C1F; border-bottom: 1px solid #27272A;")
         toggle_layout = _HBox(toggle_bar)
-        toggle_layout.setContentsMargins(4, 1, 4, 1)
-        toggle_layout.setSpacing(2)
+        toggle_layout.setContentsMargins(6, 2, 6, 2)
+        toggle_layout.setSpacing(6)
         toggle_layout.addStretch()
-        self._layout_toggle_btn = QPushButton("\u2B95 \u25A1\u25A1")  # ⮕ □□ (side by side)
-        self._layout_toggle_btn.setToolTip("Alternar layout: colunas / linhas")
-        self._layout_toggle_btn.setFixedSize(36, 18)
-        self._layout_toggle_btn.setStyleSheet(
-            "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
-            "  border: 1px solid #52525B; border-radius: 3px;"
-            "  font-size: 10px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
-            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
+
+        _TOGGLE_BTN_STYLE = (
+            "QPushButton { background-color: #27272A; color: #D4D4D8;"
+            "  border: 1px solid #52525B; border-radius: 4px;"
+            "  font-size: 15px; padding: 2px 0; }"
+            "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA;"
+            "  border-color: #71717A; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
+            "  border-color: #FBBF24; }"
         )
+
+        self._layout_toggle_btn = QPushButton("\u2B95")  # ⮕ side by side
+        self._layout_toggle_btn.setToolTip("Alternar layout: colunas / linhas")
+        self._layout_toggle_btn.setFixedSize(32, 26)
+        self._layout_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._layout_toggle_btn.setStyleSheet(_TOGGLE_BTN_STYLE)
         self._layout_toggle_btn.clicked.connect(self._toggle_terminal_layout)
         self._terminal_is_vertical = True  # starts as vertical (column)
         toggle_layout.addWidget(self._layout_toggle_btn)
 
         # Collapse chevron for autocast terminal
         self._autocast_collapsed = False
-        self._collapse_chevron = QPushButton("\u25BE")  # ▾ expanded
-        self._collapse_chevron.setToolTip("Colapsar terminal Autocast")
-        self._collapse_chevron.setFixedSize(22, 18)
+        self._collapse_chevron = QPushButton("\u25BC")  # ▼ expanded
+        self._collapse_chevron.setToolTip("Colapsar terminal Workspace")
+        self._collapse_chevron.setFixedSize(32, 26)
+        self._collapse_chevron.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_chevron.setStyleSheet(
-            "QPushButton { background-color: #3F3F46; color: #A78BFA;"
-            "  border: 1px solid #52525B; border-radius: 3px;"
-            "  font-size: 10px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
-            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
+            "QPushButton { background-color: #27272A; color: #C4B5FD;"
+            "  border: 1px solid #52525B; border-radius: 4px;"
+            "  font-size: 15px; padding: 2px 0; }"
+            "QPushButton:hover { background-color: #3F3F46; color: #E9DDFF;"
+            "  border-color: #71717A; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
+            "  border-color: #FBBF24; }"
         )
         self._collapse_chevron.clicked.connect(self._toggle_autocast_collapse)
         toggle_layout.addWidget(self._collapse_chevron)
@@ -207,20 +224,14 @@ class MainWindow(QMainWindow):
         interactive_layout.addWidget(self._output_panel, stretch=1)
         self._terminal_splitter.addWidget(self._interactive_wrapper)
 
-        # Bottom/Right: Autocast terminal (shows -p command output)
+        # Bottom/Right: Workspace terminal (shows -p command output)
         self._autocast_wrapper = QWidget()
         autocast_layout = QVBoxLayout(self._autocast_wrapper)
         autocast_layout.setContentsMargins(0, 0, 0, 0)
         autocast_layout.setSpacing(0)
-        autocast_label = QLabel(" AUTOCAST")
-        autocast_label.setFixedHeight(20)
-        autocast_label.setStyleSheet(
-            "QLabel { background-color: #1E1B4B; color: #A78BFA;"
-            "  font-size: 10px; font-weight: 700; padding-left: 6px; }"
-        )
-        autocast_layout.addWidget(autocast_label)
+        autocast_layout.addWidget(self._build_workspace_label_bar())
         self._autocast_panel = OutputPanel(parent=self._autocast_wrapper, autocast_mode=True)
-        self._autocast_panel.setProperty("testid", "terminal-autocast")
+        self._autocast_panel.setProperty("testid", "terminal-workspace")
         autocast_layout.addWidget(self._autocast_panel, stretch=1)
         self._terminal_splitter.addWidget(self._autocast_wrapper)
 
@@ -256,6 +267,66 @@ class MainWindow(QMainWindow):
 
         # Toast notification (floating, stacked, level-dependent duration)
         self._toast_notifier = ToastNotifier(central)
+
+    def _build_workspace_label_bar(self) -> QWidget:
+        """20px label bar for the Workspace terminal with three cd shortcut buttons.
+
+        Buttons: WORKSPACE (purple) · SystemForge (blue) · Workflow-app (teal).
+        Each sends a `cd <absolute-path>` to the interactive terminal.
+        """
+        from PySide6.QtWidgets import QHBoxLayout
+
+        bar = QWidget()
+        bar.setFixedHeight(20)
+        bar.setStyleSheet("background-color: #1E1B4B;")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(6, 0, 4, 0)
+        lay.setSpacing(0)
+
+        def _btn(label: str, color: str) -> QPushButton:
+            b = QPushButton(label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton {{ background: transparent; border: none; color: {color};"
+                f"  font-size: 10px; font-weight: 700; padding: 0 3px; }}"
+                f"QPushButton:hover {{ color: #FFFFFF; background: transparent; }}"
+            )
+            return b
+
+        # ── WORKSPACE — cd to project workspace_root ──────────────────── #
+        btn_ws = _btn("WORKSPACE", "#A78BFA")
+        btn_ws.setToolTip("cd → workspace do projeto carregado")
+
+        def _on_workspace() -> None:
+            if not app_state.has_config or not app_state.config:
+                signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+                return
+            path = str(app_state.config.project_dir / app_state.config.workspace_root)
+            signal_bus.run_command_in_terminal.emit(f"cd {path}")
+
+        btn_ws.clicked.connect(_on_workspace)
+
+        # ── SystemForge — cd to monorepo root ─────────────────────────── #
+        btn_sf = _btn("SystemForge", "#60A5FA")
+        btn_sf.setToolTip(f"cd → {_SYSTEMFORGE_DIR}")
+        btn_sf.clicked.connect(
+            lambda: signal_bus.run_command_in_terminal.emit(f"cd {_SYSTEMFORGE_DIR}")
+        )
+
+        # ── Workflow-app — cd to ai-forge/workflow-app ────────────────── #
+        btn_wa = _btn("Workflow-app", "#2DD4BF")
+        btn_wa.setToolTip(f"cd → {_WORKFLOW_APP_DIR}")
+        btn_wa.clicked.connect(
+            lambda: signal_bus.run_command_in_terminal.emit(f"cd {_WORKFLOW_APP_DIR}")
+        )
+
+        lay.addWidget(btn_ws)
+        lay.addSpacing(6)
+        lay.addWidget(btn_sf)
+        lay.addSpacing(6)
+        lay.addWidget(btn_wa)
+        lay.addStretch()
+        return bar
 
     def _build_history_panel(self) -> QWidget:
         """Cria o painel de histórico: FilterPanel + lista + detalhe.
@@ -319,12 +390,12 @@ class MainWindow(QMainWindow):
         """Toggle terminal splitter between vertical (column) and horizontal (row)."""
         if self._terminal_is_vertical:
             self._terminal_splitter.setOrientation(Qt.Orientation.Horizontal)
-            self._layout_toggle_btn.setText("\u2B07 \u25A0\u25A0")  # ⬇ ■■ (stacked)
+            self._layout_toggle_btn.setText("\u2B07")  # ⬇ stacked
             self._layout_toggle_btn.setToolTip("Layout: lado a lado. Clique para empilhar")
             self._terminal_is_vertical = False
         else:
             self._terminal_splitter.setOrientation(Qt.Orientation.Vertical)
-            self._layout_toggle_btn.setText("\u2B95 \u25A1\u25A1")  # ⮕ □□ (side by side)
+            self._layout_toggle_btn.setText("\u2B95")  # ⮕ side by side
             self._layout_toggle_btn.setToolTip("Layout: empilhado. Clique para lado a lado")
             self._terminal_is_vertical = True
         self._update_collapse_chevron()
@@ -338,20 +409,20 @@ class MainWindow(QMainWindow):
             else:
                 self._terminal_splitter.setSizes([350, 350])
             self._autocast_collapsed = False
-            self._collapse_chevron.setToolTip("Colapsar terminal Autocast")
+            self._collapse_chevron.setToolTip("Colapsar terminal Workspace")
         else:
             self._saved_splitter_sizes = self._terminal_splitter.sizes()
             self._autocast_wrapper.hide()
             self._autocast_collapsed = True
-            self._collapse_chevron.setToolTip("Expandir terminal Autocast")
+            self._collapse_chevron.setToolTip("Expandir terminal Workspace")
         self._update_collapse_chevron()
 
     def _update_collapse_chevron(self) -> None:
         """Update chevron icon based on collapsed state."""
         if self._autocast_collapsed:
-            self._collapse_chevron.setText("\u25B8")  # ▸ collapsed
+            self._collapse_chevron.setText("\u25B6")  # ▶ collapsed
         else:
-            self._collapse_chevron.setText("\u25BE")  # ▾ expanded
+            self._collapse_chevron.setText("\u25BC")  # ▼ expanded
 
     def _connect_signals(self) -> None:
         self._command_queue.new_pipeline_requested.connect(self._open_pipeline_creator)
@@ -513,6 +584,8 @@ class MainWindow(QMainWindow):
     def _on_view_changed(self, index: int) -> None:
         """Switch the main view stack (0=Workflow, 1=Comandos, 2=Toolbox)."""
         self._view_stack.setCurrentIndex(index)
+        if self._datatest_active:
+            self._show_testid_overlays()
 
     def _switch_to_output_tab(self) -> None:
         """Switch to Workflow view and activate the Output tab."""
@@ -543,6 +616,7 @@ class MainWindow(QMainWindow):
 
     def _on_datatest_toggled(self, enabled: bool) -> None:
         """Toggle data-testid overlay display on all widgets."""
+        self._datatest_active = enabled
         if enabled:
             self._show_testid_overlays()
         else:
@@ -565,12 +639,12 @@ class MainWindow(QMainWindow):
 
         _STYLE_NORMAL = (
             "background-color: rgba(220, 38, 38, 0.9); color: white;"
-            " font-size: 11px; font-weight: 700; padding: 2px 6px;"
+            " font-size: 11px; font-weight: 700; padding: 3px 6px;"
             " border-radius: 3px; border: none;"
         )
         _STYLE_COPIED = (
             "background-color: rgba(34, 197, 94, 0.9); color: white;"
-            " font-size: 11px; font-weight: 700; padding: 2px 6px;"
+            " font-size: 11px; font-weight: 700; padding: 3px 6px;"
             " border-radius: 3px; border: none;"
         )
 
@@ -586,14 +660,18 @@ class MainWindow(QMainWindow):
         for widget in scan_widgets:
             testid = widget.property("testid")
             if testid and not widget.property("_is_testid_overlay"):
+                # Skip widgets that aren't visible on screen
+                if not widget.isVisible() or not widget.isVisibleTo(central):
+                    continue
                 testid_str = str(testid)
 
                 # Map widget position to central widget coordinates
+                # Offset badges slightly above the target widget
                 try:
                     pos = widget.mapTo(central, QPoint(0, 0))
                 except RuntimeError:
                     continue
-                x, y = pos.x(), pos.y()
+                x, y = pos.x(), pos.y() - 14
 
                 # Offset if overlapping with existing overlay
                 for ux, uy, uw, uh in used_positions:
@@ -872,7 +950,12 @@ class MainWindow(QMainWindow):
             pass  # resume check is non-critical; never block startup
 
     def _on_save_queue_state(self) -> None:
-        """Salva o estado atual da fila no JSON do projeto aberto."""
+        """Salva template-label + last-command no JSON do projeto aberto.
+
+        Saves only the current values of queue-template-label and queue-last-command.
+        For queue-last-command, if the value is /model or /clear, walks backwards
+        through the queue to find the previous non-model/non-clear command.
+        """
         import json
         from datetime import datetime
         from pathlib import Path
@@ -881,10 +964,19 @@ class MainWindow(QMainWindow):
             self._show_toast("Nenhum projeto carregado.", "warning")
             return
 
-        queue_state = self._command_queue.get_queue_state()
-        if not queue_state:
-            self._show_toast("Fila vazia, nada a salvar.", "warning")
+        template_label = self._command_queue.get_template_label_text()
+        last_command = self._command_queue.get_last_command_text()
+
+        if not template_label and not last_command:
+            self._show_toast("Nada a salvar (template e último comando vazios).", "warning")
             return
+
+        # If last_command is /model or /clear, find the previous valid command
+        _skip = ("/model", "/clear")
+        if last_command:
+            cmd_lower = last_command.strip().split("\n")[0].strip().lower()
+            if any(cmd_lower.startswith(s) for s in _skip) or cmd_lower == "/clear":
+                last_command = self._command_queue.find_last_valid_command()
 
         config_path = Path(app_state.config.config_path)
         try:
@@ -896,15 +988,16 @@ class MainWindow(QMainWindow):
 
         project_data["queue_state"] = {
             "saved_at": datetime.now().isoformat(timespec="seconds"),
-            "commands": queue_state,
+            "template_label": template_label,
+            "last_command": last_command,
         }
 
         try:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(project_data, f, ensure_ascii=False, indent=2)
-            self._show_toast(f"Fila salva: {len(queue_state)} comandos.", "success")
+            self._show_toast(f"Salvo: {template_label} | {last_command}", "success")
         except Exception as exc:
-            self._show_toast(f"Erro ao salvar fila: {exc}", "error")
+            self._show_toast(f"Erro ao salvar: {exc}", "error")
 
     def _restore_queue_state_from_config(self, config_path: str) -> None:
         """Se o JSON do projeto tiver queue_state, restaura a fila silenciosamente."""

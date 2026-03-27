@@ -78,7 +78,13 @@ def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
     pos = 1
     prev_name = ""
     for i, spec in enumerate(specs):
-        if i > 0 and spec.interaction_type == _A and not _same_context_group(prev_name, spec.name):
+        if (
+            i > 0
+            and spec.interaction_type == _A
+            and prev_name != "/clear"
+            and spec.name != "/clear"
+            and not _same_context_group(prev_name, spec.name)
+        ):
             result.append(CommandSpec(
                 name="/clear",
                 interaction_type=_A,
@@ -100,12 +106,14 @@ def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
 # ─── JSON: apenas /project-json ─────────────────────────────────────────────── #
 
 TEMPLATE_JSON: list[CommandSpec] = [
+    _spec("/clear",        _S, _A, 0),
     _spec("/project-json", _S, _I, 1),
 ]
 
 # ─── Brief: Novo Projeto (from z-templates/start.md [new]) ──────────────────── #
 
 TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                     _S, _A,  0),
     _spec("/first-brief-create",        _O, _I,  1),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",            _O, _I,  3),
@@ -143,6 +151,7 @@ TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
 # ─── Brief: Feature (from z-templates/start.md [feature]) ───────────────────── #
 
 TEMPLATE_BRIEF_FEATURE: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                     _S, _A,  0),
     _spec("/feature-brief-create",      _O, _I,  1),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",            _O, _I,  3),
@@ -204,6 +213,7 @@ TEMPLATE_DEPLOY: list[CommandSpec] = _inject_clears([
 # NOTE: NO /clear injected — daily commands flow context between steps by design.
 
 TEMPLATE_DAILY: list[CommandSpec] = [
+    _spec("/clear",          _S, _A, 0),
     _spec("/daily:scan",     _S, _A, 1),
     _spec("/daily:plan",     _S, _A, 2),
     _spec("/daily:do",       _S, _A, 3),
@@ -214,6 +224,7 @@ TEMPLATE_DAILY: list[CommandSpec] = [
 # ─── Marketing (from z-templates/mkt.md) ──────────────────────────────────────── #
 
 TEMPLATE_MKT: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                 _S, _A, 0),
     _spec("/docs-create",           _S, _A, 1),
     _spec("/mkt:portfolio-add",     _H, _A, 2),
     _spec("/mkt:linkedin-mkt",      _S, _A, 3),
@@ -225,6 +236,7 @@ TEMPLATE_MKT: list[CommandSpec] = _inject_clears([
 # ─── Business (from z-templates/business.md) ──────────────────────────────────── #
 
 TEMPLATE_BUSINESS: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                          _S, _A, 0),
     _spec("/business:product-brief-create",  _S, _A, 1),
     _spec("/business:sow-create",            _O, _I, 2),
     _spec("/business:create-budget",         _S, _I, 3),
@@ -392,6 +404,7 @@ TEMPLATE_QA_REACT_NATIVE: list[CommandSpec] = _build_qa_template(_QA_REACT_NATIV
 # Full flow: feature brief (sem break-intake) → micro-arch WBS → review
 
 TEMPLATE_MICRO_ARCHITECTURE: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                              _S, _A, 0),
     _spec("/feature-brief-create",               _O, _I, 1),
     _spec("/intake:analyze",                     _S, _A, 2),
     _spec("/intake:enhance",                     _O, _I, 3),
@@ -404,6 +417,7 @@ TEMPLATE_MICRO_ARCHITECTURE: list[CommandSpec] = _inject_clears([
 # ─── Autocast Test (F4b/Daily — validação do ciclo de autocast) ─────────────── #
 
 TEMPLATE_AUTOCAST_TEST: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                     _S, _A, 0),
     _spec("/test-autoflow-auto",        _S, _A, 1),
     _spec("/test-autoflow-auto",        _S, _A, 2),
     _spec("/test-autoflow-interactive", _S, _I, 3),
@@ -418,6 +432,7 @@ TEMPLATE_AUTOCAST_TEST: list[CommandSpec] = _inject_clears([
 # Designed for /loop button — cycles continuously until stopped.
 
 TEMPLATE_AUTO_IMPROOVE_LOOP: list[CommandSpec] = [
+    _spec("/clear",               _O, _A,  0),
     _spec("/model Opus",          _O, _A,  1),
     _spec("/clear",               _O, _A,  2),
     _spec("/auto-improove:cmd",   _O, _A,  3),
@@ -430,6 +445,28 @@ TEMPLATE_AUTO_IMPROOVE_LOOP: list[CommandSpec] = [
     _spec("/clear",               _O, _A, 10),
     _spec("/auto-improove:cmd",   _O, _A, 11),
 ]
+
+# ─── Blog SEO (INIT flow from .claude/commands/blog/) ────────────────────────── #
+# Full INIT pipeline: strategy → keywords → clusters → articles → deploy.
+# /clear between independent steps; /model inserted by _load_quick_template.
+
+TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                    _S, _A,  0),
+    _spec("/blog:init-strategy",       _O, _A,  1),
+    _spec("/blog:discover-intents",    _O, _A,  2),
+    _spec("/blog:expand-keywords",     _O, _A,  3),
+    _spec("/blog:cluster-keywords",    _O, _A,  4),
+    _spec("/blog:prioritize-topics",   _S, _A,  5),
+    _spec("/blog:deduplicate-topics",  _S, _A,  6),
+    _spec("/blog:generate-briefs",     _O, _A,  7),
+    _spec("/blog:write-articles",      _O, _A,  8),
+    _spec("/blog:review-seo",          _S, _A,  9),
+    _spec("/blog:quality-gate",        _S, _A, 10),
+    _spec("/blog:build-internal-links", _S, _A, 11),
+    _spec("/blog:build-metadata",      _H, _A, 12),
+    _spec("/blog:schedule-batch",      _H, _A, 13),
+    _spec("/blog:deploy",              _S, _A, 14),
+])
 
 # ─── Map for QA stack picker dialog ──────────────────────────────────────────── #
 

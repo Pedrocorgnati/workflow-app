@@ -105,7 +105,6 @@ def build_launch_plan(spec: CommandSpec, instance_name: str) -> AutocastLaunchPl
             model_flag,
         )
         command_parts.extend([spec.name, *config_args, "--model", model_flag])
-        channel = "interactive"
     else:
         prompt = " ".join(part for part in (spec.name, spec.config_path) if part).strip()
         argv = (
@@ -117,7 +116,9 @@ def build_launch_plan(spec: CommandSpec, instance_name: str) -> AutocastLaunchPl
             model_flag,
         )
         command_parts.extend(["-p", prompt, "--model", model_flag])
-        channel = "autocast"
+
+    # All autocast commands run in the interactive terminal channel
+    channel = "interactive"
 
     return AutocastLaunchPlan(
         argv=argv,

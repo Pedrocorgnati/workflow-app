@@ -26,7 +26,7 @@ from workflow_app.templates.template_manager import TemplateManager
 
 
 def test_eight_factory_templates_defined():
-    assert len(FACTORY_TEMPLATES) == 9
+    assert len(FACTORY_TEMPLATES) == 10
 
 
 def test_all_have_name_description_commands():
@@ -126,7 +126,7 @@ def test_seed_creates_8_templates(tmp_db_manager):
     tm = TemplateManager(database_manager=tmp_db_manager)
     templates = tm.list_templates()
     factory_templates = [t for t in templates if t.is_factory]
-    assert len(factory_templates) == 9
+    assert len(factory_templates) == 10
 
 
 def test_seed_is_idempotent(tmp_db_manager):
@@ -134,7 +134,7 @@ def test_seed_is_idempotent(tmp_db_manager):
     seed_factory_templates(tmp_db_manager, sha256="test_hash")
     tm = TemplateManager(database_manager=tmp_db_manager)
     factory_templates = [t for t in tm.list_templates() if t.is_factory]
-    assert len(factory_templates) == 9
+    assert len(factory_templates) == 10
 
 
 def test_seed_brief_new_loads_with_commands(tmp_db_manager):

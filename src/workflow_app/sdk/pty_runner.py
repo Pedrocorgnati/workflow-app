@@ -16,6 +16,7 @@ Design:
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import logging
 import os
@@ -94,6 +95,7 @@ class PtyRunner(QObject):
         self._notifier: QSocketNotifier | None = None
         self._cols = cols
         self._rows = rows
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(100)
@@ -159,9 +161,12 @@ class PtyRunner(QObject):
             return
 
         self._command_name = command_name
+        # Reset incremental decoder for each new process
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
         env["COLUMNS"] = str(self._cols)
         env["LINES"] = str(self._rows)
         if env_overrides:
@@ -265,17 +270,29 @@ class PtyRunner(QObject):
     # ── Private ───────────────────────────────────────────────────────── #
 
     def _read_output(self) -> None:
-        """Called by QSocketNotifier when data is available on master fd."""
+        """Called by QSocketNotifier when data is available on master fd.
+
+        Coalesces multiple reads into one signal emission for better throughput.
+        Uses incremental UTF-8 decoder to handle multi-byte chars split across reads.
+        """
         if self._master_fd is None:
             return
+        chunks: list[str] = []
+        total = 0
         try:
-            data = os.read(self._master_fd, 4096)
-            text = data.decode("utf-8", errors="replace")
-            if text:
-                self.output_received.emit(text)
+            while total < 262144:  # 256KB coalesce limit
+                data = os.read(self._master_fd, 65536)
+                if not data:
+                    break
+                text = self._utf8_decoder.decode(data)
+                if text:
+                    chunks.append(text)
+                total += len(data)
         except OSError:
             # EIO when slave closes (process exited), EAGAIN when no data
             pass
+        if chunks:
+            self.output_received.emit("".join(chunks))
 
     def _check_exit(self) -> None:
         """QTimer callback: detect when the subprocess exits."""
@@ -291,11 +308,12 @@ class PtyRunner(QObject):
         if self._master_fd is not None:
             try:
                 while True:
-                    data = os.read(self._master_fd, 4096)
+                    data = os.read(self._master_fd, 65536)
                     if not data:
                         break
-                    text = data.decode("utf-8", errors="replace")
-                    self.output_received.emit(text)
+                    text = self._utf8_decoder.decode(data)
+                    if text:
+                        self.output_received.emit(text)
             except OSError:
                 pass
 

@@ -1056,6 +1056,7 @@ class TemplateListPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("testid", "tpl-saved-panel")
         self._cards: list[_TemplateCard] = []
         self._show_model = False
         self._show_clear = False
@@ -1068,6 +1069,7 @@ class TemplateListPanel(QWidget):
         root.setSpacing(0)
 
         hdr = QLabel("  TEMPLATES SALVOS")
+        hdr.setProperty("testid", "tpl-saved-header")
         hdr.setFixedHeight(28)
         hdr.setStyleSheet(
             f"background-color: {_SURFACE}; color: {_MUTED}; font-size: 11px;"
@@ -1120,6 +1122,7 @@ class TemplateListPanel(QWidget):
         scroll.setStyleSheet(f"border: none; background-color: {_DARK};")
 
         self._container = QWidget()
+        self._container.setProperty("testid", "tpl-saved-list")
         self._container.setStyleSheet(f"background-color: {_DARK};")
         self._list_layout = QVBoxLayout(self._container)
         self._list_layout.setContentsMargins(0, 0, 0, 0)

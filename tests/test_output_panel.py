@@ -4,7 +4,7 @@ Tests for OutputPanel public API — pyte/PersistentShell architecture.
 Covers:
   - append_output adds text to the terminal widget
   - clear() resets the terminal display
-  - set_max_lines updates _max_lines and document block limit
+  - set_max_lines updates _max_lines
   - set_interactive_mode is a no-op (input handled via terminal keyboard)
   - set_current_worker stores the runner reference
   - _on_pipeline_started / _on_pipeline_completed do not crash
@@ -45,12 +45,14 @@ class TestOutputPanelAppendOutput:
     def test_append_shows_text(self, panel, qtbot):
         """append_output inserts text into the terminal widget."""
         panel.append_output("Hello World\n")
+        panel._flush_pyte()
         assert "Hello World" in panel._terminal.toPlainText()
 
     def test_append_multiple_chunks(self, panel, qtbot):
         """Multiple append_output calls accumulate text."""
         panel.append_output("line-A\n")
         panel.append_output("line-B\n")
+        panel._flush_pyte()
         text = panel._terminal.toPlainText()
         assert "line-A" in text
         assert "line-B" in text
@@ -64,11 +66,13 @@ class TestOutputPanelClear:
     def test_clear_does_not_crash(self, panel):
         """clear() runs without errors."""
         panel.append_output("some text\n")
+        panel._flush_pyte()
         panel.clear()
 
     def test_clear_empties_terminal(self, panel):
-        """clear() empties the terminal QTextEdit."""
+        """clear() empties the terminal."""
         panel.append_output("some output\n")
+        panel._flush_pyte()
         panel.clear()
         assert panel._terminal.toPlainText() == ""
 
@@ -78,11 +82,6 @@ class TestOutputPanelSetMaxLines:
         """set_max_lines() updates _max_lines."""
         panel.set_max_lines(500)
         assert panel._max_lines == 500
-
-    def test_set_max_lines_updates_document_limit(self, panel):
-        """set_max_lines() propagates to document().maximumBlockCount()."""
-        panel.set_max_lines(200)
-        assert panel._terminal.document().maximumBlockCount() == 200
 
 
 class TestOutputPanelInteractiveMode:

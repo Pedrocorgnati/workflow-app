@@ -406,6 +406,7 @@ class TemplateBuilderWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("testid", "template-builder")
         self._selected: list[_SelectedRow] = []
         self._setup_ui()
 
@@ -441,12 +442,14 @@ class TemplateBuilderWidget(QWidget):
 
     def _build_catalog_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setProperty("testid", "tpl-catalog-panel")
         panel.setStyleSheet("background-color: #18181B;")
         cl = QVBoxLayout(panel)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
 
         hdr = QLabel("  CATÁLOGO DE COMANDOS")
+        hdr.setProperty("testid", "tpl-catalog-header")
         hdr.setFixedHeight(28)
         hdr.setStyleSheet(
             "background-color: #27272A; color: #71717A; font-size: 11px;"
@@ -476,6 +479,7 @@ class TemplateBuilderWidget(QWidget):
         catalog_scroll.setStyleSheet("border: none; background-color: #18181B;")
 
         self._catalog_container = QWidget()
+        self._catalog_container.setProperty("testid", "tpl-catalog-list")
         self._catalog_container.setStyleSheet("background-color: #18181B;")
         self._catalog_layout = QVBoxLayout(self._catalog_container)
         self._catalog_layout.setContentsMargins(0, 0, 0, 0)
@@ -535,6 +539,7 @@ class TemplateBuilderWidget(QWidget):
 
     def _build_new_template_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setProperty("testid", "tpl-new-panel")
         panel.setStyleSheet("background-color: #18181B;")
         rl = QVBoxLayout(panel)
         rl.setContentsMargins(0, 0, 0, 0)
@@ -555,6 +560,7 @@ class TemplateBuilderWidget(QWidget):
         tl.addWidget(name_lbl)
 
         self._name_input = QLineEdit()
+        self._name_input.setProperty("testid", "tpl-name-input")
         self._name_input.setPlaceholderText("Nome do template...")
         self._name_input.setStyleSheet(
             "background-color: #3F3F46; color: #FAFAFA; border: 1px solid #52525B;"
@@ -564,6 +570,7 @@ class TemplateBuilderWidget(QWidget):
         tl.addWidget(self._name_input, stretch=1)
 
         self._save_btn = QPushButton("Salvar")
+        self._save_btn.setProperty("testid", "tpl-btn-save")
         self._save_btn.setFixedHeight(28)
         self._save_btn.setStyleSheet(
             "QPushButton { background: #78350F; color: #FBBF24; border: 1px solid #FBBF24;"
@@ -574,6 +581,7 @@ class TemplateBuilderWidget(QWidget):
         tl.addWidget(self._save_btn)
 
         self._load_btn = QPushButton("→ Fila")
+        self._load_btn.setProperty("testid", "tpl-btn-load-queue")
         self._load_btn.setFixedHeight(28)
         self._load_btn.setStyleSheet(
             "QPushButton { background: #166534; color: #FAFAFA; border: none;"
@@ -610,6 +618,7 @@ class TemplateBuilderWidget(QWidget):
         selected_scroll.setStyleSheet("border: none; background-color: #18181B;")
 
         self._selected_container = QWidget()
+        self._selected_container.setProperty("testid", "tpl-selected-list")
         self._selected_container.setStyleSheet("background-color: #18181B;")
         self._selected_layout = QVBoxLayout(self._selected_container)
         self._selected_layout.setContentsMargins(0, 0, 0, 0)

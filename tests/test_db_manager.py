@@ -13,7 +13,7 @@ class TestDatabaseManagerSetup:
         with tmp_db_manager.get_session() as session:
             # Should not raise — factory templates are seeded automatically
             result = session.query(Template).all()
-            assert len(result) == 9  # 9 factory templates seeded
+            assert len(result) == 10  # 10 factory templates seeded
 
     def test_setup_idempotent(self, tmp_path):
         """Calling setup() twice must not raise."""
