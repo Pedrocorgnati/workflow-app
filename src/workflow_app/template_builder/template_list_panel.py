@@ -84,8 +84,8 @@ _INTERACTIVE_CMDS = frozenset({
     "/notification-spec-create", "/analytics-spec-create", "/i18n-spec-create",
     "/privacy-assessment-create",
     # F3 — Optimization (selection interviews)
-    "/create-scaffolds", "/create-blueprints", "/create-guardrails",
-    "/create-integrations",
+    "/optimize:scaffolds", "/optimize:blueprints", "/optimize:guardrails",
+    "/optimize:integrations",
     # F4 — WBS (genuine interviews)
     "/modules:create-core", "/modules:create-variants",
     "/rollout-strategy-create",

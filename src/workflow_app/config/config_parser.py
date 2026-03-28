@@ -34,6 +34,7 @@ class PipelineConfig:
     docs_root: str                 # onde ficam PRD.md, HLD.md, etc.
     wbs_root: str                  # onde ficam os modules/TASKs
     workspace_root: str            # root do código gerado
+    custom_workflow_root: str = "" # onde fica o SPECIFIC-FLOW.json
     language: str = "pt-BR"        # idioma da interface do projeto
     raw: dict = field(default_factory=dict, repr=False)  # JSON original completo
 
@@ -87,12 +88,18 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root = bf.get("docs_root", "")
         wbs_root = bf.get("wbs_root", "")
         workspace_root = bf.get("workspace_root", "")
+        custom_workflow_root = bf.get(
+            "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
+        )
     elif "docs_root" in raw or "wbs_root" in raw:
         # V2 — campos direto no root
         brief_root = raw.get("brief_root", raw.get("docs_root", ""))
         docs_root = raw.get("docs_root", "")
         wbs_root = raw.get("wbs_root", "")
         workspace_root = raw.get("workspace_root", raw.get("output_root", ""))
+        custom_workflow_root = raw.get(
+            "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
+        )
     elif "output_root" in raw:
         # V1 — apenas output_root como string
         output_root = str(raw["output_root"])
@@ -100,6 +107,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root = f"{output_root}/docs"
         wbs_root = f"{output_root}/wbs"
         workspace_root = f"{output_root}/workspace"
+        custom_workflow_root = f"{wbs_root}/specific-flow"
     else:
         raise ConfigError(
             f"Formato de project.json não reconhecido em {resolved}. "
@@ -128,6 +136,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root=docs_root,
         wbs_root=wbs_root,
         workspace_root=workspace_root,
+        custom_workflow_root=custom_workflow_root,
         language=language,
         raw=raw,
     )

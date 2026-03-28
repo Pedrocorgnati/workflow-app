@@ -45,14 +45,14 @@ def test_brief_new_has_expected_coverage():
     names = [cmd.name for cmd in TEMPLATE_BRIEF_NEW]
     assert len(TEMPLATE_BRIEF_NEW) >= 35
     assert names[0] == "/first-brief-create"
-    assert names[-1] == "/review-optimization"
+    assert names[-1] == "/optimize:review"
 
 
 def test_brief_feature_has_expected_coverage():
     names = [cmd.name for cmd in TEMPLATE_BRIEF_FEATURE]
     assert len(TEMPLATE_BRIEF_FEATURE) >= 25
     assert names[0] == "/feature-brief-create"
-    assert names[-1] == "/review-optimization"
+    assert names[-1] == "/optimize:review"
 
 
 def test_modules_has_expected_coverage():

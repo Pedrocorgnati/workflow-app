@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QWidget,
 )
@@ -141,6 +142,8 @@ class MetricsBar(QWidget):
         self._project_pill.setFixedHeight(28)
         self._project_pill.setStyleSheet(
             "QWidget#ProjectPill { background: transparent; border: 1px solid #22C55E; border-radius: 5px; }"
+            " QWidget#ProjectPill QLabel { border: none; }"
+            " QWidget#ProjectPill QPushButton { border: none; }"
         )
         _pl = QHBoxLayout(self._project_pill)
         _pl.setContentsMargins(10, 0, 6, 0)
@@ -157,15 +160,31 @@ class MetricsBar(QWidget):
         )
         _pl.addWidget(self._project_name_lbl)
         self._proj_x = QPushButton("✕")
-        self._proj_x.setFixedSize(16, 16)
+        self._proj_x.setObjectName("ProjCloseBtn")
+        self._proj_x.setFixedSize(20, 20)
         self._proj_x.setToolTip("Desvincular projeto")
         self._proj_x.setCursor(Qt.CursorShape.PointingHandCursor)
         self._proj_x.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #EF4444; font-size: 12px; font-weight: 700; }"
-            "QPushButton:hover { color: #FCA5A5; }"
+            "QPushButton#ProjCloseBtn { background: transparent; border: none;"
+            "  color: #EF4444; font-size: 14px; font-weight: 700;"
+            "  min-width: 20px; min-height: 20px; padding: 0; margin: 0; }"
+            "QPushButton#ProjCloseBtn:hover { color: #FCA5A5; background: rgba(239, 68, 68, 0.15); border-radius: 3px; }"
         )
         self._proj_x.clicked.connect(self._on_proj_unload)
         _pl.addWidget(self._proj_x)
+
+        # ── Feature name input (beside the pill) ─────────────────────── #
+        self._feature_name_input = QLineEdit()
+        self._feature_name_input.setProperty("testid", "metrics-feature-name")
+        self._feature_name_input.setPlaceholderText("feature")
+        self._feature_name_input.setFixedHeight(28)
+        self._feature_name_input.setStyleSheet(
+            "QLineEdit { background: transparent; color: #A78BFA; border: 1px solid #6D28D9;"
+            "  border-radius: 5px; font-size: 11px; font-weight: 600; padding: 0 8px; }"
+            "QLineEdit:focus { border-color: #A78BFA; }"
+        )
+        self._feature_name_input.setReadOnly(True)
+        self._feature_name_input.hide()
 
         self._proj_select_btn = QPushButton("Selecionar Projeto...")
         self._proj_select_btn.setFixedHeight(28)
@@ -177,6 +196,7 @@ class MetricsBar(QWidget):
         self._proj_select_btn.clicked.connect(self._on_proj_select)
 
         layout.addWidget(self._project_pill)
+        layout.addWidget(self._feature_name_input)
         layout.addWidget(self._proj_select_btn)
         layout.addSpacing(4)
         layout.addWidget(self._make_separator())
@@ -507,17 +527,28 @@ class MetricsBar(QWidget):
     def _on_config_loaded_signal(self, _path: str) -> None:
         from workflow_app.config.app_state import app_state
         if app_state.has_config:
-            self._apply_project_loaded(app_state.project_name)
+            raw = app_state.config.raw if app_state.config else {}
+            commercial = raw.get("commercial_name", "") or app_state.project_name
+            feature = raw.get("feature_name", "")
+            self._apply_project_loaded(commercial, feature)
 
-    def _apply_project_loaded(self, name: str) -> None:
+    def _apply_project_loaded(self, name: str, feature_name: str = "") -> None:
         self._project_name_lbl.setText(name)
         self._project_pill.show()
         self._project_name_lbl.show()
         self._proj_x.show()
         self._proj_select_btn.hide()
+        if feature_name:
+            self._feature_name_input.setText(feature_name)
+            self._feature_name_input.show()
+        else:
+            self._feature_name_input.setText("")
+            self._feature_name_input.hide()
 
     def _apply_project_empty(self) -> None:
         self._project_pill.hide()
+        self._feature_name_input.setText("")
+        self._feature_name_input.hide()
         self._proj_select_btn.show()
 
     def _on_tool_use_started(self, tool_name: str) -> None:

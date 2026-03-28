@@ -55,8 +55,8 @@ PIPELINE_COMMANDS: list[_PipelineEntry] = [
     ("/design-create",         ModelName.OPUS,   InteractionType.AUTO,        True,  ["f2"]),
     ("/review-prd-flow",       ModelName.OPUS,   InteractionType.INTERACTIVE, False, ["f2"]),
     # F3 — SystemForge optimization
-    ("/create-scaffolds",      ModelName.OPUS,   InteractionType.AUTO,        True,  ["f3"]),
-    ("/create-blueprints",     ModelName.OPUS,   InteractionType.AUTO,        True,  ["f3"]),
+    ("/optimize:scaffolds",    ModelName.OPUS,   InteractionType.AUTO,        True,  ["f3"]),
+    ("/optimize:blueprints",   ModelName.OPUS,   InteractionType.AUTO,        True,  ["f3"]),
     # F4 — WBS
     ("/auto-flow modules",     ModelName.OPUS,   InteractionType.INTERACTIVE, False, ["f4"]),
     # F5 — WBS+
