@@ -57,6 +57,97 @@ def _discover_modules(wbs_root: str, project_dir: str) -> list[str]:
     ]
 
 
+def build_wbs_create_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
+    """Build the WBS *create* half: F5 auto-flow create per module + validate + reforge.
+
+    Covers the first half of the full WBS pipeline:
+      /clear
+      /auto-flow create {module} × N
+      /validate-pipeline
+      /reforge-pipeline
+    """
+    modules = _discover_modules(wbs_root, project_dir)
+    if not modules:
+        logger.error("No modules found in %s/modules/", wbs_root)
+        return []
+
+    specs: list[CommandSpec] = []
+
+    specs.append(_spec("/clear", _S, 0))
+
+    for module_path in modules:
+        specs.append(_spec(f"/auto-flow create {module_path}", _S, 0))
+    specs.append(_spec("/validate-pipeline", _S, 0))
+    specs.append(_spec("/reforge-pipeline", _O, 0))
+
+    for i, spec in enumerate(specs, start=1):
+        spec.position = i
+
+    logger.info(
+        "WBS create template built: %d commands for %d modules",
+        len(specs), len(modules),
+    )
+    return specs
+
+
+def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
+    """Build the WBS *execute* half: F7 build + per-module execute + F8 complemento.
+
+    Covers the second half of the full WBS pipeline starting from /mobile-first-build.
+    """
+    modules = _discover_modules(wbs_root, project_dir)
+    if not modules:
+        logger.error("No modules found in %s/modules/", wbs_root)
+        return []
+
+    specs: list[CommandSpec] = []
+
+    specs.append(_spec("/clear", _S, 0))
+
+    # ── F7: Build phase ──────────────────────────────────────────────────────
+    specs.append(_spec("/mobile-first-build", _S, 0))
+    specs.append(_spec("/front-end-build", _S, 0))
+    specs.append(_spec("/front-end-review", _S, 0))
+    specs.append(_spec("/data-test-id", _S, 0))
+    specs.append(_spec("/back-end-build", _S, 0))
+    specs.append(_spec("/build-verify", _H, 0))
+    specs.append(_spec("/db-migration-create", _S, 0))
+    specs.append(_spec("/create-assets", _S, 0))
+    specs.append(_spec("/create-mocks", _S, 0))
+    specs.append(_spec("/github-linking", _H, 0))
+    specs.append(_spec("/update-tasks:analyse", _S, 0))
+    specs.append(_spec("/update-tasks:execute", _S, 0))
+
+    # ── F7: Per-module execute + review ──────────────────────────────────────
+    for module_path in modules:
+        specs.append(_spec(f"/auto-flow execute {module_path}", _S, 0))
+        specs.append(_spec(f"/review-executed-module {module_path}", _O, 0))
+
+    # ── F7: Post-execution ───────────────────────────────────────────────────
+    specs.append(_spec("/review-executed-task", _S, 0))
+    specs.append(_spec("/milestone-checklist-review", _S, 0))
+    specs.append(_spec("/reforge:prepare", _S, 0))
+    specs.append(_spec("/reforge:fix", _O, 0))
+
+    # ── F8: Complemento ─────────────────────────────────────────────────────
+    specs.append(_spec("/env-creation", _H, 0))
+    specs.append(_spec("/create-test-user", _H, 0))
+    specs.append(_spec("/seed-data-create", _S, 0))
+    specs.append(_spec("/docker-create", _S, 0))
+    specs.append(_spec("/integration-test-create", _S, 0))
+    specs.append(_spec("/dev-bootstrap-create", _H, 0))
+    specs.append(_spec("/infra-smoke-check", _H, 0))
+
+    for i, spec in enumerate(specs, start=1):
+        spec.position = i
+
+    logger.info(
+        "WBS execute template built: %d commands for %d modules",
+        len(specs), len(modules),
+    )
+    return specs
+
+
 def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     """Build the full WBS execution template dynamically.
 

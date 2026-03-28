@@ -140,8 +140,9 @@ class SignalBus(QObject):
     dry_run_requested = Signal()              # user clicked [▤] Dry Run
 
     # --- Terminal (run command directly in persistent shell) ---
-    run_command_in_terminal = Signal(str)     # command name (sends text + Enter) — interactive terminal
-    paste_text_in_terminal = Signal(str)      # text only (no Enter — inserts inline)
+    run_command_in_terminal = Signal(str)           # sends text + Enter — interactive terminal only
+    run_command_in_workspace_terminal = Signal(str) # sends text + Enter — workspace terminal only
+    paste_text_in_terminal = Signal(str)            # text only (no Enter — inserts inline)
     # Generic PTY sessions bound to a concrete terminal channel.
     # channel values used by the app: "interactive" | "workspace"
     terminal_output_chunk_received = Signal(str, str)  # channel, chunk

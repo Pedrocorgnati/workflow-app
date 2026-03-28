@@ -287,6 +287,10 @@ class CommandQueueWidget(QWidget):
              "queue-btn-modules"),
             ("wbs", "WBS dinâmico — analisa modules existentes e gera tasks",
              self._on_wbs_clicked, "queue-btn-wbs"),
+            ("create", "WBS create — F5: auto-flow create por module + validate + reforge",
+             self._on_wbs_create_clicked, "queue-btn-wbs-create"),
+            ("execute", "WBS execute — F7+F8: build + execute por module + complemento",
+             self._on_wbs_execute_clicked, "queue-btn-wbs-execute"),
             ("qa", "QA + auditoria de stack (selecione a stack no modal)",
              self._on_qa_clicked, "queue-btn-qa"),
             ("deploy", "CI/CD, infra, pre-deploy, SLO, changelog",
@@ -304,7 +308,7 @@ class CommandQueueWidget(QWidget):
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
-            ("delivery", "Delivery por milestone — analisa BUDGET.md",
+            ("delivery", "Delivery por milestone — analisa MILESTONES.md",
              self._on_delivery_clicked, "queue-btn-delivery"),
             ("auto-improove", "/model Opus + 5x /auto-improove:cmd (use com Loop)",
              lambda: self._load_quick_template(TEMPLATE_AUTO_IMPROOVE_LOOP, name="Auto-Improove Loop"),
@@ -1016,6 +1020,60 @@ class CommandQueueWidget(QWidget):
 
         self._load_quick_template(_inject_clears(template), name="WBS")
 
+    def _on_wbs_create_clicked(self) -> None:
+        """Build WBS create template dynamically (F5: auto-flow create + validate + reforge)."""
+        from workflow_app.config.app_state import app_state
+        from workflow_app.templates.quick_templates import _inject_clears
+        from workflow_app.templates.wbs_template_builder import build_wbs_create_template
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar o WBS Create.", "warning"
+            )
+            return
+
+        config = app_state.config
+        template = build_wbs_create_template(
+            wbs_root=config.wbs_root,
+            project_dir=str(config.project_dir),
+        )
+
+        if not template:
+            signal_bus.toast_requested.emit(
+                "Nenhum module encontrado em modules/. Execute /auto-flow modules primeiro.",
+                "warning",
+            )
+            return
+
+        self._load_quick_template(_inject_clears(template), name="WBS Create")
+
+    def _on_wbs_execute_clicked(self) -> None:
+        """Build WBS execute template dynamically (F7+F8: build + execute per module + complemento)."""
+        from workflow_app.config.app_state import app_state
+        from workflow_app.templates.quick_templates import _inject_clears
+        from workflow_app.templates.wbs_template_builder import build_wbs_execute_template
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar o WBS Execute.", "warning"
+            )
+            return
+
+        config = app_state.config
+        template = build_wbs_execute_template(
+            wbs_root=config.wbs_root,
+            project_dir=str(config.project_dir),
+        )
+
+        if not template:
+            signal_bus.toast_requested.emit(
+                "Nenhum module encontrado em modules/. Execute /auto-flow modules primeiro.",
+                "warning",
+            )
+            return
+
+        self._load_quick_template(_inject_clears(template), name="WBS Execute")
+
     def _on_qa_clicked(self) -> None:
         """Open QA modal with stack options."""
         from workflow_app.dialogs.qa_stack_dialog import QAStackDialog
@@ -1025,7 +1083,7 @@ class CommandQueueWidget(QWidget):
             self._load_quick_template(dlg.selected_template, name="QA")
 
     def _on_delivery_clicked(self) -> None:
-        """Build Delivery template dynamically from BUDGET.md milestones."""
+        """Build Delivery template dynamically from MILESTONES.md."""
         from workflow_app.config.app_state import app_state
         from workflow_app.templates.quick_templates import _inject_clears
         from workflow_app.templates.delivery_template_builder import build_delivery_template
@@ -1044,7 +1102,7 @@ class CommandQueueWidget(QWidget):
 
         if not template:
             signal_bus.toast_requested.emit(
-                "Nenhuma milestone encontrada em BUDGET.md. Execute /business:create-budget primeiro.",
+                "Nenhuma milestone encontrada em MILESTONES.md. Execute /modules:build-milestones primeiro.",
                 "warning",
             )
             return

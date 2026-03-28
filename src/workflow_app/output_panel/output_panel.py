@@ -198,7 +198,7 @@ class OutputPanel(QWidget):
             signal_bus.run_command_in_terminal.connect(self._run_shell_command)
             signal_bus.paste_text_in_terminal.connect(self._on_paste_text)
         else:
-            signal_bus.config_loaded.connect(self._on_config_loaded_cd_workspace)
+            signal_bus.run_command_in_workspace_terminal.connect(self._run_shell_command)
 
     # ─────────────────────────────────────────────────────── Key routing ─ #
 
@@ -418,16 +418,6 @@ class OutputPanel(QWidget):
         resize = getattr(worker, "resize", None)
         if callable(resize):
             resize(self._cols, self._rows)
-
-    def _on_config_loaded_cd_workspace(self, _path: str) -> None:
-        """cd to workspace_root when a project config is loaded (workspace terminal only)."""
-        from workflow_app.config.app_state import app_state  # noqa: PLC0415
-
-        if not app_state.has_config or not app_state.config:
-            return
-        ws = app_state.config.workspace_root
-        if ws and self._shell is not None:
-            self._shell.run_command(f"cd {ws}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._render_timer.stop()

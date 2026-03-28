@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
         """20px label bar for the Workspace terminal with three cd shortcut buttons.
 
         Buttons: WORKSPACE (purple) · SystemForge (blue) · Workflow-app (teal).
-        Each sends a `cd <absolute-path>` to the interactive terminal.
+        Each sends a `cd <absolute-path>` to the workspace terminal.
         """
         from PySide6.QtWidgets import QHBoxLayout
 
@@ -302,7 +302,7 @@ class MainWindow(QMainWindow):
                 signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
                 return
             path = str(app_state.config.project_dir / app_state.config.workspace_root)
-            signal_bus.run_command_in_terminal.emit(f"cd {path}")
+            signal_bus.run_command_in_workspace_terminal.emit(f"cd {path}")
 
         btn_ws.clicked.connect(_on_workspace)
 
@@ -310,14 +310,14 @@ class MainWindow(QMainWindow):
         btn_sf = _btn("SystemForge", "#60A5FA")
         btn_sf.setToolTip(f"cd → {_SYSTEMFORGE_DIR}")
         btn_sf.clicked.connect(
-            lambda: signal_bus.run_command_in_terminal.emit(f"cd {_SYSTEMFORGE_DIR}")
+            lambda: signal_bus.run_command_in_workspace_terminal.emit(f"cd {_SYSTEMFORGE_DIR}")
         )
 
         # ── Workflow-app — cd to ai-forge/workflow-app ────────────────── #
         btn_wa = _btn("Workflow-app", "#2DD4BF")
         btn_wa.setToolTip(f"cd → {_WORKFLOW_APP_DIR}")
         btn_wa.clicked.connect(
-            lambda: signal_bus.run_command_in_terminal.emit(f"cd {_WORKFLOW_APP_DIR}")
+            lambda: signal_bus.run_command_in_workspace_terminal.emit(f"cd {_WORKFLOW_APP_DIR}")
         )
 
         lay.addWidget(btn_ws)

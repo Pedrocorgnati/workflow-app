@@ -195,6 +195,52 @@ class TestMetricsBarTokenUpdate:
         assert "$0.00" in bar._lbl_tokens.text()
 
 
+# ──────────────────────────────── project pill ─── #
+
+
+class TestMetricsBarProjectPill:
+    """Project pill shows/hides correctly including the red X button.
+
+    Note: isVisible() requires the full widget hierarchy to be on-screen.
+    In unit tests the MetricsBar is never shown, so we use isHidden() which
+    checks only whether the widget itself was explicitly hidden/shown.
+    """
+
+    def test_proj_x_not_hidden_after_project_loaded(self, bar):
+        bar._apply_project_loaded("my-project")
+        assert not bar._proj_x.isHidden()
+
+    def test_project_pill_not_hidden_after_project_loaded(self, bar):
+        bar._apply_project_loaded("my-project")
+        assert not bar._project_pill.isHidden()
+
+    def test_proj_select_btn_hidden_after_project_loaded(self, bar):
+        bar._apply_project_loaded("my-project")
+        assert bar._proj_select_btn.isHidden()
+
+    def test_project_name_label_shows_name(self, bar):
+        bar._apply_project_loaded("ai-forge")
+        assert bar._project_name_lbl.text() == "ai-forge"
+        assert not bar._project_name_lbl.isHidden()
+
+    def test_project_pill_hidden_after_empty(self, bar):
+        bar._apply_project_loaded("my-project")
+        bar._apply_project_empty()
+        assert bar._project_pill.isHidden()
+
+    def test_proj_select_btn_not_hidden_after_empty(self, bar):
+        bar._apply_project_loaded("my-project")
+        bar._apply_project_empty()
+        assert not bar._proj_select_btn.isHidden()
+
+    def test_proj_x_not_hidden_after_reload(self, bar):
+        """X stays not-hidden when a second project is loaded (regression guard)."""
+        bar._apply_project_loaded("first-project")
+        bar._apply_project_empty()
+        bar._apply_project_loaded("second-project")
+        assert not bar._proj_x.isHidden()
+
+
 # ──────────────────────────────── nav buttons ─── #
 
 
