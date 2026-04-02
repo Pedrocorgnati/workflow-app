@@ -11,8 +11,10 @@ Classes:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from workflow_app.domain import CommandSpec, ValidationReport
 
@@ -92,6 +94,49 @@ class DryRunValidator:
         "/changelog-create",
     })
 
+    # Novos comandos críticos introduzidos no fluxo
+    _CANONICAL_GATE_COMMANDS: tuple[str, ...] = (
+        "/intake-conformity-check",
+        "/validate-pipeline",
+    )
+
+    _FRONTEND_RUNTIME_CHAIN: tuple[str, ...] = (
+        "/front-end-review",
+        "/gate:frontend-runtime",
+        "/build-verify",
+    )
+
+    _SEMANTIC_QA_COMMANDS: tuple[str, ...] = (
+        "/brief-vs-frontend-review",
+    )
+
+    def _load_phase_contracts(self) -> dict:
+        """Load PHASE-CONTRACTS.json from workflow-app if available.
+
+        Falls back to an empty dict when file is missing or invalid.
+        """
+        root = Path(__file__).resolve().parents[3]
+        contracts_path = (
+            root / "ai-forge" / "pipeline-contracts" / "PHASE-CONTRACTS.json"
+        )
+        if not contracts_path.exists():
+            return {}
+        try:
+            return json.loads(contracts_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Falha ao carregar PHASE-CONTRACTS.json: %s", exc)
+            return {}
+
+    @staticmethod
+    def _first_index(names: list[str], commands: tuple[str, ...] | list[str]) -> int | None:
+        idx = [i for i, n in enumerate(names) if n in set(commands)]
+        return min(idx) if idx else None
+
+    @staticmethod
+    def _has_any(names: list[str], commands: tuple[str, ...] | list[str]) -> bool:
+        commands_set = set(commands)
+        return any(n in commands_set for n in names)
+
     def validate(self, commands: list[CommandSpec]) -> ValidationReport:
         """
         Validate the pipeline queue offline.
@@ -110,6 +155,7 @@ class DryRunValidator:
         suggestion_objects: list[Suggestion] = []
 
         names = [cmd.name for cmd in commands]
+        phase_contracts = self._load_phase_contracts()
 
         # ── Rule 1: empty queue ───────────────────────────────────────────── #
         if not commands:
@@ -187,6 +233,77 @@ class DryRunValidator:
                 )
                 suggestion_objects.append(sug_qa)
                 suggestions.append(sug_qa.text)
+
+        # ── Rule 6: canonical pre-F7 gate when execution exists ────────────── #
+        has_execution = self._has_any(names, tuple(self._F7_COMMANDS))
+        if has_execution:
+            for gate_cmd in self._CANONICAL_GATE_COMMANDS:
+                if gate_cmd not in names:
+                    errors.append(
+                        f"Comando obrigatório ausente antes da execução: {gate_cmd}."
+                    )
+                    sug = Suggestion(
+                        text=f"Adicionar {gate_cmd} antes do primeiro comando de execução",
+                        command_to_add=gate_cmd,
+                        recommended_position=max(0, (first_f7_idx or 0)),
+                        reason="Gate canônico PRE-F7 obrigatório para reduzir regressões",
+                    )
+                    suggestion_objects.append(sug)
+                    suggestions.append(sug.text)
+
+        # ── Rule 7: front-end runtime chain enforcement ───────────────────── #
+        has_fe_or_verify = self._has_any(names, self._FRONTEND_RUNTIME_CHAIN)
+        if has_fe_or_verify:
+            missing_chain = [c for c in self._FRONTEND_RUNTIME_CHAIN if c not in names]
+            for cmd_name in missing_chain:
+                warnings.append(
+                    f"Cadeia de runtime incompleta: falta {cmd_name} "
+                    "(front-end-review -> gate:frontend-runtime -> build-verify)."
+                )
+            if not missing_chain:
+                idx_review = names.index("/front-end-review")
+                idx_gate = names.index("/gate:frontend-runtime")
+                idx_verify = names.index("/build-verify")
+                if not (idx_review < idx_gate < idx_verify):
+                    errors.append(
+                        "Ordem inválida da cadeia de runtime: esperado "
+                        "/front-end-review -> /gate:frontend-runtime -> /build-verify."
+                    )
+
+        # ── Rule 8: semantic QA command suggestion/check ──────────────────── #
+        has_qa = self._has_any(names, tuple(self._QA_COMMANDS))
+        if has_qa and "/brief-vs-frontend-review" not in names:
+            warnings.append(
+                "QA presente sem /brief-vs-frontend-review. "
+                "Adicione revisão semântica final do front contra INTAKE."
+            )
+            qa_insert = max(i for i, n in enumerate(names) if n in self._QA_COMMANDS) + 1
+            sug_sem = Suggestion(
+                text="Adicionar /brief-vs-frontend-review após a sequência de QA",
+                command_to_add="/brief-vs-frontend-review",
+                recommended_position=qa_insert,
+                reason="Reduz divergência de copy/regras visíveis no front",
+            )
+            suggestion_objects.append(sug_sem)
+            suggestions.append(sug_sem.text)
+
+        # ── Rule 9: contract-driven required commands (optional, additive) ── #
+        if phase_contracts:
+            try:
+                phases = phase_contracts.get("phases", {})
+                pre_f7 = phases.get("pre_f7_gate", {})
+                required = pre_f7.get("required_commands", [])
+                if has_execution:
+                    for cmd_name in required:
+                        if cmd_name not in names:
+                            msg = f"Contrato de fase: comando obrigatório ausente: {cmd_name}."
+                            if pre_f7.get("blocking_if_missing", False):
+                                if msg not in errors:
+                                    errors.append(msg)
+                            elif msg not in warnings:
+                                warnings.append(msg)
+            except Exception as exc:  # defensive: validator never hard-crashes
+                logger.warning("Falha ao aplicar PHASE-CONTRACTS.json: %s", exc)
 
         is_valid = len(errors) == 0
         report = ValidationReport(

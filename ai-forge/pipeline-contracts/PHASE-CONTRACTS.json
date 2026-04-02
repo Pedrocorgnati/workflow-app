@@ -1,0 +1,128 @@
+{
+  "version": "1.1.0",
+  "updated_at": "2026-03-31",
+  "phases": {
+    "pre_f7_gate": {
+      "required_commands": [
+        "/intake-conformity-check",
+        "/validate-pipeline"
+      ],
+      "blocking_if_missing": true
+    },
+    "f7_execution": {
+      "required_when_present": {
+        "triggers": ["/execute-task", "/auto-flow execute", "/front-end-build", "/back-end-build"],
+        "required_commands": ["/front-end-review", "/gate:frontend-runtime", "/build-verify"]
+      },
+      "order_constraints": [
+        {
+          "before": "/front-end-review",
+          "after": "/gate:frontend-runtime",
+          "severity": "error"
+        },
+        {
+          "before": "/gate:frontend-runtime",
+          "after": "/build-verify",
+          "severity": "error"
+        }
+      ]
+    },
+    "f9_intake_review": {
+      "required_when_present": {
+        "triggers": ["/intake-review:compare", "/intake-review:create-gaplist"],
+        "required_commands": [
+          "/intake-review:create-checklist",
+          "/intake-review:list-improove",
+          "/intake-review:compare"
+        ]
+      },
+      "order_constraints": [
+        {
+          "before": "/intake-review:create-checklist",
+          "after": "/intake-review:list-improove",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:list-improove",
+          "after": "/intake-review:compare",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:compare",
+          "after": "/intake-review:create-gaplist",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:create-gaplist",
+          "after": "/intake-review:execute-gaplist",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:execute-gaplist",
+          "after": "/intake-review:review-executed",
+          "severity": "warning"
+        }
+      ],
+      "blocking_if_missing": false
+    },
+    "f9_qa": {
+      "required_when_present": {
+        "triggers": ["/qa:prep", "/qa:trace", "/qa:report"],
+        "required_commands": ["/brief-vs-frontend-review"]
+      },
+      "blocking_if_missing": false
+    }
+  },
+  "phase_triggers": {
+    "f2_post_review_prd_flow": {
+      "on_command_success": "/review-prd-flow",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f2",
+        "/pipeline:collect-lessons --phase f2",
+        "/cmd:backlog-from-lessons --phase f2"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f5_post_validate_pipeline": {
+      "on_command_success": "/validate-pipeline",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f5",
+        "/pipeline:collect-lessons --phase f5",
+        "/cmd:backlog-from-lessons --phase f5"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f7_post_build_verify": {
+      "on_command_success": "/build-verify",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f7",
+        "/pipeline:collect-lessons --phase f7",
+        "/cmd:backlog-from-lessons --phase f7"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f9_post_brief_vs_frontend_review": {
+      "on_command_success": "/brief-vs-frontend-review",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f9",
+        "/pipeline:collect-lessons --phase f9",
+        "/cmd:backlog-from-lessons --phase f9"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f11_post_deploy_verify": {
+      "on_command_success": "/post-deploy-verify",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f11",
+        "/pipeline:collect-lessons --phase f11",
+        "/cmd:backlog-from-lessons --phase f11"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    }
+  }
+}

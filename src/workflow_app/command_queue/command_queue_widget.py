@@ -314,8 +314,10 @@ class CommandQueueWidget(QWidget):
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
-            ("delivery", "Delivery por milestone — analisa MILESTONES.md",
-             self._on_delivery_clicked, "queue-btn-delivery"),
+            ("delivery plan", "Planejamento: analyse → identify → create-tasks",
+             self._on_delivery_plan_clicked, "queue-btn-delivery-plan"),
+            ("delivery qa", "Validacao: qa-gate → mcp-review → sign-off",
+             self._on_delivery_qa_clicked, "queue-btn-delivery-qa"),
             ("auto-improove", "/model Opus + 5x /auto-improove:cmd (use com Loop)",
              lambda: self._load_quick_template(TEMPLATE_AUTO_IMPROOVE_LOOP, name="Auto-Improove Loop"),
              "queue-btn-auto-improove"),
@@ -1202,11 +1204,11 @@ class CommandQueueWidget(QWidget):
             "Auto-Improove carregado — sem projeto. Use Loop ×10 para completar tudo.", "info"
         )
 
-    def _on_delivery_clicked(self) -> None:
-        """Build Delivery template dynamically from MILESTONES.md."""
+    def _on_delivery_plan_clicked(self) -> None:
+        """Build Delivery PLAN template (before code — analyse/identify/create-tasks)."""
         from workflow_app.config.app_state import app_state
         from workflow_app.templates.quick_templates import _inject_clears
-        from workflow_app.templates.delivery_template_builder import build_delivery_template
+        from workflow_app.templates.delivery_template_builder import build_delivery_plan_template
 
         if not app_state.has_config or not app_state.config:
             signal_bus.toast_requested.emit(
@@ -1215,7 +1217,7 @@ class CommandQueueWidget(QWidget):
             return
 
         config = app_state.config
-        template = build_delivery_template(
+        template = build_delivery_plan_template(
             docs_root=config.docs_root,
             project_dir=str(config.project_dir),
         )
@@ -1227,7 +1229,34 @@ class CommandQueueWidget(QWidget):
             )
             return
 
-        self._load_quick_template(_inject_clears(template), name="Delivery")
+        self._load_quick_template(_inject_clears(template), name="Delivery Plan")
+
+    def _on_delivery_qa_clicked(self) -> None:
+        """Build Delivery QA template (after code — qa-gate/mcp-review/sign-off)."""
+        from workflow_app.config.app_state import app_state
+        from workflow_app.templates.quick_templates import _inject_clears
+        from workflow_app.templates.delivery_template_builder import build_delivery_qa_template
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar o Delivery.", "warning"
+            )
+            return
+
+        config = app_state.config
+        template = build_delivery_qa_template(
+            docs_root=config.docs_root,
+            project_dir=str(config.project_dir),
+        )
+
+        if not template:
+            signal_bus.toast_requested.emit(
+                "Nenhuma milestone encontrada em MILESTONES.md. Execute /modules:build-milestones primeiro.",
+                "warning",
+            )
+            return
+
+        self._load_quick_template(_inject_clears(template), name="Delivery QA")
 
     def _on_run_command(self, cmd_text: str) -> None:
         """Update last-command label and highlight the matching queue row."""

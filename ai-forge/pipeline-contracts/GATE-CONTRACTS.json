@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-03-30",
+  "gates": [
+    {
+      "name": "pre_f7_canonical",
+      "commands": ["/intake-conformity-check", "/validate-pipeline"],
+      "blocking": true,
+      "goal": "Bloquear execucao sem conformidade canonica e pipeline valido"
+    },
+    {
+      "name": "frontend_runtime_gate",
+      "commands": ["/front-end-review", "/gate:frontend-runtime", "/build-verify"],
+      "blocking": true,
+      "goal": "Evitar falso positivo de build sem validacao de runtime"
+    },
+    {
+      "name": "brief_frontend_semantic",
+      "commands": ["/brief-vs-frontend-review"],
+      "blocking": false,
+      "goal": "Validar aderencia semantica final entre produto e interface"
+    }
+  ]
+}

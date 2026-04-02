@@ -3,6 +3,10 @@ Delivery Template Builder — Dynamic template generation based on MILESTONES.md
 
 Scans the docs_root/MILESTONES.md file for milestone entries and generates
 the delivery pipeline with per-milestone auto-flow commands.
+
+Two indicators available:
+- delivery-pre: analyse → identify → create-tasks per milestone (before code)
+- delivery-pos: qa-gate → mcp-review → sign-off → pending-actions per milestone (after code)
 """
 
 from __future__ import annotations
@@ -59,18 +63,17 @@ def _discover_milestones(docs_root: str, project_dir: str) -> list[int]:
     return numbers
 
 
+def _renumber(specs: list[CommandSpec]) -> list[CommandSpec]:
+    """Renumber positions 1..N."""
+    for i, spec in enumerate(specs, start=1):
+        spec.position = i
+    return specs
+
+
 def build_delivery_template(docs_root: str, project_dir: str) -> list[CommandSpec]:
-    """Build the delivery pipeline template dynamically.
+    """Build the full delivery pipeline template (legacy — plan mode).
 
-    Scans MILESTONES.md for milestones and generates:
-    - Per milestone: /clear + /auto-flow delivery milestone-{n}
-
-    Args:
-        docs_root: relative path to docs root (e.g. "output/docs/my-project")
-        project_dir: absolute path to project directory
-
-    Returns:
-        list[CommandSpec] with all commands, positions renumbered 1..N
+    Kept for backward compatibility. Generates /auto-flow delivery-pre milestone-{n}.
     """
     milestones = _discover_milestones(docs_root, project_dir)
     if not milestones:
@@ -78,18 +81,58 @@ def build_delivery_template(docs_root: str, project_dir: str) -> list[CommandSpe
         return []
 
     specs: list[CommandSpec] = []
-
-    # Per-milestone delivery commands
     for n in milestones:
         specs.append(_spec("/clear", _S, 0))
-        specs.append(_spec(f"/auto-flow delivery milestone-{n}", _O, 0))
-
-    # Renumber positions 1..N
-    for i, spec in enumerate(specs, start=1):
-        spec.position = i
+        specs.append(_spec(f"/auto-flow delivery-pre milestone-{n}", _O, 0))
 
     logger.info(
         "Delivery template built: %d commands for %d milestones",
         len(specs), len(milestones),
     )
-    return specs
+    return _renumber(specs)
+
+
+def build_delivery_plan_template(docs_root: str, project_dir: str) -> list[CommandSpec]:
+    """Build delivery PLAN template (before code exists).
+
+    Per milestone: analyse → identify → create-tasks.
+    Uses 'delivery-pre' indicator directly — no mode question needed.
+    """
+    milestones = _discover_milestones(docs_root, project_dir)
+    if not milestones:
+        logger.error("No milestones found in MILESTONES.md under %s", docs_root)
+        return []
+
+    specs: list[CommandSpec] = []
+    for n in milestones:
+        specs.append(_spec("/clear", _S, 0))
+        specs.append(_spec(f"/auto-flow delivery-pre milestone-{n}", _O, 0))
+
+    logger.info(
+        "Delivery PLAN template built: %d commands for %d milestones",
+        len(specs), len(milestones),
+    )
+    return _renumber(specs)
+
+
+def build_delivery_qa_template(docs_root: str, project_dir: str) -> list[CommandSpec]:
+    """Build delivery QA template (after code exists).
+
+    Per milestone: qa-gate → fix (if needed) → mcp-review → sign-off → pending-actions.
+    Uses 'delivery-pos' indicator directly — no mode question needed.
+    """
+    milestones = _discover_milestones(docs_root, project_dir)
+    if not milestones:
+        logger.error("No milestones found in MILESTONES.md under %s", docs_root)
+        return []
+
+    specs: list[CommandSpec] = []
+    for n in milestones:
+        specs.append(_spec("/clear", _S, 0))
+        specs.append(_spec(f"/auto-flow delivery-pos milestone-{n}", _O, 0))
+
+    logger.info(
+        "Delivery QA template built: %d commands for %d milestones",
+        len(specs), len(milestones),
+    )
+    return _renumber(specs)

@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-03-30",
+  "harness": {
+    "mutable": [
+      ".claude/commands/**/*.md",
+      "ai-forge/templates/**/*.md"
+    ],
+    "immutable": [
+      "ai-forge/workflow-app/ai-forge/pipeline-contracts/BENCHMARK-CONTRACTS.json",
+      "ai-forge/workflow-app/ai-forge/pipeline-contracts/PHASE-CONTRACTS.json",
+      "ai-forge/workflow-app/ai-forge/pipeline-contracts/GATE-CONTRACTS.json"
+    ]
+  },
+  "project_classes": [
+    "nextjs-saas-standard",
+    "nextjs-compliance-heavy",
+    "typescript-vanilla-light",
+    "python-api-oriented",
+    "legacy-refactor-high-risk"
+  ],
+  "splits": {
+    "tuning": 0.8,
+    "holdout": 0.2,
+    "holdout_policy": "holdout nao pode ser usado para tuning de comandos"
+  },
+  "required_outputs": [
+    "PIPELINE-SCORECARD.json",
+    "PIPELINE-RUNS.tsv",
+    "EXPERIMENT-REPORT.md",
+    "PROMOTION-DECISION.md"
+  ]
+}

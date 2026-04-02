@@ -2,7 +2,8 @@
 Quick template definitions for header buttons.
 
 Defines static command sequences for all non-dynamic header buttons.
-The WBS button is dynamic and handled by wbs_template_builder.py.
+The WBS button is dynamic and handled by wbs_template_builder.py
+(including interleaved Codex plugin review steps during execute flow).
 """
 
 from __future__ import annotations
@@ -271,9 +272,16 @@ TEMPLATE_BUSINESS: list[CommandSpec] = _inject_clears([
 # ─── QA Templates per stack (from z-templates/qa.md) ──────────────────────────── #
 
 _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
+    ("/intake-review:create-checklist", _S, _A),
+    ("/intake-review:list-improove",    _O, _A),
+    ("/intake-review:compare",          _O, _A),
+    ("/intake-review:create-gaplist",   _O, _A),
+    ("/intake-review:execute-gaplist",  _S, _A),
+    ("/intake-review:review-executed",  _O, _A),
     ("/qa:prep",              _S, _A),
     ("/qa:trace",             _O, _A),
     ("/qa:report",            _S, _A),
+    ("/validate-roles",       _O, _A),
     ("/validate-billing",     _O, _A),
     ("/backend:scan",         _S, _A),
     ("/backend:audit",        _O, _A),
@@ -516,22 +524,26 @@ TEMPLATE_AUTO_IMPROOVE: list[CommandSpec] = [
 # /clear between independent steps; /model inserted by _load_quick_template.
 
 TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
-    _spec("/clear",                    _S, _A,  0),
-    _spec("/blog:init-strategy",       _O, _A,  1),
-    _spec("/blog:discover-intents",       _O, _A,  2),
-    _spec("/blog:discover-intents-part2", _O, _A,  3),
-    _spec("/blog:expand-keywords",        _S, _A,  4),
-    _spec("/blog:cluster-keywords",    _O, _A,  4),
-    _spec("/blog:prioritize-topics",   _S, _A,  5),
-    _spec("/blog:deduplicate-topics",  _S, _A,  6),
-    _spec("/blog:generate-briefs",     _O, _A,  7),
-    _spec("/blog:write-articles",      _O, _A,  8),
-    _spec("/blog:review-seo",          _S, _A,  9),
-    _spec("/blog:quality-gate",        _S, _A, 10),
-    _spec("/blog:build-internal-links", _S, _A, 11),
-    _spec("/blog:build-metadata",      _H, _A, 12),
-    _spec("/blog:schedule-batch",      _H, _A, 13),
-    _spec("/blog:deploy",              _S, _A, 14),
+    _spec("/clear",                       _S, _A,  0),
+    _spec("/blog:init-strategy",          _O, _A,  1),
+    _spec("/blog:competitor-spy",         _O, _A,  2),
+    _spec("/blog:discover-intents",       _O, _A,  3),
+    _spec("/blog:discover-intents-part2", _O, _A,  4),
+    _spec("/blog:expand-keywords",        _S, _A,  5),
+    _spec("/blog:cluster-keywords",       _O, _A,  5),
+    _spec("/blog:prioritize-topics",      _S, _A,  6),
+    _spec("/blog:deduplicate-topics",     _S, _A,  7),
+    _spec("/blog:generate-briefs",        _O, _A,  8),
+    _spec("/blog:write-articles",         _O, _A,  9),
+    _spec("/blog:review-seo",             _S, _A, 10),
+    _spec("/blog:eeat-inject",            _S, _A, 11),
+    _spec("/blog:localize-check",         _S, _A, 12),
+    _spec("/blog:quality-gate",           _S, _A, 13),
+    _spec("/blog:build-internal-links",   _S, _A, 14),
+    _spec("/blog:build-metadata",         _H, _A, 15),
+    _spec("/blog:schedule-batch",         _H, _A, 16),
+    _spec("/blog:deploy",                 _S, _A, 17),
+    _spec("/blog:hreflang-map",           _H, _A, 18),
 ])
 
 # ─── Map for QA stack picker dialog ──────────────────────────────────────────── #

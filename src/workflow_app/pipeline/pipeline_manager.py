@@ -92,6 +92,9 @@ class PipelineManager:
         # forces manual advance even for NON_INTERACTIVE commands.
         self._force_interactive_next_complete: bool = False
 
+        # Trigger IDs already fired during this pipeline execution.
+        self._fired_phase_triggers: set[str] = set()
+
     # ── Public API ────────────────────────────────────────────────────── #
 
     def set_extras_orchestrator(self, extras: object) -> None:
@@ -100,8 +103,18 @@ class PipelineManager:
 
     def set_queue(self, commands: list[CommandSpec]) -> None:
         """Set the command queue before calling start()."""
-        self._queue = list(commands)
+        queue = list(commands)
+        # Compile-time phase trigger injection:
+        # avoids hard dependency on runtime command completion detection.
+        try:
+            from workflow_app.pipeline.phase_trigger_engine import PhaseTriggerEngine
+
+            queue = PhaseTriggerEngine().inject_phase_actions_into_queue(queue)
+        except Exception:  # noqa: BLE001
+            logger.debug("PhaseTriggerEngine compile-time injection skipped", exc_info=True)
+        self._queue = queue
         self._current_index = 0
+        self._fired_phase_triggers.clear()
 
     def start(self, permission_mode: str | None = None) -> None:
         """Create PipelineExecution in DB and start the first command."""
@@ -113,6 +126,7 @@ class PipelineManager:
             permission_mode = AppConfig.get("default_permission_mode", "acceptEdits")
         self._permission_mode = permission_mode
         self._paused = False
+        self._fired_phase_triggers.clear()
         self._pipeline_exec_id = self._create_pipeline_execution()
         self._signal_bus.pipeline_status_changed.emit(
             self._pipeline_exec_id, PipelineStatus.EXECUTANDO.value
@@ -488,6 +502,8 @@ class PipelineManager:
                     pass
             # RF13: Check if completed command triggers queue expansion
             self._try_expand_queue(spec.name)
+            # Contract-driven phase triggers (scorecard/lessons/backlog, etc.)
+            self._try_expand_phase_triggers(spec)
             # Autocast: advance automatically unless interactive or question was asked
             is_interactive = spec.interaction_type == InteractionType.INTERACTIVE
             had_question = self._force_interactive_next_complete
@@ -554,6 +570,44 @@ class PipelineManager:
                 )
         except Exception:  # noqa: BLE001
             logger.debug("RF13 QueueExpander: expansion skipped due to error", exc_info=True)
+
+    def _try_expand_phase_triggers(self, spec: CommandSpec) -> None:
+        """Append contract-driven auto-actions after phase checkpoint commands.
+
+        Uses PHASE-CONTRACTS.json -> phase_triggers to enqueue research actions
+        such as scorecard, lessons, and backlog generation.
+        """
+        try:
+            from workflow_app.pipeline.phase_trigger_engine import PhaseTriggerEngine
+
+            engine = PhaseTriggerEngine()
+            existing = [s.name for s in self._queue]
+            trigger_id, new_specs = engine.check_and_expand(
+                spec.name,
+                existing,
+                fired_triggers=self._fired_phase_triggers,
+                config_path=spec.config_path or "",
+            )
+            if trigger_id is None:
+                return
+            self._fired_phase_triggers.add(trigger_id)
+            if not new_specs:
+                return
+            for new_spec in new_specs:
+                new_spec.position = len(self._queue) + 1
+                self._queue.append(new_spec)
+            self._signal_bus.queue_expanded.emit([s.name for s in new_specs])
+            self._log_pipeline_event(
+                f"phase_trigger:{trigger_id}:added:{len(new_specs)}"
+            )
+            logger.info(
+                "PhaseTriggerEngine: trigger=%s added %d command(s) after '%s'",
+                trigger_id,
+                len(new_specs),
+                spec.name,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("PhaseTriggerEngine: expansion skipped due to error", exc_info=True)
 
     # ── Internal: pipeline completion ────────────────────────────────── #
 

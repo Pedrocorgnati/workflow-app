@@ -101,7 +101,12 @@ def test_valid_queue_no_errors():
         _cmd("/prd-create"),
         _cmd("/hld-create"),
         _cmd("/review-prd-flow"),
+        _cmd("/intake-conformity-check"),
+        _cmd("/validate-pipeline"),
         _cmd("/create-task"),
+        _cmd("/front-end-review"),
+        _cmd("/gate:frontend-runtime"),
+        _cmd("/build-verify"),
         _cmd("/execute-task"),
     ]
     report = DryRunValidator().validate(cmds)
@@ -158,9 +163,15 @@ def test_suggestion_objects_empty_on_valid_queue():
         _cmd("/prd-create"),
         _cmd("/hld-create"),
         _cmd("/review-prd-flow"),
+        _cmd("/intake-conformity-check"),
+        _cmd("/validate-pipeline"),
         _cmd("/create-task"),
+        _cmd("/front-end-review"),
+        _cmd("/gate:frontend-runtime"),
+        _cmd("/build-verify"),
         _cmd("/execute-task"),
         _cmd("/qa:prep"),
+        _cmd("/brief-vs-frontend-review"),
     ]
     report = DryRunValidator().validate(cmds)
     assert report._suggestion_objects == []

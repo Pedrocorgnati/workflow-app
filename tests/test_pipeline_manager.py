@@ -58,7 +58,7 @@ def _spec(name: str = "/cmd", interaction_type: InteractionType = InteractionTyp
 def test_set_queue_stores_commands(manager):
     specs = [_spec("/cmd-a"), _spec("/cmd-b")]
     manager.set_queue(specs)
-    assert manager._queue == specs
+    assert [s.name for s in manager._queue[:2]] == ["/cmd-a", "/cmd-b"]
 
 
 def test_set_queue_resets_index(manager):
@@ -66,6 +66,15 @@ def test_set_queue_resets_index(manager):
     manager._current_index = 1
     manager.set_queue([_spec("/cmd-c")])
     assert manager._current_index == 0
+
+
+def test_set_queue_compile_time_injection_for_prd_checkpoint(manager):
+    specs = [_spec("/review-prd-flow"), _spec("/next")]
+    manager.set_queue(specs)
+    names = [s.name for s in manager._queue]
+    assert "/pipeline:run-scorecard --phase f2" in names
+    assert "/pipeline:collect-lessons --phase f2" in names
+    assert "/cmd:backlog-from-lessons --phase f2" in names
 
 
 # ── start ─────────────────────────────────────────────────────────────────────
@@ -222,6 +231,27 @@ def test_interactive_advance_wrong_state_is_noop(manager, mock_bus):
         manager.interactive_advance()
     # Index must NOT have advanced
     assert manager._current_index == 0
+
+
+def test_phase_trigger_engine_appends_actions_once(manager):
+    """Runtime trigger should not duplicate actions already injected at compile time."""
+    base = _spec("/review-prd-flow")
+    base.config_path = ".claude/projects/demo.json"
+    manager.set_queue([base, _spec("/next")])
+
+    original_len = len(manager._queue)
+    manager._try_expand_phase_triggers(base)
+    first_len = len(manager._queue)
+
+    assert first_len == original_len
+    names = [c.name for c in manager._queue]
+    assert "/pipeline:run-scorecard --phase f2" in names
+    assert "/pipeline:collect-lessons --phase f2" in names
+    assert "/cmd:backlog-from-lessons --phase f2" in names
+
+    # Second call with same trigger must not duplicate in same execution.
+    manager._try_expand_phase_triggers(base)
+    assert len(manager._queue) == first_len
 
 
 # ── check_resume ──────────────────────────────────────────────────────────────

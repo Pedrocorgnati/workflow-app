@@ -91,7 +91,7 @@ def build_wbs_create_template(wbs_root: str, project_dir: str) -> list[CommandSp
 
 
 def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
-    """Build the WBS *execute* half: F7 build + per-module execute + F8 complemento.
+    """Build the WBS *execute* half: F7 build + per-module execute/review + F8 complemento.
 
     Covers the second half of the full WBS pipeline starting from /mobile-first-build.
     """
@@ -106,6 +106,7 @@ def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandS
 
     # ── F7: Build phase ──────────────────────────────────────────────────────
     specs.append(_spec("/mobile-first-build", _S, 0))
+    specs.append(_spec("/mobile:create-expo-app", _O, 0))
     specs.append(_spec("/front-end-build", _S, 0))
     specs.append(_spec("/front-end-review", _S, 0))
     specs.append(_spec("/data-test-id", _S, 0))
@@ -115,12 +116,17 @@ def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandS
     specs.append(_spec("/create-assets", _S, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
+    specs.append(_spec("/sync:github", _H, 0))
+    specs.append(_spec("/sync:mcp", _S, 0))
     specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
-    # ── F7: Per-module execute + review ──────────────────────────────────────
+    # ── F7: Per-module execute + Codex review + review ──────────────────────
     for module_path in modules:
         specs.append(_spec(f"/auto-flow execute {module_path}", _S, 0))
+        specs.append(_spec("/codex-plugin:review --base main --background", _O, 0))
+        specs.append(_spec("/codex-plugin:status", _O, 0))
+        specs.append(_spec("/codex-plugin:result", _O, 0))
         specs.append(_spec(f"/review-executed-module {module_path}", _O, 0))
 
     # ── F7: Post-execution ───────────────────────────────────────────────────
@@ -156,7 +162,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     2. validate-pipeline + reforge-pipeline
     3. front-end-build, back-end-build, db-migration-create
     4. create-assets, create-mocks, github-linking
-    5. Per-module: auto-flow execute + review-executed-module
+    5. Per-module: auto-flow execute + codex-plugin review + review-executed-module
     6. milestone-checklist-review, reforge:prepare, reforge:fix
     7. F8: env-creation, create-test-user, seed-data-create, docker-create, integration-test-create
     Args:
@@ -184,6 +190,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
 
     # ── F7: Build phase ──────────────────────────────────────────────────────
     specs.append(_spec("/mobile-first-build", _S, 0))
+    specs.append(_spec("/mobile:create-expo-app", _O, 0))
     specs.append(_spec("/front-end-build", _S, 0))
     specs.append(_spec("/front-end-review", _S, 0))
     specs.append(_spec("/data-test-id", _S, 0))
@@ -193,12 +200,17 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/create-assets", _S, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
+    specs.append(_spec("/sync:github", _H, 0))
+    specs.append(_spec("/sync:mcp", _S, 0))
     specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
-    # ── F7: Per-module execute + review ──────────────────────────────────────
+    # ── F7: Per-module execute + Codex review + review ──────────────────────
     for module_path in modules:
         specs.append(_spec(f"/auto-flow execute {module_path}", _S, 0))
+        specs.append(_spec("/codex-plugin:review --base main --background", _O, 0))
+        specs.append(_spec("/codex-plugin:status", _O, 0))
+        specs.append(_spec("/codex-plugin:result", _O, 0))
         specs.append(_spec(f"/review-executed-module {module_path}", _O, 0))
 
     # ── F7: Post-execution ───────────────────────────────────────────────────
