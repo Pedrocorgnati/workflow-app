@@ -71,6 +71,40 @@
         "required_commands": ["/brief-vs-frontend-review"]
       },
       "blocking_if_missing": false
+    },
+    "f8b_delivery": {
+      "required_when_present": {
+        "triggers": ["/delivery:identify-task", "/delivery:create-tasks", "/delivery:qa-gate", "/delivery:mcp-review", "/delivery:sign-off"],
+        "required_commands": ["/delivery:analyse"]
+      },
+      "order_constraints": [
+        {
+          "before": "/delivery:analyse",
+          "after": "/delivery:identify-task",
+          "severity": "error"
+        },
+        {
+          "before": "/delivery:identify-task",
+          "after": "/delivery:create-tasks",
+          "severity": "warning"
+        },
+        {
+          "before": "/delivery:qa-gate",
+          "after": "/delivery:mcp-review",
+          "severity": "error"
+        },
+        {
+          "before": "/delivery:mcp-review",
+          "after": "/delivery:sign-off",
+          "severity": "error"
+        },
+        {
+          "before": "/delivery:sign-off",
+          "after": "/delivery:pending-actions",
+          "severity": "warning"
+        }
+      ],
+      "blocking_if_missing": false
     }
   },
   "phase_triggers": {
@@ -120,6 +154,15 @@
         "/pipeline:run-scorecard --phase f11",
         "/pipeline:collect-lessons --phase f11",
         "/cmd:backlog-from-lessons --phase f11"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f8b_post_sign_off": {
+      "on_command_success": "/delivery:sign-off",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f8b",
+        "/pipeline:collect-lessons --phase f8b"
       ],
       "blocking": false,
       "cooldown_runs": 1
