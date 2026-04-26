@@ -54,6 +54,14 @@ class InteractionType(str, enum.Enum):
     INTERACTIVE = "inter"   # Requires user input during execution
 
 
+class EffortLevel(str, enum.Enum):
+    """Claude Code `/effort` levels mirrored as CLI flag values."""
+    LOW = "low"
+    STANDARD = "medium"
+    HIGH = "high"
+    MAX = "max"
+
+
 class CommandInteractionType(str, enum.Enum):
     """How the command handles user interaction (DB/backend key)."""
     SEM_INTERACAO = "sem_interacao"   # Runs automatically
@@ -101,6 +109,7 @@ class CommandSpec:
     estimated_seconds: int | None = None       # Time estimate (optional)
     phase: str = "F?"                              # Pipeline phase (F1, F2, ...)
     config_path: str = ""                         # e.g. ".claude/projects/meu-projeto.json"
+    effort: EffortLevel = EffortLevel.STANDARD    # Claude Code /effort level
 
     def display_name(self) -> str:
         """Return formatted display string."""
@@ -113,6 +122,10 @@ class CommandSpec:
     def interaction_badge_text(self) -> str:
         """Return short interaction type for badge display."""
         return "→ auto" if self.interaction_type == InteractionType.AUTO else "↔ inter"
+
+    def effort_badge_text(self) -> str:
+        """Return short effort level for badge display."""
+        return self.effort.value
 
 
 @dataclass

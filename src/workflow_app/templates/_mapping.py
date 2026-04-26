@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from workflow_app.domain import (
     CommandInteractionType,
+    EffortLevel,
     InteractionType,
     ModelName,
     ModelType,
@@ -45,3 +46,27 @@ def interaction_to_db(interaction_type: InteractionType) -> str:
     if interaction_type == InteractionType.INTERACTIVE:
         return CommandInteractionType.INTERATIVO.value
     return CommandInteractionType.SEM_INTERACAO.value
+
+
+def effort_to_db(effort: EffortLevel) -> str:
+    """Convert UI EffortLevel enum to DB effort_level string."""
+    return effort.value
+
+
+def db_to_effort(effort_level: str | None) -> EffortLevel:
+    """Convert DB effort_level string to UI EffortLevel enum.
+
+    Unknown or missing values default to STANDARD (medium) for backward
+    compatibility with rows written before the T-053 migration.
+    """
+    if not effort_level:
+        return EffortLevel.STANDARD
+    try:
+        return EffortLevel(effort_level.lower())
+    except ValueError:
+        return EffortLevel.STANDARD
+
+
+def effort_type_to_name(effort_level: str | None) -> EffortLevel:
+    """Alias of db_to_effort for symmetry with `model_type_to_name`."""
+    return db_to_effort(effort_level)

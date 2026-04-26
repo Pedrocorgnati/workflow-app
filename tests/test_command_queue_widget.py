@@ -41,8 +41,13 @@ def widget(qapp, qtbot) -> CommandQueueWidget:
 
 class TestCommandQueueWidgetInitialState:
     def test_width_within_bounds(self, widget):
-        """Widget width is within min/max bounds (200–360px)."""
-        assert 200 <= widget.width() <= 360
+        """Widget width is within min/max bounds (200–400px).
+
+        Upper bound raised from 360→400 by TASK-050: the new DCP buttons
+        (`DCP: Build Module Pipeline` / `DCP: Specific-Flow`) have spec-
+        mandated literal labels wider than the previous legacy buttons.
+        """
+        assert 200 <= widget.width() <= 400
 
     def test_empty_widget_visible(self, widget):
         """Empty state widget is visible initially."""

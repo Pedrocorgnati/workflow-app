@@ -52,8 +52,8 @@ def _find_systemforge_root() -> str | None:
     return None
 
 
-_TERMINAL_COLS = 220
-_TERMINAL_ROWS = 50
+_TERMINAL_COLS = 80
+_TERMINAL_ROWS = 24
 
 DEFAULT_MAX_LINES = 10_000
 
@@ -101,18 +101,19 @@ class OutputPanel(QWidget):
         self._pending_rows: int = self._rows
 
         # ── Persistent shell ──────────────────────────────────────────── #
+        # Shell is created here but NOT started until showEvent fires with
+        # real widget geometry. Starting early with fallback cols/rows makes
+        # Claude Code (and any TUI) render its banner at the wrong width,
+        # which then wraps/duplicates lines forever.
         self._shell: PersistentShell | None = None
         self._shell = PersistentShell(
             cols=self._cols, rows=self._rows, cwd=_find_systemforge_root()
         )
         self._shell.output_received.connect(self._on_chunk)
+        self._shell_started: bool = False
 
         self._setup_ui()
         self._connect_signals()
-
-        # Start the shell
-        if self._shell is not None:
-            self._shell.start()
 
     # ─────────────────────────────────────────────────────────── UI ──── #
 
@@ -140,6 +141,37 @@ class OutputPanel(QWidget):
         layout.addWidget(self._scrollbar)
 
         QTimer.singleShot(0, self._schedule_resize)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Start the persistent shell only after real geometry is known.
+
+        On the first show, force the layout to settle, recompute cols/rows
+        from actual pixel size, apply that size synchronously to pyte + PTY,
+        and only then spawn the shell. This avoids the Claude Code / TUI
+        "banner rendered at 220 cols, visible area is 130 cols" breakage.
+        """
+        super().showEvent(event)
+        if self._shell_started or self._shell is None:
+            return
+
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+
+        cols, rows = self._terminal.recompute_grid()
+        if cols > 0 and rows > 0:
+            self._cols = cols
+            self._rows = rows
+            try:
+                self._screen.resize(lines=rows, columns=cols)
+            except Exception:  # noqa: BLE001
+                self._screen = EnhancedScreen(cols, rows, history=5000)
+                self._stream = pyte.ByteStream(self._screen)
+                self._history_cursor = 0
+                self._has_pending_render = False
+            self._shell.resize(cols, rows)
+        self._shell.start()
+        self._shell_started = True
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -199,6 +231,7 @@ class OutputPanel(QWidget):
             signal_bus.paste_text_in_terminal.connect(self._on_paste_text)
         else:
             signal_bus.run_command_in_workspace_terminal.connect(self._run_shell_command)
+            signal_bus.paste_text_in_workspace_terminal.connect(self._on_paste_text)
 
     # ─────────────────────────────────────────────────────── Key routing ─ #
 
@@ -238,9 +271,28 @@ class OutputPanel(QWidget):
             self._shell.send_raw(data)
 
     def _run_shell_command(self, command: str) -> None:
-        """Send a command to the persistent shell, when available."""
+        """Send a command to the persistent shell, when available.
+
+        Wraps the payload in bracketed paste markers (ESC[200~…ESC[201~) when
+        DEC 2004 is active, then always schedules the submitting Enter (\r) as
+        a separate write. Ink-based CLIs (Claude Code) buffer the paste block
+        and swallow a trailing \r that arrives in the same chunk, so the queue
+        play button (data-testid="queue-btn-play-next") would type the command
+        but never submit it. A delayed singleShot guarantees the Enter lands
+        as a standalone keypress in both BP and non-BP modes.
+        """
+        if self._shell is None:
+            return
+        data = command.encode("utf-8", errors="replace")
+        if _BRACKETED_PASTE_MODE in self._screen.mode:
+            data = b"\x1b[200~" + data + b"\x1b[201~"
+        self._shell.send_raw(data)
+        QTimer.singleShot(80, self._send_enter_to_shell)
+
+    def _send_enter_to_shell(self) -> None:
+        """Send a bare \r to the persistent shell if it is still alive."""
         if self._shell is not None:
-            self._shell.run_command(command)
+            self._shell.send_raw(b"\r")
 
     def _on_terminal_output_chunk(self, channel: str, chunk: str) -> None:
         """Render a PTY chunk for the bound terminal channel."""

@@ -71,3 +71,29 @@ src/workflow_app/
 ## Modules
 
 16 modules implemented (84 tasks). See `output/wbs/workflow-app/modules/MODULES-PROGRESS.md`.
+
+## DCP mode vs Legacy mode
+
+A partir de T-050 o workflow-app separa a entrada **DCP canonical loop A..I
+per module** da entrada legacy monolitica F1..F11. Ambas convivem para nao
+quebrar templates existentes; novos pipelines devem usar apenas DCP.
+
+| Aspecto | DCP (novo, canonico) | Legacy (F1..F11, deprecated) |
+|---|---|---|
+| Escopo de execucao | Por module (state-machine em `delivery.json`) | Projeto inteiro em fases monoliticas |
+| Entry point UI — Command Queue | Botoes `[DCP: Build Module Pipeline]` e `[DCP: Specific-Flow]` na aba *workflow* | Botoes `modules (legacy)`, `specific-flow (legacy)`, `wbs`, `create`, `execute`, `qa`, `deploy` (tooltips marcados `[legacy ...]`) |
+| Entry point CLI | `/build-module-pipeline` (paste literal) ou `/build-module-pipeline {id}` / `--rehydrate {id}` (resolvido via `delivery.json`) | `/auto-flow {indicator}` / `/front-end-build` / `/back-end-build` etc. |
+| Catalogo — Template Builder | Bloco `DCP Canonical Loop (per module)` com 12 fases A, B, B.2, C, D, D.5, E, F, G, F.2, H, I | Bloco `Legacy Monolithic (F1..F11) — Deprecated` preservado como referencia |
+| Fonte de verdade | `delivery.json` v1 (T-035 `DeliveryReader`) | Ausente — pipelines legacy nao tem state-machine |
+| Dependencia para habilitar | T-035 (`workflow_app.services.delivery_reader`). O botao `[DCP: Specific-Flow]` fica desabilitado com tooltip `"Requer T-035 (reader)"` se a importacao falhar | Sempre disponivel (nao requer reader) |
+| Mensagens de bloqueio | `QMessageBox.information` com texto literal da spec (`"Carregue um projeto (pill superior) antes de gerar pipeline DCP."`, `"Nenhum modulo ativo. Use [DCP: Build Module Pipeline] primeiro"`, `"delivery.json ausente — rode /delivery:init..."`, etc.) | Sem gates explicitos |
+| Uso recomendado | Novos projetos e modules novos | Manter apenas para projetos que nao foram migrados para `delivery.json` |
+
+### Quadro resumo (spec T-050)
+
+| Fluxo | Botao | Estado |
+|-------|-------|--------|
+| DCP (recomendado) | DCP: Build Module Pipeline + DCP: Specific-Flow | novo — por modulo |
+| Legacy | Modules (Legacy WBS) | sera descontinuado em T-060 |
+
+Para detalhes do refactor T-050 veja `docs/refactor/T-050/README.md`.

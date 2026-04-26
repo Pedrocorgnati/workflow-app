@@ -8,7 +8,7 @@ The WBS button is dynamic and handled by wbs_template_builder.py
 
 from __future__ import annotations
 
-from workflow_app.domain import CommandSpec, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 
 # ─── Short aliases ──────────────────────────────────────────────────────────── #
 
@@ -18,6 +18,40 @@ _H = ModelName.HAIKU
 _I = InteractionType.INTERACTIVE
 _A = InteractionType.AUTO
 
+# Commands bumped to EffortLevel.HIGH per TASK-053 §7 (codex thread 019d8577).
+# 22 commands — 3 delivery:* entries from the original spec were dropped after
+# static verification showed they never appear in any template tuple (drift D1).
+_HIGH_EFFORT_COMMANDS: frozenset[str] = frozenset({
+    "/deep-research-1",
+    "/deep-research-2",
+    "/break-intake",
+    "/prd-create",
+    "/hld-create",
+    "/lld-create",
+    "/threat-model-create",
+    "/modules:create-core",
+    "/modules:create-variants",
+    "/modules:create-structure",
+    "/modules:create-coverage",
+    "/modules:review-created",
+    "/rollout-strategy-create",
+    "/modules:build-milestones",
+    "/review-executed-micro-architecture",
+    "/review-created-micro-architecture",
+    "/final-review",
+    "/validate-stack",
+    "/review-prd-flow",
+    "/review-executed-module",
+    "/secrets-scan",
+    "/compliance-check",
+})
+
+
+def _resolve_effort(name: str, override: EffortLevel | None) -> EffortLevel:
+    if override is not None:
+        return override
+    return EffortLevel.HIGH if name in _HIGH_EFFORT_COMMANDS else EffortLevel.STANDARD
+
 
 def _spec(
     name: str,
@@ -25,6 +59,7 @@ def _spec(
     interaction: InteractionType,
     pos: int,
     optional: bool = False,
+    effort: EffortLevel | None = None,
 ) -> CommandSpec:
     return CommandSpec(
         name=name,
@@ -32,6 +67,7 @@ def _spec(
         interaction_type=interaction,
         position=pos,
         is_optional=optional,
+        effort=_resolve_effort(name, effort),
     )
 
 
@@ -60,7 +96,13 @@ def _same_context_group(prev_name: str, curr_name: str) -> bool:
     return False
 
 
-def _repeats(cmd: str, model: ModelName, n: int, start_pos: int) -> list[CommandSpec]:
+def _repeats(
+    cmd: str,
+    model: ModelName,
+    n: int,
+    start_pos: int,
+    effort: EffortLevel | None = None,
+) -> list[CommandSpec]:
     """Generate n repetitions of (/clear, cmd) starting at start_pos.
 
     Used exclusively by TEMPLATE_AUTO_IMPROOVE.
@@ -71,49 +113,78 @@ def _repeats(cmd: str, model: ModelName, n: int, start_pos: int) -> list[Command
     for _ in range(n):
         out.append(CommandSpec(name="/clear", model=model, interaction_type=_A, position=pos))
         pos += 1
-        out.append(_spec(cmd, model, _A, pos))
+        out.append(_spec(cmd, model, _A, pos, effort=effort))
         pos += 1
     return out
 
 
 def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
-    """Insert /clear before AUTO commands, respecting context groups.
+    """Insert /clear + /model + /effort block headers before AUTO commands.
+
+    Follows TEMPLATE_INTAKE_REVIEW canonical pattern (see WORKFLOW-DETAILED §2):
+    each block starts with the triplet `/clear`, `/model {X}`, `/effort {Y}` where
+    X and Y come from the next real command's resolved model/effort.
 
     Rules:
-      - First command: never gets /clear before it.
-      - INTERACTIVE commands: never get /clear before them (they build context
+      - Leading /clear entries in the input are stripped — this function owns
+        block-header emission.
+      - An initial header is emitted once, seeded from the first real command.
+      - INTERACTIVE commands: no header emitted before them (they build context
         through dialogue and need the conversation history).
       - AUTO commands in the same context group as the previous command:
-        no /clear inserted (they share a sub-pipeline).
-      - Other AUTO commands: /clear inserted before them.
-      - /clear uses the NEXT command's model (avoids unnecessary /model haiku).
+        no header emitted (they share a sub-pipeline).
+      - Other AUTO commands: full `/clear` + `/model` + `/effort` block header
+        emitted before them.
 
-    Applied to: Brief, Modules, Deploy, Mkt, Business, QA, Micro-Architecture.
-    NOT applied to: Daily (context flows through the full session by design).
+    Applied to: Brief, Modules, Deploy, Mkt, Business, QA, Micro-Architecture,
+    Autocast, Blog. NOT applied to: Daily (context flows through the full
+    session by design) or Intake Review (already hand-authored with triplets).
+
+    Optimization: /model e /effort so sao reemitidos quando o valor MUDA em
+    relacao ao header anterior. /clear e sempre emitido (delimita o bloco e
+    reseta o contexto de conversa, mas nao reseta model/effort no CLI).
     """
     result: list[CommandSpec] = []
     pos = 1
-    prev_name = ""
-    for i, spec in enumerate(specs):
-        if (
-            i > 0
-            and spec.interaction_type == _A
-            and prev_name != "/clear"
-            and spec.name != "/clear"
-            and not _same_context_group(prev_name, spec.name)
-        ):
-            result.append(CommandSpec(
-                name="/clear",
-                interaction_type=_A,
-                position=pos,
-            ))
+    last_model: ModelName | None = None
+    last_effort: EffortLevel | None = None
+
+    def _emit_header(model: ModelName, effort: EffortLevel) -> None:
+        nonlocal pos, last_model, last_effort
+        result.append(CommandSpec(name="/clear", model=model, interaction_type=_A, position=pos))
+        pos += 1
+        if model != last_model:
+            result.append(CommandSpec(name=f"/model {model.value.lower()}", model=model, interaction_type=_A, position=pos))
             pos += 1
+            last_model = model
+        if effort != last_effort:
+            result.append(CommandSpec(name=f"/effort {effort.value}", model=model, interaction_type=_A, position=pos))
+            pos += 1
+            last_effort = effort
+
+    first_real = next((s for s in specs if s.name != "/clear"), None)
+    if first_real is not None:
+        _emit_header(first_real.model, _resolve_effort(first_real.name, first_real.effort))
+
+    prev_name = ""
+    for spec in specs:
+        if spec.name == "/clear":
+            continue
+        effective_effort = _resolve_effort(spec.name, spec.effort)
+        needs_header = (
+            prev_name != ""
+            and spec.interaction_type == _A
+            and not _same_context_group(prev_name, spec.name)
+        )
+        if needs_header:
+            _emit_header(spec.model, effective_effort)
         result.append(CommandSpec(
             name=spec.name,
             model=spec.model,
             interaction_type=spec.interaction_type,
             position=pos,
             is_optional=spec.is_optional,
+            effort=effective_effort,
         ))
         pos += 1
         prev_name = spec.name
@@ -132,6 +203,7 @@ TEMPLATE_JSON: list[CommandSpec] = [
 TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
     _spec("/clear",                     _S, _A,  0),
     _spec("/first-brief-create",        _O, _I,  1),
+    _spec("/intake:obvious",            _O, _I,  2),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",              _O, _I,  3),
     _spec("/intake:front-end",            _O, _I,  4),
@@ -172,6 +244,7 @@ TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
 TEMPLATE_BRIEF_FEATURE: list[CommandSpec] = _inject_clears([
     _spec("/clear",                     _S, _A,  0),
     _spec("/feature-brief-create",      _O, _I,  1),
+    _spec("/intake:obvious",            _O, _I,  2),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",              _O, _I,  3),
     _spec("/intake:front-end",            _O, _I,  4),
@@ -244,6 +317,263 @@ TEMPLATE_DAILY: list[CommandSpec] = [
     _spec("/daily:review",   _S, _A, 5),
 ]
 
+# ─── Intake Seed (preparacao do INTAKE para /intake-review:seed) ─────────────── #
+# Dupla funcao:
+#   1. Melhora o INTAKE.md original via /intake:obvious (preenche lacunas obvias
+#      a partir do project.json + inferencias de conteudo) — deixa a base limpa.
+#   2. Invoca /intake-review:seed — gera INTAKE.seeded.md e MILESTONES.seeded.md
+#      com expansao exaustiva (dominios, CRUD, estados UX, auth, edge cases,
+#      features consolidadas de docs_root/features/*/INTAKE.md), passando por
+#      obvious-pass interno (FASE 2.5) antes de derivar os milestones.
+#
+# Ambos recebem o project.json apendado automaticamente pelo main_window
+# (_on_pipeline_ready) a partir de app_state.config.config_path (metrics-project-pill).
+#
+# Uso manual — nao integrado ao /auto-flow. Executado sob demanda quando se quer
+# preparar uma base maximamente expandida para /intake-review:create-checklist.
+#
+# Codex wiring: tanto /intake:obvious quanto /intake-review:seed ja invocam
+# /skill:mcp-codex internamente (seed: FASE 1.1 Level 2 + FASE 2.5.5 Level 1).
+# Nao adicionamos gates externos para evitar redundancia.
+
+TEMPLATE_INTAKE_SEED: list[CommandSpec] = [
+    # /model e /effort so sao reinjetados quando o valor MUDA. /clear nao reseta
+    # nem modelo nem effort no CLI. Transicoes:
+    #   model:  haiku (bloco 0) -> opus (bloco 1, mantem em 2)
+    #   effort: low (bloco 0)   -> medium (bloco 1) -> high (bloco 2)
+
+    # Bloco 0: Reset de feature paths (Haiku / low) — restaura project.json para paths base
+    # — executa /reset:project-json deteccao + preview + confirmacao
+    _spec("/clear",              _H, _A, 0),
+    _spec("/model haiku",        _H, _A, 1),
+    _spec("/effort low",         _H, _A, 2),
+    _spec("/reset:project-json", _H, _A, 3),
+
+    # Bloco 1: obvious-pass do INTAKE original (Opus / medium)
+    # — preenche lacunas derivaveis do project.json e inferencias de conteudo
+    _spec("/clear",           _O, _A, 4),
+    _spec("/model opus",      _O, _A, 5),
+    _spec("/effort medium",   _O, _A, 6),
+    _spec("/intake:obvious",  _O, _A, 7),
+
+    # Bloco 2: seed (Opus / high) — INTAKE.seeded.md + MILESTONES.seeded.md
+    # — consolida features de docs_root/features/*, aplica obvious-pass interno,
+    #   deriva milestones expandidos so apos base otimizada
+    _spec("/clear",                _O, _A, 8),
+    _spec("/effort high",          _O, _A, 9),
+    _spec("/intake-review:seed",   _O, _A, 10, effort=EffortLevel.HIGH),
+]
+
+# ─── Intake Review (subfluxo F9 QA) ─────────────────────────────────────────── #
+# NOTE: No /clear auto-injection — explicit /clear + /model + /effort intercalado
+# antes de cada bloco com mudanca de modelo/effort. Segue canonical loop A..I
+# style (WORKFLOW-DETAILED.md §2).
+
+TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
+    # Bloco 1: extracao inicial (Sonnet / standard)
+    _spec("/clear",                          _S, _A,  0),
+    _spec("/model sonnet",                   _S, _A,  1),
+    _spec("/effort medium",                  _S, _A,  2),
+    _spec("/intake-review:create-checklist", _S, _A,  3),
+
+    # Bloco 2a: descoberta de gaps — list-improove + compare compartilham contexto
+    _spec("/clear",                          _O, _A,  4),
+    _spec("/model opus",                     _O, _A,  5),
+    _spec("/effort high",                    _O, _A,  6),
+    _spec("/intake-review:list-improove",    _O, _A,  7, effort=EffortLevel.HIGH),
+    _spec("/intake-review:compare",          _O, _A,  8, effort=EffortLevel.HIGH),
+
+    # Bloco 2b: priorizacao isolada — contexto limpo para create-gaplist (split anti-overload)
+    _spec("/clear",                          _O, _A,  9),
+    _spec("/model opus",                     _O, _A, 10),
+    _spec("/effort high",                    _O, _A, 11),
+    _spec("/intake-review:create-gaplist",   _O, _A, 12, effort=EffortLevel.HIGH),
+
+    # Bloco 2.5: Codex adversarial review da gaplist (programatico, skip_prompt)
+    _spec(
+        "/skill:mcp-codex revisar a gaplist gerada por /intake-review:create-gaplist "
+        "(output/wbs/{slug}/intake-review/gaplist.md). Topic_type=decision. Level 2 "
+        "primary+secondary (senior-qa-architect + senior-adversarial). Identifique: "
+        "(a) gaps do INTAKE que ficaram fora da gaplist, (b) priorizacao P0/P1/P2 "
+        "inconsistente, (c) tasks com escopo ambiguo ou criterio de aceite fraco.",
+        _S, _A, 13),
+
+    # Bloco 3a.1: execucao P0 blockers — primeira passada (Opus / high)
+    _spec("/clear",                             _O, _A, 14),
+    _spec("/model opus",                        _O, _A, 15),
+    _spec("/effort high",                       _O, _A, 16),
+    _spec("/intake-review:execute-gaplist-p0",  _O, _A, 17, effort=EffortLevel.HIGH),
+
+    # Bloco 3a.2: execucao P0 — segunda passada (continua checkpoint)
+    _spec("/clear",                             _O, _A, 18),
+    _spec("/model opus",                        _O, _A, 19),
+    _spec("/effort high",                       _O, _A, 20),
+    _spec("/intake-review:execute-gaplist-p0",  _O, _A, 21, effort=EffortLevel.HIGH),
+
+    # Bloco 3b.1: execucao P1 high — primeira passada (Opus / medium)
+    _spec("/clear",                             _O, _A, 22),
+    _spec("/model opus",                        _O, _A, 23),
+    _spec("/effort medium",                     _O, _A, 24),
+    _spec("/intake-review:execute-gaplist-p1",  _O, _A, 25),
+
+    # Bloco 3b.2: execucao P1 — segunda passada (continua checkpoint)
+    _spec("/clear",                             _O, _A, 26),
+    _spec("/model opus",                        _O, _A, 27),
+    _spec("/effort medium",                     _O, _A, 28),
+    _spec("/intake-review:execute-gaplist-p1",  _O, _A, 29),
+
+    # Bloco 3b.5: gate de build/typecheck — P0+P1 nao podem ter quebrado o repo
+    _spec("/build-verify",                      _S, _A, 30, effort=EffortLevel.STANDARD),
+
+    # Bloco 3c: execucao P2+P3 medium/low (Opus / low) — batch pragmatico
+    _spec("/clear",                             _O, _A, 31),
+    _spec("/model opus",                        _O, _A, 32),
+    _spec("/effort low",                        _O, _A, 33),
+    _spec("/intake-review:execute-gaplist-p2",  _O, _A, 34, effort=EffortLevel.LOW),
+
+    # Bloco 3.5: Codex adversarial review pos-execucao (programatico)
+    _spec(
+        "/skill:mcp-codex revisar o estado do workspace apos execucao completa da "
+        "gaplist (P0+P1+P2). Topic_type=decision. Level 2 primary+secondary "
+        "(senior-qa-architect + senior-adversarial). Identifique: (a) regressoes "
+        "introduzidas, (b) INTAKE items ainda nao cobertos no codigo, (c) testes "
+        "ou docs desatualizados frente ao codigo novo.",
+        _S, _A, 35),
+
+    # Bloco 3.6: validacao de stack completa antes do veredito
+    _spec("/validate-stack",                    _O, _A, 36),
+
+    # Bloco 4: veredito final (Opus / high)
+    _spec("/clear",                          _O, _A, 37),
+    _spec("/model opus",                     _O, _A, 38),
+    _spec("/effort high",                    _O, _A, 39),
+    _spec("/intake-review:review-executed",  _O, _A, 40, effort=EffortLevel.HIGH),
+
+    # Bloco 4.5: scan de assets/imagens faltantes — append em ASSETS-TO-CREATE.md
+    _spec("/assets:create",                  _S, _A, 41, effort=EffortLevel.STANDARD),
+
+    # Bloco 5: housekeeping (Haiku / low) — limpa historico para nova execucao
+    _spec("/clear",                          _H, _A, 42),
+    _spec("/model haiku",                    _H, _A, 43),
+    _spec("/effort low",                     _H, _A, 44),
+    _spec("/intake-review:clear",            _H, _A, 45, optional=True, effort=EffortLevel.LOW),
+]
+
+# ─── Intake MAX Review (versao deep — Opus/MAX + Codex adversarial + gates) ── #
+# Clone do TEMPLATE_INTAKE_REVIEW com effort 1-2 graus acima em cada comando
+# (excecao do /intake-review:clear final — mantido Haiku/LOW por instrucao direta).
+#
+# Ajustes sobre o clone naive (analise Level 2 primary+secondary):
+#  - /skill:mcp-codex recebe argumento explicito (skip_prompt implicito via topic),
+#    caso contrario entraria em modo interativo e quebraria o autocast.
+#  - list-improove em HIGH (satura antes do MAX — comando criativo/inferencial).
+#
+# Anti-overload (splits baseados em tamanho real dos comandos subjacentes):
+#  - create-gaplist (394 linhas, maior dos intake-review) isolado em bloco
+#    proprio com /clear apos compare — evita competir contexto com o compare
+#    (318 linhas) que ja satura em projetos com 30+ models.
+#  - execute-gaplist-p0/p1 rodam em DUAS passadas cada com /clear entre elas:
+#    o comando tem checkpoint por task, segunda chamada continua de onde parou.
+#    Garante que tasks deixadas half-done na primeira sejam concluidas.
+#  - /build-verify entre P0+P1 e P2 para garantir que P0+P1 nao quebraram.
+#  - /validate-stack antes do veredito para audit completo da stack.
+#  - /assets:create apos review-executed para scan final de placeholders de
+#    imagem e gerar prompts em output/assets/ASSETS-TO-CREATE.md (append-only).
+#
+# Limitacao conhecida: se /intake-review:review-executed emitir REPROVADO, o
+# Ciclo 2 (re-run de create-gaplist com gaps residuais) precisa ser disparado
+# manualmente re-clicando o botao. Branching condicional nao e expressivel no
+# modelo linear de CommandSpec. Para auto-retry use /loop 1 {template}.
+
+TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
+    # /model e /effort so sao injetados quando o valor MUDA. /clear nao reseta
+    # nem o modelo nem o effort, entao reinjetar entre blocos com mesmo valor
+    # e desperdicio. Transicoes:
+    #   model:  opus (inicio)               -> haiku (housekeeping)
+    #   effort: high (inicio) -> max (2a)   -> high (3c) -> max (4) -> low (5)
+
+    # Bloco 1: extracao inicial — Opus/HIGH (era Sonnet/medium, +2 graus)
+    _spec("/clear",                          _O, _A,  0),
+    _spec("/model opus",                     _O, _A,  1),
+    _spec("/effort high",                    _O, _A,  2),
+    _spec("/intake-review:create-checklist", _O, _A,  3, effort=EffortLevel.HIGH),
+
+    # Bloco 2a: descoberta de gaps — list-improove + compare compartilham contexto
+    _spec("/clear",                          _O, _A,  4),
+    _spec("/effort max",                     _O, _A,  5),
+    _spec("/intake-review:list-improove",    _O, _A,  6, effort=EffortLevel.HIGH),
+    _spec("/intake-review:compare",          _O, _A,  7, effort=EffortLevel.MAX),
+
+    # Bloco 2b: priorizacao isolada — contexto limpo para create-gaplist deliberar
+    # P0/P1/P2/P3 sem competir com o compare-report ja em memoria (split G-L)
+    _spec("/clear",                          _O, _A,  8),
+    _spec("/intake-review:create-gaplist",   _O, _A,  9, effort=EffortLevel.MAX),
+
+    # Bloco 2.5: Codex adversarial review da gaplist (programatico, skip_prompt)
+    _spec(
+        "/skill:mcp-codex revisar a gaplist gerada por /intake-review:create-gaplist "
+        "(output/wbs/{slug}/intake-review/gaplist.md). Topic_type=decision. Level 2 "
+        "primary+secondary (senior-qa-architect + senior-adversarial). Identifique: "
+        "(a) gaps do INTAKE que ficaram fora da gaplist, (b) priorizacao P0/P1/P2 "
+        "inconsistente, (c) tasks com escopo ambiguo ou criterio de aceite fraco. "
+        "Retorne findings acionaveis antes da execucao.",
+        _O, _A, 10, effort=EffortLevel.MAX),
+
+    # Bloco 3a.1: execucao P0 blockers — primeira passada
+    _spec("/clear",                             _O, _A, 11),
+    _spec("/intake-review:execute-gaplist-p0",  _O, _A, 12, effort=EffortLevel.MAX),
+
+    # Bloco 3a.2: execucao P0 — segunda passada (continua checkpoint, conclui pendentes)
+    _spec("/clear",                             _O, _A, 13),
+    _spec("/intake-review:execute-gaplist-p0",  _O, _A, 14, effort=EffortLevel.MAX),
+
+    # Bloco 3b.1: execucao P1 high — primeira passada
+    _spec("/clear",                             _O, _A, 15),
+    _spec("/intake-review:execute-gaplist-p1",  _O, _A, 16, effort=EffortLevel.MAX),
+
+    # Bloco 3b.2: execucao P1 — segunda passada (conclui checkpoints pendentes)
+    _spec("/clear",                             _O, _A, 17),
+    _spec("/intake-review:execute-gaplist-p1",  _O, _A, 18, effort=EffortLevel.MAX),
+
+    # Bloco 3b.5: gate de build/typecheck — P0+P1 nao podem ter quebrado o repo
+    _spec("/build-verify",                      _S, _A, 19, effort=EffortLevel.STANDARD),
+
+    # Bloco 3c: execucao P2+P3 — Opus/HIGH (era Opus/LOW, +2 graus)
+    _spec("/clear",                             _O, _A, 20),
+    _spec("/effort high",                       _O, _A, 21),
+    _spec("/intake-review:execute-gaplist-p2",  _O, _A, 22, effort=EffortLevel.HIGH),
+
+    # Bloco 3.5: Codex adversarial review pos-execucao (programatico)
+    _spec(
+        "/skill:mcp-codex revisar o estado do workspace apos execucao completa da "
+        "gaplist (P0+P1+P2). Topic_type=decision. Level 2 primary+secondary "
+        "(senior-qa-architect + senior-adversarial). Identifique: (a) regressoes "
+        "introduzidas, (b) INTAKE items ainda nao cobertos no codigo, (c) testes "
+        "ou docs desatualizados frente ao codigo novo. Retorne lista de acoes "
+        "residuais para o review-executed.",
+        _O, _A, 23, effort=EffortLevel.MAX),
+
+    # Bloco 3.6: validacao de stack completa antes do veredito
+    _spec("/validate-stack",                    _O, _A, 24, effort=EffortLevel.HIGH),
+
+    # Bloco 4: veredito final — Opus/MAX (era Opus/HIGH, +1 grau)
+    _spec("/clear",                          _O, _A, 25),
+    _spec("/effort max",                     _O, _A, 26),
+    _spec("/intake-review:review-executed",  _O, _A, 27, effort=EffortLevel.MAX),
+
+    # Bloco 4.5: scan de assets/imagens faltantes — append em ASSETS-TO-CREATE.md
+    # Comando ja e append-only por design (escaneia @ASSET_PLACEHOLDER, PNG
+    # minimos, MP4 vazios; gera prompts gpt-image-1; grava organizado por H1
+    # de workspace_root em ordem de chegada). Sonnet/medium e o default.
+    _spec("/assets:create",                  _S, _A, 28, effort=EffortLevel.STANDARD),
+
+    # Bloco 5: housekeeping — Haiku/LOW (mudanca de modelo: opus -> haiku)
+    _spec("/clear",                          _H, _A, 29),
+    _spec("/model haiku",                    _H, _A, 30),
+    _spec("/effort low",                     _H, _A, 31),
+    _spec("/intake-review:clear",            _H, _A, 32, optional=True, effort=EffortLevel.LOW),
+]
+
 # ─── Marketing (from z-templates/mkt.md) ──────────────────────────────────────── #
 
 TEMPLATE_MKT: list[CommandSpec] = _inject_clears([
@@ -276,7 +606,9 @@ _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
     ("/intake-review:list-improove",    _O, _A),
     ("/intake-review:compare",          _O, _A),
     ("/intake-review:create-gaplist",   _O, _A),
-    ("/intake-review:execute-gaplist",  _S, _A),
+    ("/intake-review:execute-gaplist-p0",  _O, _A),
+    ("/intake-review:execute-gaplist-p1",  _O, _A),
+    ("/intake-review:execute-gaplist-p2",  _O, _A),
     ("/intake-review:review-executed",  _O, _A),
     ("/qa:prep",              _S, _A),
     ("/qa:trace",             _O, _A),
@@ -287,7 +619,6 @@ _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
     ("/backend:audit",        _O, _A),
     ("/backend:test-check",   _S, _A),
     ("/backend:report",       _S, _A),
-    ("/validate-front-end",   _O, _A),
     ("/frontend:scan",        _S, _A),
     ("/frontend:audit",        _O, _A),
     ("/frontend:mobile-check", _S, _A),
@@ -302,7 +633,6 @@ _QA_BASE: list[tuple[str, ModelName, InteractionType]] = [
     ("/compliance-check",     _S, _A),
     ("/mutation-test-create",  _H, _A),
     ("/review-language",      _S, _A),
-    ("/validate-stack",       _H, _A),
 ]
 
 _QA_NEXTJS: list[tuple[str, ModelName, InteractionType]] = [
@@ -417,10 +747,8 @@ _QA_REACT_NATIVE: list[tuple[str, ModelName, InteractionType]] = [
 def _build_qa_template(stack_cmds: list[tuple[str, ModelName, InteractionType]]) -> list[CommandSpec]:
     """Build a QA template by combining base QA commands with stack-specific ones."""
     base_specs = [_spec(name, model, interaction, i + 1) for i, (name, model, interaction) in enumerate(_QA_BASE + stack_cmds)]
-    result = _inject_clears(base_specs)
-    # Prepend /clear at the start of QA templates
-    result.insert(0, CommandSpec(name="/clear", interaction_type=_A, position=0))
-    return result
+    # _inject_clears already seeds the initial /clear + /model + /effort block header.
+    return _inject_clears(base_specs)
 
 
 TEMPLATE_QA_NEXTJS: list[CommandSpec] = _build_qa_template(_QA_NEXTJS)
@@ -435,6 +763,7 @@ TEMPLATE_QA_REACT_NATIVE: list[CommandSpec] = _build_qa_template(_QA_REACT_NATIV
 TEMPLATE_MICRO_ARCHITECTURE: list[CommandSpec] = _inject_clears([
     _spec("/clear",                              _S, _A, 0),
     _spec("/feature-brief-create",               _O, _I, 1),
+    _spec("/intake:obvious",                     _O, _I, 2),
     _spec("/intake:analyze",                     _S, _A, 2),
     _spec("/intake:enhance",                     _O, _I, 3),
     _spec("/micro-architecture",                 _S, _I, 4),
@@ -456,24 +785,6 @@ TEMPLATE_AUTOCAST_TEST: list[CommandSpec] = _inject_clears([
     _spec("/test-autoflow-auto",        _S, _A, 7),
     _spec("/test-autoflow-auto",        _S, _A, 8),
 ])
-
-# ─── Auto-Improove Loop (Auxiliar tab) ──────────────────────────────────────── #
-# Designed for /loop button — cycles continuously until stopped.
-
-TEMPLATE_AUTO_IMPROOVE_LOOP: list[CommandSpec] = [
-    _spec("/clear",               _O, _A,  0),
-    _spec("/model Opus",          _O, _A,  1),
-    _spec("/clear",               _O, _A,  2),
-    _spec("/auto-improove:cmd",   _O, _A,  3),
-    _spec("/clear",               _O, _A,  4),
-    _spec("/auto-improove:cmd",   _O, _A,  5),
-    _spec("/clear",               _O, _A,  6),
-    _spec("/auto-improove:cmd",   _O, _A,  7),
-    _spec("/clear",               _O, _A,  8),
-    _spec("/auto-improove:cmd",   _O, _A,  9),
-    _spec("/clear",               _O, _A, 10),
-    _spec("/auto-improove:cmd",   _O, _A, 11),
-]
 
 # ─── Auto-Improove Balanced Flow (Daily tab) ────────────────────────────────── #
 # Fluxo balanceado para melhoria contínua do SystemForge.

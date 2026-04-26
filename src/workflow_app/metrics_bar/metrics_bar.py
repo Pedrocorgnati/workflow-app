@@ -89,7 +89,7 @@ _NAV_INACTIVE = (
 class MetricsBar(QWidget):
     """48px project selector, instance selection, and navigation toolbar."""
 
-    view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Toolbox
+    view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Toolbox, 3=Kanban
     config_change_requested = Signal(str)   # path of selected .json
     config_unload_requested = Signal()      # user clicked ✕ on project pill
 
@@ -246,7 +246,20 @@ class MetricsBar(QWidget):
         self._btn_toolbox.clicked.connect(lambda: self._on_nav_clicked(2))
         layout.addWidget(self._btn_toolbox)
 
-        self._nav_btns = [self._btn_workflow, self._btn_comandos, self._btn_toolbox]
+        self._btn_kanban = QPushButton("Kanban")
+        self._btn_kanban.setProperty("testid", "nav-btn-kanban")
+        self._btn_kanban.setFixedHeight(28)
+        self._btn_kanban.setFont(font_nav)
+        self._btn_kanban.setMinimumWidth(80)
+        self._btn_kanban.clicked.connect(lambda: self._on_nav_clicked(3))
+        layout.addWidget(self._btn_kanban)
+
+        self._nav_btns = [
+            self._btn_workflow,
+            self._btn_comandos,
+            self._btn_toolbox,
+            self._btn_kanban,
+        ]
         self._apply_nav_styles()
 
         layout.addWidget(self._make_separator())

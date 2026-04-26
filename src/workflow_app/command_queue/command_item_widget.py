@@ -68,6 +68,7 @@ class CommandItemWidget(QWidget):
         self.setObjectName("CommandItemWidget")
         self._spec = spec
         self._status = CommandStatus.PENDENTE
+        self._is_sent: bool = False
         self._highlighted: bool = False
         self._can_reorder_fn: Callable[[int], bool] = can_reorder_fn or (lambda _pos: True)
         self._drag_start_pos: QPoint | None = None
@@ -279,7 +280,10 @@ class CommandItemWidget(QWidget):
             clipboard.setText(text)
 
     def _on_run_clicked(self) -> None:
-        """Emit run signal, turn button into amber dot, reveal quick-delete."""
+        """Toggle sent state: play → mark as sent; amber dot → reset to pending."""
+        if self._is_sent:
+            self.reset_to_pending()
+            return
         self.run_in_terminal_requested.emit(
             f"{self._spec.name} {self._spec.config_path}".strip()
         )
@@ -287,20 +291,24 @@ class CommandItemWidget(QWidget):
 
     def _mark_as_sent(self) -> None:
         """Visually mark this row as already sent to terminal."""
+        self._is_sent = True
         self._run_btn.setText("●")
+        self._run_btn.setToolTip("Resetar para pendente")
         self._run_btn.setStyleSheet(
             "QPushButton { background-color: transparent; border: none;"
             "  color: #FBBF24; font-size: 11px; }"
+            "QPushButton:hover { color: #FDE68A; }"
         )
-        self._run_btn.setEnabled(False)
 
     def is_pending_run(self) -> bool:
         """True if this row has not yet been sent to the terminal."""
-        return self._run_btn.isEnabled()
+        return not self._is_sent
 
     def reset_to_pending(self) -> None:
         """Reset this row back to pending state (for loop restart)."""
+        self._is_sent = False
         self._run_btn.setText("▶")
+        self._run_btn.setToolTip("Executar no terminal")
         self._run_btn.setStyleSheet(
             "QPushButton { background-color: transparent; border: none;"
             "  color: #22C55E; font-size: 10px; }"

@@ -11,12 +11,19 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from workflow_app.domain import CommandSpec, InteractionType
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType
 
 _MODEL_MAP: dict[str, str] = {
     "Opus": "opus",
     "Sonnet": "sonnet",
     "Haiku": "haiku",
+}
+
+_EFFORT_MAP: dict[str, str] = {
+    EffortLevel.LOW.value: "low",
+    EffortLevel.STANDARD.value: "medium",
+    EffortLevel.HIGH.value: "high",
+    EffortLevel.MAX.value: "max",
 }
 
 
@@ -92,6 +99,7 @@ def build_launch_plan(spec: CommandSpec, instance_name: str) -> AutocastLaunchPl
         )
 
     model_flag = _MODEL_MAP.get(spec.model.value, "sonnet")
+    effort_flag = _EFFORT_MAP.get(spec.effort.value, "medium")
     config_args = (spec.config_path,) if spec.config_path else ()
     command_parts = [profile.name]
 
@@ -103,8 +111,12 @@ def build_launch_plan(spec: CommandSpec, instance_name: str) -> AutocastLaunchPl
             *config_args,
             "--model",
             model_flag,
+            "--effort",
+            effort_flag,
         )
-        command_parts.extend([spec.name, *config_args, "--model", model_flag])
+        command_parts.extend(
+            [spec.name, *config_args, "--model", model_flag, "--effort", effort_flag]
+        )
     else:
         prompt = " ".join(part for part in (spec.name, spec.config_path) if part).strip()
         argv = (
@@ -114,8 +126,12 @@ def build_launch_plan(spec: CommandSpec, instance_name: str) -> AutocastLaunchPl
             prompt,
             "--model",
             model_flag,
+            "--effort",
+            effort_flag,
         )
-        command_parts.extend(["-p", prompt, "--model", model_flag])
+        command_parts.extend(
+            ["-p", prompt, "--model", model_flag, "--effort", effort_flag]
+        )
 
     # All autocast commands run in the interactive terminal channel
     channel = "interactive"

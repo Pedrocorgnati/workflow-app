@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from workflow_app.domain import CommandSpec, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 
 
 class AddCommandDialog(QDialog):
@@ -35,7 +35,7 @@ class AddCommandDialog(QDialog):
         super().__init__(parent)
         self._next_position = next_position
         self.setWindowTitle("Adicionar Comando")
-        self.setMinimumSize(440, 280)
+        self.setMinimumSize(440, 320)
         self.setModal(True)
         self.setStyleSheet("background-color: #18181B;")
         self._setup_ui()
@@ -116,6 +116,19 @@ class AddCommandDialog(QDialog):
         )
         bl.addWidget(self._inter_combo)
 
+        # Effort combo
+        effort_label = QLabel("Effort (/effort)")
+        effort_label.setStyleSheet("color: #FAFAFA; font-size: 13px; font-weight: 600;")
+        bl.addWidget(effort_label)
+        self._effort_combo = QComboBox()
+        self._effort_combo.addItems(["low", "medium", "high", "max"])
+        self._effort_combo.setCurrentText("medium")
+        self._effort_combo.setStyleSheet(
+            "background-color: #27272A; color: #FAFAFA;"
+            " border: 1px solid #3F3F46; border-radius: 4px; padding: 8px 10px;"
+        )
+        bl.addWidget(self._effort_combo)
+
         root.addWidget(body, stretch=1)
 
         # Footer
@@ -164,15 +177,23 @@ class AddCommandDialog(QDialog):
 
         model_map = {"Opus": ModelName.OPUS, "Sonnet": ModelName.SONNET, "Haiku": ModelName.HAIKU}
         inter_map = {"Interativo": InteractionType.INTERACTIVE, "Automático": InteractionType.AUTO}
+        effort_map = {
+            "low": EffortLevel.LOW,
+            "medium": EffortLevel.STANDARD,
+            "high": EffortLevel.HIGH,
+            "max": EffortLevel.MAX,
+        }
 
         model = model_map.get(self._model_combo.currentText(), ModelName.SONNET)
         inter = inter_map.get(self._inter_combo.currentText(), InteractionType.INTERACTIVE)
+        effort = effort_map.get(self._effort_combo.currentText(), EffortLevel.STANDARD)
 
         spec = CommandSpec(
             name=name,
             model=model,
             interaction_type=inter,
             position=self._next_position,
+            effort=effort,
         )
         self.command_added.emit(spec)
         self.accept()

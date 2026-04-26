@@ -68,7 +68,12 @@ def test_build_launch_plan_for_auto_command_uses_print_mode():
         "--dangerously-skip-permissions",
         "-p",
     )
-    assert plan.argv[-2:] == ("--model", "sonnet")
+    assert "--model" in plan.argv
+    midx = plan.argv.index("--model")
+    assert plan.argv[midx + 1] == "sonnet"
+    assert "--effort" in plan.argv
+    eidx = plan.argv.index("--effort")
+    assert plan.argv[eidx + 1] == "medium"
 
 
 def test_build_launch_plan_rejects_codex_instances():

@@ -13,6 +13,7 @@ dependencies = [
     "alembic>=1.13.0",
     "python-statemachine>=2.0.0",
     "pyte>=0.8.0",
+    "pydantic>=2.5",
 ]
 
 [project.optional-dependencies]

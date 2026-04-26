@@ -143,6 +143,7 @@ class SignalBus(QObject):
     run_command_in_terminal = Signal(str)           # sends text + Enter — interactive terminal only
     run_command_in_workspace_terminal = Signal(str) # sends text + Enter — workspace terminal only
     paste_text_in_terminal = Signal(str)            # text only (no Enter — inserts inline)
+    paste_text_in_workspace_terminal = Signal(str)  # text only (no Enter) — workspace terminal
     # Generic PTY sessions bound to a concrete terminal channel.
     # channel values used by the app: "interactive" | "workspace"
     terminal_output_chunk_received = Signal(str, str)  # channel, chunk

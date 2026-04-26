@@ -57,6 +57,13 @@ class PersistentShell(QObject):
         env["COLORTERM"] = "truecolor"
         env["COLUMNS"] = str(self._cols)
         env["LINES"] = str(self._rows)
+        # Force a UTF-8 locale so bash readline and TUIs (Claude Code, etc)
+        # accept multi-byte input (á é í ã ç …). If the host has a non-UTF-8
+        # LANG, accented keystrokes are silently dropped by readline.
+        for key in ("LANG", "LC_ALL", "LC_CTYPE"):
+            val = env.get(key, "")
+            if "UTF-8" not in val and "utf8" not in val.lower():
+                env[key] = "C.UTF-8"
         # Remove CLAUDECODE so sub-claude CLIs work inside the shell
         env.pop("CLAUDECODE", None)
 

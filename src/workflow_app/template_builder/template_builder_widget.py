@@ -41,6 +41,143 @@ _H = ModelName.HAIKU
 _I = InteractionType.INTERACTIVE
 _A = InteractionType.AUTO
 
+# DCP canonical loop A..I per module — source: TASK-050 spec §127 (literal order).
+# Order: A, B, B.2, C, D, D.5, E, F, F.2, G, H, I — matches the spec's literal
+# list. F = stack review plan (pre-deploy); F.2 = stack review check.
+COMMAND_CATALOG_DCP: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] = [
+    ("A - Creation", [
+        ("/clear",                      _S, _A),
+        ("/model opus",                 _O, _A),
+        ("/effort high",                _O, _A),
+        ("/create-task",                _O, _I),
+        ("/create-task-layout",         _S, _I),
+        ("/review-created-task",        _S, _I),
+        ("/create-overview",            _S, _I),
+        ("/update-task-user-stories",   _S, _I),
+    ]),
+    ("B - Build", [
+        ("/clear",                      _S, _A),
+        ("/model sonnet",               _S, _A),
+        ("/effort medium",              _S, _A),
+        ("/mobile-first-build",         _S, _I),
+        ("/front-end-build",            _S, _I),
+        ("/front-end-obvious",          _S, _I),
+        ("/front-end-review",           _S, _I),
+        ("/gate:frontend-runtime",      _S, _A),
+        ("/data-test-id",               _S, _A),
+        ("/back-end-build",             _S, _I),
+        ("/build-verify",               _H, _A),
+        ("/db-migration-create",        _S, _I),
+        ("/assets:create",              _H, _I),
+    ]),
+    ("B.2 - Per-task", [
+        ("/clear",                      _S, _A),
+        ("/model sonnet",               _S, _A),
+        ("/execute-task",               _S, _I),
+        ("/review:prep",                _S, _A),
+        ("/review:scaffold-check",      _S, _A),
+        ("/review:tests-a11y",          _S, _A),
+        ("/review-executed-task",       _S, _I),
+    ]),
+    ("C - Linkage", [
+        ("/clear",                      _S, _A),
+        ("/model haiku",                _H, _A),
+        ("/effort low",                 _H, _A),
+        ("/github-linking",             _H, _I),
+        ("/sync:github",                _H, _I),
+        ("/sync:mcp",                   _S, _I),
+    ]),
+    ("D - F8 micro", [
+        ("/clear",                      _S, _A),
+        ("/model haiku",                _H, _A),
+        ("/env-creation",               _H, _I),
+        ("/create-test-user",           _H, _I),
+        ("/seed-data-create",           _S, _I),
+        ("/dev-bootstrap-create",       _H, _I),
+        ("/pending-actions-mcp",        _S, _I),
+        ("/infra-smoke-check",          _H, _I),
+    ]),
+    ("D.5 - Revision", [
+        ("/clear",                      _S, _A),
+        ("/model opus",                 _O, _A),
+        ("/effort high",                _O, _A),
+        ("/review-executed-module",     _O, _I),
+    ]),
+    ("E - QA micro", [
+        ("/clear",                      _S, _A),
+        ("/model sonnet",               _S, _A),
+        ("/effort medium",              _S, _A),
+        ("/auto-flow intake-review",    _S, _I),
+        ("/qa:prep",                    _S, _I),
+        ("/qa:trace",                   _O, _I),
+        ("/qa:report",                  _S, _I),
+        ("/brief-vs-frontend-review",   _S, _I),
+        ("/validate-roles",             _O, _I),
+        ("/validate-billing",           _O, _I),
+        ("/validate-backend",           _O, _I),
+        ("/backend:scan",               _S, _I),
+        ("/backend:audit",              _O, _I),
+        ("/backend:test-check",         _S, _I),
+        ("/backend:report",             _S, _I),
+        ("/validate-front-end",         _O, _I),
+        ("/frontend:scan",              _S, _I),
+        ("/frontend:audit",             _O, _I),
+        ("/frontend:mobile-check",      _S, _I),
+        ("/frontend:assets-check",      _S, _I),
+        ("/frontend:report",            _S, _I),
+        ("/load-test-create",           _S, _I),
+        ("/tech-debt-audit",            _S, _I),
+        ("/dependency-audit",           _S, _I),
+        ("/secrets-scan",               _H, _I),
+        ("/compliance-check",           _S, _I),
+        ("/validation-remediate",       _S, _I),
+        ("/validation-summary",         _S, _I),
+    ]),
+    ("F - Stack plan", [
+        ("/clear",                      _S, _A),
+        ("/model opus",                 _O, _A),
+        ("/effort high",                _O, _A),
+        ("/{stack}:{stack}-review plan", _O, _I),
+    ]),
+    ("F.2 - Stack check", [
+        ("/clear",                      _S, _A),
+        ("/model opus",                 _O, _A),
+        ("/{stack}:{stack}-review check", _O, _I),
+    ]),
+    ("G - Deploy parcial", [
+        ("/clear",                      _S, _A),
+        ("/model sonnet",               _S, _A),
+        ("/effort medium",              _S, _A),
+        ("/ci-cd-create",               _S, _I),
+        ("/supabase-sql-editor",        _S, _I),
+        ("/infra-create",               _S, _I),
+        ("/slo-create",                 _S, _I),
+        ("/monitoring-setup",           _S, _I),
+        ("/pre-deploy-testing",         _S, _I),
+        ("/deploy-checklist",           _S, _I),
+        ("/hostinger:update-bd",        _S, _I),
+        ("/staging-validate",           _S, _I),
+        ("/post-deploy-verify",         _S, _I),
+    ]),
+    ("H - Commit", [
+        ("/clear",                      _S, _A),
+        ("/model sonnet",               _S, _A),
+        ("/effort medium",              _S, _A),
+        ("/commit:simple",              _S, _I),
+        ("/commit:static",              _S, _I),
+        ("/commit:nextjs-hostinger",    _S, _I),
+        ("/commit:multilanguage",       _S, _I),
+    ]),
+    ("I - Analise humana", [
+        ("/npm-run",                    _S, _I),
+        ("/documentation-update",       _S, _I),
+        ("/next-modules-skeleton-update", _S, _I),
+    ]),
+]
+
+# DEPRECATED — use COMMAND_CATALOG_DCP for new work.
+# Kept for backwards compatibility; rendered under a "Legacy Monolithic
+# (F1..F11) — Deprecated" header by `_build_catalog()`.
 COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] = [
     ("F1 — Brief", [
         ("/project-json",           _S, _I),
@@ -96,7 +233,7 @@ COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] 
         ("/auto-flow execute",      _S, _A),
         ("/execute-task",           _S, _A),
         ("/review-executed-task",   _S, _A),
-        ("/create-assets",          _H, _A),
+        ("/assets:create",          _H, _A),
         ("/create-mocks",           _S, _I),
         ("/github-linking",         _H, _A),
     ]),
@@ -656,8 +793,79 @@ class TemplateBuilderWidget(QWidget):
     # ── Catalog builder ── #
 
     def _build_catalog(self) -> None:
+        """Render DCP and Legacy catalogs as two side-by-side columns.
+
+        Spec TASK-050 §125-129 mandates "dois blocos lado a lado dentro de
+        QScrollArea" with a tooltip on the DCP banner and a red deprecated
+        badge on the Legacy block.
+        """
         self._all_rows: list[tuple[str, _CatalogRow]] = []
         self._phase_headers: list[tuple[str, QLabel]] = []
+
+        columns_row = QWidget()
+        columns_layout = QHBoxLayout(columns_row)
+        columns_layout.setContentsMargins(0, 0, 0, 0)
+        columns_layout.setSpacing(1)
+
+        dcp_column = QWidget()
+        dcp_col_layout = QVBoxLayout(dcp_column)
+        dcp_col_layout.setContentsMargins(0, 0, 0, 0)
+        dcp_col_layout.setSpacing(0)
+
+        dcp_banner = QLabel("  DCP Canonical Loop (A..I)")
+        dcp_banner.setFixedHeight(28)
+        dcp_banner.setStyleSheet(
+            "background-color: #1E3A8A; color: #DBEAFE; font-size: 12px;"
+            "font-weight: 700; border-bottom: 2px solid #3B82F6;"
+        )
+        dcp_banner.setToolTip("A fase executa por modulo, nao por fase global")
+        dcp_col_layout.addWidget(dcp_banner)
+        self._phase_headers.append(("__dcp_banner__", dcp_banner))
+
+        for phase, cmds in COMMAND_CATALOG_DCP:
+            hdr = QLabel(f"  {phase}")
+            hdr.setFixedHeight(24)
+            hdr.setStyleSheet(
+                "background-color: #27272A; color: #A1A1AA; font-size: 11px;"
+                "font-weight: 600; border-bottom: 1px solid #3F3F46;"
+            )
+            dcp_col_layout.addWidget(hdr)
+            self._phase_headers.append((phase, hdr))
+
+            for name, model, interaction in cmds:
+                row = _CatalogRow(name, model, interaction)
+                row.add_requested.connect(self._on_catalog_add)
+                dcp_col_layout.addWidget(row)
+                self._all_rows.append((phase, row))
+
+        dcp_col_layout.addStretch()
+
+        legacy_column = QWidget()
+        legacy_col_layout = QVBoxLayout(legacy_column)
+        legacy_col_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_col_layout.setSpacing(0)
+
+        legacy_banner = QLabel("  Legacy Monolithic (F1..F11)")
+        legacy_banner.setFixedHeight(28)
+        legacy_banner.setStyleSheet(
+            "background-color: #78350F; color: #FEF3C7; font-size: 12px;"
+            "font-weight: 700; border-bottom: 2px solid #F59E0B;"
+        )
+        legacy_col_layout.addWidget(legacy_banner)
+        self._phase_headers.append(("__legacy_banner__", legacy_banner))
+
+        deprecated_badge = QLabel("  Deprecated / migrate")
+        deprecated_badge.setFixedHeight(22)
+        deprecated_badge.setStyleSheet(
+            "background-color: #7F1D1D; color: #FECACA; font-size: 11px;"
+            "font-weight: 700; letter-spacing: 0.5px;"
+            "border-bottom: 1px solid #991B1B;"
+        )
+        deprecated_badge.setToolTip(
+            "Bloco descontinuado — use o DCP Canonical Loop a esquerda"
+        )
+        legacy_col_layout.addWidget(deprecated_badge)
+        self._phase_headers.append(("__legacy_badge__", deprecated_badge))
 
         for phase, cmds in COMMAND_CATALOG:
             hdr = QLabel(f"  {phase}")
@@ -666,21 +874,34 @@ class TemplateBuilderWidget(QWidget):
                 "background-color: #27272A; color: #A1A1AA; font-size: 11px;"
                 "font-weight: 600; border-bottom: 1px solid #3F3F46;"
             )
-            self._catalog_layout.addWidget(hdr)
+            legacy_col_layout.addWidget(hdr)
             self._phase_headers.append((phase, hdr))
 
             for name, model, interaction in cmds:
                 row = _CatalogRow(name, model, interaction)
                 row.add_requested.connect(self._on_catalog_add)
-                self._catalog_layout.addWidget(row)
+                legacy_col_layout.addWidget(row)
                 self._all_rows.append((phase, row))
+
+        legacy_col_layout.addStretch()
+
+        columns_layout.addWidget(dcp_column, stretch=1)
+        columns_layout.addWidget(legacy_column, stretch=1)
+        self._catalog_layout.addWidget(columns_row)
 
     def _apply_filter(self, text: str) -> None:
         text = text.strip().lower()
         for _phase, row in self._all_rows:
             row.setVisible(not text or text in row._name.lower())
+        dcp_phases = {p for p, _ in COMMAND_CATALOG_DCP}
+        legacy_phases = {p for p, _ in COMMAND_CATALOG}
         for phase, hdr in self._phase_headers:
-            visible = any(r.isVisible() for p, r in self._all_rows if p == phase)
+            if phase == "__dcp_banner__":
+                visible = any(r.isVisible() for p, r in self._all_rows if p in dcp_phases)
+            elif phase in ("__legacy_banner__", "__legacy_badge__"):
+                visible = any(r.isVisible() for p, r in self._all_rows if p in legacy_phases)
+            else:
+                visible = any(r.isVisible() for p, r in self._all_rows if p == phase)
             hdr.setVisible(visible)
 
     # ── Slots ── #

@@ -88,6 +88,9 @@ class TemplateCommand(Base):
     )
     estimated_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_optional: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    effort_level: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="medium"
+    )
 
     # Relationships
     template: Mapped[Template] = relationship("Template", back_populates="commands")

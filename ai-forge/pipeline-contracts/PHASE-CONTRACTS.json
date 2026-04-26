@@ -1,6 +1,97 @@
 {
-  "version": "1.1.0",
-  "updated_at": "2026-03-31",
+  "version": "1.4.1",
+  "updated_at": "2026-04-24",
+  "canonical_loop": {
+    "A": {
+      "name": "Creation",
+      "task_budget_tokens_default": 60000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 100000
+    },
+    "A.2": {
+      "name": "Criacao de TDD",
+      "condition": "modules.*.tdd.required == true",
+      "gates": [
+        "/tdd:test-plan",
+        "/tdd:contract-from-openapi",
+        "/tdd:behavior-from-specs",
+        "/tdd:unit-skeletons",
+        "/tdd:create-suite",
+        "/tdd:lock"
+      ],
+      "state_transition": "creation -> execution (via /tdd:lock)",
+      "enforces_invariant": "I-13",
+      "task_budget_tokens_default": 140000,
+      "task_budget_tokens_min": 60000,
+      "task_budget_tokens_max": 220000
+    },
+    "B": {
+      "name": "Execution",
+      "task_budget_tokens_default": 120000,
+      "task_budget_tokens_min": 40000,
+      "task_budget_tokens_max": 200000,
+      "tdd_gate": {
+        "enabled_when": "modules.*.tdd.required == true",
+        "pre_implementation": "/execute-task PRE-0.5 asserts RED",
+        "post_implementation": "/build-verify --tdd-gate asserts GREEN + LOCK intact",
+        "enforces_invariant": "I-13"
+      }
+    },
+    "C": {
+      "name": "Linkage",
+      "task_budget_tokens_default": 40000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 60000
+    },
+    "D": {
+      "name": "F8 micro",
+      "task_budget_tokens_default": 80000,
+      "task_budget_tokens_min": 30000,
+      "task_budget_tokens_max": 120000
+    },
+    "D.5": {
+      "name": "Review executed",
+      "task_budget_tokens_default": 50000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 80000
+    },
+    "E": {
+      "name": "QA micro",
+      "task_budget_tokens_default": 60000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 100000
+    },
+    "F": {
+      "name": "Stack plan",
+      "task_budget_tokens_default": 40000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 60000
+    },
+    "F.2": {
+      "name": "Stack check",
+      "task_budget_tokens_default": 30000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 50000
+    },
+    "G": {
+      "name": "Deploy partial",
+      "task_budget_tokens_default": 30000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 50000
+    },
+    "H": {
+      "name": "Commit",
+      "task_budget_tokens_default": 20000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 30000
+    },
+    "I": {
+      "name": "Human analysis",
+      "task_budget_tokens_default": 40000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 60000
+    }
+  },
   "phases": {
     "pre_f7_gate": {
       "required_commands": [
@@ -54,11 +145,21 @@
         },
         {
           "before": "/intake-review:create-gaplist",
-          "after": "/intake-review:execute-gaplist",
+          "after": "/intake-review:execute-gaplist-p0",
           "severity": "error"
         },
         {
-          "before": "/intake-review:execute-gaplist",
+          "before": "/intake-review:execute-gaplist-p0",
+          "after": "/intake-review:execute-gaplist-p1",
+          "severity": "warning"
+        },
+        {
+          "before": "/intake-review:execute-gaplist-p1",
+          "after": "/intake-review:execute-gaplist-p2",
+          "severity": "warning"
+        },
+        {
+          "before": "/intake-review:execute-gaplist-p2",
           "after": "/intake-review:review-executed",
           "severity": "warning"
         }
@@ -167,5 +268,54 @@
       "blocking": false,
       "cooldown_runs": 1
     }
-  }
+  },
+  "dcp_triggers": [
+    {
+      "id": "post-build-validate",
+      "after": "/build-module-pipeline",
+      "run": ["/delivery:validate"],
+      "max_per_session": 3,
+      "scope": "module"
+    },
+    {
+      "id": "post-commit-record",
+      "after": "/commit:*",
+      "run": ["/memory:record-run", "/pipeline:collect-lessons"],
+      "max_per_session": 5,
+      "conditional": "module.state in ['done'] && last_transition_to == 'done'"
+    },
+    {
+      "id": "validation-summary-qa-done",
+      "after": "/validation-summary --module",
+      "run": [],
+      "conditional": "result == 'APROVADO' && module.deploy.target == 'none'",
+      "notes": "autoriza workflow-app a acionar /commit:* que transiciona qa->done"
+    },
+    {
+      "id": "validation-summary-qa-deploy",
+      "after": "/validation-summary --module",
+      "run": [],
+      "conditional": "result == 'APROVADO' && module.deploy.target != 'none'",
+      "notes": "autoriza workflow-app a acionar deploy e depois /post-deploy-verify"
+    },
+    {
+      "id": "post-deploy-verify-ok",
+      "after": "/post-deploy-verify",
+      "run": [],
+      "conditional": "result == 'OK'",
+      "notes": "autoriza workflow-app a acionar /commit:* que transiciona deploy->done"
+    },
+    {
+      "id": "post-unblock-validate",
+      "after": "/delivery:unblock",
+      "run": ["/delivery:validate"],
+      "max_per_session": 10
+    },
+    {
+      "id": "post-reopen-validate",
+      "after": "/delivery:reopen",
+      "run": ["/delivery:validate"],
+      "max_per_session": 10
+    }
+  ]
 }

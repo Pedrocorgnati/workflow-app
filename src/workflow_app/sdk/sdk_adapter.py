@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 import subprocess
 import time
 from collections.abc import AsyncIterator
@@ -221,25 +223,120 @@ class SDKAdapter:
         """
         return find_spec("claude_agent_sdk") is not None
 
+    # ── PATH helpers (TASK-2) ─────────────────────────────────────────────── #
+
+    @staticmethod
+    def _resolve_nvm_bin() -> str | None:
+        """
+        Resolves the active NVM Node bin directory without relying on a
+        hardcoded version string.
+
+        Resolution order:
+          1. ``~/.nvm/alias/default`` — the alias NVM writes on ``nvm use --default``.
+             Its content is either a version tag (``v24.11.1``) or a nested alias
+             (``lts/iron``).  Nested aliases are resolved by reading
+             ``~/.nvm/alias/lts/<name>``.
+          2. ``~/.nvm/versions/node/`` — when the alias file is missing, we scan
+             the installed versions directory and pick the lexicographically highest
+             semver entry (best-effort fallback).
+
+        Returns the resolved ``bin/`` path string, or ``None`` if NVM is not
+        installed or no versions are found.
+        """
+        nvm_dir = os.path.expanduser("~/.nvm")
+        if not os.path.isdir(nvm_dir):
+            return None
+
+        # --- step 1: read the default alias -------------------------------- #
+        alias_file = os.path.join(nvm_dir, "alias", "default")
+        version: str | None = None
+
+        if os.path.isfile(alias_file):
+            raw = open(alias_file).read().strip()  # e.g. "v24.11.1" or "lts/iron"
+            if raw.startswith("lts/"):
+                lts_name = raw.split("/", 1)[1]
+                lts_alias = os.path.join(nvm_dir, "alias", "lts", lts_name)
+                if os.path.isfile(lts_alias):
+                    raw = open(lts_alias).read().strip()
+            # raw is now expected to be a version tag like "v24.11.1"
+            if raw.startswith("v"):
+                version = raw
+
+        # --- step 2: fallback — scan installed versions -------------------- #
+        if version is None:
+            versions_dir = os.path.join(nvm_dir, "versions", "node")
+            if os.path.isdir(versions_dir):
+                candidates = sorted(
+                    (d for d in os.listdir(versions_dir) if d.startswith("v")),
+                    key=lambda v: [int(x) for x in v.lstrip("v").split(".") if x.isdigit()],
+                    reverse=True,
+                )
+                if candidates:
+                    version = candidates[0]
+                    logger.debug("_resolve_nvm_bin: alias missing, picked %s via scan", version)
+
+        if version is None:
+            return None
+
+        bin_dir = os.path.join(nvm_dir, "versions", "node", version, "bin")
+        return bin_dir if os.path.isdir(bin_dir) else None
+
+    @staticmethod
+    def _build_augmented_path() -> str:
+        """
+        Returns an augmented PATH string that prepends user-local binary
+        directories so desktop-launched processes find the same tools as
+        a login shell.
+
+        Directories are deduplicated and inserted only if not already present.
+        """
+        candidates = [
+            os.path.expanduser("~/.local/bin"),
+            "/usr/local/bin",
+        ]
+
+        nvm_bin = SDKAdapter._resolve_nvm_bin()
+        if nvm_bin:
+            candidates.insert(0, nvm_bin)
+            logger.debug("_build_augmented_path: NVM bin resolved to %s", nvm_bin)
+        else:
+            logger.debug("_build_augmented_path: NVM not found or no version installed")
+
+        env_path = os.environ.get("PATH", "")
+        existing = set(env_path.split(os.pathsep))
+        prefix = [d for d in candidates if d not in existing]
+        return os.pathsep.join(prefix + [env_path]) if prefix else env_path
+
     def check_auth(self) -> bool:
         """
         Checks if Claude CLI is authenticated.
 
-        Strategy: runs `claude --version` via subprocess.
-        If it returns code 0, the CLI is installed and presumably authenticated.
-
-        NOTE: claude-agent-sdk may have its own auth check method.
-        Check documentation and use if available.
+        Strategy: resolves the ``claude`` binary via an augmented PATH (so
+        desktop launchers with a minimal PATH don't produce false negatives),
+        then runs ``claude --version``.  Return code 0 means installed and
+        presumably authenticated.
 
         Returns:
             True if authenticated, False otherwise.
         """
+        augmented_path = self._build_augmented_path()
+
+        claude_bin = shutil.which("claude", path=augmented_path)
+        if claude_bin is None:
+            logger.warning(
+                "check_auth: 'claude' binary not found. Searched PATH=%s",
+                augmented_path,
+            )
+            return False
+
         try:
+            env = {**os.environ, "PATH": augmented_path}
             result = subprocess.run(
-                ["claude", "--version"],
+                [claude_bin, "--version"],
                 capture_output=True,
                 timeout=5,
                 check=False,
+                env=env,
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

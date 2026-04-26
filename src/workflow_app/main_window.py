@@ -50,8 +50,12 @@ from workflow_app.interview.pipeline_creator_widget import PipelineCreatorWidget
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 from workflow_app.metrics_bar.preferences_dialog import PreferencesDialog
 from workflow_app.output_panel.output_panel import OutputPanel
+from workflow_app.services.delivery_reader import DeliveryReader
+from workflow_app.services.lock_service import LockService
 from workflow_app.signal_bus import signal_bus
 from workflow_app.template_builder.template_builder_widget import TemplateBuilderWidget
+from workflow_app.views.kanban import KanbanView
+from workflow_app.views.module_detail import ModuleDetailView
 from workflow_app.widgets.execution_detail_panel import ExecutionDetailPanel
 from workflow_app.widgets.execution_history_widget import ExecutionHistoryWidget
 from workflow_app.widgets.filter_panel import FilterPanel
@@ -263,16 +267,46 @@ class MainWindow(QMainWindow):
         self._toolbox_tab.setProperty("testid", "page-toolbox")
         self._view_stack.addWidget(self._toolbox_tab)  # index 2
 
+        # ── Cooperative lock service (T-037) ─────────────────────────── #
+        # Instantiated BEFORE the per-module detail view so it can be
+        # injected as a constructor arg. API-only for now: no acquire on
+        # startup. T-038 drives try_acquire/release from the detail view.
+        self._lock_service = LockService(parent=self)
+        self._lock_service.lock_lost.connect(self._on_lock_lost)
+
+        # Shared DeliveryReader used by both Kanban and ModuleDetailView.
+        self._kanban_reader = DeliveryReader()
+
+        # ── Page 3: Kanban (9 colunas por estado DCP, T-036) ──────────── #
+        self._kanban_view = KanbanView(reader=self._kanban_reader, parent=self)
+        self._kanban_view.setProperty("testid", "page-kanban")
+        self._kanban_view.module_clicked.connect(self._on_kanban_module_clicked)
+        self._view_stack.addWidget(self._kanban_view)  # index 3
+
+        # ── Page 4: Module Detail (per-modulo view, T-038) ───────────── #
+        self._module_detail_view = ModuleDetailView(
+            reader=self._kanban_reader,
+            lock_service=self._lock_service,
+            parent=self,
+        )
+        self._module_detail_view.setProperty("testid", "page-module-detail")
+        self._module_detail_view.back_requested.connect(
+            lambda: self._view_stack.setCurrentIndex(3)
+        )
+        self._view_stack.addWidget(self._module_detail_view)  # index 4
+
         root_layout.addWidget(self._view_stack, stretch=1)
 
         # Toast notification (floating, stacked, level-dependent duration)
         self._toast_notifier = ToastNotifier(central)
 
     def _build_workspace_label_bar(self) -> QWidget:
-        """20px label bar for the Workspace terminal with three cd shortcut buttons.
+        """20px label bar for the Workspace terminal with four shortcut buttons.
 
-        Buttons: WORKSPACE (purple) · SystemForge (blue) · Workflow-app (teal).
-        Each sends a `cd <absolute-path>` to the workspace terminal.
+        Buttons: WORKSPACE (purple) · SystemForge (blue) · cd Workflow-app (teal)
+        · mention Workflow-app (teal). The three leftmost send a `cd <absolute>`
+        + Enter; the rightmost pastes the relative path `ai-forge/workflow-app`
+        without Enter.
         """
         from PySide6.QtWidgets import QHBoxLayout
 
@@ -313,11 +347,18 @@ class MainWindow(QMainWindow):
             lambda: signal_bus.run_command_in_workspace_terminal.emit(f"cd {_SYSTEMFORGE_DIR}")
         )
 
-        # ── Workflow-app — cd to ai-forge/workflow-app ────────────────── #
-        btn_wa = _btn("Workflow-app", "#2DD4BF")
+        # ── cd Workflow-app — cd to ai-forge/workflow-app ─────────────── #
+        btn_wa = _btn("cd Workflow-app", "#2DD4BF")
         btn_wa.setToolTip(f"cd → {_WORKFLOW_APP_DIR}")
         btn_wa.clicked.connect(
             lambda: signal_bus.run_command_in_workspace_terminal.emit(f"cd {_WORKFLOW_APP_DIR}")
+        )
+
+        # ── mention Workflow-app — paste relative path without Enter ──── #
+        btn_wa_mention = _btn("mention Workflow-app", "#2DD4BF")
+        btn_wa_mention.setToolTip("Cola 'ai-forge/workflow-app' no terminal (sem Enter)")
+        btn_wa_mention.clicked.connect(
+            lambda: signal_bus.paste_text_in_workspace_terminal.emit("ai-forge/workflow-app")
         )
 
         lay.addWidget(btn_ws)
@@ -325,6 +366,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(btn_sf)
         lay.addSpacing(6)
         lay.addWidget(btn_wa)
+        lay.addSpacing(6)
+        lay.addWidget(btn_wa_mention)
         lay.addStretch()
         return bar
 
@@ -473,8 +516,29 @@ class MainWindow(QMainWindow):
                 self._splitter.setSizes([total // 3, total * 2 // 3])
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # T-037: release the cooperative lock BEFORE saving state so the
+        # filesystem lock is relinquished even if persistence blows up.
+        # release_and_stop() is idempotent and never raises, but we wrap
+        # it defensively so a regression cannot prevent app shutdown.
+        try:
+            self._lock_service.release_and_stop()
+        except Exception:  # noqa: BLE001
+            logger.exception("closeEvent: failed to release cooperative lock")
         self._save_state()
         super().closeEvent(event)
+
+    def _on_lock_lost(self, reason: str) -> None:
+        """Slot for LockService.lock_lost — surface a toast to the user.
+
+        T-037: in API-only mode, no flow actively holds the lock, so this
+        slot is mostly a safety net for future T-038 edit flows. We keep
+        the wiring now so the contract is stable from day one.
+        """
+        logger.warning("MainWindow: cooperative lock lost: %s", reason)
+        signal_bus.toast_requested.emit(
+            "Lock cooperativo perdido — outra instancia assumiu delivery.json",
+            "error",
+        )
 
     # ─────────────────────────────────────────────────────── Slots ───── #
 
@@ -507,8 +571,8 @@ class MainWindow(QMainWindow):
             except ValueError:
                 rel = abs_config
             for spec in commands:
-                if spec.name.startswith("/model ") or spec.name == "/clear":
-                    continue  # model-switch and /clear rows must never carry a config path
+                if spec.name.startswith("/model ") or spec.name.startswith("/effort ") or spec.name == "/clear":
+                    continue  # model-switch, /effort and /clear rows must never carry a config path
                 spec.config_path = rel
 
         self._command_queue.load_pipeline(commands)
@@ -582,7 +646,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_view_changed(self, index: int) -> None:
-        """Switch the main view stack (0=Workflow, 1=Comandos, 2=Toolbox)."""
+        """Switch the main view stack (0=Workflow, 1=Comandos, 2=Toolbox, 3=Kanban)."""
         self._view_stack.setCurrentIndex(index)
         if self._datatest_active:
             self._show_testid_overlays()
@@ -783,6 +847,7 @@ class MainWindow(QMainWindow):
         logger.info("Config carregado: projeto=%s", config.project_name)
         self._check_template_versions()  # RESOLVED: G002
         self._restore_queue_state_from_config(path)
+        self._load_kanban_from_config(config)
 
     def _check_template_versions(self) -> None:
         """Check if factory templates are aligned with the current CLAUDE.md.  # RESOLVED: G002"""
@@ -1031,8 +1096,43 @@ class MainWindow(QMainWindow):
         app_state.clear_config()
         self._settings.remove(self._SETTINGS_LAST_CONFIG)
         self._update_title(project_name=None)
+        self._kanban_view.clear()
+        self._module_detail_view.clear()
         signal_bus.config_unloaded.emit()
         signal_bus.toast_requested.emit("Projeto desvinculado", "info")
+
+    # ─────────────────────────────────────────────── Kanban (T-036) ──── #
+
+    def _load_kanban_from_config(self, config) -> None:
+        """Populate the Kanban view with modules from the loaded project.
+
+        Resolves ``{project_dir}/{wbs_root}`` and delegates to
+        ``KanbanView.load``. Failures are logged; the kanban header surfaces
+        the user-visible message itself.
+        """
+        try:
+            wbs_abs = config.project_dir / config.wbs_root
+        except (AttributeError, TypeError) as exc:
+            logger.warning("Kanban: cannot resolve wbs_root: %s", exc)
+            return
+        self._kanban_view.load(wbs_abs)
+        self._module_detail_view.set_wbs_root(wbs_abs)
+
+    def _on_kanban_module_clicked(self, module_id: str) -> None:
+        """Open the per-module detail view (T-038).
+
+        Resolves ``module_id`` via ``ModuleDetailView.show_for`` and switches
+        ``_view_stack`` to page 4. Failures surface via ``signal_bus`` toast.
+        """
+        try:
+            self._module_detail_view.show_for(module_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("ModuleDetail: show_for(%s) failed", module_id)
+            signal_bus.toast_requested.emit(
+                f"Falha ao abrir módulo: {exc}", "error"
+            )
+            return
+        self._view_stack.setCurrentIndex(4)
 
     def _update_title(self, project_name: str | None) -> None:
         """Atualiza a barra de título da janela.

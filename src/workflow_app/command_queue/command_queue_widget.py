@@ -31,15 +31,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app import dcp as dcp_pkg
 from workflow_app.command_queue.autocast_cli import build_launch_plan
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
+from workflow_app.dcp.specific_flow_handler import (
+    build_paste_command_only,
+    resolve as dcp_resolve,
+)
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
 from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
 from workflow_app.sdk.pty_runner import PtyRunner
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
     TEMPLATE_AUTO_IMPROOVE,
-    TEMPLATE_AUTO_IMPROOVE_LOOP,
     TEMPLATE_AUTOCAST_TEST,
     TEMPLATE_BLOG,
     TEMPLATE_BRIEF_FEATURE,
@@ -47,6 +51,9 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_BUSINESS,
     TEMPLATE_DAILY,
     TEMPLATE_DEPLOY,
+    TEMPLATE_INTAKE_MAX_REVIEW,
+    TEMPLATE_INTAKE_REVIEW,
+    TEMPLATE_INTAKE_SEED,
     TEMPLATE_JSON,
     TEMPLATE_MKT,
     TEMPLATE_MODULES,
@@ -261,10 +268,21 @@ class CommandQueueWidget(QWidget):
             ("daily", "Daily tasks: scan → plan → do → validate → review",
              lambda: self._load_quick_template(TEMPLATE_DAILY, name="Daily"),
              "queue-btn-daily"),
+            ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
+             lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
+             "queue-btn-intake-seed"),
+            ("intake-review", "Intake Review (F9): create-checklist → list-improove → compare → create-gaplist → execute-gaplist-p0 → execute-gaplist-p1 → execute-gaplist-p2 → review-executed → clear",
+             lambda: self._load_quick_template(TEMPLATE_INTAKE_REVIEW, name="Intake Review"),
+             "queue-btn-intake-review"),
+            ("intake-max-review", "Intake MAX Review — clone do Intake Review com Opus/MAX em todo fluxo + gates /skill:mcp-codex adversarial (clear final mantem Haiku/LOW). Versao deep para entrega de alta profundidade.",
+             lambda: self._load_quick_template(TEMPLATE_INTAKE_MAX_REVIEW, name="Intake MAX Review"),
+             "queue-btn-intake-max-review"),
+            ("delivery plan", "Planejamento: analyse → identify → create-tasks",
+             self._on_delivery_plan_clicked, "queue-btn-delivery-plan"),
+            ("delivery qa", "Validacao: qa-gate → mcp-review → sign-off",
+             self._on_delivery_qa_clicked, "queue-btn-delivery-qa"),
             ("micro-json", "Configura project.json para micro-arquitetura",
              self._on_micro_json_clicked, "queue-btn-micro-json"),
-            ("micro-arch", "Carrega pipeline de micro-arquitetura",
-             self._on_micro_arch_clicked, "queue-btn-micro-arch"),
             ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
              lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
              "queue-btn-blog"),
@@ -286,23 +304,28 @@ class CommandQueueWidget(QWidget):
             ("brief feat", "/feature-brief-create → intake → PRD (nova feature)",
              lambda: self._load_quick_template(TEMPLATE_BRIEF_FEATURE, name="Brief \u2014 Feature"),
              "queue-btn-brief-feat"),
-            ("modules", "Pipeline F4 de modules: core → blueprints → variants → structure",
+            ("Modules (Legacy WBS)", "[legacy WBS] sera descontinuado em T-060 — use DCP: Build Module Pipeline",
              lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
              "queue-btn-modules"),
-            ("wbs", "WBS dinâmico — analisa modules existentes e gera tasks",
+            ("DCP: Build Module Pipeline", "Cola /build-module-pipeline no terminal — gera SPECIFIC-FLOW.json para o modulo atual",
+             self._on_dcp_build_clicked, "queue-btn-dcp-build"),
+            ("DCP: Specific-Flow", "Decide e cola /build-module-pipeline {id} ou --rehydrate baseado no delivery.json",
+             self._on_dcp_specific_flow_clicked, "queue-btn-dcp-specific-flow"),
+            ("wbs", "[legacy WBS] WBS dinâmico — analisa modules existentes e gera tasks",
              self._on_wbs_clicked, "queue-btn-wbs"),
-            ("create", "WBS create — F5: auto-flow create por module + validate + reforge",
+            ("create", "[legacy WBS] WBS create — F5: auto-flow create por module + validate + reforge",
              self._on_wbs_create_clicked, "queue-btn-wbs-create"),
-            ("execute", "WBS execute — F7+F8: build + execute por module + complemento",
+            ("execute", "[legacy WBS] WBS execute — F7+F8: build + execute por module + complemento",
              self._on_wbs_execute_clicked, "queue-btn-wbs-execute"),
-            ("specific-flow", "Importa fila F5→F10 gerada por /workflow-custom-template",
+            ("specific-flow (legacy)", "[legacy custom-template] — use DCP: Specific-Flow",
              self._on_specific_flow_clicked, "queue-btn-specific-flow"),
-            ("qa", "QA + auditoria de stack (selecione a stack no modal)",
+            ("qa", "[legacy F9] QA + auditoria de stack (selecione a stack no modal)",
              self._on_qa_clicked, "queue-btn-qa"),
-            ("deploy", "CI/CD, infra, pre-deploy, SLO, changelog",
+            ("deploy", "[legacy F11] CI/CD, infra, pre-deploy, SLO, changelog",
              lambda: self._load_quick_template(TEMPLATE_DEPLOY, name="Deploy"),
              "queue-btn-deploy"),
         ])
+        self._apply_dcp_reader_gating(workflow_content)
         header_layout.addWidget(workflow_content)
         self._sec_contents.append(workflow_content)
 
@@ -314,13 +337,8 @@ class CommandQueueWidget(QWidget):
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
-            ("delivery plan", "Planejamento: analyse → identify → create-tasks",
-             self._on_delivery_plan_clicked, "queue-btn-delivery-plan"),
-            ("delivery qa", "Validacao: qa-gate → mcp-review → sign-off",
-             self._on_delivery_qa_clicked, "queue-btn-delivery-qa"),
-            ("auto-improove", "/model Opus + 5x /auto-improove:cmd (use com Loop)",
-             lambda: self._load_quick_template(TEMPLATE_AUTO_IMPROOVE_LOOP, name="Auto-Improove Loop"),
-             "queue-btn-auto-improove"),
+            ("micro-arch", "Carrega pipeline de micro-arquitetura",
+             self._on_micro_arch_clicked, "queue-btn-micro-arch"),
             ("autocast-test", "Testa ciclo completo do autocast",
              lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
              "queue-btn-autocast-test"),
@@ -802,6 +820,11 @@ class CommandQueueWidget(QWidget):
             if spec.name == "/clear":
                 expanded.append(spec)
                 continue  # Keep current_model — no /model needed if model didn't change
+            # Skip injection when spec is already a /model switch (template has it explicit)
+            if spec.name.startswith("/model "):
+                current_model = spec.model
+                expanded.append(spec)
+                continue
             if spec.model != current_model:
                 model_spec = CommandSpec(
                     name=f"/model {spec.model.value.lower()}",
@@ -1161,6 +1184,90 @@ class CommandQueueWidget(QWidget):
         if dlg.exec() == QAStackDialog.Accepted:
             self._load_quick_template(dlg.selected_template, name="QA")
 
+    # ────────────────────────────────────────────────────────── DCP ── #
+
+    def _apply_dcp_reader_gating(self, workflow_content: QWidget) -> None:
+        """Init-time gating for the workflow tab's DCP and legacy buttons.
+
+        Two gates are applied:
+        1. `[Modules (Legacy WBS)]` is always disabled per TASK-050 §78 with
+           a "sera descontinuado em T-060" tooltip — the button is kept
+           visible as a migration signpost but cannot fire the legacy flow.
+        2. `[DCP: Specific-Flow]` is disabled only when
+           `workflow_app.dcp.READER_AVAILABLE` is false, with the spec
+           literal tooltip "Requer T-035 (reader)" (§112-119).
+
+        Reading `dcp_pkg.READER_AVAILABLE` (instead of the imported symbol)
+        lets pytest monkeypatch the flag without `importlib.reload`.
+        """
+        for btn in workflow_content.findChildren(QPushButton):
+            testid = btn.property("testid")
+            if testid == "queue-btn-modules":
+                btn.setEnabled(False)
+                btn.setToolTip(
+                    "[Modules (Legacy WBS)] sera descontinuado em T-060 — "
+                    "use [DCP: Build Module Pipeline]"
+                )
+
+        if dcp_pkg.READER_AVAILABLE:
+            return
+        logger.warning(
+            "[DCP] reader ausente — DCP: Specific-Flow desabilitado"
+        )
+        for btn in workflow_content.findChildren(QPushButton):
+            if btn.property("testid") == "queue-btn-dcp-specific-flow":
+                btn.setEnabled(False)
+                btn.setToolTip("Requer T-035 (reader)")
+                break
+
+    def _on_dcp_build_clicked(self) -> None:
+        """Paste `/build-module-pipeline` in the interactive terminal.
+
+        The command itself (T-013) resolves the current module via CWD +
+        `delivery.json`; the button is intentionally stateless.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        from workflow_app.config.app_state import app_state
+
+        if not app_state.has_config:
+            logger.info("[DCP] build clicked without project — showing prompt")
+            QMessageBox.information(
+                self,
+                "DCP",
+                "Carregue um projeto (pill superior) antes de gerar pipeline DCP.",
+            )
+            return
+        logger.info("[DCP] pasting /build-module-pipeline (stateless)")
+        signal_bus.paste_text_in_terminal.emit(build_paste_command_only())
+        signal_bus.focus_interactive_terminal.emit()
+
+    def _on_dcp_specific_flow_clicked(self) -> None:
+        """Decide and paste `/build-module-pipeline {id}` or `--rehydrate`.
+
+        Delegates to `specific_flow_handler.resolve` which is a pure,
+        Qt-free function — the widget only wraps the outcome as a
+        QMessageBox (blocked cases) or a terminal paste (happy path).
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        from workflow_app.config.app_state import app_state
+
+        if not dcp_pkg.READER_AVAILABLE:
+            logger.warning("[DCP] specific-flow clicked but reader unavailable")
+            QMessageBox.information(self, "DCP", "Requer T-035 (reader)")
+            return
+
+        action = dcp_resolve(app_state.config)
+        if action.command is None:
+            logger.info("[DCP] specific-flow blocked: %s", action.reason)
+            QMessageBox.information(self, "DCP", action.reason)
+            return
+
+        logger.info("[DCP] pasting specific-flow command: %s (%s)", action.command, action.reason)
+        signal_bus.paste_text_in_terminal.emit(action.command)
+        signal_bus.focus_interactive_terminal.emit()
+
     def _on_auto_improove_balanced_clicked(self) -> None:
         """Load the auto-improove balanced flow (Daily tab).
 
@@ -1220,11 +1327,12 @@ class CommandQueueWidget(QWidget):
         template = build_delivery_plan_template(
             docs_root=config.docs_root,
             project_dir=str(config.project_dir),
+            wbs_root=config.wbs_root,
         )
 
         if not template:
             signal_bus.toast_requested.emit(
-                "Nenhuma milestone encontrada em MILESTONES.md. Execute /modules:build-milestones primeiro.",
+                "Nenhuma milestone encontrada em MILESTONES.md (nem MILESTONES.seeded.md). Execute /modules:build-milestones ou /intake-review:seed primeiro.",
                 "warning",
             )
             return
@@ -1247,11 +1355,12 @@ class CommandQueueWidget(QWidget):
         template = build_delivery_qa_template(
             docs_root=config.docs_root,
             project_dir=str(config.project_dir),
+            wbs_root=config.wbs_root,
         )
 
         if not template:
             signal_bus.toast_requested.emit(
-                "Nenhuma milestone encontrada em MILESTONES.md. Execute /modules:build-milestones primeiro.",
+                "Nenhuma milestone encontrada em MILESTONES.md (nem MILESTONES.seeded.md). Execute /modules:build-milestones ou /intake-review:seed primeiro.",
                 "warning",
             )
             return

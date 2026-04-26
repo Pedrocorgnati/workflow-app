@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,8 +31,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from workflow_app.domain import CommandSpec, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 from workflow_app.signal_bus import signal_bus
+
+_EFFORT_SETTINGS_KEY = "workflow_app/template_list_panel/show_effort"
 
 # ─── Palette ──────────────────────────────────────────────────────────────── #
 
@@ -55,9 +57,31 @@ _MODEL_OPTIONS: list[tuple[str, ModelName | None]] = [
     ("Haiku",          ModelName.HAIKU),
 ]
 
+_EFFORT_COLOR: dict[EffortLevel, tuple[str, str]] = {
+    EffortLevel.LOW:      ("#475569", "#FFFFFF"),
+    EffortLevel.STANDARD: ("#334155", "#94A3B8"),
+    EffortLevel.HIGH:     ("#B45309", "#FFFFFF"),
+    EffortLevel.MAX:      ("#991B1B", "#FFFFFF"),
+}
+
+_EFFORT_OPTIONS: list[tuple[str, EffortLevel]] = [
+    ("Low",      EffortLevel.LOW),
+    ("Standard", EffortLevel.STANDARD),
+    ("High",     EffortLevel.HIGH),
+    ("Max",      EffortLevel.MAX),
+]
+
 
 def _badge_style(model: ModelName) -> str:
     bg, fg = _MODEL_COLOR[model]
+    return (
+        f"background-color: {bg}; color: {fg}; border-radius: 3px;"
+        "padding: 1px 5px; font-size: 10px; font-weight: 600;"
+    )
+
+
+def _effort_badge_style(effort: EffortLevel) -> str:
+    bg, fg = _EFFORT_COLOR[effort]
     return (
         f"background-color: {bg}; color: {fg}; border-radius: 3px;"
         "padding: 1px 5px; font-size: 10px; font-weight: 600;"
@@ -331,11 +355,12 @@ class _AddCommandDialog(QDialog):
         parent: QWidget | None = None,
         initial_name: str = "",
         initial_model: ModelName | None = None,
+        initial_effort: EffortLevel = EffortLevel.STANDARD,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Editar Comando" if initial_name else "Adicionar Comando")
         self.setModal(True)
-        self.setFixedSize(400, 210)
+        self.setFixedSize(400, 240)
         self.setStyleSheet(
             f"background-color: {_SURFACE}; color: #FAFAFA;"
         )
@@ -384,6 +409,22 @@ class _AddCommandDialog(QDialog):
         )
         form.addRow("Modelo:", self._model_combo)
 
+        # Effort select
+        self._effort_combo = QComboBox()
+        for label, value in _EFFORT_OPTIONS:
+            self._effort_combo.addItem(label, value)
+        for i, (_, v) in enumerate(_EFFORT_OPTIONS):
+            if v == initial_effort:
+                self._effort_combo.setCurrentIndex(i)
+                break
+        self._effort_combo.setFixedHeight(28)
+        self._effort_combo.setStyleSheet(
+            f"QComboBox {{ background: #3F3F46; color: #FAFAFA; border: 1px solid {_BORDER};"
+            "  border-radius: 3px; padding: 0 6px; font-size: 12px; }}"
+            "QComboBox QAbstractItemView { background: #3F3F46; color: #FAFAFA; }"
+        )
+        form.addRow("Esforço:", self._effort_combo)
+
         layout.addLayout(form)
         layout.addStretch()
 
@@ -413,6 +454,11 @@ class _AddCommandDialog(QDialog):
     @property
     def model(self) -> ModelName | None:
         return self._model_combo.currentData()
+
+    @property
+    def effort(self) -> EffortLevel:
+        data = self._effort_combo.currentData()
+        return data if isinstance(data, EffortLevel) else EffortLevel.STANDARD
 
 
 # ─── Droppable container ──────────────────────────────────────────────────── #
@@ -465,11 +511,13 @@ class _TemplateCommandRow(QWidget):
         self,
         spec: CommandSpec,
         show_model: bool = True,
+        show_effort: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.spec = spec
         self._show_model = show_model
+        self._show_effort = show_effort
         self._editing = False
         self._drag_start: QPoint | None = None
         self._build()
@@ -502,6 +550,13 @@ class _TemplateCommandRow(QWidget):
             self._badge.setText(self.spec.model.value)
             self._badge.setStyleSheet(_badge_style(self.spec.model))
         layout.addWidget(self._badge)
+
+        # Effort badge
+        self._effort_badge = QLabel("")
+        if self._show_effort:
+            self._effort_badge.setText(self.spec.effort.value)
+            self._effort_badge.setStyleSheet(_effort_badge_style(self.spec.effort))
+        layout.addWidget(self._effort_badge)
 
         # Edit button (always visible)
         self._edit_btn = QPushButton("✏")
@@ -543,26 +598,43 @@ class _TemplateCommandRow(QWidget):
         n = self.spec.name.strip().lower()
         return n == "/clear" or n.startswith("/clear ")
 
-    def apply_cmd_filter(self, show_model: bool, show_clear: bool) -> None:
+    def is_effort_cmd(self) -> bool:
+        return self.spec.name.lower().startswith("/effort")
+
+    def apply_cmd_filter(
+        self,
+        show_model: bool,
+        show_clear: bool,
+        show_effort: bool,
+    ) -> None:
         if self.is_model_cmd():
             self.setVisible(show_model)
         elif self.is_clear_cmd():
             self.setVisible(show_clear)
+        elif self.is_effort_cmd():
+            self.setVisible(show_effort)
         else:
             self.setVisible(True)
 
     def refresh_display(self) -> None:
-        """Re-render name label and badge after spec update."""
+        """Re-render name label and badges after spec update."""
         display = self.spec.name
         if self.spec.config_path:
             display += f" {self.spec.config_path}"
         self._name_lbl.setText(display)
-        show_model = not self.spec.name.lower().startswith("/model")
+        is_model_row = self.spec.name.lower().startswith("/model")
+        is_effort_row = self.spec.name.lower().startswith("/effort")
+        show_model = not is_model_row and not is_effort_row
         if show_model and self._show_model:
             self._badge.setText(self.spec.model.value)
             self._badge.setStyleSheet(_badge_style(self.spec.model))
         else:
             self._badge.setText("")
+        if not is_model_row and not is_effort_row and self._show_effort:
+            self._effort_badge.setText(self.spec.effort.value)
+            self._effort_badge.setStyleSheet(_effort_badge_style(self.spec.effort))
+        else:
+            self._effort_badge.setText("")
 
     # ── Drag source ── #
 
@@ -722,19 +794,25 @@ class _TemplateCard(QWidget):
             r.setParent(None)
         self._rows.clear()
 
-        # Inject synthetic /model rows where the model changes,
-        # so the "model" checkbox has rows to show/hide.
+        # Inject synthetic /model and /effort rows where they change,
+        # so the corresponding toolbar checkboxes have rows to show/hide.
         expanded: list[CommandSpec] = []
         current_model = None
+        current_effort = None
         for spec in commands:
-            if spec.name.lower().startswith("/model"):
-                # Already has an explicit /model row — keep as-is
+            lowered = spec.name.lower()
+            if lowered.startswith("/model"):
                 expanded.append(spec)
                 current_model = spec.model
+                continue
+            if lowered.startswith("/effort"):
+                expanded.append(spec)
+                current_effort = spec.effort
                 continue
             if spec.name == "/clear":
                 expanded.append(spec)
                 current_model = None  # force model row after clear
+                current_effort = None
                 continue
             if spec.model != current_model:
                 expanded.append(CommandSpec(
@@ -742,13 +820,32 @@ class _TemplateCard(QWidget):
                     model=spec.model,
                     interaction_type=InteractionType.AUTO,
                     position=0,
+                    effort=spec.effort,
                 ))
                 current_model = spec.model
+            if spec.effort != current_effort:
+                expanded.append(CommandSpec(
+                    name=f"/effort {spec.effort.value}",
+                    model=spec.model,
+                    interaction_type=InteractionType.AUTO,
+                    position=0,
+                    effort=spec.effort,
+                ))
+                current_effort = spec.effort
             expanded.append(spec)
 
         for spec in expanded:
-            show_model = not spec.name.lower().startswith("/model")
-            row = _TemplateCommandRow(spec, show_model=show_model, parent=self._cmd_widget)
+            lowered = spec.name.lower()
+            is_model_row = lowered.startswith("/model")
+            is_effort_row = lowered.startswith("/effort")
+            show_model = not is_model_row and not is_effort_row
+            show_effort = not is_model_row and not is_effort_row
+            row = _TemplateCommandRow(
+                spec,
+                show_model=show_model,
+                show_effort=show_effort,
+                parent=self._cmd_widget,
+            )
             row.remove_self.connect(self._remove_row)
             row.edit_requested.connect(self._on_edit_row)
             self._cmd_layout.addWidget(row)
@@ -788,7 +885,7 @@ class _TemplateCard(QWidget):
         try:
             from workflow_app.db.database_manager import db_manager
             from workflow_app.templates.template_manager import TemplateManager
-            # Filter out synthetic /model rows — they are display-only
+            # Filter out synthetic /model and /effort rows — they are display-only
             specs = [
                 CommandSpec(
                     name=r.spec.name,
@@ -797,9 +894,11 @@ class _TemplateCard(QWidget):
                     position=i + 1,
                     is_optional=r.spec.is_optional,
                     config_path=r.spec.config_path,
+                    effort=r.spec.effort,
                 )
                 for i, r in enumerate(
-                    r for r in self._rows if not r.is_model_cmd()
+                    r for r in self._rows
+                    if not r.is_model_cmd() and not r.is_effort_cmd()
                 )
             ]
             mgr = TemplateManager(db_manager)
@@ -820,6 +919,7 @@ class _TemplateCard(QWidget):
             parent=self,
             initial_name=row.spec.name,
             initial_model=row.spec.model,
+            initial_effort=row.spec.effort,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -834,14 +934,20 @@ class _TemplateCard(QWidget):
             position=row.spec.position,
             is_optional=row.spec.is_optional,
             config_path=row.spec.config_path,
+            effort=dlg.effort,
         )
         row.refresh_display()
         if not self._editing:
             self._persist()
 
-    def apply_cmd_filter(self, show_model: bool, show_clear: bool) -> None:
+    def apply_cmd_filter(
+        self,
+        show_model: bool,
+        show_clear: bool,
+        show_effort: bool,
+    ) -> None:
         for row in self._rows:
-            row.apply_cmd_filter(show_model, show_clear)
+            row.apply_cmd_filter(show_model, show_clear, show_effort)
         # Force layout recalculation after visibility changes
         if self._cmd_layout is not None:
             self._cmd_layout.invalidate()
@@ -861,6 +967,7 @@ class _TemplateCard(QWidget):
             name=name,
             model=model,
             interaction_type=InteractionType.AUTO,
+            effort=dlg.effort,
         )
         self._add_spec_as_row(spec, show_model)
 
@@ -868,11 +975,19 @@ class _TemplateCard(QWidget):
         """Add a CommandSpec to this card (called from catalog column [+])."""
         if not self._editing:
             return
-        show_model = not spec.name.lower().startswith("/model")
+        lowered = spec.name.lower()
+        show_model = not lowered.startswith("/model") and not lowered.startswith("/effort")
         self._add_spec_as_row(spec, show_model)
 
     def _add_spec_as_row(self, spec: CommandSpec, show_model: bool = True) -> None:
-        row = _TemplateCommandRow(spec, show_model=show_model, parent=self._cmd_widget)
+        lowered = spec.name.lower()
+        show_effort = not lowered.startswith("/model") and not lowered.startswith("/effort")
+        row = _TemplateCommandRow(
+            spec,
+            show_model=show_model,
+            show_effort=show_effort,
+            parent=self._cmd_widget,
+        )
         row.set_editing(True)
         row.remove_self.connect(self._remove_row)
         row.edit_requested.connect(self._on_edit_row)
@@ -880,8 +995,8 @@ class _TemplateCard(QWidget):
         self._rows.append(row)
 
     def _load_to_queue(self) -> None:
-        """Load all commands to queue, inserting /model switcher rows."""
-        # Skip synthetic /model rows — they'll be re-injected below
+        """Load all commands to queue, inserting /model and /effort switcher rows."""
+        # Skip synthetic /model and /effort rows — they will be re-injected below
         raw = [
             CommandSpec(
                 name=r.spec.name,
@@ -890,22 +1005,33 @@ class _TemplateCard(QWidget):
                 position=0,
                 is_optional=r.spec.is_optional,
                 config_path=r.spec.config_path,
+                effort=r.spec.effort,
             )
             for r in self._rows
-            if not r.is_model_cmd()
+            if not r.is_model_cmd() and not r.is_effort_cmd()
         ]
         expanded: list[CommandSpec] = []
         current_model = None
+        current_effort = None
         for spec in raw:
-            if not spec.name.lower().startswith("/model"):
-                if spec.model != current_model:
-                    expanded.append(CommandSpec(
-                        name=f"/model {spec.model.value.lower()}",
-                        model=spec.model,
-                        interaction_type=InteractionType.AUTO,
-                        position=0,
-                    ))
-                    current_model = spec.model
+            if spec.model != current_model:
+                expanded.append(CommandSpec(
+                    name=f"/model {spec.model.value.lower()}",
+                    model=spec.model,
+                    interaction_type=InteractionType.AUTO,
+                    position=0,
+                    effort=spec.effort,
+                ))
+                current_model = spec.model
+            if spec.effort != current_effort:
+                expanded.append(CommandSpec(
+                    name=f"/effort {spec.effort.value}",
+                    model=spec.model,
+                    interaction_type=InteractionType.AUTO,
+                    position=0,
+                    effort=spec.effort,
+                ))
+                current_effort = spec.effort
             expanded.append(spec)
         for i, spec in enumerate(expanded, start=1):
             spec.position = i
@@ -1060,6 +1186,10 @@ class TemplateListPanel(QWidget):
         self._cards: list[_TemplateCard] = []
         self._show_model = False
         self._show_clear = False
+        self._settings = QSettings()
+        self._show_effort = bool(
+            self._settings.value(_EFFORT_SETTINGS_KEY, False, type=bool)
+        )
         self._build()
         self._load_templates()
 
@@ -1113,6 +1243,18 @@ class TemplateListPanel(QWidget):
         self._cb_clear.stateChanged.connect(self._on_filter_changed)
         nl.addWidget(self._cb_clear)
 
+        self._cb_effort = QCheckBox("effort")
+        self._cb_effort.setStyleSheet(
+            f"QCheckBox {{ color: #A1A1AA; font-size: 10px; border: none; }}"
+            "QCheckBox::indicator { width: 12px; height: 12px; }"
+            f"QCheckBox::indicator:unchecked {{ border: 1px solid {_BORDER}; border-radius: 2px; background: {_DARK}; }}"
+            "QCheckBox::indicator:checked { border: 1px solid #B45309; border-radius: 2px; background: #B45309; }"
+        )
+        self._cb_effort.setToolTip("Exibir comandos /effort no fluxo")
+        self._cb_effort.setChecked(self._show_effort)
+        self._cb_effort.stateChanged.connect(self._on_filter_changed)
+        nl.addWidget(self._cb_effort)
+
         nl.addStretch()
         root.addWidget(navbar)
 
@@ -1158,15 +1300,21 @@ class TemplateListPanel(QWidget):
                 idx = self._list_layout.count() - 1  # before stretch
                 self._list_layout.insertWidget(idx, card)
                 self._cards.append(card)
-                card.apply_cmd_filter(self._show_model, self._show_clear)
+                card.apply_cmd_filter(
+                    self._show_model, self._show_clear, self._show_effort
+                )
             except Exception:
                 continue
 
     def _on_filter_changed(self) -> None:
         self._show_model = self._cb_model.isChecked()
         self._show_clear = self._cb_clear.isChecked()
+        self._show_effort = self._cb_effort.isChecked()
+        self._settings.setValue(_EFFORT_SETTINGS_KEY, self._show_effort)
         for card in self._cards:
-            card.apply_cmd_filter(self._show_model, self._show_clear)
+            card.apply_cmd_filter(
+                self._show_model, self._show_clear, self._show_effort
+            )
         # Force the scroll area container to recalculate layout
         self._container.updateGeometry()
         self._container.update()

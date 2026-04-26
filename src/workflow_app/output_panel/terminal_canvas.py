@@ -75,11 +75,32 @@ SCROLL_LINES_PER_STEP = 3
 
 
 def _pyte_color_to_qcolor(raw: Any) -> QColor | None:
-    """Convert a pyte color value to QColor. Returns None for 'default'."""
+    """Convert a pyte color value to QColor. Returns None for 'default'.
+
+    pyte stores colors as:
+      - 'default'                    → widget default
+      - named 16-color: 'red', …     → ANSI palette lookup
+      - 256-color & truecolor: 6-char hex 'rrggbb' (no leading '#')
+      - int (legacy paths)           → ANSI index / 256-cube
+    Without the hex branch, every SGR 38;5;N / 38;2;R;G;B fell through and
+    the terminal rendered everything as default white.
+    """
     if raw is None or raw == "default":
         return None
     if isinstance(raw, str):
-        return _ANSI_16_COLORS.get(raw)
+        named = _ANSI_16_COLORS.get(raw)
+        if named is not None:
+            return named
+        if len(raw) == 6:
+            try:
+                return QColor(
+                    int(raw[0:2], 16),
+                    int(raw[2:4], 16),
+                    int(raw[4:6], 16),
+                )
+            except ValueError:
+                return None
+        return None
     if isinstance(raw, int):
         if raw < 16:
             return _ANSI_16_BY_INDEX[raw]
@@ -165,6 +186,10 @@ class TerminalCanvas(QWidget):
         self.setObjectName("TerminalCanvas")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        # Enable input method so dead-key composition (´+a → á, ^+e → ê, ~+a → ã)
+        # is routed through inputMethodEvent(). Without this, Brazilian Portuguese
+        # accents never compose on Linux/XIM/IBus.
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # Font setup
@@ -638,6 +663,15 @@ class TerminalCanvas(QWidget):
         if commit:
             self.raw_key_pressed.emit(commit.encode("utf-8", errors="replace"))
 
+    _DEAD_KEYS: frozenset[Qt.Key] = frozenset({
+        Qt.Key.Key_Dead_Grave,
+        Qt.Key.Key_Dead_Acute,
+        Qt.Key.Key_Dead_Circumflex,
+        Qt.Key.Key_Dead_Tilde,
+        Qt.Key.Key_Dead_Diaeresis,
+        Qt.Key.Key_Dead_Cedilla,
+    })
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         from PySide6.QtGui import QKeyEvent  # noqa: PLC0415
         key = Qt.Key(event.key())
@@ -648,6 +682,12 @@ class TerminalCanvas(QWidget):
         # Reset cursor blink on input
         self._cursor_visible = True
         self._cursor_blink_timer.start(530)
+
+        # Let dead keys pass through Qt's input method so the composed char
+        # (e.g. ´+a → á) arrives via inputMethodEvent() instead of here.
+        if key in self._DEAD_KEYS:
+            event.accept()
+            return
 
         # Ctrl+Shift+V → paste
         if modifiers == (ctrl | shift) and key == Qt.Key.Key_V:

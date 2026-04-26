@@ -46,7 +46,7 @@ class TestInterviewGeneratesCommands:
         commands = engine.generate_command_list(answers)
         names = [c.name for c in commands]
         assert "/front-end-build" not in names
-        assert "/create-assets" not in names
+        assert "/assets:create" not in names
 
     def test_active_phases_filter_commands(self) -> None:
         engine = InterviewEngine()

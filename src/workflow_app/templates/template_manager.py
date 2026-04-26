@@ -19,6 +19,8 @@ from workflow_app.domain import (
     TemplateType,
 )
 from workflow_app.templates._mapping import (
+    db_to_effort,
+    effort_to_db,
     interaction_to_db,
     interaction_to_ui,
     model_name_to_db,
@@ -102,6 +104,7 @@ class TemplateManager:
                     interaction_type=interaction_to_ui(cmd.interaction_type),
                     position=cmd.position,
                     is_optional=cmd.is_optional,
+                    effort=db_to_effort(cmd.effort_level),
                 )
                 for cmd in commands
             ]
@@ -164,6 +167,7 @@ class TemplateManager:
                     interaction_type=interaction_to_db(spec.interaction_type),
                     position=spec.position,
                     is_optional=spec.is_optional,
+                    effort_level=effort_to_db(spec.effort),
                 )
                 session.add(cmd)
 
@@ -205,6 +209,7 @@ class TemplateManager:
                     interaction_type=interaction_to_db(spec.interaction_type),
                     position=spec.position,
                     is_optional=spec.is_optional,
+                    effort_level=effort_to_db(spec.effort),
                 )
                 session.add(cmd)
             session.commit()

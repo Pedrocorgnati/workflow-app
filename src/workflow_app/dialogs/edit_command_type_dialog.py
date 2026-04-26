@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from workflow_app.domain import CommandSpec, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 
 
 class EditCommandTypeDialog(QDialog):
@@ -33,7 +33,7 @@ class EditCommandTypeDialog(QDialog):
         super().__init__(parent)
         self._spec = spec
         self.setWindowTitle("Editar Tipo de Comando")
-        self.setMinimumSize(380, 220)
+        self.setMinimumSize(380, 270)
         self.setModal(True)
         self.setStyleSheet("background-color: #18181B;")
         self._setup_ui()
@@ -106,6 +106,16 @@ class EditCommandTypeDialog(QDialog):
         self._inter_combo.setStyleSheet(combo_style)
         bl.addWidget(self._inter_combo)
 
+        # Effort combo
+        effort_label = QLabel("Effort (/effort)")
+        effort_label.setStyleSheet(label_style)
+        bl.addWidget(effort_label)
+        self._effort_combo = QComboBox()
+        self._effort_combo.addItems(["low", "medium", "high", "max"])
+        self._effort_combo.setCurrentText(self._spec.effort.value)
+        self._effort_combo.setStyleSheet(combo_style)
+        bl.addWidget(self._effort_combo)
+
         root.addWidget(body, stretch=1)
 
         # Footer
@@ -152,6 +162,12 @@ class EditCommandTypeDialog(QDialog):
             "Interativo": InteractionType.INTERACTIVE,
             "Automático": InteractionType.AUTO,
         }
+        effort_map = {
+            "low": EffortLevel.LOW,
+            "medium": EffortLevel.STANDARD,
+            "high": EffortLevel.HIGH,
+            "max": EffortLevel.MAX,
+        }
         import dataclasses
 
         updated = dataclasses.replace(
@@ -160,6 +176,7 @@ class EditCommandTypeDialog(QDialog):
             interaction_type=inter_map.get(
                 self._inter_combo.currentText(), self._spec.interaction_type
             ),
+            effort=effort_map.get(self._effort_combo.currentText(), self._spec.effort),
         )
         self.command_updated.emit(updated)
         self.accept()

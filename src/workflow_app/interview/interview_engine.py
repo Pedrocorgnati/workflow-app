@@ -66,7 +66,7 @@ PIPELINE_COMMANDS: list[_PipelineEntry] = [
     ("/mobile-first-build",    ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
     ("/front-end-build",       ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
     ("/data-test-id",          ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
-    ("/create-assets",         ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7", "frontend"]),
+    ("/assets:create",         ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7", "frontend"]),
     ("/create-mocks",          ModelName.SONNET, InteractionType.AUTO,        True,  ["f7"]),
     ("/github-linking",        ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7"]),
     ("/auto-flow execute",     ModelName.SONNET, InteractionType.AUTO,        False, ["f7"]),
@@ -124,7 +124,7 @@ _QUESTIONS: list[InterviewQuestion] = [
         question="Qual é a stack principal?",
         field_name="stack",
         options=["nextjs", "pyside6", "react", "vue", "fastapi", "django", "flutter", "other"],
-        hint="Isso determina se /front-end-build e /create-assets serão incluídos.",
+        hint="Isso determina se /front-end-build e /assets:create serão incluídos.",
     ),
     InterviewQuestion(
         id="has_frontend",

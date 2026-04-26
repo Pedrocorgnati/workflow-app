@@ -11,7 +11,7 @@ import logging
 import re
 from pathlib import Path
 
-from workflow_app.domain import CommandSpec, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +21,18 @@ _H = ModelName.HAIKU
 _A = InteractionType.AUTO
 
 
-def _spec(name: str, model: ModelName, pos: int) -> CommandSpec:
+def _spec(
+    name: str,
+    model: ModelName,
+    pos: int,
+    effort: EffortLevel = EffortLevel.STANDARD,
+) -> CommandSpec:
     return CommandSpec(
         name=name,
         model=model,
         interaction_type=_A,
         position=pos,
+        effort=effort,
     )
 
 
@@ -113,7 +119,7 @@ def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandS
     specs.append(_spec("/back-end-build", _S, 0))
     specs.append(_spec("/build-verify", _H, 0))
     specs.append(_spec("/db-migration-create", _S, 0))
-    specs.append(_spec("/create-assets", _S, 0))
+    specs.append(_spec("/assets:create", _S, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
     specs.append(_spec("/sync:github", _H, 0))
@@ -121,10 +127,18 @@ def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandS
     specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
-    # ── F7: Per-module execute + review ─────────────────────────────────────
+    # ── F7: Per-module FASE A.2 (TDD, optional) + execute + review ──────────
+    # Skip TDD specs quando MODULE-META.tdd.required == false (usuario remove manualmente)
     for module_path in modules:
+        specs.append(_spec(f"/tdd:test-plan {module_path}", _O, 0))
+        specs.append(_spec(f"/tdd:contract-from-openapi {module_path}", _S, 0))
+        specs.append(_spec(f"/tdd:behavior-from-specs {module_path}", _S, 0))
+        specs.append(_spec(f"/tdd:unit-skeletons {module_path}", _S, 0))
+        specs.append(_spec(f"/tdd:create-suite {module_path}", _O, 0))
+        specs.append(_spec(f"/tdd:lock {module_path}", _H, 0))
         specs.append(_spec(f"/auto-flow execute {module_path}", _S, 0))
-        specs.append(_spec(f"/review-executed-module {module_path}", _O, 0))
+        specs.append(_spec(f"/build-verify --tdd-gate --module {module_path}", _H, 0))
+        specs.append(_spec(f"/review-executed-module {module_path}", _O, 0, effort=EffortLevel.HIGH))
 
     # ── F7: Post-execution ───────────────────────────────────────────────────
     specs.append(_spec("/review-executed-task", _S, 0))
@@ -158,7 +172,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     1. auto-flow create {first} {last} — F5 create range
     2. validate-pipeline + reforge-pipeline
     3. front-end-build, back-end-build, db-migration-create
-    4. create-assets, create-mocks, github-linking
+    4. /assets:create, /create-mocks, github-linking
     5. Per-module: auto-flow execute + review-executed-module
     6. milestone-checklist-review, reforge:prepare, reforge:fix
     7. F8: env-creation, create-test-user, seed-data-create, docker-create, integration-test-create
@@ -194,7 +208,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/back-end-build", _S, 0))
     specs.append(_spec("/build-verify", _H, 0))
     specs.append(_spec("/db-migration-create", _S, 0))
-    specs.append(_spec("/create-assets", _S, 0))
+    specs.append(_spec("/assets:create", _S, 0))
     specs.append(_spec("/create-mocks", _S, 0))
     specs.append(_spec("/github-linking", _H, 0))
     specs.append(_spec("/sync:github", _H, 0))
@@ -202,10 +216,18 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
-    # ── F7: Per-module execute + review ─────────────────────────────────────
+    # ── F7: Per-module FASE A.2 (TDD, optional) + execute + review ──────────
+    # Skip TDD specs quando MODULE-META.tdd.required == false (usuario remove manualmente)
     for module_path in modules:
+        specs.append(_spec(f"/tdd:test-plan {module_path}", _O, 0))
+        specs.append(_spec(f"/tdd:contract-from-openapi {module_path}", _S, 0))
+        specs.append(_spec(f"/tdd:behavior-from-specs {module_path}", _S, 0))
+        specs.append(_spec(f"/tdd:unit-skeletons {module_path}", _S, 0))
+        specs.append(_spec(f"/tdd:create-suite {module_path}", _O, 0))
+        specs.append(_spec(f"/tdd:lock {module_path}", _H, 0))
         specs.append(_spec(f"/auto-flow execute {module_path}", _S, 0))
-        specs.append(_spec(f"/review-executed-module {module_path}", _O, 0))
+        specs.append(_spec(f"/build-verify --tdd-gate --module {module_path}", _H, 0))
+        specs.append(_spec(f"/review-executed-module {module_path}", _O, 0, effort=EffortLevel.HIGH))
 
     # ── F7: Post-execution ───────────────────────────────────────────────────
     specs.append(_spec("/review-executed-task", _S, 0))
