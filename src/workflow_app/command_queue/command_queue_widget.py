@@ -46,6 +46,7 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_AUTO_IMPROOVE,
     TEMPLATE_AUTOCAST_TEST,
     TEMPLATE_BLOG,
+    TEMPLATE_BOILERPLATE,
     TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
@@ -57,6 +58,7 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_JSON,
     TEMPLATE_MKT,
     TEMPLATE_MODULES,
+    TEMPLATE_PYTHON_IMPROOVE,
 )
 
 _DROP_INDICATOR_COLOR = QColor("#F59E0B")  # Amber-400
@@ -304,7 +306,7 @@ class CommandQueueWidget(QWidget):
             ("brief feat", "/feature-brief-create → intake → PRD (nova feature)",
              lambda: self._load_quick_template(TEMPLATE_BRIEF_FEATURE, name="Brief \u2014 Feature"),
              "queue-btn-brief-feat"),
-            ("Modules (Legacy WBS)", "[legacy WBS] sera descontinuado em T-060 — use DCP: Build Module Pipeline",
+            ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
              lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
              "queue-btn-modules"),
             ("DCP: Build Module Pipeline", "Cola /build-module-pipeline no terminal — gera SPECIFIC-FLOW.json para o modulo atual",
@@ -337,11 +339,16 @@ class CommandQueueWidget(QWidget):
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
+            ("boilerplate", "Boilerplate: scan → convert-nextjs → cleanup → persona → mockify → persona-assets → enhance-fe → gen-sql → finalize. Abre modal para path do repo (NAO le project.json).",
+             self._on_boilerplate_clicked, "queue-btn-boilerplate"),
             ("micro-arch", "Carrega pipeline de micro-arquitetura",
              self._on_micro_arch_clicked, "queue-btn-micro-arch"),
             ("autocast-test", "Testa ciclo completo do autocast",
              lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
              "queue-btn-autocast-test"),
+            ("python-improove", "Auto-Improove Python — /model opus + /effort high + 20× (/clear + /auto-improove:python). Delega trechos deterministicos dos comandos para scripts Python co-localizados. Sem vinculo com projeto.",
+             self._on_python_improove_clicked,
+             "queue-btn-python-improove"),
             ("Sonnet", "Envia /model sonnet no terminal",
              lambda: signal_bus.run_command_in_terminal.emit("/model sonnet"),
              "queue-btn-model-sonnet"),
@@ -1187,28 +1194,15 @@ class CommandQueueWidget(QWidget):
     # ────────────────────────────────────────────────────────── DCP ── #
 
     def _apply_dcp_reader_gating(self, workflow_content: QWidget) -> None:
-        """Init-time gating for the workflow tab's DCP and legacy buttons.
+        """Init-time gating for the workflow tab's DCP buttons.
 
-        Two gates are applied:
-        1. `[Modules (Legacy WBS)]` is always disabled per TASK-050 §78 with
-           a "sera descontinuado em T-060" tooltip — the button is kept
-           visible as a migration signpost but cannot fire the legacy flow.
-        2. `[DCP: Specific-Flow]` is disabled only when
-           `workflow_app.dcp.READER_AVAILABLE` is false, with the spec
-           literal tooltip "Requer T-035 (reader)" (§112-119).
+        `[DCP: Specific-Flow]` is disabled only when
+        `workflow_app.dcp.READER_AVAILABLE` is false, with the spec literal
+        tooltip "Requer T-035 (reader)" (§112-119).
 
         Reading `dcp_pkg.READER_AVAILABLE` (instead of the imported symbol)
         lets pytest monkeypatch the flag without `importlib.reload`.
         """
-        for btn in workflow_content.findChildren(QPushButton):
-            testid = btn.property("testid")
-            if testid == "queue-btn-modules":
-                btn.setEnabled(False)
-                btn.setToolTip(
-                    "[Modules (Legacy WBS)] sera descontinuado em T-060 — "
-                    "use [DCP: Build Module Pipeline]"
-                )
-
         if dcp_pkg.READER_AVAILABLE:
             return
         logger.warning(
@@ -1309,6 +1303,114 @@ class CommandQueueWidget(QWidget):
         signal_bus.pipeline_ready.emit(expanded)
         signal_bus.toast_requested.emit(
             "Auto-Improove carregado — sem projeto. Use Loop ×10 para completar tudo.", "info"
+        )
+
+    def _on_python_improove_clicked(self) -> None:
+        """Load the python-improove flow (Auxiliar tab).
+
+        Comportamento especial: NAO requer projeto carregado e NAO anexa
+        config_path a nenhum comando. Opera sobre o proprio SystemForge
+        (.claude/commands/), igual ao auto-improove balanced.
+        """
+        raw = copy.deepcopy(TEMPLATE_PYTHON_IMPROOVE)
+        for spec in raw:
+            spec.config_path = ""
+
+        self._template_label.setText("  \U0001f4cb  Python Improove")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Python Improove")
+
+        for i, spec in enumerate(raw, start=1):
+            spec.position = i
+
+        signal_bus.pipeline_ready.emit(raw)
+        signal_bus.toast_requested.emit(
+            "Python Improove carregado — sem projeto. 20 iteracoes.", "info"
+        )
+
+    def _on_boilerplate_clicked(self) -> None:
+        """Carrega o pipeline boilerplate (9 passos).
+
+        Comportamento especial: NAO le metrics-project-pill (project.json).
+        Abre BoilerplatePathDialog para o usuario colar o path do repo legado.
+        Em seguida injeta config_path por-spec:
+          - /boilerplate:scan → repo_path (caminho fornecido)
+          - demais /boilerplate:* → staging_path = output/boilerplates/_staging/{basename(repo_path)}
+          - /clear, /model X, /effort Y → "" (sem arg)
+
+        O patch em main_window._on_pipeline_ready preserva esses config_path
+        pre-setados (so escreve quando spec.config_path esta vazio).
+        """
+        from pathlib import Path
+
+        from workflow_app.dialogs.boilerplate_path_dialog import BoilerplatePathDialog
+
+        dlg = BoilerplatePathDialog(parent=self)
+        if dlg.exec() != BoilerplatePathDialog.Accepted:
+            return
+
+        repo_path = dlg.repo_path
+        if not repo_path:
+            signal_bus.toast_requested.emit("Path vazio — boilerplate cancelado.", "warning")
+            return
+
+        # Basename normalizado: tira trailing slash e usa o ultimo segmento.
+        # Bloqueia "." e ".." para preservar o isolamento do staging.
+        basename = Path(repo_path).name
+        if not basename or basename in {".", ".."}:
+            signal_bus.toast_requested.emit(
+                f"Basename invalido derivado de '{repo_path}'.", "error"
+            )
+            return
+
+        staging_path = f"output/boilerplates/_staging/{basename}"
+
+        raw = copy.deepcopy(TEMPLATE_BOILERPLATE)
+        # Injeta config_path por spec. Headers (/clear, /model, /effort) ficam vazios.
+        for spec in raw:
+            if spec.name == "/clear" or spec.name.startswith("/model ") or spec.name.startswith("/effort "):
+                spec.config_path = ""
+                continue
+            if spec.name == "/boilerplate:scan":
+                spec.config_path = repo_path
+            elif spec.name.startswith("/boilerplate:"):
+                spec.config_path = staging_path
+            else:
+                spec.config_path = ""
+
+        self._template_label.setText("  \U0001f4cb  Boilerplate")
+        self._template_label.setVisible(True)
+        # NOTA: pulamos _maybe_auto_save porque este fluxo nao depende de projeto carregado.
+
+        # Reusa logica de _load_quick_template (injecao de /model rows e renumeracao).
+        expanded: list[CommandSpec] = []
+        current_model = None
+        for spec in raw:
+            if spec.name == "/clear":
+                expanded.append(spec)
+                continue
+            if spec.name.startswith("/model "):
+                current_model = spec.model
+                expanded.append(spec)
+                continue
+            if spec.model != current_model:
+                model_spec = CommandSpec(
+                    name=f"/model {spec.model.value.lower()}",
+                    model=spec.model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                )
+                expanded.append(model_spec)
+                current_model = spec.model
+            expanded.append(spec)
+
+        for i, spec in enumerate(expanded, start=1):
+            spec.position = i
+
+        signal_bus.pipeline_ready.emit(expanded)
+        signal_bus.toast_requested.emit(
+            f"Boilerplate carregado: 9 passos sobre {basename}", "success"
         )
 
     def _on_delivery_plan_clicked(self) -> None:

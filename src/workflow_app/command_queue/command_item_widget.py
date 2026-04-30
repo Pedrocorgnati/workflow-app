@@ -12,6 +12,7 @@ Visual states per DESIGN.md 2.3:
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable
 
 from PySide6.QtCore import QMimeData, QPoint, Qt, Signal
@@ -242,8 +243,16 @@ class CommandItemWidget(QWidget):
         return self._spec
 
     def command_text(self) -> str:
-        """Return the full command text (name + config_path), space-separated."""
-        return f"{self._spec.name} {self._spec.config_path}".strip()
+        """Return the full command text (name + config_path), shell-quoted when needed.
+
+        config_path pode conter caminhos arbitrarios (ex.: boilerplate aceita repo
+        path do usuario). shlex.quote nao adiciona aspas para paths sem caracteres
+        especiais, entao templates legados (ex.: ".claude/projects/foo.json") ficam
+        intocados.
+        """
+        if not self._spec.config_path:
+            return self._spec.name
+        return f"{self._spec.name} {shlex.quote(self._spec.config_path)}"
 
     def set_highlighted(self, highlighted: bool) -> None:
         """Mark this item as the 'current' command (matches queue-last-command)."""
@@ -274,7 +283,7 @@ class CommandItemWidget(QWidget):
 
     def _on_copy_clicked(self) -> None:
         """Copy the full command line to the clipboard."""
-        text = f"{self._spec.name} {self._spec.config_path}".strip()
+        text = self.command_text()
         clipboard = QApplication.clipboard()
         if clipboard:
             clipboard.setText(text)
@@ -284,9 +293,7 @@ class CommandItemWidget(QWidget):
         if self._is_sent:
             self.reset_to_pending()
             return
-        self.run_in_terminal_requested.emit(
-            f"{self._spec.name} {self._spec.config_path}".strip()
-        )
+        self.run_in_terminal_requested.emit(self.command_text())
         self._mark_as_sent()
 
     def _mark_as_sent(self) -> None:

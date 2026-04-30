@@ -93,7 +93,7 @@ quebrar templates existentes; novos pipelines devem usar apenas DCP.
 
 | Fluxo | Botao | Estado |
 |-------|-------|--------|
-| DCP (recomendado) | DCP: Build Module Pipeline + DCP: Specific-Flow | novo — por modulo |
-| Legacy | Modules (Legacy WBS) | sera descontinuado em T-060 |
+| Creation (Fase A) | Modules (Creation) | cria WBS + MODULE-META + delivery.json |
+| DCP (Fase A→B) | DCP: Build Module Pipeline + DCP: Specific-Flow | gera SPECIFIC-FLOW.json e transita pending → creation |
 
 Para detalhes do refactor T-050 veja `docs/refactor/T-050/README.md`.

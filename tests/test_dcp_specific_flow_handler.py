@@ -351,10 +351,10 @@ def test_dcp_specific_flow_button_disabled_when_reader_missing(
         widget.deleteLater()
 
 
-def test_modules_legacy_wbs_button_disabled_unconditionally(qapp) -> None:
-    """Spec §78: `[Modules (Legacy WBS)]` must be disabled at widget init time
-    with a 'sera descontinuado em T-060' tooltip — independent of reader
-    availability. The button stays visible as a migration signpost."""
+def test_modules_creation_button_enabled(qapp) -> None:
+    """`[Modules (Creation)]` must be enabled at widget init time — it covers
+    fase A do canonical loop (creates WBS structure + MODULE-META + delivery.json),
+    a hard pre-requisite of `/build-module-pipeline`."""
     from PySide6.QtWidgets import QPushButton
 
     from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
@@ -367,7 +367,7 @@ def test_modules_legacy_wbs_button_disabled_unconditionally(qapp) -> None:
                 target = btn
                 break
         assert target is not None, "queue-btn-modules not found"
-        assert target.isEnabled() is False
-        assert "descontinuado em T-060" in target.toolTip()
+        assert target.isEnabled() is True
+        assert "Fase A" in target.toolTip()
     finally:
         widget.deleteLater()

@@ -442,8 +442,9 @@ class PipelineManager:
         self._signal_bus.current_worker_changed.emit(runner)
 
         # Show "$ claude /command [config]" in terminal so the user sees what's running
+        import shlex as _shlex_pm
         cmd_display = spec.name if spec.name.startswith("/") else f"/{spec.name}"
-        config_suffix = f" {spec.config_path}" if spec.config_path else ""
+        config_suffix = f" {_shlex_pm.quote(spec.config_path)}" if spec.config_path else ""
         self._signal_bus.output_chunk_received.emit(
             f"\n\x1b[32m$\x1b[0m claude {cmd_display}{config_suffix}\n"
         )

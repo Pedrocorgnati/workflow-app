@@ -48,7 +48,7 @@ SKILLS_DATA: list[tuple[str, str, str]] = [
 
 TOOLS_DATA: list[tuple[str, str, str]] = [
     ("init-ctx",  "/tools:init-context",          "Carrega contexto sem modificar nada"),
-    ("nuclear",   "/tools:nuclear-debug",          "Debug nuclear para bugs persistentes"),
+    ("nuclear",   "/tools:nuclear-debug",          "Bugs persistentes: loop evidence-driven com repro-contract, patch fan-out e veredictos negativos"),
     ("next-feat", "/tools:next-feature-research",  "Analisa gap INTAKE vs workspace"),
     ("lay-rfct",  "/tools:layout-full-refactor",   "Refatora visual do front-end"),
     ("lay-upd",   "/tools:layout-upd",             "Atualiza tema light/dark a partir de preset"),

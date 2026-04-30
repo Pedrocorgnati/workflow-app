@@ -830,6 +830,18 @@ TEMPLATE_AUTO_IMPROOVE: list[CommandSpec] = [
 # << END AUTO-GENERATED >>
 
 
+# ─── Python Improove (Auxiliar tab) ─────────────────────────────────────────── #
+# Sequencia dedicada para /auto-improove:python.
+# Estrutura: /model opus + /effort high + 20× (/clear + /auto-improove:python).
+# Sem vinculo com projeto — opera sobre os comandos do proprio SystemForge.
+
+TEMPLATE_PYTHON_IMPROOVE: list[CommandSpec] = [
+    _spec("/model opus",            _O, _A, 0),
+    _spec("/effort high",           _O, _A, 1),
+    *_repeats("/auto-improove:python", _O, 20, 2),
+]
+
+
 # ─── Blog SEO (INIT flow from .claude/commands/blog/) ────────────────────────── #
 # Full INIT pipeline: strategy → keywords → clusters → articles → deploy.
 # /clear between independent steps; /model inserted by _load_quick_template.
@@ -855,6 +867,27 @@ TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
     _spec("/blog:schedule-batch",         _H, _A, 16),
     _spec("/blog:deploy",                 _S, _A, 17),
     _spec("/blog:hreflang-map",           _H, _A, 18),
+])
+
+# ─── Boilerplate (from .claude/commands/boilerplate/) ───────────────────────── #
+# Pipeline de 9 passos que converte um repo legado num boilerplate Next.js
+# vendavel. Diferente dos demais: o argumento posicional NAO e project.json,
+# e sim o caminho do repo (scan) ou do staging (8 passos seguintes).
+# A injecao por-spec do config_path e feita em
+# command_queue_widget.py::_on_boilerplate_clicked, nao em _on_pipeline_ready.
+# Todos OPUS + AUTO + HIGH/MAX (alinhado ao frontmatter dos comandos).
+
+TEMPLATE_BOILERPLATE: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                     _O, _A, 0),
+    _spec("/boilerplate:scan",          _O, _A, 1, effort=EffortLevel.HIGH),
+    _spec("/boilerplate:convert-nextjs", _O, _A, 2, effort=EffortLevel.MAX),
+    _spec("/boilerplate:cleanup",       _O, _A, 3, effort=EffortLevel.HIGH),
+    _spec("/boilerplate:persona",       _O, _A, 4, effort=EffortLevel.HIGH),
+    _spec("/boilerplate:mockify",       _O, _A, 5, effort=EffortLevel.HIGH),
+    _spec("/boilerplate:persona-assets", _O, _A, 6, effort=EffortLevel.MAX),
+    _spec("/boilerplate:enhance-fe",    _O, _A, 7, effort=EffortLevel.HIGH),
+    _spec("/boilerplate:gen-sql",       _O, _A, 8, effort=EffortLevel.HIGH),
+    _spec("/boilerplate:finalize",      _O, _A, 9, effort=EffortLevel.MAX),
 ])
 
 # ─── Map for QA stack picker dialog ──────────────────────────────────────────── #

@@ -561,7 +561,11 @@ class MainWindow(QMainWindow):
             self._output_panel.set_max_lines(settings["buffer_lines"])
 
     def _on_pipeline_ready(self, commands: list[CommandSpec]) -> None:
-        # Annotate each spec with the relative config path when a project is loaded
+        # Annotate each spec with the relative config path when a project is loaded.
+        # Comandos /boilerplate:* recebem config_path pre-setado pelo handler
+        # (repo_path no scan, staging_path nos demais) e NAO devem ser sobrescritos
+        # pelo project.json. Para os demais comandos mantemos o comportamento legado
+        # (anotar com a config relativa) para nao regredir templates customizados.
         if app_state.has_config and app_state.config:
             import os
             abs_config = app_state.config.config_path
@@ -573,6 +577,10 @@ class MainWindow(QMainWindow):
             for spec in commands:
                 if spec.name.startswith("/model ") or spec.name.startswith("/effort ") or spec.name == "/clear":
                     continue  # model-switch, /effort and /clear rows must never carry a config path
+                if spec.name.startswith("/boilerplate:"):
+                    continue  # respeita config_path pre-setado por _on_boilerplate_clicked
+                if spec.name.startswith("/auto-improove:"):
+                    continue  # auto-improove opera sobre o proprio SystemForge, sem project.json
                 spec.config_path = rel
 
         self._command_queue.load_pipeline(commands)
