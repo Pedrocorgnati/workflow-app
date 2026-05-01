@@ -25,6 +25,49 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_qt_widgets():
+    """Close and dispose top-level widgets after every test.
+
+    Without this, MainWindow instances created by tests accumulate in the
+    session-scoped QApplication. Each subsequent `setStyleSheet`/repaint
+    has to walk every leaked widget tree, which made the 5th window in
+    test_main_window.py time out at 20-30s on `apply_theme`.
+    """
+    yield
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    import gc
+
+    try:
+        import shiboken6
+    except ImportError:
+        shiboken6 = None  # type: ignore[assignment]
+
+    for w in list(app.topLevelWidgets()):
+        try:
+            w.close()
+            if shiboken6 is not None:
+                # Force synchronous C++ destruction. deleteLater() is async
+                # and PySide refs keep popups alive between tests, leaking
+                # ~346 QComboBox popup QFrames per MainWindow created.
+                shiboken6.delete(w)
+            else:
+                w.setParent(None)
+                w.deleteLater()
+        except RuntimeError:
+            # Widget already deleted by the test itself.
+            pass
+    app.processEvents()
+    gc.collect()
+    app.processEvents()
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 

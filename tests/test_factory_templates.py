@@ -36,22 +36,42 @@ def test_all_have_name_description_commands():
         assert len(commands) > 0, f"No commands: {name}"
 
 
-def test_json_has_1_command():
-    assert len(TEMPLATE_JSON) == 1
-    assert TEMPLATE_JSON[0].name == "/project-json"
+def _first_real(commands) -> str:
+    """Return the first command name that is not a block header.
+
+    Block headers are `/clear`, `/model ...` and `/effort ...` — see
+    `_inject_clears` in `workflow_app.templates.quick_templates`.
+    """
+    for c in commands:
+        if c.name == "/clear":
+            continue
+        if c.name.startswith("/model") or c.name.startswith("/effort"):
+            continue
+        return c.name
+    raise AssertionError("no real command in template (only headers)")
+
+
+# Backwards-compatible alias used by older tests.
+_first_non_clear = _first_real
+
+
+def test_json_has_project_json():
+    # Templates start with `/clear` headers (see _inject_clears in quick_templates).
+    assert any(c.name == "/project-json" for c in TEMPLATE_JSON)
+    assert _first_non_clear(TEMPLATE_JSON) == "/project-json"
 
 
 def test_brief_new_has_expected_coverage():
     names = [cmd.name for cmd in TEMPLATE_BRIEF_NEW]
     assert len(TEMPLATE_BRIEF_NEW) >= 35
-    assert names[0] == "/first-brief-create"
+    assert _first_non_clear(TEMPLATE_BRIEF_NEW) == "/first-brief-create"
     assert names[-1] == "/optimize:review"
 
 
 def test_brief_feature_has_expected_coverage():
     names = [cmd.name for cmd in TEMPLATE_BRIEF_FEATURE]
     assert len(TEMPLATE_BRIEF_FEATURE) >= 25
-    assert names[0] == "/feature-brief-create"
+    assert _first_non_clear(TEMPLATE_BRIEF_FEATURE) == "/feature-brief-create"
     assert names[-1] == "/optimize:review"
 
 
@@ -69,8 +89,18 @@ def test_deploy_has_expected_coverage():
     assert "/deploy-flow" in names
 
 
-def test_daily_has_5_commands():
-    assert len(TEMPLATE_DAILY) == 5
+def test_daily_has_expected_commands():
+    # Includes a leading `/clear` header.
+    names = [c.name for c in TEMPLATE_DAILY]
+    assert len(TEMPLATE_DAILY) == 6
+    assert names[0] == "/clear"
+    assert names[1:] == [
+        "/daily:scan",
+        "/daily:plan",
+        "/daily:do",
+        "/daily:validate",
+        "/daily:review",
+    ]
 
 
 def test_mkt_has_expected_coverage():
@@ -88,9 +118,14 @@ def test_business_has_expected_coverage():
 
 
 def test_all_positions_sequential():
+    # Templates may start at position 0 or 1 depending on whether a leading
+    # `/clear` header is present; what matters is that positions are
+    # contiguous with no gaps or duplicates.
     for name, (_, commands) in FACTORY_TEMPLATES.items():
         positions = [c.position for c in commands]
-        expected = list(range(1, len(commands) + 1))
+        if not positions:
+            continue
+        expected = list(range(positions[0], positions[0] + len(commands)))
         assert positions == expected, f"Non-sequential in '{name}': {positions}"
 
 
@@ -102,13 +137,13 @@ def test_all_commands_have_valid_model():
 
 
 def test_brief_feature_starts_with_feature_brief():
-    names = [c.name for c in TEMPLATE_BRIEF_FEATURE]
-    assert names[0] == "/feature-brief-create"
+    # The first non-`/clear` command must be the brief entrypoint.
+    assert _first_non_clear(TEMPLATE_BRIEF_FEATURE) == "/feature-brief-create"
 
 
 def test_brief_new_starts_with_first_brief():
     names = [c.name for c in TEMPLATE_BRIEF_NEW]
-    assert names[0] == "/first-brief-create"
+    assert _first_non_clear(TEMPLATE_BRIEF_NEW) == "/first-brief-create"
     assert "/feature-brief-create" not in names
 
 
@@ -143,7 +178,7 @@ def test_seed_brief_new_loads_with_commands(tmp_db_manager):
     brief_new = next(t for t in templates if t.name == "Brief: New")
     dto = tm.load_template(brief_new.id)
     assert len(dto.commands) == len(TEMPLATE_BRIEF_NEW)
-    assert dto.commands[0].name == "/first-brief-create"
+    assert _first_non_clear(dto.commands) == "/first-brief-create"
     assert dto.is_factory is True
 
 

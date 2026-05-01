@@ -72,9 +72,11 @@ ModuleType = Literal[
     "auth",
     "integration",
     "payment",
+    "notification",
     "backoffice",
     "infra-only",
     "api-only",
+    "report",
 ]
 
 Owner = Literal["pipeline", "human"]
@@ -89,14 +91,14 @@ ACTIVE_STATES: frozenset[str] = frozenset(
 _ISO8601_UTC_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
-_MODULE_KEY_RE = re.compile(r"^module-\d+-[a-z0-9-]+$")
+_MODULE_KEY_RE = re.compile(r"^module-\d+[a-z]?-[a-z0-9-]+$")
 
 Iso8601Utc = Annotated[
     str,
     StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"),
 ]
 ModuleKey = Annotated[
-    str, StringConstraints(pattern=r"^module-\d+-[a-z0-9-]+$")
+    str, StringConstraints(pattern=r"^module-\d+[a-z]?-[a-z0-9-]+$")
 ]
 
 
@@ -306,6 +308,7 @@ class Metadata(BaseModel):
     created_at: Iso8601Utc
     created_by: str
     last_modified_by: str
+    last_modified_at: Optional[Iso8601Utc] = None
 
 
 # ─── Top-level ───────────────────────────────────────────────────────────── #

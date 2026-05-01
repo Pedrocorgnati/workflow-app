@@ -486,13 +486,18 @@ class MetricsBar(QWidget):
             QApplication.clipboard().setText(addr)
             self._btn_copy_ip.setText("✓")
             self._btn_copy_ip.setToolTip("Copiado!")
+            # Parented overload — Qt cancels the callback if `self` is
+            # destroyed before the timer fires (otherwise the lambda
+            # raises RuntimeError on the deleted C++ button).
             QTimer.singleShot(
                 self._COPY_FEEDBACK_MS,
-                lambda: (
-                    self._btn_copy_ip.setText("📋"),
-                    self._btn_copy_ip.setToolTip("Copiar IP:Porta"),
-                ),
+                self,
+                self._reset_copy_ip_button,
             )
+
+    def _reset_copy_ip_button(self) -> None:
+        self._btn_copy_ip.setText("📋")
+        self._btn_copy_ip.setToolTip("Copiar IP:Porta")
 
     def _on_remote_server_started(self, address: str) -> None:
         self._btn_remote.setChecked(True)
