@@ -30,6 +30,10 @@
       "task_budget_tokens_default": 120000,
       "task_budget_tokens_min": 40000,
       "task_budget_tokens_max": 200000,
+      "entry_paths": [
+        "creation -> execution (via /tdd:lock when modules.*.tdd.required == true)",
+        "creation -> execution (via /execute-task lazy T02 when modules.*.tdd.required != true) — fires on first persist_files_touched call after task execution; owner is execute-task; preserves R01 (no attempt mutation), I-04 (no skipped states) and I-05 (timestamps)"
+      ],
       "tdd_gate": {
         "enabled_when": "modules.*.tdd.required == true",
         "pre_implementation": "/execute-task PRE-0.5 asserts RED",
