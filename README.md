@@ -82,7 +82,7 @@ quebrar templates existentes; novos pipelines devem usar apenas DCP.
 |---|---|---|
 | Escopo de execucao | Por module (state-machine em `delivery.json`) | Projeto inteiro em fases monoliticas |
 | Entry point UI — Command Queue | Botoes `[DCP: Build Module Pipeline]` e `[DCP: Specific-Flow]` na aba *workflow* | Botoes `modules (legacy)`, `specific-flow (legacy)`, `wbs`, `create`, `execute`, `qa`, `deploy` (tooltips marcados `[legacy ...]`) |
-| Entry point CLI | `/build-module-pipeline` (paste literal) ou `/build-module-pipeline {id}` / `--rehydrate {id}` (resolvido via `delivery.json`) | `/auto-flow {indicator}` / `/front-end-build` / `/back-end-build` etc. |
+| Entry point CLI | `/build-module-pipeline {config_path}` ou `--module {N} {config_path}` (state pending) / `--regenerate --module {N} {config_path}` (state past pending — re-emite SPECIFIC-FLOW sem re-transicao) | `/auto-flow {indicator}` / `/front-end-build` / `/back-end-build` etc. |
 | Catalogo — Template Builder | Bloco `DCP Canonical Loop (per module)` com 12 fases A, B, B.2, C, D, D.5, E, F, G, F.2, H, I | Bloco `Legacy Monolithic (F1..F11) — Deprecated` preservado como referencia |
 | Fonte de verdade | `delivery.json` v1 (T-035 `DeliveryReader`) | Ausente — pipelines legacy nao tem state-machine |
 | Dependencia para habilitar | T-035 (`workflow_app.services.delivery_reader`). O botao `[DCP: Specific-Flow]` fica desabilitado com tooltip `"Requer T-035 (reader)"` se a importacao falhar | Sempre disponivel (nao requer reader) |

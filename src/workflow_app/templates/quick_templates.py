@@ -283,8 +283,10 @@ TEMPLATE_MODULES: list[CommandSpec] = _inject_clears([
     _spec("/modules:user-stories",      _S, _A, 6),
     _spec("/modules:create-overview",   _S, _A, 7),
     _spec("/modules:review-created",    _O, _I, 8),
-    _spec("/rollout-strategy-create",   _S, _I, 9),
-    _spec("/modules:build-milestones",  _S, _I, 10),
+    _spec("/rollout-strategy-create",        _S, _I, 9),
+    _spec("/modules:build-milestones",       _S, _I, 10),
+    _spec("/modules:build-shared-skeleton",  _S, _A, 11),
+    _spec("/delivery:init",                  _S, _A, 12),
 ])
 
 # ─── Deploy (from z-templates/deploy.md) ─────────────────────────────────────── #

@@ -7,8 +7,10 @@ de `scheduled-updates/refactor-workflow-sytemforge/TASK-050-workflow-app-dcp-cle
 
 - **Command Queue tab "workflow"** passa a expor 2 botoes DCP novos:
   - `[DCP: Build Module Pipeline]` — paste literal `/build-module-pipeline`
-  - `[DCP: Specific-Flow]` — resolve `current_module` via T-035 reader e pasta
-    `/build-module-pipeline {id}` ou `/build-module-pipeline --rehydrate {id}`
+  - `[DCP: Specific-Flow]` — resolve `current_module` via T-035 reader e cola
+    `/build-module-pipeline --module {N} {config_path}` (state pending) ou
+    `/build-module-pipeline --regenerate --module {N} {config_path}`
+    (state past pending; re-emite SPECIFIC-FLOW sem re-transicao)
 - Botoes legacy recebem sufixo `(legacy)` e prefixo `[legacy ...]` nos tooltips
   para isolar monolitos F1..F11 da entrada canonica DCP.
 - **Template Builder catalog** passa a renderizar dois blocos sequenciais:

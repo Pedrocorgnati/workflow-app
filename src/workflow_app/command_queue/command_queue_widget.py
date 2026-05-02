@@ -34,12 +34,9 @@ from PySide6.QtWidgets import (
 from workflow_app import dcp as dcp_pkg
 from workflow_app.command_queue.autocast_cli import build_launch_plan
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
-from workflow_app.dcp.specific_flow_handler import (
-    build_paste_command_only,
-    resolve as dcp_resolve,
-)
+from workflow_app.dcp.specific_flow_handler import build_paste_command_only
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
-from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, InteractionType, ModelName
 from workflow_app.sdk.pty_runner import PtyRunner
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
@@ -309,9 +306,9 @@ class CommandQueueWidget(QWidget):
             ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
              lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
              "queue-btn-modules"),
-            ("DCP: Build Module Pipeline", "Cola /build-module-pipeline no terminal — gera SPECIFIC-FLOW.json para o modulo atual",
+            ("DCP: Gerar Pipeline", "Cola /build-module-pipeline no terminal — decide automaticamente entre novo pipeline ou --regenerate baseado no delivery.json",
              self._on_dcp_build_clicked, "queue-btn-dcp-build"),
-            ("DCP: Specific-Flow", "Decide e cola /build-module-pipeline {id} ou --rehydrate baseado no delivery.json",
+            ("DCP: Specific-Flow", "Le o SPECIFIC-FLOW.json do modulo atual e carrega os comandos na fila para execucao via Autocast",
              self._on_dcp_specific_flow_clicked, "queue-btn-dcp-specific-flow"),
             ("wbs", "[legacy WBS] WBS dinâmico — analisa modules existentes e gera tasks",
              self._on_wbs_clicked, "queue-btn-wbs"),
@@ -1196,9 +1193,9 @@ class CommandQueueWidget(QWidget):
     def _apply_dcp_reader_gating(self, workflow_content: QWidget) -> None:
         """Init-time gating for the workflow tab's DCP buttons.
 
-        `[DCP: Specific-Flow]` is disabled only when
-        `workflow_app.dcp.READER_AVAILABLE` is false, with the spec literal
-        tooltip "Requer T-035 (reader)" (§112-119).
+        `[DCP: Specific-Flow]` is disabled when `workflow_app.dcp.READER_AVAILABLE`
+        is false — it requires delivery_reader (T-035) to resolve the module and
+        locate SPECIFIC-FLOW.json.
 
         Reading `dcp_pkg.READER_AVAILABLE` (instead of the imported symbol)
         lets pytest monkeypatch the flag without `importlib.reload`.
@@ -1215,16 +1212,26 @@ class CommandQueueWidget(QWidget):
                 break
 
     def _on_dcp_build_clicked(self) -> None:
-        """Paste `/build-module-pipeline` in the interactive terminal.
+        """Paste canonical `/build-module-pipeline` command — Phase A pre-req gate.
 
-        The command itself (T-013) resolves the current module via CWD +
-        `delivery.json`; the button is intentionally stateless.
+        MVP gate (per Codex review T-013/T-052):
+          1. has_config (project loaded)
+          2. delivery.json exists + DeliveryFound (CLI requires it; no bootstrap)
+          3. execution_mode != parallel-independent (or block ambiguous case)
+          4. current_module exists, module exists, state != done
+          5. MODULE-META.json exists, parses, has minimal canonical fields
+
+        Choses ``--regenerate`` when module is past pending (state in
+        creation/execution/etc) so the SPECIFIC-FLOW is re-emitted without
+        re-transitioning state. Falls back to bare command only when the reader
+        is genuinely unavailable.
         """
         from PySide6.QtWidgets import QMessageBox
 
         from workflow_app.config.app_state import app_state
 
-        if not app_state.has_config:
+        # Gate 1 — project loaded
+        if not app_state.has_config or app_state.config is None:
             logger.info("[DCP] build clicked without project — showing prompt")
             QMessageBox.information(
                 self,
@@ -1232,35 +1239,285 @@ class CommandQueueWidget(QWidget):
                 "Carregue um projeto (pill superior) antes de gerar pipeline DCP.",
             )
             return
-        logger.info("[DCP] pasting /build-module-pipeline (stateless)")
-        signal_bus.paste_text_in_terminal.emit(build_paste_command_only())
+        config = app_state.config
+
+        # Reader unavailable — emit bare command and let CLI surface errors
+        if not dcp_pkg.READER_AVAILABLE:
+            cmd = build_paste_command_only(config=config)
+            logger.warning("[DCP] reader ausente — colando comando bare")
+            signal_bus.paste_text_in_terminal.emit(cmd)
+            signal_bus.focus_interactive_terminal.emit()
+            return
+
+        from workflow_app.dcp.specific_flow_handler import _resolve_wbs_root
+        from workflow_app.services.delivery_reader import (
+            DeliveryFound,
+            DeliveryFutureVersion,
+            DeliveryInvalid,
+            DeliveryMissing,
+            DeliveryReader,
+        )
+
+        wbs_root = _resolve_wbs_root(config)
+        result = DeliveryReader().load(wbs_root)
+
+        # Gate 2 — delivery.json present and structurally OK
+        if isinstance(result, DeliveryMissing):
+            QMessageBox.information(
+                self, "DCP",
+                "delivery.json ausente. Rode primeiro a Phase A:\n"
+                "  1. Brief — Novo Projeto (queue-btn-brief-new), e\n"
+                "  2. Modules (Creation) (queue-btn-modules)\n"
+                "Depois volte ao DCP: Gerar Pipeline.",
+            )
+            return
+        if isinstance(result, DeliveryInvalid):
+            QMessageBox.information(
+                self, "DCP",
+                f"delivery.json invalido: {result.error}. Rode /delivery:validate.",
+            )
+            return
+        if isinstance(result, DeliveryFutureVersion):
+            QMessageBox.information(self, "DCP", result.message)
+            return
+
+        assert isinstance(result, DeliveryFound)
+        delivery = result.delivery
+
+        # Gate 3 — parallel-independent requires explicit module selection
+        if delivery.execution_mode == "parallel-independent":
+            QMessageBox.information(
+                self, "DCP",
+                "execution_mode=parallel-independent requer selecao explicita "
+                "do modulo. Use o botao DCP no card do modulo desejado.",
+            )
+            return
+
+        # Gate 4 — current_module is set, exists in modules, not done
+        cm_id = delivery.current_module
+        if not cm_id:
+            QMessageBox.information(
+                self, "DCP",
+                "current_module nao definido em delivery.json. "
+                "Rode /modules:create-structure ou /delivery:validate.",
+            )
+            return
+        if delivery.modules and all(
+            m.state == "done" for m in delivery.modules.values()
+        ):
+            QMessageBox.information(
+                self, "DCP", "Todos os modulos estao concluidos."
+            )
+            return
+        module = delivery.modules.get(cm_id)
+        if module is None:
+            QMessageBox.information(
+                self, "DCP",
+                f"current_module={cm_id!r} nao existe em modules. "
+                "Rode /delivery:validate.",
+            )
+            return
+        if module.state == "done":
+            QMessageBox.information(
+                self, "DCP",
+                f"Modulo {cm_id!r} ja concluido. "
+                "Use /delivery:sign-off ou inicie o proximo modulo.",
+            )
+            return
+
+        # Gate 5 — MODULE-META.json exists, parses, has minimal canonical fields
+        meta_path = wbs_root / "modules" / cm_id / "MODULE-META.json"
+        if not meta_path.exists():
+            QMessageBox.information(
+                self, "DCP",
+                f"MODULE-META.json ausente em {meta_path.name}. Phase A nao "
+                "foi completada. Rode Modules (queue-btn-modules).",
+            )
+            return
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            QMessageBox.information(
+                self, "DCP",
+                f"MODULE-META.json corrupto: {exc}. "
+                "Re-rode Modules (queue-btn-modules).",
+            )
+            return
+        required_keys = {"module_id", "module_name", "module_type"}
+        missing = required_keys - set(meta.keys())
+        if missing:
+            QMessageBox.information(
+                self, "DCP",
+                f"MODULE-META.json incompleto. Faltam: {sorted(missing)}. "
+                "Re-rode Modules (queue-btn-modules).",
+            )
+            return
+        # Identity check — meta.module_id MUST match delivery.json[modules] key,
+        # otherwise we'd run pipeline against the wrong module's spec.
+        if meta.get("module_id") != cm_id:
+            QMessageBox.information(
+                self, "DCP",
+                f"MODULE-META.json identifica module_id={meta.get('module_id')!r} "
+                f"mas delivery.json aponta current_module={cm_id!r}. "
+                "Resolva o desalinhamento antes de prosseguir.",
+            )
+            return
+
+        # All gates passed — choose --regenerate when module is past pending
+        regenerate = module.state != "pending"
+        cmd = build_paste_command_only(
+            config=config, current_module=cm_id, regenerate=regenerate,
+        )
+        logger.info("[DCP] pasting %r (regenerate=%s)", cmd, regenerate)
+        signal_bus.paste_text_in_terminal.emit(cmd)
         signal_bus.focus_interactive_terminal.emit()
 
     def _on_dcp_specific_flow_clicked(self) -> None:
-        """Decide and paste `/build-module-pipeline {id}` or `--rehydrate`.
+        """Load SPECIFIC-FLOW.json for the active module into the command queue.
 
-        Delegates to `specific_flow_handler.resolve` which is a pure,
-        Qt-free function — the widget only wraps the outcome as a
-        QMessageBox (blocked cases) or a terminal paste (happy path).
+        Reads delivery.json to resolve `current_module`, then uses the
+        DCP-9.2 cascade (artifacts.last_specific_flow -> custom_workflow_root)
+        to locate the JSON and populate the queue via `pipeline_ready`.
+        The user can then run the pipeline via Autocast.
         """
-        from PySide6.QtWidgets import QMessageBox
-
         from workflow_app.config.app_state import app_state
 
-        if not dcp_pkg.READER_AVAILABLE:
-            logger.warning("[DCP] specific-flow clicked but reader unavailable")
-            QMessageBox.information(self, "DCP", "Requer T-035 (reader)")
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar DCP: Specific-Flow.", "warning"
+            )
             return
 
-        action = dcp_resolve(app_state.config)
-        if action.command is None:
-            logger.info("[DCP] specific-flow blocked: %s", action.reason)
-            QMessageBox.information(self, "DCP", action.reason)
+        config = app_state.config
+
+        from workflow_app.dcp.specific_flow_handler import _resolve_wbs_root
+        from workflow_app.services.delivery_reader import (
+            DeliveryFound,
+            DeliveryFutureVersion,
+            DeliveryInvalid,
+            DeliveryMissing,
+            DeliveryReader,
+            resolve_specific_flow,
+        )
+
+        wbs_root = _resolve_wbs_root(config)
+        result = DeliveryReader().load(wbs_root)
+
+        if isinstance(result, DeliveryMissing):
+            signal_bus.toast_requested.emit(
+                "delivery.json ausente. Rode /delivery:init primeiro.", "warning"
+            )
+            return
+        if isinstance(result, DeliveryInvalid):
+            signal_bus.toast_requested.emit(
+                f"delivery.json invalido: {result.error}. Rode /delivery:validate.", "warning"
+            )
+            return
+        if isinstance(result, DeliveryFutureVersion):
+            signal_bus.toast_requested.emit(result.message, "warning")
             return
 
-        logger.info("[DCP] pasting specific-flow command: %s (%s)", action.command, action.reason)
-        signal_bus.paste_text_in_terminal.emit(action.command)
-        signal_bus.focus_interactive_terminal.emit()
+        assert isinstance(result, DeliveryFound)
+        delivery = result.delivery
+        cm_id = delivery.current_module
+        if not cm_id:
+            signal_bus.toast_requested.emit("Nenhum modulo ativo no delivery.json.", "warning")
+            return
+
+        if delivery.modules and all(m.state == "done" for m in delivery.modules.values()):
+            signal_bus.toast_requested.emit("Todos os modulos estao concluidos.", "warning")
+            return
+
+        module = delivery.modules.get(cm_id)
+        if module is None or module.state == "done":
+            signal_bus.toast_requested.emit(
+                f"Modulo {cm_id!r} esta concluido ou nao existe.", "warning"
+            )
+            return
+
+        flow_path = resolve_specific_flow(
+            delivery,
+            cm_id,
+            config.project_dir,
+            custom_workflow_root=config.custom_workflow_root or None,
+        )
+
+        if flow_path is None or not flow_path.exists():
+            signal_bus.toast_requested.emit(
+                f"SPECIFIC-FLOW.json nao encontrado para {cm_id}. "
+                "Execute [DCP: Gerar Pipeline] primeiro.",
+                "warning",
+            )
+            return
+
+        try:
+            data = json.loads(flow_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            signal_bus.toast_requested.emit(f"Erro ao ler SPECIFIC-FLOW.json: {exc}", "error")
+            return
+
+        if not isinstance(data, dict):
+            signal_bus.toast_requested.emit(
+                "SPECIFIC-FLOW.json invalido: root deve ser um objeto JSON.", "error"
+            )
+            return
+
+        commands_raw = data.get("commands", [])
+        if not isinstance(commands_raw, list):
+            signal_bus.toast_requested.emit(
+                "SPECIFIC-FLOW.json invalido: campo 'commands' deve ser uma lista.", "error"
+            )
+            return
+
+        _model_map = {
+            "opus": ModelName.OPUS,
+            "sonnet": ModelName.SONNET,
+            "haiku": ModelName.HAIKU,
+        }
+        _effort_map = {
+            "low": EffortLevel.LOW,
+            "medium": EffortLevel.STANDARD,
+            "standard": EffortLevel.STANDARD,
+            "high": EffortLevel.HIGH,
+            "max": EffortLevel.MAX,
+        }
+        specs: list[CommandSpec] = []
+        for i, cmd in enumerate(commands_raw, start=1):
+            if not isinstance(cmd, dict):
+                continue
+            name = cmd.get("name", "").strip()
+            if not name:
+                continue
+            model = _model_map.get(str(cmd.get("model", "sonnet")).lower(), ModelName.SONNET)
+            interaction = (
+                InteractionType.INTERACTIVE
+                if str(cmd.get("interaction", "auto")).lower() == "inter"
+                else InteractionType.AUTO
+            )
+            effort = _effort_map.get(str(cmd.get("effort", "medium")).lower(), EffortLevel.STANDARD)
+            phase = str(cmd.get("phase", "F?"))
+            specs.append(
+                CommandSpec(
+                    name=name,
+                    model=model,
+                    interaction_type=interaction,
+                    config_path="",
+                    position=i,
+                    effort=effort,
+                    phase=phase,
+                )
+            )
+
+        if not specs:
+            signal_bus.toast_requested.emit("SPECIFIC-FLOW.json esta vazio.", "warning")
+            return
+
+        project = data.get("project", config.project_name)
+        logger.info("[DCP] loading pipeline from %s (%d commands)", flow_path, len(specs))
+        self._template_label.setText(f"  \U0001f4cb  DCP: {cm_id} — {project}")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"DCP {cm_id}")
+        signal_bus.pipeline_ready.emit(specs)
 
     def _on_auto_improove_balanced_clicked(self) -> None:
         """Load the auto-improove balanced flow (Daily tab).

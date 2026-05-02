@@ -156,6 +156,37 @@ def test_build_paste_command_only_literal() -> None:
     assert build_paste_command_only() == "/build-module-pipeline"
 
 
+def test_build_paste_command_only_config_without_module(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path, tmp_path / "wbs")
+    cmd = build_paste_command_only(config=cfg)
+    assert cmd.startswith("/build-module-pipeline ")
+    assert "--module" not in cmd
+    assert ".claude" in cmd
+
+
+def test_build_paste_command_only_config_with_module(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path, tmp_path / "wbs")
+    cmd = build_paste_command_only(config=cfg, current_module="module-2-payments")
+    assert "--module 2" in cmd
+    assert ".claude" in cmd
+
+
+def test_build_paste_command_only_regenerate(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path, tmp_path / "wbs")
+    cmd = build_paste_command_only(
+        config=cfg, current_module="module-2-payments", regenerate=True
+    )
+    assert cmd.startswith("/build-module-pipeline --regenerate --module 2 ")
+    assert ".claude" in cmd
+
+
+def test_build_paste_command_only_letter_suffix_module(tmp_path: Path) -> None:
+    """Module ids like 'module-6a-aba3-engine' must extract '6a' alias."""
+    cfg = _make_config(tmp_path, tmp_path / "wbs")
+    cmd = build_paste_command_only(config=cfg, current_module="module-6a-aba3-engine")
+    assert "--module 6a" in cmd
+
+
 def test_resolve_no_project_returns_spec_literal_message() -> None:
     action = resolve(None)
     assert isinstance(action, SpecificFlowAction)
@@ -196,11 +227,15 @@ def test_resolve_module_pending_paste_build_module_pipeline(tmp_path: Path) -> N
 
     action = resolve(cfg, reader=DeliveryReader())
 
-    assert action.command == "/build-module-pipeline module-1-dashboard"
+    # Canonical CLI contract: --module {N} {config_path} (no --rehydrate, no
+    # bare module-id positional). Allow partial match because tmp_path varies.
+    assert action.command is not None
+    assert action.command.startswith("/build-module-pipeline --module 1 ")
+    assert action.command.endswith("project.json")
     assert action.reason == "novo pipeline"
 
 
-def test_resolve_module_with_last_specific_flow_rehydrate(tmp_path: Path) -> None:
+def test_resolve_module_with_last_specific_flow_regenerate(tmp_path: Path) -> None:
     wbs_root = tmp_path / "wbs"
     wbs_root.mkdir()
     _write_delivery(
@@ -218,8 +253,14 @@ def test_resolve_module_with_last_specific_flow_rehydrate(tmp_path: Path) -> Non
 
     action = resolve(cfg, reader=DeliveryReader())
 
-    assert action.command == "/build-module-pipeline --rehydrate module-1-dashboard"
-    assert action.reason == "reidratar pipeline existente"
+    # Canonical CLI contract for re-emit: --regenerate --module {N} {config_path}
+    # (T-013 implements --regenerate, never --rehydrate).
+    assert action.command is not None
+    assert action.command.startswith(
+        "/build-module-pipeline --regenerate --module 1 "
+    )
+    assert action.command.endswith("project.json")
+    assert action.reason == "regenerar SPECIFIC-FLOW existente"
 
 
 def test_resolve_current_module_in_done_state_returns_no_active_module(

@@ -527,14 +527,29 @@ class ModuleDetailView(QWidget):
     def _on_run(self, module_id: str) -> None:
         state = self._action_bar.current_state
         if state == "pending":
+            from workflow_app.config.app_state import app_state
+            from workflow_app.dcp.specific_flow_handler import (
+                build_paste_command_only,
+            )
+
+            if not app_state.has_config or app_state.config is None:
+                self._emit_toast(
+                    "Carregue um projeto antes de gerar pipeline DCP.",
+                    "warning",
+                )
+                return
+            cmd = build_paste_command_only(
+                config=app_state.config, current_module=module_id
+            )
             self._emit_toast(
-                f"Disparando /build-module-pipeline para {module_id}...",
+                f"Colando {cmd} — execute no terminal.",
                 "info",
             )
-            self._run_claude_cli(
-                args=["/build-module-pipeline", module_id],
-                success_toast=f"Pipeline criado para {module_id}",
-            )
+            try:
+                signal_bus.paste_text_in_terminal.emit(cmd)
+                signal_bus.focus_interactive_terminal.emit()
+            except Exception:  # pragma: no cover
+                logger.exception("paste_text_in_terminal emit failed")
             return
         self._emit_toast(
             f"Retomando pipeline de {module_id} — veja a aba Comandos.",

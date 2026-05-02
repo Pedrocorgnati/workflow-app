@@ -17,8 +17,11 @@ Decision table (per TASK-050 §Subtasks + detailed.md §6.3):
     all modules.state == "done"        → QMessageBox "Nenhum modulo ativo..."
     current_module.state == "done"     → QMessageBox "Nenhum modulo ativo..."
     module not in modules dict         → QMessageBox "current_module nao existe..."
-    module.state == "pending"          → paste "/build-module-pipeline {id}"
-    artifacts.last_specific_flow set   → paste "/build-module-pipeline --rehydrate {id}"
+    module.state == "pending"          → paste canonical pipeline command
+                                         (build_paste_command_only, no flags)
+    artifacts.last_specific_flow set   → paste canonical command with
+                                         ``--regenerate`` (re-emit SPECIFIC-FLOW
+                                         without re-transitioning state)
     otherwise                          → QMessageBox "modulo {id} em estado {state}..."
 
 The two "done" branches collapse into the same "Nenhum modulo ativo..."
@@ -79,13 +82,72 @@ class SpecificFlowAction:
     reason: str
 
 
-def build_paste_command_only() -> str:
+import re as _re
+
+
+def _module_number(module_id: str) -> str:
+    """Extract the numeric (+ optional letter) part from a module id.
+
+    Examples:
+        'module-1-setup'        → '1'
+        'module-6a-aba3-engine' → '6a'
+    """
+    m = _re.match(r"^module-(\d+[a-z]?)-", module_id)
+    return m.group(1) if m else module_id
+
+
+def _relative_config_path(config_path: str) -> str:
+    """Return config_path relative to the repo root (walk-up to CLAUDE.md).
+
+    Falls back to the absolute path if the repo root cannot be found.
+    """
+    p = Path(config_path)
+    for parent in p.parents:
+        if (parent / "CLAUDE.md").exists():
+            try:
+                return str(p.relative_to(parent))
+            except ValueError:
+                break
+    return config_path
+
+
+def build_paste_command_only(
+    config: "Optional[PipelineConfig]" = None,
+    current_module: "Optional[str]" = None,
+    *,
+    regenerate: bool = False,
+) -> str:
     """Return the literal text the `[DCP: Build Module Pipeline]` button pastes.
 
-    The button intentionally does NOT try to resolve `current_module` itself —
-    `/build-module-pipeline` (T-013) already does that via the project CWD.
+    When *config* and *current_module* are supplied the command is enriched
+    with ``--module {N}`` and the config path so the user can paste it
+    directly without editing:
+
+        /build-module-pipeline --module 1 .claude/projects/zap-typist.json
+
+    When *regenerate* is True (module already past pending — re-emit
+    SPECIFIC-FLOW.json without re-transitioning state), ``--regenerate`` is
+    inserted before ``--module``:
+
+        /build-module-pipeline --regenerate --module 1 .claude/projects/zap-typist.json
+
+    When only *config* is supplied (current_module unavailable), the command
+    still includes the config path so build-module-pipeline can resolve the
+    current module from delivery.json itself:
+
+        /build-module-pipeline .claude/projects/zap-typist.json
+
+    Falls back to the bare ``/build-module-pipeline`` only when config is
+    also absent (stateless, backwards-compatible).
     """
-    return "/build-module-pipeline"
+    if config is None:
+        return "/build-module-pipeline"
+    rel_path = _relative_config_path(config.config_path)
+    flags = " --regenerate" if regenerate else ""
+    if current_module is None:
+        return f"/build-module-pipeline{flags} {rel_path}"
+    module_num = _module_number(current_module)
+    return f"/build-module-pipeline{flags} --module {module_num} {rel_path}"
 
 
 def _resolve_wbs_root(config: PipelineConfig) -> Path:
@@ -170,14 +232,16 @@ def resolve(
 
     if module.state == "pending":
         return SpecificFlowAction(
-            f"/build-module-pipeline {cm_id}",
+            build_paste_command_only(config=config, current_module=cm_id),
             "novo pipeline",
         )
 
     if module.artifacts.last_specific_flow:
         return SpecificFlowAction(
-            f"/build-module-pipeline --rehydrate {cm_id}",
-            "reidratar pipeline existente",
+            build_paste_command_only(
+                config=config, current_module=cm_id, regenerate=True
+            ),
+            "regenerar SPECIFIC-FLOW existente",
         )
 
     return SpecificFlowAction(
