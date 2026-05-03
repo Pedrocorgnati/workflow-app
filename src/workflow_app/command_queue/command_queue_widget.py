@@ -1390,7 +1390,10 @@ class CommandQueueWidget(QWidget):
 
         config = app_state.config
 
-        from workflow_app.dcp.specific_flow_handler import _resolve_wbs_root
+        from workflow_app.dcp.specific_flow_handler import (
+            _next_non_done_module_id,
+            _resolve_wbs_root,
+        )
         from workflow_app.services.delivery_reader import (
             DeliveryFound,
             DeliveryFutureVersion,
@@ -1420,18 +1423,20 @@ class CommandQueueWidget(QWidget):
         assert isinstance(result, DeliveryFound)
         delivery = result.delivery
         cm_id = delivery.current_module
-        if not cm_id:
-            signal_bus.toast_requested.emit("Nenhum modulo ativo no delivery.json.", "warning")
-            return
 
-        if delivery.modules and all(m.state == "done" for m in delivery.modules.values()):
+        # Auto-advance: se current_module aponta para um modulo done (situacao
+        # comum ao retomar no dia seguinte), usa o proximo modulo nao-done.
+        if not cm_id or (delivery.modules.get(cm_id) and delivery.modules[cm_id].state == "done"):
+            cm_id = _next_non_done_module_id(delivery)
+
+        if not cm_id:
             signal_bus.toast_requested.emit("Todos os modulos estao concluidos.", "warning")
             return
 
         module = delivery.modules.get(cm_id)
-        if module is None or module.state == "done":
+        if module is None:
             signal_bus.toast_requested.emit(
-                f"Modulo {cm_id!r} esta concluido ou nao existe.", "warning"
+                f"Modulo {cm_id!r} nao existe no delivery.json. Rode /delivery:validate.", "warning"
             )
             return
 

@@ -85,6 +85,21 @@ class SpecificFlowAction:
 import re as _re
 
 
+def _sort_module_key(module_id: str) -> tuple:
+    m = _re.match(r"^module-(\d+)([a-z]?)-", module_id)
+    return (int(m.group(1)), m.group(2)) if m else (9999, module_id)
+
+
+def _next_non_done_module_id(delivery: "Delivery") -> "Optional[str]":  # type: ignore[name-defined]
+    """Return the first non-done module key ordered by module number, or None.
+
+    Called when `current_module` points to a `done` module so the button can
+    auto-advance to the next pending module instead of blocking the user.
+    """
+    candidates = [mid for mid, mod in delivery.modules.items() if mod.state != "done"]
+    return sorted(candidates, key=_sort_module_key)[0] if candidates else None
+
+
 def _module_number(module_id: str) -> str:
     """Extract the numeric (+ optional letter) part from a module id.
 
@@ -228,7 +243,11 @@ def resolve(
         )
 
     if module.state == "done":
-        return SpecificFlowAction(None, no_active_module_msg)
+        next_id = _next_non_done_module_id(delivery)
+        if next_id is None:
+            return SpecificFlowAction(None, no_active_module_msg)
+        cm_id = next_id
+        module = delivery.modules[cm_id]
 
     if module.state == "pending":
         return SpecificFlowAction(
@@ -254,4 +273,5 @@ __all__ = [
     "SpecificFlowAction",
     "build_paste_command_only",
     "resolve",
+    "_next_non_done_module_id",
 ]

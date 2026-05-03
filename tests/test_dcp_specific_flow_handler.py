@@ -266,7 +266,7 @@ def test_resolve_module_with_last_specific_flow_regenerate(tmp_path: Path) -> No
 def test_resolve_current_module_in_done_state_returns_no_active_module(
     tmp_path: Path,
 ) -> None:
-    """Spec §107: 'current_module is None OR all modules done' → same message."""
+    """Quando current_module esta done e nao ha proximo modulo, retorna no_active_module_msg."""
     wbs_root = tmp_path / "wbs"
     wbs_root.mkdir()
     _write_delivery(
@@ -284,6 +284,28 @@ def test_resolve_current_module_in_done_state_returns_no_active_module(
     assert action.reason == (
         "Nenhum modulo ativo. Use [DCP: Build Module Pipeline] primeiro"
     )
+
+
+def test_resolve_current_module_done_advances_to_next_pending(tmp_path: Path) -> None:
+    """Bug fix: quando current_module esta done mas ha modulo seguinte pending,
+    deve retornar comando para o proximo modulo (nao bloquear)."""
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    _write_delivery(
+        wbs_root,
+        current_module="module-1-dashboard",
+        modules={
+            "module-1-dashboard": _module("done", module_type="dashboard"),
+            "module-2-crud": _module("pending", module_type="crud"),
+        },
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+
+    action = resolve(cfg, reader=DeliveryReader())
+
+    assert action.command is not None
+    assert "--module 2" in action.command
+    assert action.reason == "novo pipeline"
 
 
 def test_resolve_all_modules_done_returns_no_active_module(tmp_path: Path) -> None:

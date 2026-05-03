@@ -159,6 +159,49 @@ class ModuleFlags(BaseModel):
     rework_target: ReworkTarget = Field(default_factory=ReworkTarget)
 
 
+class FilesTouchedEvent(BaseModel):
+    """Single file mutation captured by /execute-task PRE-0.3 -> POST diff (T-049)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    action: Literal["create", "modify", "delete"]
+    sha256_before: Optional[str] = None
+    sha256_after: Optional[str] = None
+    at: Iso8601Utc
+    task_id: str
+
+
+class ExecutionArtifact(BaseModel):
+    """Execution subtree under modules[id].artifacts.execution (T-049).
+
+    `extra="allow"` because downstream tasks (front_end_obvious, runtime_gate,
+    frontend, backend hooks) attach their own subtrees without bumping schema.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    files_touched: List[FilesTouchedEvent] = Field(default_factory=list)
+    last_task_id: Optional[str] = None
+    last_run_at: Optional[Iso8601Utc] = None
+    last_status: Optional[Literal["ok", "failed"]] = None
+
+
+class QaArtifact(BaseModel):
+    """QA subtree under modules[id].artifacts.qa (T-048).
+
+    `checks` accepts arbitrary keys per Q5 design rule — values are free-form
+    per-check payloads.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: Optional[Literal["APROVADO", "RESSALVAS", "REPROVADO"]] = None
+    at: Optional[Iso8601Utc] = None
+    checks: Dict[str, Any] = Field(default_factory=dict)
+    report_path: Optional[str] = None
+
+
 class ModuleArtifacts(BaseModel):
     """Optional artifact pointers (all nullable per T-001 schema)."""
 
@@ -171,6 +214,8 @@ class ModuleArtifacts(BaseModel):
     last_commit_sha: Optional[str] = None
     last_deploy_url: Optional[str] = None
     git_tag: Optional[str] = None
+    execution: Optional[ExecutionArtifact] = None
+    qa: Optional[QaArtifact] = None
 
 
 class ModuleState(BaseModel):
@@ -480,7 +525,9 @@ __all__ = [
     "ACTIVE_STATES",
     "Delivery",
     "DeliveryInvariantWarning",
+    "ExecutionArtifact",
     "ExecutionMode",
+    "FilesTouchedEvent",
     "HistoryEntry",
     "Iso8601Utc",
     "Locks",
@@ -493,6 +540,7 @@ __all__ = [
     "ModuleType",
     "Owner",
     "Project",
+    "QaArtifact",
     "ReworkPhase",
     "ReworkTarget",
     "Skeleton",
