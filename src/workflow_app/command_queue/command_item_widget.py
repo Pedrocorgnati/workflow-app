@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app.command_queue.kimi_whitelist import adapt_to_kimi, is_kimi_compatible
 from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
 from workflow_app.widgets.model_badge import ModelBadge
 
@@ -54,7 +55,8 @@ class CommandItemWidget(QWidget):
     edit_model_requested = Signal(int)      # position
     retry_requested = Signal(int)           # position (module-12/TASK-3)
     cancel_requested = Signal()             # no arg — cancel whole pipeline
-    run_in_terminal_requested = Signal(str) # command name
+    run_in_terminal_requested = Signal(str) # command name (Claude — interactive terminal)
+    run_in_kimi_terminal_requested = Signal(str)  # Kimi-adapted prompt (workspace terminal)
 
     # Minimum Manhattan distance before drag begins (px)
     _DRAG_THRESHOLD = 10
@@ -103,6 +105,30 @@ class CommandItemWidget(QWidget):
         )
         self._run_btn.clicked.connect(self._on_run_clicked)
         layout.addWidget(self._run_btn)
+
+        # Kimi run button (blue arrow) — runs adapted prompt in workspace terminal.
+        # Visible only when the command is in the Kimi-compatible whitelist.
+        self._kimi_btn = QPushButton("▶")
+        self._kimi_btn.setObjectName("KimiRunButton")
+        self._kimi_btn.setProperty("testid", "queue-item-kimi-run")
+        self._kimi_btn.setFixedSize(16, 16)
+        self._kimi_btn.setToolTip(
+            "Executar versão Kimi no terminal workspace\n"
+            "(marca a seta verde como amarela sem disparar o terminal Claude)"
+        )
+        self._kimi_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            "  color: #3B82F6; font-size: 10px; }"
+            "QPushButton:hover { color: #93C5FD; }"
+            "QPushButton:disabled { color: transparent; }"
+        )
+        self._kimi_btn.clicked.connect(self._on_kimi_clicked)
+        _kimi_visible = is_kimi_compatible(self._spec.name)
+        sp = self._kimi_btn.sizePolicy()
+        sp.setRetainSizeWhenHidden(False)
+        self._kimi_btn.setSizePolicy(sp)
+        self._kimi_btn.setVisible(_kimi_visible)
+        layout.addWidget(self._kimi_btn)
 
         # Copy button (blue clipboard icon) — copies the full command line
         self._copy_btn = QPushButton("\u29C9")
@@ -294,6 +320,21 @@ class CommandItemWidget(QWidget):
             self.reset_to_pending()
             return
         self.run_in_terminal_requested.emit(self.command_text())
+        self._mark_as_sent()
+
+    def _on_kimi_clicked(self) -> None:
+        """Send Kimi-adapted prompt to the workspace terminal and mark as sent.
+
+        Does NOT trigger the Claude (interactive) terminal — the green arrow
+        becomes amber as if it had been run, so play-next skips it.
+        """
+        if self._is_sent:
+            return
+        try:
+            kimi_prompt = adapt_to_kimi(self.command_text())
+        except ValueError:
+            return
+        self.run_in_kimi_terminal_requested.emit(kimi_prompt)
         self._mark_as_sent()
 
     def _mark_as_sent(self) -> None:

@@ -1809,6 +1809,8 @@ class CommandQueueWidget(QWidget):
         item.cancel_requested.connect(self._on_cancel_requested)
         item.run_in_terminal_requested.connect(signal_bus.run_command_in_terminal)
         item.run_in_terminal_requested.connect(self._on_run_command)
+        item.run_in_kimi_terminal_requested.connect(signal_bus.run_command_in_workspace_terminal)
+        item.run_in_kimi_terminal_requested.connect(self._on_run_command)
         return item
 
     # ──────────────────────────────────────── Quick-save helpers ─────── #
