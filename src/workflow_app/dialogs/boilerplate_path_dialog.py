@@ -6,7 +6,7 @@ Diferente dos demais botoes do CommandQueueWidget, o pipeline boilerplate nao
 le project.json (metrics-project-pill). O usuario cola aqui o caminho do repo
 (ex: output/workspace/free-sites/marciosantosadvogado.com) e este path vira o
 argumento do /boilerplate:scan; os 8 passos seguintes recebem o staging path
-derivado (output/boilerplates/_staging/{basename}).
+derivado (output/workspace/boilerplates/_staging/{basename}).
 """
 
 from __future__ import annotations

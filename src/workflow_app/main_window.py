@@ -181,8 +181,8 @@ class MainWindow(QMainWindow):
         self._terminal_is_vertical = True  # starts as vertical (column)
         toggle_layout.addWidget(self._layout_toggle_btn)
 
-        # Collapse chevron for autocast terminal
-        self._autocast_collapsed = False
+        # Collapse chevron for the workspace terminal
+        self._workspace_collapsed = False
         self._collapse_chevron = QPushButton("\u25BC")  # ▼ expanded
         self._collapse_chevron.setToolTip("Colapsar terminal Workspace")
         self._collapse_chevron.setFixedSize(32, 26)
@@ -196,11 +196,11 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
             "  border-color: #FBBF24; }"
         )
-        self._collapse_chevron.clicked.connect(self._toggle_autocast_collapse)
+        self._collapse_chevron.clicked.connect(self._toggle_workspace_collapse)
         toggle_layout.addWidget(self._collapse_chevron)
         output_layout.addWidget(toggle_bar)
 
-        # Dual terminal: splitter with interactive (top/left) + autocast (bottom/right)
+        # Dual terminal: splitter with interactive (top/left) + workspace (bottom/right)
         self._terminal_splitter = QSplitter(Qt.Orientation.Vertical)
         self._terminal_splitter.setHandleWidth(4)
         self._terminal_splitter.setChildrenCollapsible(False)
@@ -228,16 +228,16 @@ class MainWindow(QMainWindow):
         interactive_layout.addWidget(self._output_panel, stretch=1)
         self._terminal_splitter.addWidget(self._interactive_wrapper)
 
-        # Bottom/Right: Workspace terminal (shows -p command output)
-        self._autocast_wrapper = QWidget()
-        autocast_layout = QVBoxLayout(self._autocast_wrapper)
-        autocast_layout.setContentsMargins(0, 0, 0, 0)
-        autocast_layout.setSpacing(0)
-        autocast_layout.addWidget(self._build_workspace_label_bar())
-        self._autocast_panel = OutputPanel(parent=self._autocast_wrapper, autocast_mode=True)
-        self._autocast_panel.setProperty("testid", "terminal-workspace")
-        autocast_layout.addWidget(self._autocast_panel, stretch=1)
-        self._terminal_splitter.addWidget(self._autocast_wrapper)
+        # Bottom/Right: Workspace terminal (Kimi / paste target for blue ▶)
+        self._workspace_wrapper = QWidget()
+        workspace_layout = QVBoxLayout(self._workspace_wrapper)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+        workspace_layout.addWidget(self._build_workspace_label_bar())
+        self._workspace_panel = OutputPanel(parent=self._workspace_wrapper, workspace_mode=True)
+        self._workspace_panel.setProperty("testid", "terminal-workspace")
+        workspace_layout.addWidget(self._workspace_panel, stretch=1)
+        self._terminal_splitter.addWidget(self._workspace_wrapper)
 
         self._terminal_splitter.setSizes([350, 350])
         output_layout.addWidget(self._terminal_splitter, stretch=1)
@@ -337,6 +337,7 @@ class MainWindow(QMainWindow):
                 return
             path = str(app_state.config.project_dir / app_state.config.workspace_root)
             signal_bus.run_command_in_workspace_terminal.emit(f"cd {path}")
+            self._workspace_panel._terminal.setFocus()
 
         btn_ws.clicked.connect(_on_workspace)
 
@@ -344,21 +345,30 @@ class MainWindow(QMainWindow):
         btn_sf = _btn("SystemForge", "#60A5FA")
         btn_sf.setToolTip(f"cd → {_SYSTEMFORGE_DIR}")
         btn_sf.clicked.connect(
-            lambda: signal_bus.run_command_in_workspace_terminal.emit(f"cd {_SYSTEMFORGE_DIR}")
+            lambda: (
+                signal_bus.run_command_in_workspace_terminal.emit(f"cd {_SYSTEMFORGE_DIR}"),
+                self._workspace_panel._terminal.setFocus(),
+            )
         )
 
         # ── cd Workflow-app — cd to ai-forge/workflow-app ─────────────── #
         btn_wa = _btn("cd Workflow-app", "#2DD4BF")
         btn_wa.setToolTip(f"cd → {_WORKFLOW_APP_DIR}")
         btn_wa.clicked.connect(
-            lambda: signal_bus.run_command_in_workspace_terminal.emit(f"cd {_WORKFLOW_APP_DIR}")
+            lambda: (
+                signal_bus.run_command_in_workspace_terminal.emit(f"cd {_WORKFLOW_APP_DIR}"),
+                self._workspace_panel._terminal.setFocus(),
+            )
         )
 
         # ── mention Workflow-app — paste relative path without Enter ──── #
         btn_wa_mention = _btn("mention Workflow-app", "#2DD4BF")
         btn_wa_mention.setToolTip("Cola 'ai-forge/workflow-app' no terminal (sem Enter)")
         btn_wa_mention.clicked.connect(
-            lambda: signal_bus.paste_text_in_workspace_terminal.emit("ai-forge/workflow-app")
+            lambda: (
+                signal_bus.paste_text_in_workspace_terminal.emit("ai-forge/workflow-app"),
+                self._workspace_panel._terminal.setFocus(),
+            )
         )
 
         lay.addWidget(btn_ws)
@@ -443,26 +453,26 @@ class MainWindow(QMainWindow):
             self._terminal_is_vertical = True
         self._update_collapse_chevron()
 
-    def _toggle_autocast_collapse(self) -> None:
-        """Toggle collapse/expand of the autocast terminal."""
-        if self._autocast_collapsed:
-            self._autocast_wrapper.show()
+    def _toggle_workspace_collapse(self) -> None:
+        """Toggle collapse/expand of the workspace terminal."""
+        if self._workspace_collapsed:
+            self._workspace_wrapper.show()
             if hasattr(self, "_saved_splitter_sizes"):
                 self._terminal_splitter.setSizes(self._saved_splitter_sizes)
             else:
                 self._terminal_splitter.setSizes([350, 350])
-            self._autocast_collapsed = False
+            self._workspace_collapsed = False
             self._collapse_chevron.setToolTip("Colapsar terminal Workspace")
         else:
             self._saved_splitter_sizes = self._terminal_splitter.sizes()
-            self._autocast_wrapper.hide()
-            self._autocast_collapsed = True
+            self._workspace_wrapper.hide()
+            self._workspace_collapsed = True
             self._collapse_chevron.setToolTip("Expandir terminal Workspace")
         self._update_collapse_chevron()
 
     def _update_collapse_chevron(self) -> None:
         """Update chevron icon based on collapsed state."""
-        if self._autocast_collapsed:
+        if self._workspace_collapsed:
             self._collapse_chevron.setText("\u25B6")  # ▶ collapsed
         else:
             self._collapse_chevron.setText("\u25BC")  # ▼ expanded

@@ -16,14 +16,14 @@ Path contract (v1.1 — strict, no heuristics):
     The previous version applied a "is it just a filename?" heuristic that
     silently used `loop_root.parent / value` for multi-segment relative paths,
     producing path duplication when a generator wrote the full
-    `output/daily-loop/{slug}/PROGRESS.md` form. That heuristic is removed.
+    `blacksmith/loop-archives/{slug}/PROGRESS.md` form. That heuristic is removed.
 
     `/daily-loop:enumerate` (v1.1+) writes filename-only relatives or absolutes.
     Legacy configs with multi-segment relatives now resolve under loop_root.
 
 Design:
     - The handler in command_queue_widget reads _LOOP-CONFIG.json via the
-      project pill (basic_flow paths point inside output/daily-loop/{slug}/),
+      project pill (basic_flow paths point inside blacksmith/loop-archives/{slug}/),
       and dispatches here for spec generation.
     - We deduplicate consecutive `/model X` and `/effort Y` headers — only
       emit a row when the value changes from the previous spec.
@@ -303,7 +303,7 @@ def build_daily_loop_specs(
 
     Args:
         raw_config: parsed _LOOP-CONFIG.json (root dict).
-        loop_root:  resolved filesystem path of output/daily-loop/{slug}/.
+        loop_root:  resolved filesystem path of blacksmith/loop-archives/{slug}/.
 
     Returns:
         list[CommandSpec] ready for `signal_bus.pipeline_ready.emit(...)`.
@@ -356,11 +356,9 @@ def build_daily_loop_specs(
     review_done_command = str(
         daily_loop.get("review_done_command", "/daily-loop:review-done")
     ).strip() or "/daily-loop:review-done"
-    # Opt-in flag: when items are independent (no cross-item conversation
-    # context needed — the only shared state is PROGRESS.md on disk), the
-    # caller can request a /clear between consecutive items to keep model
-    # attention fresh on long loops. Default false preserves the historical
-    # contract (single /clear at position 0).
+    # Default false preserves the historical contract for legacy configs (single
+    # /clear at position 0). New configs always emit "clear_between_items": true
+    # via enumerate.md template, so the default only matters for old archives.
     clear_between_items = bool(daily_loop.get("clear_between_items", False))
     # Floor canonico do review-done. Mantido aqui (nao no JSON) para impedir que
     # configs legados degradem o per-item audit para sonnet/medium.

@@ -74,6 +74,7 @@ def _module(
     *,
     module_type: str = "crud",
     last_specific_flow: str | None = None,
+    dependencies: list | None = None,
 ) -> Dict[str, Any]:
     history: list = (
         []
@@ -117,7 +118,7 @@ def _module(
             "last_deploy_url": None,
             "git_tag": None,
         },
-        "dependencies": [],
+        "dependencies": dependencies if dependencies is not None else [],
     }
 
 
@@ -432,5 +433,506 @@ def test_modules_creation_button_enabled(qapp) -> None:
         assert target is not None, "queue-btn-modules not found"
         assert target.isEnabled() is True
         assert "Fase A" in target.toolTip()
+    finally:
+        widget.deleteLater()
+
+
+# ─── Gate 6: dependency readiness in queue-btn-dcp-build ─────────────────── #
+
+
+def test_dcp_build_gate6_blocks_when_dep_not_done(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Gate 6: `queue-btn-dcp-build` must show QMessageBox.warning (not paste)
+    when the pending current_module has unmet dependencies (state != done).
+
+    Reproduces the recurring failure: module-N pending with dep in 'revision'
+    → button pasted command → CLI exited 1 → user had to ask for fix.
+    """
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+
+    # module-1-foundation in revision (not done), module-2-feature pending + depends on it
+    _write_delivery(
+        wbs_root,
+        current_module="module-2-feature",
+        modules={
+            "module-1-foundation": _module("revision"),
+            "module-2-feature": _module("pending", dependencies=["module-1-foundation"]),
+        },
+    )
+
+    # MODULE-META.json for current module
+    meta_dir = wbs_root / "modules" / "module-2-feature"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "MODULE-META.json").write_text(
+        json.dumps({
+            "module_id": "module-2-feature",
+            "module_name": "Feature",
+            "module_type": "crud",
+            "dependencies": {"modules": ["module-1-foundation"]},
+        }),
+        encoding="utf-8",
+    )
+
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    pasted: list[str] = []
+    from workflow_app.signal_bus import signal_bus
+    signal_bus.paste_text_in_terminal.connect(pasted.append)
+
+    warned: list[str] = []
+    with patch(
+        "PySide6.QtWidgets.QMessageBox.warning",
+        side_effect=lambda *a, **kw: warned.append(a[2]),
+    ):
+        widget = CommandQueueWidget()
+        try:
+            btn = next(
+                (b for b in widget.findChildren(QPushButton)
+                 if b.property("testid") == "queue-btn-dcp-build"),
+                None,
+            )
+            assert btn is not None, "queue-btn-dcp-build not found"
+            btn.click()
+        finally:
+            widget.deleteLater()
+            app_state.clear_config()
+
+    assert len(pasted) == 0, "button must NOT paste when deps are unmet"
+    assert len(warned) == 1, "button must show QMessageBox.warning"
+    assert "module-1-foundation" in warned[0]
+    assert "revision" in warned[0]
+
+
+def test_dcp_build_gate6_allows_when_all_deps_done(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Gate 6 must NOT block when all dependencies are done — happy path."""
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+
+    _write_delivery(
+        wbs_root,
+        current_module="module-2-feature",
+        modules={
+            "module-1-foundation": _module("done"),
+            "module-2-feature": _module("pending", dependencies=["module-1-foundation"]),
+        },
+    )
+
+    meta_dir = wbs_root / "modules" / "module-2-feature"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "MODULE-META.json").write_text(
+        json.dumps({
+            "module_id": "module-2-feature",
+            "module_name": "Feature",
+            "module_type": "crud",
+            "dependencies": {"modules": ["module-1-foundation"]},
+        }),
+        encoding="utf-8",
+    )
+
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    pasted: list[str] = []
+    from workflow_app.signal_bus import signal_bus
+    signal_bus.paste_text_in_terminal.connect(pasted.append)
+
+    warned: list[str] = []
+    with patch(
+        "PySide6.QtWidgets.QMessageBox.warning",
+        side_effect=lambda *a, **kw: warned.append(a[2]),
+    ):
+        widget = CommandQueueWidget()
+        try:
+            btn = next(
+                (b for b in widget.findChildren(QPushButton)
+                 if b.property("testid") == "queue-btn-dcp-build"),
+                None,
+            )
+            assert btn is not None, "queue-btn-dcp-build not found"
+            btn.click()
+        finally:
+            widget.deleteLater()
+            app_state.clear_config()
+
+    assert len(warned) == 0, "must not warn when all deps are done"
+    assert len(pasted) == 1, "must paste command when all deps are done"
+    assert "--module 2" in pasted[0]
+
+
+# ─── Onda 1: destructive guard for --regenerate path ────────────────────────── #
+
+
+def _setup_dcp_build_regen_scenario(
+    tmp_path: Path, *, with_specific_flow: bool
+) -> tuple[Path, Path]:
+    """Helper: scenario where current_module is past pending so the click path
+    chooses --regenerate. Optionally writes a SPECIFIC-FLOW.json on disk to
+    trigger the destructive confirmation modal.
+    """
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+
+    _write_delivery(
+        wbs_root,
+        current_module="module-1-dashboard",
+        modules={
+            "module-1-dashboard": _module("creation", module_type="dashboard"),
+        },
+    )
+
+    meta_dir = wbs_root / "modules" / "module-1-dashboard"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "MODULE-META.json").write_text(
+        json.dumps({
+            "module_id": "module-1-dashboard",
+            "module_name": "Dashboard",
+            "module_type": "dashboard",
+        }),
+        encoding="utf-8",
+    )
+
+    flow_path = meta_dir / "SPECIFIC-FLOW.json"
+    if with_specific_flow:
+        flow_path.write_text(
+            json.dumps({"version": 1, "commands": [{"name": "/clear"}]}),
+            encoding="utf-8",
+        )
+    return wbs_root, flow_path
+
+
+def test_dcp_build_regen_with_existing_flow_blocks_paste_when_modal_rejected(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Regen path + SPECIFIC-FLOW.json existing → modal must run; reject = no paste."""
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QDialog, QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root, _ = _setup_dcp_build_regen_scenario(tmp_path, with_specific_flow=True)
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    pasted: list[str] = []
+    from workflow_app.signal_bus import signal_bus
+    signal_bus.paste_text_in_terminal.connect(pasted.append)
+
+    modal_calls: list[bool] = []
+
+    def fake_exec(self):
+        modal_calls.append(True)
+        return QDialog.DialogCode.Rejected
+
+    with patch(
+        "workflow_app.dialogs.confirm_regenerate_specific_flow_modal."
+        "ConfirmRegenerateSpecificFlowModal.exec",
+        new=fake_exec,
+    ):
+        widget = CommandQueueWidget()
+        try:
+            btn = next(
+                (b for b in widget.findChildren(QPushButton)
+                 if b.property("testid") == "queue-btn-dcp-build"),
+                None,
+            )
+            assert btn is not None, "queue-btn-dcp-build not found"
+            btn.click()
+        finally:
+            widget.deleteLater()
+            app_state.clear_config()
+
+    assert len(modal_calls) == 1, "destructive modal must run on regen path"
+    assert len(pasted) == 0, "rejected modal must block paste"
+
+
+def test_dcp_build_regen_with_existing_flow_pastes_when_modal_accepted(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Regen path + SPECIFIC-FLOW.json existing → modal accepted = paste with --regenerate."""
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QDialog, QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root, _ = _setup_dcp_build_regen_scenario(tmp_path, with_specific_flow=True)
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    pasted: list[str] = []
+    from workflow_app.signal_bus import signal_bus
+    signal_bus.paste_text_in_terminal.connect(pasted.append)
+
+    def fake_exec(self):
+        return QDialog.DialogCode.Accepted
+
+    with patch(
+        "workflow_app.dialogs.confirm_regenerate_specific_flow_modal."
+        "ConfirmRegenerateSpecificFlowModal.exec",
+        new=fake_exec,
+    ):
+        widget = CommandQueueWidget()
+        try:
+            btn = next(
+                (b for b in widget.findChildren(QPushButton)
+                 if b.property("testid") == "queue-btn-dcp-build"),
+                None,
+            )
+            assert btn is not None, "queue-btn-dcp-build not found"
+            btn.click()
+        finally:
+            widget.deleteLater()
+            app_state.clear_config()
+
+    assert len(pasted) == 1, "accepted modal must allow paste"
+    assert "--regenerate" in pasted[0]
+    assert "--module 1" in pasted[0]
+
+
+def test_dcp_build_regen_without_existing_flow_skips_modal(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Regen path BUT no SPECIFIC-FLOW.json on disk → no modal, paste happens."""
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root, _ = _setup_dcp_build_regen_scenario(tmp_path, with_specific_flow=False)
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    pasted: list[str] = []
+    from workflow_app.signal_bus import signal_bus
+    signal_bus.paste_text_in_terminal.connect(pasted.append)
+
+    modal_calls: list[bool] = []
+
+    def fake_exec(self):
+        modal_calls.append(True)
+        return 0
+
+    with patch(
+        "workflow_app.dialogs.confirm_regenerate_specific_flow_modal."
+        "ConfirmRegenerateSpecificFlowModal.exec",
+        new=fake_exec,
+    ):
+        widget = CommandQueueWidget()
+        try:
+            btn = next(
+                (b for b in widget.findChildren(QPushButton)
+                 if b.property("testid") == "queue-btn-dcp-build"),
+                None,
+            )
+            assert btn is not None, "queue-btn-dcp-build not found"
+            btn.click()
+        finally:
+            widget.deleteLater()
+            app_state.clear_config()
+
+    assert len(modal_calls) == 0, "modal must NOT run when SPECIFIC-FLOW.json missing"
+    assert len(pasted) == 1, "paste must happen on regen path with no existing file"
+    assert "--regenerate" in pasted[0]
+
+
+# ─── Onda 4: overrides.skipped persistence + filter ────────────────────────── #
+
+
+def _setup_dcp_specific_flow_scenario(
+    tmp_path: Path, *, commands: list[dict], overrides: dict | None = None
+) -> tuple[Path, Path]:
+    """Build a delivery + SPECIFIC-FLOW pair so the [DCP: Specific-Flow]
+    button has something to load."""
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    flow_path = wbs_root / "modules" / "module-1-dashboard" / "SPECIFIC-FLOW.json"
+    flow_path.parent.mkdir(parents=True)
+
+    _write_delivery(
+        wbs_root,
+        current_module="module-1-dashboard",
+        modules={
+            "module-1-dashboard": _module(
+                "creation",
+                module_type="dashboard",
+                last_specific_flow=str(flow_path),
+            ),
+        },
+    )
+
+    flow = {
+        "version": "2.0",
+        "project": "t050-test",
+        "scope": "module",
+        "scope_module": {
+            "module_id": "module-1-dashboard",
+            "module_name": "Dashboard",
+            "module_type": "dashboard",
+            "profile": "full",
+        },
+        "generated_at": "2026-05-10T20:00:00Z",
+        "pipeline_range": {},
+        "config": {},
+        "commands": commands,
+    }
+    if overrides is not None:
+        flow["overrides"] = overrides
+    flow_path.write_text(
+        json.dumps(flow, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return wbs_root, flow_path
+
+
+def test_dcp_specific_flow_filters_overrides_skipped(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Reader must drop commands whose name appears in overrides.skipped[]."""
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    commands = [
+        {"name": "/clear", "model": "sonnet", "effort": "medium", "phase": "FASE_A_CREATION"},
+        {"name": "/front-end-build x", "model": "opus", "effort": "high", "phase": "FASE_B_BUILD"},
+        {"name": "/back-end-build x", "model": "opus", "effort": "high", "phase": "FASE_B_BUILD"},
+    ]
+    overrides = {"skipped": ["/front-end-build x"]}
+    wbs_root, _ = _setup_dcp_specific_flow_scenario(
+        tmp_path, commands=commands, overrides=overrides,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    captured: list[list] = []
+    from workflow_app.signal_bus import signal_bus
+    signal_bus.pipeline_ready.connect(captured.append)
+
+    widget = CommandQueueWidget()
+    try:
+        btn = next(
+            (b for b in widget.findChildren(QPushButton)
+             if b.property("testid") == "queue-btn-dcp-specific-flow"),
+            None,
+        )
+        assert btn is not None
+        btn.click()
+    finally:
+        widget.deleteLater()
+        app_state.clear_config()
+
+    assert len(captured) == 1, "pipeline_ready must fire once"
+    names = [s.name for s in captured[0]]
+    assert "/front-end-build x" not in names, "skipped command must be filtered"
+    assert "/clear" in names and "/back-end-build x" in names, "non-skipped must remain"
+
+
+def test_dcp_specific_flow_remove_persists_to_overrides_skipped(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Removing a queue item via _on_remove_requested must append to
+    overrides.skipped[] of the source SPECIFIC-FLOW.json on disk."""
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    commands = [
+        {"name": "/clear", "model": "sonnet", "effort": "medium", "phase": "FASE_A"},
+        {"name": "/front-end-build x", "model": "opus", "effort": "high", "phase": "FASE_B"},
+    ]
+    wbs_root, flow_path = _setup_dcp_specific_flow_scenario(
+        tmp_path, commands=commands, overrides=None,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    widget = CommandQueueWidget()
+    try:
+        btn = next(
+            (b for b in widget.findChildren(QPushButton)
+             if b.property("testid") == "queue-btn-dcp-specific-flow"),
+            None,
+        )
+        assert btn is not None
+        btn.click()
+        # After click + emit, queue has 2 items at positions 1,2.
+        assert len(widget._items) == 2
+        assert widget._current_dcp_flow_path == flow_path
+        # Remove the /front-end-build x item (position 2)
+        widget._on_remove_requested(2)
+    finally:
+        widget.deleteLater()
+        app_state.clear_config()
+
+    data = json.loads(flow_path.read_text(encoding="utf-8"))
+    assert "/front-end-build x" in data.get("overrides", {}).get("skipped", []), (
+        "remove must persist to overrides.skipped"
+    )
+
+
+def test_dcp_remove_outside_dcp_context_does_not_write_disk(
+    qapp, tmp_path: Path
+) -> None:
+    """When the queue is loaded from a non-DCP source (legacy template),
+    _on_remove_requested must NOT touch any SPECIFIC-FLOW.json on disk —
+    _current_dcp_flow_path stays None and _persist_dcp_skip is a no-op."""
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
+
+    widget = CommandQueueWidget()
+    try:
+        # Load directly via load_pipeline (skips _on_dcp_specific_flow_clicked)
+        widget.load_pipeline([
+            CommandSpec(
+                name="/some-template-cmd",
+                model=ModelName.SONNET,
+                interaction_type=InteractionType.AUTO,
+                position=1,
+                effort=EffortLevel.STANDARD,
+                phase="legacy",
+            ),
+        ])
+        assert widget._current_dcp_flow_path is None
+        widget._on_remove_requested(1)  # should not raise, should not write
+        assert widget._current_dcp_flow_path is None
     finally:
         widget.deleteLater()

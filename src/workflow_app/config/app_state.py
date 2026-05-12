@@ -21,6 +21,7 @@ class AppState:
 
     def __init__(self) -> None:
         self._config: PipelineConfig | None = None
+        self._loop_mode: str | None = None
 
     @property
     def config(self) -> PipelineConfig | None:
@@ -35,12 +36,20 @@ class AppState:
 
     def clear_config(self) -> None:
         self._config = None
+        self._loop_mode = None
 
     @property
     def project_name(self) -> str:
         if self._config:
             return self._config.project_name
         return ""
+
+    @property
+    def loop_mode(self) -> str | None:
+        return self._loop_mode
+
+    def set_loop_mode(self, mode: str | None) -> None:
+        self._loop_mode = mode
 
 
 # Singleton

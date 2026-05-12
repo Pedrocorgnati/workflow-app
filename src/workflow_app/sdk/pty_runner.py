@@ -150,8 +150,8 @@ class PtyRunner(QObject):
     ) -> None:
         """Launch an arbitrary PTY-backed process.
 
-        This is used by Autocast, which must run the actual CLI process and
-        advance only when the subprocess exits.
+        Used by PipelineManager (SDK runs) — must spawn the real CLI process
+        and signal completion only when the subprocess exits.
         """
         if not argv:
             msg = "Falha ao iniciar processo: argv vazio"

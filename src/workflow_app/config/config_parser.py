@@ -81,6 +81,12 @@ def parse_config(path: str) -> PipelineConfig:
     project_name = raw.get("name", resolved.stem)
 
     # ── Detecta versão e extrai paths ──────────────────────────────────────
+    is_loop_json = (
+        "iteration_template" in raw
+        and "items" in raw
+        and "finalization" in raw
+    )
+
     if "basic_flow" in raw:
         # V3
         bf = raw["basic_flow"]
@@ -108,13 +114,21 @@ def parse_config(path: str) -> PipelineConfig:
         wbs_root = f"{output_root}/wbs"
         workspace_root = f"{output_root}/workspace"
         custom_workflow_root = f"{wbs_root}/specific-flow"
+    elif is_loop_json:
+        # Loop JSON (task-loop, cmd-loop, both-loop)
+        brief_root = ""
+        docs_root = ""
+        wbs_root = ""
+        workspace_root = ""
+        custom_workflow_root = ""
     else:
         raise ConfigError(
             f"Formato de project.json não reconhecido em {resolved}. "
-            "Campos esperados: 'basic_flow' (V3), 'docs_root' (V2) ou 'output_root' (V1)."
+            "Campos esperados: 'basic_flow' (V3), 'docs_root' (V2), 'output_root' (V1) "
+            "ou 'iteration_template' + 'items' + 'finalization' (loop JSON)."
         )
 
-    if not docs_root:
+    if not docs_root and not is_loop_json:
         raise ConfigError(
             f"Campo 'docs_root' ausente ou vazio em {resolved}."
         )

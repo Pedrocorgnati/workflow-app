@@ -2,7 +2,7 @@
 MetricsBar — 48px top toolbar for project, instance selection, navigation and metrics.
 
 Layout (left to right):
-  [project pill / Selecionar] │ [clauded] [clauded2] [codex] [codex-high] [codex-ultra] │ [Workflow] [Comandos] [Toolbox] │ (metrics) │ (stretch) │ [📡] [⚙]
+  [project pill / Selecionar] │ [clauded] [kimid] [codex] [clauded2] │ [Workflow] [Comandos] [Toolbox] │ (metrics) │ (stretch) │ [📡] [⚙]
 
 Git info: overlay label, bottom-right corner, updated via git_info_updated signal.
 
@@ -14,9 +14,10 @@ Specs:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QDateTime, QFileSystemWatcher, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +29,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QWidget,
 )
+
+_SCHEDULE_STATE_FILE = Path.home() / ".workflow-app" / "schedule-autocast.json"
 
 # ─── Styles ───────────────────────────────────────────────────────────────── #
 
@@ -85,6 +88,135 @@ _NAV_INACTIVE = (
     "}"
 )
 
+_AUTOCAST_OFF = (
+    "QPushButton {"
+    "  background-color: #2563EB;"
+    "  color: #FAFAFA;"
+    "  border: none;"
+    "  border-radius: 4px;"
+    "  padding: 0 12px;"
+    "  font-size: 11px;"
+    "  font-weight: 700;"
+    "}"
+    "QPushButton:hover { background-color: #1D4ED8; }"
+    "QPushButton:disabled { background-color: #1E3A8A; color: #93C5FD; }"
+)
+_AUTOCAST_ON = (
+    "QPushButton {"
+    "  background-color: #DC2626;"
+    "  color: #FAFAFA;"
+    "  border: none;"
+    "  border-radius: 4px;"
+    "  padding: 0 12px;"
+    "  font-size: 11px;"
+    "  font-weight: 700;"
+    "}"
+    "QPushButton:hover { background-color: #B91C1C; }"
+)
+
+_SCHEDULE_IDLE = (
+    "QPushButton {"
+    "  background-color: #2563EB;"
+    "  color: #FAFAFA;"
+    "  border: none;"
+    "  border-radius: 4px;"
+    "  padding: 0 12px;"
+    "  font-size: 11px;"
+    "  font-weight: 700;"
+    "}"
+    "QPushButton:hover { background-color: #1D4ED8; }"
+)
+_SCHEDULE_RUNNING = (
+    "QPushButton {"
+    "  background-color: #F0B90B;"
+    "  color: #18181B;"
+    "  border: none;"
+    "  border-radius: 4px;"
+    "  padding: 0 12px;"
+    "  font-size: 11px;"
+    "  font-weight: 700;"
+    "}"
+    "QPushButton:hover { background-color: #D9A509; }"
+)
+_SCHEDULE_FIRED = (
+    "QPushButton {"
+    "  background-color: #22C55E;"
+    "  color: #FAFAFA;"
+    "  border: none;"
+    "  border-radius: 4px;"
+    "  padding: 0 12px;"
+    "  font-size: 11px;"
+    "  font-weight: 700;"
+    "}"
+)
+
+
+def _read_schedule_state() -> dict | None:
+    try:
+        if not _SCHEDULE_STATE_FILE.exists():
+            return None
+        return json.loads(_SCHEDULE_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_schedule_state(end_at_iso: str) -> None:
+    try:
+        _SCHEDULE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SCHEDULE_STATE_FILE.write_text(
+            json.dumps({"end_at": end_at_iso}), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _clear_schedule_state() -> None:
+    try:
+        _SCHEDULE_STATE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+class TerminalStatusDot(QWidget):
+    """Circular indicator for terminal activity state.
+
+    Green  (#22C55E) — terminal silent for 2+ seconds (idle at prompt).
+    Yellow (#F59E0B) — PTY output flowing (command executing).
+    """
+
+    busy_changed = Signal(str, bool)  # channel, is_busy — fired on every transition
+
+    _SIZE = 28
+    _IDLE_STYLE = f"QWidget {{ background-color: #22C55E; border-radius: {_SIZE // 2}px; }}"
+    _BUSY_STYLE = f"QWidget {{ background-color: #F59E0B; border-radius: {_SIZE // 2}px; }}"
+
+    def __init__(self, channel: str, label: str, parent: "QWidget | None" = None) -> None:
+        super().__init__(parent)
+        self._channel = channel
+        self._label = label
+        self._busy = False
+        self.setProperty("testid", f"listener-{channel}")
+        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(self._IDLE_STYLE)
+        self.setToolTip(f"{label}: parado")
+
+    @property
+    def is_busy(self) -> bool:
+        return self._busy
+
+    @property
+    def channel(self) -> str:
+        return self._channel
+
+    def set_busy(self, busy: bool) -> None:
+        if busy == self._busy:
+            return
+        self._busy = busy
+        self.setStyleSheet(self._BUSY_STYLE if busy else self._IDLE_STYLE)
+        self.setToolTip(f"{self._label}: {'executando' if busy else 'parado'}")
+        self.busy_changed.emit(self._channel, busy)
+
 
 class MetricsBar(QWidget):
     """48px project selector, instance selection, and navigation toolbar."""
@@ -111,8 +243,27 @@ class MetricsBar(QWidget):
         self._tool_use_count = 0
         self._active_view: int = 0
         self._selected_instance: int = 0
+        self._autocast_phase: str = "off"  # off | awaiting-busy | running
+
+        # MARKER_SCHEDULE_AUTOCAST_STATE - schedule-autocast countdown state
+        self._schedule_end_at: QDateTime | None = None
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(1000)
+        self._schedule_timer.timeout.connect(self._on_schedule_tick)
+
+        # Restore schedule-autocast state from disk
+        state = _read_schedule_state()
+        if state and isinstance(state.get("end_at"), str):
+            restored = QDateTime.fromString(state["end_at"], Qt.DateFormat.ISODate)
+            if restored.isValid() and QDateTime.currentDateTime().secsTo(restored) > 0:
+                self._schedule_end_at = restored
+                self._schedule_timer.start()
+                QTimer.singleShot(0, self._update_schedule_visual)
+            else:
+                _clear_schedule_state()
 
         self._setup_ui()
+        self._setup_activity_timers()
         self._setup_git_overlay()
         self._connect_signals()
 
@@ -203,7 +354,7 @@ class MetricsBar(QWidget):
         layout.addSpacing(4)
 
         # ── Instance toggle buttons (clauded group) ───────────────────── #
-        _instance_names = ["clauded", "clauded2", "codex", "codex-high", "codex-ultra"]
+        _instance_names = ["clauded", "kimid", "codex", "clauded2"]
         self._instance_btns: list[QPushButton] = []
 
         for i, name in enumerate(_instance_names):
@@ -261,6 +412,53 @@ class MetricsBar(QWidget):
             self._btn_kanban,
         ]
         self._apply_nav_styles()
+
+        # ── Listeners + Autocast frame (own div, separated from nav) ────── #
+        layout.addSpacing(6)
+        self._listeners_frame = QFrame()
+        self._listeners_frame.setObjectName("ListenersFrame")
+        self._listeners_frame.setProperty("testid", "listeners-frame")
+        self._listeners_frame.setStyleSheet(
+            "QFrame#ListenersFrame { background-color: transparent;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        lf = QHBoxLayout(self._listeners_frame)
+        lf.setContentsMargins(8, 2, 8, 2)
+        lf.setSpacing(8)
+
+        self._dot_interactive = TerminalStatusDot("interactive", "Claude CLI", self._listeners_frame)
+        self._dot_workspace = TerminalStatusDot("workspace", "Kimi CLI", self._listeners_frame)
+        lf.addWidget(self._dot_interactive)
+        lf.addWidget(self._dot_workspace)
+
+        # MARKER_SCHEDULE_AUTOCAST_BUTTON
+        self._btn_schedule_autocast = QPushButton("agendar")
+        self._btn_schedule_autocast.setProperty("testid", "schedule-autocast-btn")
+        self._btn_schedule_autocast.setFixedHeight(28)
+        self._btn_schedule_autocast.setMinimumWidth(76)
+        self._btn_schedule_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_schedule_autocast.setToolTip(
+            "Agendar disparo automatico do autocast"
+        )
+        self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_IDLE)
+        self._btn_schedule_autocast.clicked.connect(self._on_schedule_clicked)
+        lf.addWidget(self._btn_schedule_autocast)
+
+        self._btn_autocast = QPushButton("autocast")
+        self._btn_autocast.setProperty("testid", "autocast-btn")
+        self._btn_autocast.setCheckable(True)
+        self._btn_autocast.setFixedHeight(28)
+        self._btn_autocast.setMinimumWidth(76)
+        self._btn_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_autocast.setToolTip(
+            "Autocast: dispara [Rodar próximo] em loop até a fila esvaziar"
+        )
+        self._btn_autocast.setStyleSheet(_AUTOCAST_OFF)
+        self._btn_autocast.toggled.connect(self._on_autocast_toggled)
+        lf.addWidget(self._btn_autocast)
+
+        layout.addWidget(self._listeners_frame)
+        layout.addSpacing(4)
 
         layout.addWidget(self._make_separator())
 
@@ -350,6 +548,115 @@ class MetricsBar(QWidget):
         self._btn_prefs = self._make_icon_btn("\u2699\uFE0F", "Preferências")
         layout.addWidget(self._btn_prefs)
 
+    # Path where the notify script writes its signal.
+    _NOTIFY_FILE = Path.home() / ".workflow-app" / "terminal-notify.json"
+
+    def _setup_activity_timers(self) -> None:
+        """Idle detection — two coexisting paths.
+
+        AUTHORITATIVE (primary, used by skill notify files):
+          When a skill script writes ~/.workflow-app/terminal-notify-{channel}.json,
+          QFileSystemWatcher fires _on_notify_file_changed → the dot goes green
+          IMMEDIATELY and a per-channel lock ignores subsequent PTY repaint
+          chunks (Rich/textual cursor blink, status line). Lock releases when
+          the app dispatches the next command, when an external session starts,
+          or after a 30s safety-net TTL.
+
+        HEURISTIC (legacy, for runner-backed PTY sessions):
+          terminal_session_finished → _on_force_idle starts a 2s one-shot timer.
+          PTY output during that window resets the timer. After 2s of silence
+          the dot turns green. Used only when no notify file is involved.
+
+        Two fences guard the authoritative path:
+          - epoch fence: rejects notifies whose iat <= last command dispatch
+          - session fence: ignores notifies while runner-backed session is active
+        """
+        # Hardening window — 3s of true PTY silence after notify file
+        # before the dot turns green. Resets on every chunk while active.
+        # Single timer, no hardcap: the contract is "if there's activity,
+        # the dot does NOT turn green". A CLI with infinite animation
+        # (genuine continuous output) keeps the dot yellow indefinitely
+        # — that is the correct behaviour, not a bug.
+        self._idle_timer_interactive = QTimer(self)
+        self._idle_timer_interactive.setSingleShot(True)
+        self._idle_timer_interactive.setInterval(3_000)
+        self._idle_timer_interactive.timeout.connect(
+            lambda: self._on_idle_confirmed("interactive")
+        )
+
+        self._idle_timer_workspace = QTimer(self)
+        self._idle_timer_workspace.setSingleShot(True)
+        self._idle_timer_workspace.setInterval(3_000)
+        self._idle_timer_workspace.timeout.connect(
+            lambda: self._on_idle_confirmed("workspace")
+        )
+
+        # One notify file per channel — eliminates cross-channel race conditions.
+        # Files are created here so QFileSystemWatcher can watch them from the start.
+        notify_dir = self._NOTIFY_FILE.parent
+        notify_dir.mkdir(parents=True, exist_ok=True)
+        self._notify_files: dict[str, Path] = {
+            "interactive": notify_dir / "terminal-notify-interactive.json",
+            "workspace":   notify_dir / "terminal-notify-workspace.json",
+        }
+        for p in self._notify_files.values():
+            if not p.exists():
+                p.write_text("{}")
+        self._notify_watcher = QFileSystemWatcher(
+            [str(p) for p in self._notify_files.values()], self
+        )
+        self._notify_watcher.fileChanged.connect(self._on_notify_file_changed)
+        # Also watch the parent directory: if a notify file is deleted at
+        # runtime (e.g. user `rm` to debug), QFileSystemWatcher drops the
+        # file path forever. The directory watcher catches the delete and
+        # we re-create + re-add. Without this, a deleted notify file
+        # leaves the channel permanently disconnected from notify events.
+        self._notify_watcher.addPath(str(notify_dir))
+        self._notify_watcher.directoryChanged.connect(
+            self._on_notify_directory_changed
+        )
+        # Clean stale notify files from previous sessions on startup.
+        self._clean_stale_notify_files()
+
+        # Authoritative idle lock — green-by-default semantics.
+        #
+        # The dot represents "is a command currently being executed via the
+        # app on this channel?". At rest, the lock is True so ambient PTY
+        # chunks (Kimi cursor blink, Rich repaints from a mouse click on the
+        # terminal area, status line refreshes) are ignored and the dot
+        # stays green. The lock is only released when the app actively
+        # dispatches a command (`run_command_in_*_terminal`) or when an
+        # external PTY session starts. After the command finishes (notify
+        # file → hardening → silence) the lock returns to True and the dot
+        # is green again until the next dispatch.
+        self._idle_locked: dict[str, bool] = {"interactive": True, "workspace": True}
+        # NOTE: the legacy 30s TTL safety net was removed — it conflicted
+        # with green-by-default semantics by periodically opening a window
+        # in which a stray click could flip the dot yellow. The lock now
+        # persists until an actual dispatch event releases it.
+        self._idle_lock_ttl: dict[str, QTimer] = {}
+
+        # Command epoch fence: monotonic wall-clock of the latest command
+        # dispatched per channel. A notify whose `iat` is older than the
+        # current epoch is rejected — prevents a delayed notify from command A
+        # re-locking the dot while command B is already running. Initialized
+        # to 0 so notifies before the first command are still accepted.
+        self._command_epoch: dict[str, float] = {"interactive": 0.0, "workspace": 0.0}
+
+        # External-session fence: True between terminal_session_started and
+        # terminal_session_finished. While active, authoritative notifies are
+        # ignored — runner-driven sessions own the dot via the legacy
+        # heuristic path (terminal_session_finished -> _on_force_idle).
+        self._session_active: dict[str, bool] = {"interactive": False, "workspace": False}
+
+        # Hardcap timers are created on-demand by `_arm_hardening` when
+        # called with `hardcap_ms`. Skills (notify file path) call without
+        # hardcap → no entry created, strict "activity ⇒ yellow" preserved.
+        # Helpers (/clear, /model, etc) call with hardcap_ms=5000 → entry
+        # created and started; even Kimi's invisible CPR/cursor chunks
+        # cannot keep the dot yellow past the cap.
+        self._hardcap_timer: dict[str, QTimer] = {}
+
     def _setup_git_overlay(self) -> None:
         """Configure overlay label for git info (bottom-right corner)."""
         self._lbl_git_info = QLabel("", self)
@@ -418,7 +725,10 @@ class MetricsBar(QWidget):
         self._selected_instance = index
         self._apply_instance_styles()
         self._signal_bus.instance_selected.emit(name)
-        self._signal_bus.run_command_in_terminal.emit(name)
+        if name == "kimid":
+            self._signal_bus.run_command_in_workspace_terminal.emit(name)
+        else:
+            self._signal_bus.run_command_in_terminal.emit(name)
 
     def _apply_instance_styles(self) -> None:
         for i, btn in enumerate(self._instance_btns):
@@ -444,10 +754,110 @@ class MetricsBar(QWidget):
         for i, btn in enumerate(self._nav_btns):
             btn.setStyleSheet(_NAV_ACTIVE if i == self._active_view else _NAV_INACTIVE)
 
+    # ─────────────────────────────────── Autocast (toggle + loop) ────── #
+    #
+    # State machine:
+    #   OFF                 → button blue "autocast", no triggers fired.
+    #   awaiting-busy       → just fired a step; if neither dot turns yellow within
+    #                         _AUTOCAST_ARM_MS, queue is empty → switch back to OFF.
+    #   running             → at least one dot turned yellow; when BOTH dots are
+    #                         green again, fire next step and re-arm.
+    #
+    # The dot busy transitions are emitted by TerminalStatusDot.set_busy(), which
+    # is the single source of truth for color changes.
+
+    _AUTOCAST_ARM_MS = 1500      # window after a click in which busy must appear
+    _AUTOCAST_DEBOUNCE_MS = 1000 # delay before re-firing on both-green (per spec)
+
+    def _on_autocast_toggled(self, checked: bool) -> None:
+        if checked:
+            self._autocast_phase = "awaiting-busy"
+            self._btn_autocast.setText("parar")
+            self._btn_autocast.setStyleSheet(_AUTOCAST_ON)
+            self._ensure_autocast_timers()
+            self._fire_autocast_step()
+        else:
+            self._autocast_phase = "off"
+            self._btn_autocast.setText("autocast")
+            self._btn_autocast.setStyleSheet(_AUTOCAST_OFF)
+            if hasattr(self, "_autocast_arm_timer"):
+                self._autocast_arm_timer.stop()
+            if hasattr(self, "_autocast_fire_timer"):
+                self._autocast_fire_timer.stop()
+
+    def _ensure_autocast_timers(self) -> None:
+        if not hasattr(self, "_autocast_arm_timer"):
+            self._autocast_arm_timer = QTimer(self)
+            self._autocast_arm_timer.setSingleShot(True)
+            self._autocast_arm_timer.setInterval(self._AUTOCAST_ARM_MS)
+            self._autocast_arm_timer.timeout.connect(self._on_autocast_arm_timeout)
+        if not hasattr(self, "_autocast_fire_timer"):
+            self._autocast_fire_timer = QTimer(self)
+            self._autocast_fire_timer.setSingleShot(True)
+            self._autocast_fire_timer.setInterval(self._AUTOCAST_DEBOUNCE_MS)
+            self._autocast_fire_timer.timeout.connect(self._fire_autocast_step)
+
+    def _fire_autocast_step(self) -> None:
+        """Request CommandQueueWidget to click `queue-btn-play-next` and arm the window."""
+        if not self._btn_autocast.isChecked():
+            return
+        self._autocast_phase = "awaiting-busy"
+        self._signal_bus.autocast_step_requested.emit()
+        self._autocast_arm_timer.start()
+
+    def _on_autocast_arm_timeout(self) -> None:
+        """No dot turned yellow within the arm window → queue is empty, stop autocast."""
+        if not self._btn_autocast.isChecked():
+            return
+        if self._autocast_phase != "awaiting-busy":
+            return
+        # Toggle the button OFF programmatically; toggled signal handles UI reset.
+        self._btn_autocast.setChecked(False)
+
+    def _on_dot_busy_changed(self, _channel: str, busy: bool) -> None:
+        if not self._btn_autocast.isChecked():
+            return
+        if busy:
+            # Confirmed a command actually started — leave the awaiting window.
+            if self._autocast_phase == "awaiting-busy":
+                self._autocast_phase = "running"
+                self._autocast_arm_timer.stop()
+            return
+        # Dot went green. Only proceed once BOTH are idle and we are in 'running'.
+        if self._autocast_phase != "running":
+            return
+        if self._dot_interactive.is_busy or self._dot_workspace.is_busy:
+            return
+        # Debounce a touch so paired green-transitions arriving in the same tick
+        # don't double-fire and so any late PTY chunk has a chance to flip yellow.
+        self._autocast_fire_timer.start()
+
     # ─────────────────────────────────────────────────────── Signals ─── #
 
     def _connect_signals(self) -> None:
         bus = self._signal_bus
+
+        # Terminal status dots — dual-mode: output-silence (10 s) + script notify
+        bus.terminal_activity.connect(self._on_terminal_activity)
+        bus.terminal_force_idle.connect(self._on_force_idle)
+        bus.terminal_session_started.connect(self._on_terminal_session_started)
+        bus.terminal_session_finished.connect(self._on_terminal_session_finished)
+
+        # Autocast — listen to dot busy transitions to drive the loop state machine
+        self._dot_interactive.busy_changed.connect(self._on_dot_busy_changed)
+        self._dot_workspace.busy_changed.connect(self._on_dot_busy_changed)
+
+        # Release authoritative idle lock when the app sends a new command,
+        # so the dot can turn yellow again on real activity. Bound methods
+        # (not lambdas) so the singleton bus does not retain stale closures
+        # over self after MetricsBar destruction.
+        bus.run_command_in_terminal.connect(self._on_command_dispatched_interactive)
+        bus.run_command_in_workspace_terminal.connect(self._on_command_dispatched_workspace)
+        # Blue-arrow Kimi dispatch uses a different signal (paste + 500ms +
+        # Enter), but it IS still a command dispatch from the dot's POV —
+        # without listening here the workspace epoch never advances and
+        # any helper auto-idle scheduled before it would fire mid-command.
+        bus.kimi_blue_arrow_dispatched.connect(self._on_command_dispatched_workspace)
 
         self._btn_prefs.clicked.connect(bus.preferences_requested)
 
@@ -537,6 +947,33 @@ class MetricsBar(QWidget):
             "JSON Files (*.json);;All Files (*)",
         )
         if path:
+            p = Path(path)
+            if p.name.endswith("-loop.json"):
+                try:
+                    raw = json.loads(p.read_text(encoding="utf-8"))
+                    required = ["schema_version", "name", "iteration_template", "items", "finalization"]
+                    if p.name.endswith("-cmd-loop.json") or p.name.endswith("-both-loop.json"):
+                        required.append("mode")
+                    missing = [f for f in required if f not in raw]
+                    if missing:
+                        self._signal_bus.toast_requested.emit(
+                            f"Schema invalido em {p.name}: campos ausentes {', '.join(missing)}. "
+                            "Verifique se o JSON segue o LOOP_CANONICAL_TEMPLATE.",
+                            "error",
+                        )
+                        return
+                    if "mode" in raw and raw["mode"] not in ("task", "cmd", "both"):
+                        self._signal_bus.toast_requested.emit(
+                            f"Schema invalido em {p.name}: modo '{raw.get('mode')}' nao reconhecido. "
+                            "Valores validos: task, cmd, both.",
+                            "error",
+                        )
+                        return
+                except Exception as exc:
+                    self._signal_bus.toast_requested.emit(
+                        f"Erro ao ler {p.name}: {exc}", "error"
+                    )
+                    return
             self.config_change_requested.emit(path)
 
     def _on_proj_unload(self) -> None:
@@ -546,6 +983,22 @@ class MetricsBar(QWidget):
         from workflow_app.config.app_state import app_state
         if app_state.has_config:
             raw = app_state.config.raw if app_state.config else {}
+            # Discriminar tipo de JSON pelo schema
+            kind = "unknown"
+            loop_mode = None
+            if isinstance(raw, dict):
+                if raw.get("kind") == "daily-loop" and "daily_loop" in raw:
+                    kind = "daily-loop"
+                elif (
+                    "iteration_template" in raw
+                    and "items" in raw
+                    and "finalization" in raw
+                ):
+                    kind = "loop-json"
+                    loop_mode = raw.get("mode")
+                    if loop_mode not in ("task", "cmd", "both"):
+                        loop_mode = "task"
+            app_state.set_loop_mode(loop_mode)
             commercial = raw.get("commercial_name", "") or app_state.project_name
             feature = raw.get("feature_name", "")
             self._apply_project_loaded(commercial, feature)
@@ -615,6 +1068,374 @@ class MetricsBar(QWidget):
         else:
             self._lbl_errors.setVisible(False)
 
+    # ── Terminal status dot slots ─────────────────────────────────────── #
+
+    def _clean_stale_notify_files(self) -> None:
+        """Truncate notify files with expired timestamps on startup."""
+        import time as _time
+        for p in self._notify_files.values():
+            try:
+                data = json.loads(p.read_text())
+                exp = data.get("exp", 0)
+                if exp and _time.time() > exp:
+                    p.write_text("{}")
+            except Exception:
+                pass
+
+    def _on_notify_directory_changed(self, _path: str) -> None:
+        """Re-create + re-watch any notify file that was deleted at runtime.
+
+        QFileSystemWatcher drops a watched file path on delete and never
+        re-arms it on its own. Without this recovery the channel stays
+        disconnected from notify events for the rest of the app session.
+        """
+        for ch, p in self._notify_files.items():
+            if not p.exists():
+                try:
+                    p.write_text("{}")
+                except OSError:
+                    continue
+            if str(p) not in self._notify_watcher.files():
+                self._notify_watcher.addPath(str(p))
+
+    def _on_notify_file_changed(self, path: str) -> None:
+        """QFileSystemWatcher callback — skill script wrote the notify file."""
+        import time as _time
+        try:
+            data = json.loads(Path(path).read_text())
+            channel = data.get("channel", "")
+            exp = data.get("exp", 0)
+            iat = data.get("iat", 0)
+            # Reject stale notifications (app was not running when script fired).
+            if exp and _time.time() > exp:
+                return
+            # Defense in depth: reject if JSON channel contradicts the filename.
+            # Prevents cross-channel contamination from manual edits or external writes.
+            expected = next(
+                (c for c, p in self._notify_files.items() if str(p) == path), None
+            )
+            if expected is not None and channel != expected:
+                return
+            if data.get("state") == "idle" and channel in ("interactive", "workspace"):
+                # Epoch fence: drop notifies that do not strictly post-date
+                # the latest command dispatched on this channel. Without
+                # this, a delayed notify from command A could re-lock the dot
+                # while command B is actively running. `<=` (not `<`) closes
+                # the same-tick equality boundary.
+                if iat and iat <= self._command_epoch.get(channel, 0.0):
+                    return
+                # Session fence: while a runner-backed session is active,
+                # the dot is owned by terminal_session_started/finished.
+                # An authoritative notify here would silently mask runner
+                # output until the next command.
+                if self._session_active.get(channel):
+                    return
+                # Workspace (Kimi) bypasses hardening entirely — Kimi's TUI
+                # emits continuous subtle PTY chunks at the input prompt
+                # which would reset any soft timer forever. Instead, wait
+                # a fixed 5s after notify then go straight to green.
+                # Interactive (Claude Code) keeps the strict hardening
+                # contract: 3s soft, no hardcap. Claude genuinely goes
+                # silent at its prompt so soft fires reliably on its own.
+                if channel == "workspace":
+                    self._arm_workspace_post_notify_timeout()
+                else:
+                    self._arm_hardening(channel)
+        except Exception:
+            pass
+        # Some Linux inotify backends remove the watch after IN_CLOSE_WRITE; re-add it.
+        if path not in self._notify_watcher.files():
+            self._notify_watcher.addPath(path)
+
+    def _on_force_idle(self, channel: str) -> None:
+        """OutputPanel detected 2s of PTY silence on this channel.
+
+        Used ONLY for `interactive` (Claude) — the workspace OutputPanel
+        does not arm its idle timer (see output_panel.py `_on_chunk`).
+        For interactive, this is the silence-based path that lets Claude
+        go green even when a skill doesn't write a notify file for it.
+
+        Defensive: if this somehow fires for workspace (e.g. future code
+        change or session_finished path), no-op to preserve workspace's
+        explicit 5s post-notify contract.
+        """
+        if channel != "interactive":
+            return
+        if self._idle_locked.get(channel):
+            return
+        self._arm_hardening(channel)
+
+    def _on_idle_confirmed(self, channel: str) -> None:
+        """Soft hardening timer fired — true silence reached after notify.
+
+        Promote the channel to authoritative idle: green + lock. Subsequent
+        chunks (post-stream cursor animations, mouse-click repaints) will
+        be ignored.
+        """
+        self._enter_authoritative_idle(channel)
+
+    def _arm_hardening(self, channel: str, hardcap_ms: int | None = None) -> None:
+        """Enter the hardening phase. Dot stays YELLOW until soft timer
+        expires (3s of true silence) OR optional hardcap fires.
+
+        Two callers, two contracts:
+          - `_on_notify_file_changed` calls without hardcap → strict
+            "if there's activity, NOT green" contract. Skills that emit
+            forever stay yellow forever (correct).
+          - `_helper_auto_idle` calls with hardcap_ms=5000 → helpers
+            (/clear, /model, etc) eventually flip green even if Kimi's
+            TUI emits invisible CPR/cursor chunks indefinitely.
+
+        Hardcap timers are created on-demand and cached in
+        `self._hardcap_timer[channel]`.
+        """
+        if self._idle_locked.get(channel):
+            return
+        idle = self._idle_timer_for(channel)
+        if idle:
+            idle.start()  # 3s soft window, resets on activity
+        if hardcap_ms is not None:
+            cap = self._hardcap_timer.get(channel)
+            if cap is None:
+                cap = QTimer(self)
+                cap.setSingleShot(True)
+                cap.timeout.connect(
+                    lambda _ch=channel: self._on_hardcap_expired(_ch)
+                )
+                self._hardcap_timer[channel] = cap
+            cap.setInterval(hardcap_ms)
+            cap.start()  # absolute ceiling, never resets on activity
+
+    def _on_hardcap_expired(self, channel: str) -> None:
+        """Hard cap reached — force authoritative idle even if chunks
+        are still flowing (typical for Kimi's animated prompt)."""
+        self._enter_authoritative_idle(channel)
+
+    def _arm_workspace_post_notify_timeout(self) -> None:
+        """Workspace-only: schedule plain 5s timer to green after notify.
+
+        Bypasses the chunk-watching hardening path (which would never
+        complete because Kimi's input prompt emits subtle PTY bytes
+        forever). Cancellable: any new dispatch on workspace calls
+        `_release_idle_lock` which stops this timer too.
+        """
+        if self._idle_locked.get("workspace"):
+            return
+        # Reuse the workspace hardcap slot as the post-notify timer —
+        # _release_idle_lock already stops it on next dispatch. Different
+        # interval but same lifecycle semantics.
+        cap = self._hardcap_timer.get("workspace")
+        if cap is None:
+            cap = QTimer(self)
+            cap.setSingleShot(True)
+            cap.timeout.connect(
+                lambda: self._on_hardcap_expired("workspace")
+            )
+            self._hardcap_timer["workspace"] = cap
+        cap.setInterval(self._WORKSPACE_POST_NOTIFY_MS)
+        cap.start()
+
+    def _enter_authoritative_idle(self, channel: str) -> None:
+        """Promote channel to green + locked. PTY repaint chunks (cursor
+        blink, Rich status bar, mouse-click repaints, etc.) are ignored
+        until the app sends the next command or an external session starts.
+        """
+        idle = self._idle_timer_for(channel)
+        if idle:
+            idle.stop()
+        cap = self._hardcap_timer.get(channel)
+        if cap:
+            cap.stop()
+        self._idle_locked[channel] = True
+        dot = self._dot_for(channel)
+        if dot:
+            dot.set_busy(False)
+
+    def _release_idle_lock(self, channel: str) -> None:
+        """Release the authoritative idle lock for a channel.
+
+        Also cancels any in-flight hardening (idle/hardcap timers) so a new
+        command does not get prematurely promoted by a stale notify.
+        """
+        self._idle_locked[channel] = False
+        idle = self._idle_timer_for(channel)
+        if idle:
+            idle.stop()
+        cap = self._hardcap_timer.get(channel)
+        if cap:
+            cap.stop()
+
+    def _bump_command_epoch(self, channel: str) -> None:
+        """Advance the per-channel epoch fence to wall-clock now.
+
+        Subsequent notifies whose payload `iat` is `<=` this epoch are
+        rejected by `_on_notify_file_changed`. Solves the A/B race where a
+        delayed notify from command A would otherwise re-lock the dot while
+        command B is already running.
+
+        Defenses:
+          - Clamps to never-decrease, so a backward NTP step cannot reset
+            the fence below an older notify's iat.
+          - Uses `<=` comparison on the reader side, so two events at the
+            same tick (epoch == iat) reject the notify rather than accept it.
+        """
+        import time as _time
+        self._command_epoch[channel] = max(
+            self._command_epoch.get(channel, 0.0), _time.time()
+        )
+
+    def _on_command_dispatched_interactive(self, cmd: str) -> None:
+        """Bound slot — a new interactive command was dispatched. Bump
+        epoch, release lock, force dot yellow as immediate UI feedback,
+        and (for helpers) schedule the deferred hardening arm.
+
+        Forcing yellow on dispatch matters for commands the CLI processes
+        silently (e.g. Kimi's `/clear` emits no PTY output). Without this,
+        the dot would stay green and the user would have no visual
+        confirmation that the command was actually dispatched.
+        """
+        self._bump_command_epoch("interactive")
+        self._release_idle_lock("interactive")
+        self._dot_interactive.set_busy(True)
+        self._maybe_schedule_helper_auto_idle("interactive", cmd)
+
+    def _on_command_dispatched_workspace(self, cmd: str) -> None:
+        """Bound slot — a new workspace command was dispatched."""
+        self._bump_command_epoch("workspace")
+        self._release_idle_lock("workspace")
+        self._dot_workspace.set_busy(True)
+        self._maybe_schedule_helper_auto_idle("workspace", cmd)
+
+    # Queue helpers — no notify file, just mutate CLI session state or
+    # change the bash environment. All these get a deferred hardening
+    # arm so the dot eventually goes green after their brief output.
+    _HELPER_COMMANDS: tuple[str, ...] = (
+        "/model", "/effort", "/clear",            # slash-helpers
+        "cd",                                      # bash directory change
+        "clauded", "kimid", "codex", "clauded2",  # CLI launches
+    )
+    _HELPER_AUTO_IDLE_MS: int = 1_000
+    # Extra delay added to /clear on the workspace channel: Kimi's TUI
+    # repaint after a clear takes longer than a regular helper, so the
+    # dot must stay yellow longer before hardening arms.
+    _CLEAR_WORKSPACE_EXTRA_MS: int = 1_000
+
+    def _maybe_schedule_helper_auto_idle(self, channel: str, cmd: str) -> None:
+        """Schedule auto-green for queue helpers that don't notify on completion.
+
+        These commands are processed by the CLI in well under a second, but
+        they don't write a notify file because they're queue-side helpers
+        (model switch, effort change, context clear) rather than skills.
+        Without this hook the dot would stay yellow forever after the helper.
+
+        Epoch-guarded: if a newer command is dispatched on the same channel
+        before the timer fires, the auto-idle is dropped — prevents a stale
+        helper schedule from flipping a real command's dot green prematurely.
+
+        Uses the `QTimer.singleShot(msec, context, slot)` overload with `self`
+        as context so the timer is auto-cancelled if MetricsBar is destroyed
+        before it fires (avoids "C++ object already deleted" in tests).
+        """
+        if not self._is_helper_command(cmd):
+            return
+        scheduled_epoch = self._command_epoch.get(channel, 0.0)
+        head = cmd.strip().split(None, 1)[0].lower() if cmd.strip() else ""
+        delay_ms = self._HELPER_AUTO_IDLE_MS
+        # /clear on workspace gets +1s extra because Kimi's TUI repaint
+        # after a clear is slower — the dot must stay yellow longer to
+        # cover the repaint window before hardening arms.
+        if channel == "workspace" and head == "/clear":
+            delay_ms += self._CLEAR_WORKSPACE_EXTRA_MS
+        QTimer.singleShot(
+            delay_ms,
+            self,
+            lambda: self._helper_auto_idle(channel, scheduled_epoch),
+        )
+
+    def _is_helper_command(self, cmd: str) -> bool:
+        """Match a queue helper by the leading slash-token (case-insensitive)."""
+        if not cmd or not cmd.strip():
+            return False
+        head = cmd.strip().split(None, 1)[0].lower()
+        return head in self._HELPER_COMMANDS
+
+    # Hardcap window — only used by HELPERS (no notify file) on either
+    # channel. Skills on interactive use no cap (Claude truly idles).
+    # Skills on workspace use `_arm_workspace_post_notify_timeout`
+    # instead (5s fixed timer, no chunk-watching).
+    _HELPER_HARDCAP_MS: int = 5_000
+    # Workspace post-notify timeout: fixed delay between notify file
+    # arrival and green. Bypasses chunk-watching since Kimi's input
+    # prompt emits subtle PTY bytes that would reset any soft timer.
+    _WORKSPACE_POST_NOTIFY_MS: int = 5_000
+
+    def _helper_auto_idle(self, channel: str, scheduled_epoch: float) -> None:
+        """Arm hardening on behalf of a helper command (no notify file).
+
+        Helpers (/clear /model /effort, also `cd` and `kimid`) don't write
+        notify files because they're not skills — they just mutate CLI
+        session state. Auto-idle waits 1s/2s post-dispatch then arms
+        hardening WITH a 5s hardcap. The hardcap guarantees the dot turns
+        green even if Kimi's TUI keeps emitting invisible cursor/CPR
+        chunks (Codex/Kimi /skill:double-mcp consensus: option B).
+
+        Race protection: helper at t=0, real command at t=0.5 → at t=1 the
+        helper's auto-idle would otherwise hand control over to a stale
+        hardening. Comparing epochs cancels the late auto-idle.
+        """
+        if self._command_epoch.get(channel, 0.0) > scheduled_epoch:
+            return
+        self._arm_hardening(channel, hardcap_ms=self._HELPER_HARDCAP_MS)
+
+    def _on_terminal_activity(self, channel: str) -> None:
+        """Any PTY output chunk — turn dot yellow.
+
+        If the soft idle timer is active (notify already fired and we are in
+        the hardening window), reset it so post-notify streaming output keeps
+        the dot yellow until 2s of true silence. The hard cap timer is NOT
+        reset here — it is the absolute ceiling that guarantees we eventually
+        leave the hardening phase even if chunks never stop (Kimi animations).
+        """
+        if self._idle_locked.get(channel):
+            return
+        dot = self._dot_for(channel)
+        timer = self._idle_timer_for(channel)
+        if dot:
+            dot.set_busy(True)
+        if timer and timer.isActive():
+            timer.start()  # reset 2s countdown while summary is still printing
+
+    def _on_terminal_session_started(self, channel: str) -> None:
+        """External PTY session started — ensure dot is yellow, stop idle timer."""
+        self._session_active[channel] = True
+        self._release_idle_lock(channel)
+        dot = self._dot_for(channel)
+        timer = self._idle_timer_for(channel)
+        if timer:
+            timer.stop()
+        if dot:
+            dot.set_busy(True)
+
+    def _on_terminal_session_finished(self, channel: str) -> None:
+        """External PTY session finished — clear the session fence so
+        notify-driven hardening can engage on the next legitimate notify.
+        """
+        self._session_active[channel] = False
+
+    def _dot_for(self, channel: str) -> "TerminalStatusDot | None":
+        if channel == "interactive":
+            return self._dot_interactive
+        if channel == "workspace":
+            return self._dot_workspace
+        return None
+
+    def _idle_timer_for(self, channel: str) -> "QTimer | None":
+        if channel == "interactive":
+            return self._idle_timer_interactive
+        if channel == "workspace":
+            return self._idle_timer_workspace
+        return None
+
     # Backward-compat stubs (called by older code, now no-ops)
     def set_progress_text(self, completed: int, total: int) -> None:
         pass
@@ -631,3 +1452,80 @@ class MetricsBar(QWidget):
 
     def update_errors(self, count: int) -> None:
         self.set_errors_badge(count)
+
+    # MARKER_SCHEDULE_AUTOCAST_HELPERS - helpers do schedule-autocast
+    @staticmethod
+    def _format_schedule_remaining(total_seconds: int) -> str:
+        total_seconds = max(0, int(total_seconds))
+        h, rem = divmod(total_seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    def _on_schedule_clicked(self) -> None:
+        if self._schedule_end_at is None:
+            from workflow_app.metrics_bar.schedule_autocast_dialog import (
+                ScheduleAutocastDialog,
+            )
+            dialog = ScheduleAutocastDialog(self)
+            if dialog.exec() != ScheduleAutocastDialog.DialogCode.Accepted:
+                return
+            seconds = dialog.total_seconds()
+            if seconds <= 0:
+                return
+            self._schedule_end_at = QDateTime.currentDateTime().addSecs(seconds)
+            _write_schedule_state(self._schedule_end_at.toString(Qt.DateFormat.ISODate))
+            self._schedule_timer.start()
+            self._update_schedule_visual()
+            return
+
+        # Cancelamento
+        self._schedule_timer.stop()
+        self._schedule_end_at = None
+        _clear_schedule_state()
+        self._reset_schedule_visual_to_idle()
+
+    def _on_schedule_tick(self) -> None:
+        if self._schedule_end_at is None:
+            self._schedule_timer.stop()
+            return
+        remaining = QDateTime.currentDateTime().secsTo(self._schedule_end_at)
+        if remaining <= 0:
+            self._schedule_timer.stop()
+            self._fire_schedule_autocast()
+            return
+        self._update_schedule_visual()
+
+    def _update_schedule_visual(self) -> None:
+        if self._schedule_end_at is None:
+            return
+        remaining = max(0, QDateTime.currentDateTime().secsTo(self._schedule_end_at))
+        label = self._format_schedule_remaining(remaining)
+        self._btn_schedule_autocast.setText(label)
+        self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_RUNNING)
+        self._btn_schedule_autocast.setToolTip(
+            f"Clique para cancelar - dispara em {label}"
+        )
+
+    def _fire_schedule_autocast(self) -> None:
+        _clear_schedule_state()
+        # Ja ligado: ignorar silenciosamente, sem clicar, sem toast, sem tooltip.
+        if self._btn_autocast.isChecked():
+            self._schedule_end_at = None
+            self._reset_schedule_visual_to_idle()
+            return
+
+        self._schedule_end_at = None
+        self._btn_schedule_autocast.setText("disparado")
+        self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_FIRED)
+        self._btn_schedule_autocast.setToolTip("Autocast disparado")
+        QTimer.singleShot(2000, self._reset_schedule_visual_to_idle)
+        self._btn_autocast.click()
+
+    def _reset_schedule_visual_to_idle(self) -> None:
+        self._btn_schedule_autocast.setText("agendar")
+        self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_IDLE)
+        self._btn_schedule_autocast.setToolTip(
+            "Agendar disparo automatico do autocast"
+        )

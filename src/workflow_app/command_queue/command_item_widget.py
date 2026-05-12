@@ -46,6 +46,66 @@ _STATUS_SYMBOL: dict[CommandStatus, str] = {
 }
 
 
+def _format_command_label(name: str, config_path: str, *, max_lines: int = 3) -> str:
+    """Render a command + args as at most `max_lines` visual rows.
+
+    Strategy:
+      - line 1 is always the command name (untouched).
+      - remaining tokens are grouped into `--flag value` pairs when possible,
+        then evenly distributed across the remaining `max_lines - 1` rows.
+        Trailing rows absorb leftovers so flag/value pairs stay together
+        unless the row count forces a split.
+
+    Examples (max_lines=3):
+      "/prd-create"                                 -> "/prd-create"
+      "/foo .claude/projects/x.json"                -> "/foo\\n.claude/projects/x.json"
+      "/cmd --slug s --item 5 path/cfg"             -> "/cmd\\n--slug s --item 5\\npath/cfg"
+    """
+    raw = f"{name} {config_path}".strip()
+    if not raw:
+        return ""
+    parts = raw.split()
+    if len(parts) <= 1:
+        return raw
+
+    head = parts[0]
+    rest = parts[1:]
+
+    # Group --flag/-f value pairs so the row split keeps them together when possible.
+    groups: list[str] = []
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        nxt = rest[i + 1] if i + 1 < len(rest) else None
+        is_flag = tok.startswith("-")
+        next_is_value = nxt is not None and not nxt.startswith("-")
+        if is_flag and next_is_value:
+            groups.append(f"{tok} {nxt}")
+            i += 2
+        else:
+            groups.append(tok)
+            i += 1
+
+    remaining = max_lines - 1  # rows available for arguments
+    if remaining <= 0:
+        return head
+
+    if len(groups) <= remaining:
+        return "\n".join([head, *groups])
+
+    # Distribute groups across the remaining rows, front-loading the extras
+    # (so the last row is short — easier to read in a 280px panel).
+    n = len(groups)
+    base, extra = divmod(n, remaining)
+    lines = [head]
+    idx = 0
+    for row in range(remaining):
+        count = base + (1 if row < extra else 0)
+        lines.append(" ".join(groups[idx:idx + count]))
+        idx += count
+    return "\n".join(lines)
+
+
 class CommandItemWidget(QWidget):
     """One command row in the queue list."""
 
@@ -79,6 +139,12 @@ class CommandItemWidget(QWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self._setup_ui()
+        if spec.testid:
+            self.setProperty("testid", spec.testid)
+        elif spec.kimi_eligible:
+            self.setProperty("testid", "queue-item-kimi-run")
+        if spec.blocked_reason:
+            self.set_status(CommandStatus.ERRO, spec.blocked_reason)
 
     # ─────────────────────────────────────────────────────────── UI ──── #
 
@@ -108,8 +174,12 @@ class CommandItemWidget(QWidget):
 
         # Kimi run button (blue arrow) — runs adapted prompt in workspace terminal.
         # Visible only when the command is in the Kimi-compatible whitelist.
+        # objectName must be "IconButton" so it picks up the QPushButton#IconButton
+        # rule from theme.py (padding: 4px). Without that, the generic QPushButton
+        # rule applies padding: 6px 14px and clips the ▶ glyph on the 16x16 button.
+        # `testid` is the per-item identifier kept for tests.
         self._kimi_btn = QPushButton("▶")
-        self._kimi_btn.setObjectName("KimiRunButton")
+        self._kimi_btn.setObjectName("IconButton")
         self._kimi_btn.setProperty("testid", "queue-item-kimi-run")
         self._kimi_btn.setFixedSize(16, 16)
         self._kimi_btn.setToolTip(
@@ -159,9 +229,14 @@ class CommandItemWidget(QWidget):
         )
         layout.addWidget(self._delete_btn)
 
-        # Command name (+ optional config path) — one token per line
-        parts = f"{self._spec.name} {self._spec.config_path}".strip().split()
-        self._name_label = QLabel("\n".join(parts))
+        # Command name (+ optional config path) — capped at 3 visual rows.
+        # Tokens beyond the cap are merged into existing rows so very long
+        # commands (eg. /daily-loop:review-done --slug X --item N path/cfg)
+        # continue legible inside the 280px panel without scrolling vertically.
+        label_text = _format_command_label(
+            self._spec.name, self._spec.config_path, max_lines=3
+        )
+        self._name_label = QLabel(label_text)
         self._name_label.setStyleSheet(
             "color: #FAFAFA; font-family: monospace; font-size: 11px;"
         )
@@ -347,6 +422,14 @@ class CommandItemWidget(QWidget):
             "  color: #FBBF24; font-size: 11px; }"
             "QPushButton:hover { color: #FDE68A; }"
         )
+        # Force Qt to re-evaluate stylesheet cascade — without this, the global
+        # QPushButton#IconButton rule from theme.py can keep the previous color
+        # cached and the ● glyph stays green visually.
+        style = self._run_btn.style()
+        if style is not None:
+            style.unpolish(self._run_btn)
+            style.polish(self._run_btn)
+        self._run_btn.update()
 
     def is_pending_run(self) -> bool:
         """True if this row has not yet been sent to the terminal."""
@@ -363,6 +446,12 @@ class CommandItemWidget(QWidget):
             "QPushButton:hover { color: #86EFAC; }"
         )
         self._run_btn.setEnabled(True)
+        # Mirror _mark_as_sent: force re-polish so the green color reapplies cleanly.
+        style = self._run_btn.style()
+        if style is not None:
+            style.unpolish(self._run_btn)
+            style.polish(self._run_btn)
+        self._run_btn.update()
         self.set_status(CommandStatus.PENDENTE)
 
     # ─────────────────────────────────────────── Drag-and-drop source ─── #

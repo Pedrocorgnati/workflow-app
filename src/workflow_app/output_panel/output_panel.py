@@ -64,11 +64,11 @@ _BRACKETED_PASTE_MODE = 2004 << 5
 class OutputPanel(QWidget):
     """Terminal panel: persistent shell + optional pipeline runner overlay."""
 
-    def __init__(self, parent: QWidget | None = None, autocast_mode: bool = False) -> None:
+    def __init__(self, parent: QWidget | None = None, workspace_mode: bool = False) -> None:
         super().__init__(parent)
-        self._autocast_mode = autocast_mode
-        self._channel = "workspace" if autocast_mode else "interactive"
-        self.setObjectName("WorkspacePanel" if autocast_mode else "OutputPanel")
+        self._workspace_mode = workspace_mode
+        self._channel = "workspace" if workspace_mode else "interactive"
+        self.setObjectName("WorkspacePanel" if workspace_mode else "OutputPanel")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -91,6 +91,17 @@ class OutputPanel(QWidget):
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(50)  # 20 fps
         self._render_timer.timeout.connect(self._flush_pyte)
+
+        # ── Heuristic 2s idle timer (interactive channel only) ─ #
+        # Detects "PTY went silent for 2s" → fires terminal_force_idle.
+        # Used by Claude (interactive) which goes genuinely silent post-
+        # command. NOT used by workspace — see `_on_chunk` gate.
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.setInterval(2_000)
+        self._idle_timer.timeout.connect(
+            lambda: signal_bus.terminal_force_idle.emit(self._channel)
+        )
 
         # ── Resize debounce timer ──────────────────────────────────────── #
         self._resize_timer = QTimer(self)
@@ -124,7 +135,7 @@ class OutputPanel(QWidget):
 
         self._terminal = TerminalCanvas()
         self._terminal.setProperty("testid",
-            "terminal-workspace-output" if self._autocast_mode else "terminal-interactive-output")
+            "terminal-workspace-output" if self._workspace_mode else "terminal-interactive-output")
         self._terminal.raw_key_pressed.connect(self._on_raw_key)
         layout.addWidget(self._terminal, stretch=1)
 
@@ -218,7 +229,7 @@ class OutputPanel(QWidget):
         signal_bus.terminal_session_started.connect(self._on_terminal_session_started)
         signal_bus.terminal_session_finished.connect(self._on_terminal_session_finished)
         signal_bus.terminal_worker_changed.connect(self._on_terminal_worker_changed)
-        if not self._autocast_mode:
+        if not self._workspace_mode:
             signal_bus.output_cleared.connect(self.clear)
             signal_bus.pipeline_started.connect(self._on_pipeline_started)
             signal_bus.pipeline_completed.connect(self._on_pipeline_completed)
@@ -229,9 +240,12 @@ class OutputPanel(QWidget):
             signal_bus.pipeline_error_occurred.connect(self._on_pipeline_error)
             signal_bus.run_command_in_terminal.connect(self._run_shell_command)
             signal_bus.paste_text_in_terminal.connect(self._on_paste_text)
+            signal_bus.submit_enter_to_terminal.connect(self._send_enter_to_shell)
         else:
             signal_bus.run_command_in_workspace_terminal.connect(self._run_shell_command)
             signal_bus.paste_text_in_workspace_terminal.connect(self._on_paste_text)
+            signal_bus.submit_enter_to_workspace_terminal.connect(self._send_enter_to_shell)
+            signal_bus.kimi_blue_arrow_dispatched.connect(self._run_kimi_blue_arrow)
 
     # ─────────────────────────────────────────────────────── Key routing ─ #
 
@@ -277,9 +291,9 @@ class OutputPanel(QWidget):
         DEC 2004 is active, then always schedules the submitting Enter (\r) as
         a separate write. Ink-based CLIs (Claude Code) buffer the paste block
         and swallow a trailing \r that arrives in the same chunk, so the queue
-        play button (data-testid="queue-btn-play-next") would type the command
-        but never submit it. A delayed singleShot guarantees the Enter lands
-        as a standalone keypress in both BP and non-BP modes.
+        run trigger would type the command but never submit it. A delayed
+        singleShot guarantees the Enter lands as a standalone keypress in both
+        BP and non-BP modes.
         """
         if self._shell is None:
             return
@@ -294,6 +308,24 @@ class OutputPanel(QWidget):
         if self._shell is not None:
             self._shell.send_raw(b"\r")
 
+    def _run_kimi_blue_arrow(self, prompt: str, delay_ms: int) -> None:
+        """Blue-arrow Kimi dispatch — paste + delayed Enter.
+
+        Kimi's Rich/textual prompt sometimes swallows Enter when it arrives
+        too early (Ink CLIs buffer the paste block and an Enter on the same
+        tick gets eaten before the /skill: line is fully composed). The
+        delay is supplied by the caller — typically 1000ms, or 3000ms when
+        the dispatch is subsequent to /clear (Kimi takes longer to render
+        the prompt right after a clear because the TUI repaints fully).
+        """
+        if self._shell is None:
+            return
+        data = prompt.encode("utf-8", errors="replace")
+        if _BRACKETED_PASTE_MODE in self._screen.mode:
+            data = b"\x1b[200~" + data + b"\x1b[201~"
+        self._shell.send_raw(data)
+        QTimer.singleShot(delay_ms, self, self._send_enter_to_shell)
+
     def _on_terminal_output_chunk(self, channel: str, chunk: str) -> None:
         """Render a PTY chunk for the bound terminal channel."""
         if channel == self._channel:
@@ -304,6 +336,7 @@ class OutputPanel(QWidget):
         if channel != self._channel:
             return
         self._runner_active = True
+        self._idle_timer.stop()
         # Disconnect shell output to prevent mixing with runner output
         if self._shell is not None:
             try:
@@ -362,7 +395,20 @@ class OutputPanel(QWidget):
         return cells[:self._cols]
 
     def _on_chunk(self, chunk: str) -> None:
-        """Feed a chunk (from shell or pipeline) to pyte and schedule render."""
+        """Feed a chunk (from shell or pipeline) to pyte and schedule render.
+
+        Heuristic 2s idle timer is armed ONLY for the interactive channel
+        (Claude Code). Claude's UI emits a "Bash..." indicator while a
+        bash tool is running (so intra-execution sleeps don't cause false
+        idle), and goes genuinely silent when the command finishes — so
+        the 2s timer + 3s soft fire correctly when there's nothing
+        emitting notify file for the interactive channel.
+
+        Workspace (Kimi) does NOT use this heuristic: Kimi's input prompt
+        emits subtle PTY bytes indefinitely (cursor, ANSI repaints), so a
+        silence-based heuristic never fires AND collides with notify
+        hardening. Workspace relies on the explicit 5s post-notify timer.
+        """
         try:
             self._stream.feed(chunk.encode("utf-8", errors="replace"))
         except Exception:  # noqa: BLE001
@@ -370,6 +416,9 @@ class OutputPanel(QWidget):
         self._has_pending_render = True
         if not self._render_timer.isActive():
             self._render_timer.start()
+        if not self._runner_active and self._channel == "interactive":
+            self._idle_timer.start()
+        signal_bus.terminal_activity.emit(self._channel)
 
     def _on_pipeline_chunk(self, chunk: str) -> None:
         """Chunk from the pipeline runner (separate signal from shell)."""
@@ -410,6 +459,7 @@ class OutputPanel(QWidget):
 
     def _on_pipeline_started(self) -> None:
         self._runner_active = True
+        self._idle_timer.stop()
         if self._shell is not None:
             try:
                 self._shell.output_received.disconnect(self._on_chunk)

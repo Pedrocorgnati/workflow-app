@@ -173,7 +173,8 @@ class PipelineManager:
     def advance(self) -> None:
         """Advance to the next command in the queue.
 
-        Called manually (interactive mode) or automatically (autocast).
+        Called manually (interactive mode) or automatically when an AUTO
+        command finishes its SDK turn.
         """
         self._current_index += 1
         if self._current_index >= len(self._queue):
@@ -505,14 +506,11 @@ class PipelineManager:
             self._try_expand_queue(spec.name)
             # Contract-driven phase triggers (scorecard/lessons/backlog, etc.)
             self._try_expand_phase_triggers(spec)
-            # Autocast: advance automatically unless interactive or question was asked
+            # AUTO commands advance automatically; INTERACTIVE wait for manual.
             is_interactive = spec.interaction_type == InteractionType.INTERACTIVE
             had_question = self._force_interactive_next_complete
             self._force_interactive_next_complete = False  # reset for next command
             if not is_interactive and not had_question:
-                next_index = self._current_index + 1
-                next_name = self._queue[next_index].name if next_index < len(self._queue) else ""
-                self._signal_bus.autocast_advancing.emit(next_name)
                 self.advance()
             else:
                 # Interactive mode or question was asked: notify UI that manual advance is ready

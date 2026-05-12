@@ -202,6 +202,22 @@ class QaArtifact(BaseModel):
     report_path: Optional[str] = None
 
 
+class SignedOff(BaseModel):
+    """Final delivery sign-off block written by `/delivery:sign-off`.
+
+    Persisted alongside (not inside) `artifacts` so it remains discoverable
+    by dashboards/reporting without traversing into per-phase metadata.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["APROVADO", "APROVADO COM NOTA"]
+    at: Iso8601Utc
+    by: str
+    release_notes: Optional[str] = None
+    note: Optional[str] = None
+
+
 class ModuleArtifacts(BaseModel):
     """Optional artifact pointers (all nullable per T-001 schema)."""
 
@@ -210,6 +226,9 @@ class ModuleArtifacts(BaseModel):
     module_meta_path: Optional[str] = None
     overview_path: Optional[str] = None
     last_specific_flow: Optional[str] = None
+    last_specific_flow_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     last_review_report: Optional[str] = None
     last_commit_sha: Optional[str] = None
     last_deploy_url: Optional[str] = None
@@ -238,6 +257,8 @@ class ModuleState(BaseModel):
     history: List[HistoryEntry] = Field(default_factory=list)
     artifacts: ModuleArtifacts = Field(default_factory=ModuleArtifacts)
     dependencies: List[ModuleKey] = Field(default_factory=list)
+    signed_off: Optional[SignedOff] = None
+    tasks: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _per_module_invariants(self) -> "ModuleState":
@@ -310,6 +331,12 @@ class ModuleState(BaseModel):
         if self.history and self.history[-1].to != self.state:
             raise ValueError(
                 f"I-07: history[-1].to={self.history[-1].to!r} != state={self.state!r}"
+            )
+
+        # signed_off only valid on done modules (sign-off is the terminal gate).
+        if self.signed_off is not None and self.state != "done":
+            raise ValueError(
+                f"signed_off requires state='done', got state={self.state!r}"
             )
 
         return self
@@ -543,6 +570,7 @@ __all__ = [
     "QaArtifact",
     "ReworkPhase",
     "ReworkTarget",
+    "SignedOff",
     "Skeleton",
     "StateExceptBlocked",
     "StateIncludingV0",

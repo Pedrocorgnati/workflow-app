@@ -1,6 +1,16 @@
 {
-  "version": "1.4.1",
-  "updated_at": "2026-04-24",
+  "version": "1.6.0",
+  "updated_at": "2026-05-10",
+  "gates": [
+    {
+      "gate_id": "B-dcp.exit",
+      "phase": "B-dcp",
+      "command": "/dcp:build-validate",
+      "condition": "SPECIFIC-FLOW.json valid AND condition_resolved emitted per step",
+      "blocks": ["B.2", "B.3"],
+      "on_fail": "abort with exit 1"
+    }
+  ],
   "canonical_loop": {
     "A": {
       "name": "Creation",
@@ -45,7 +55,14 @@
       "name": "Linkage",
       "task_budget_tokens_default": 40000,
       "task_budget_tokens_min": 20000,
-      "task_budget_tokens_max": 60000
+      "task_budget_tokens_max": 60000,
+      "security_gate": {
+        "enabled_when": "modules.*.criticality in ['high','critical'] OR modules.*.qa.security_review_required == true",
+        "pre_linkage": "/skill:security-review-gate --module",
+        "post_linkage": "/scope-drift-detect --module",
+        "enforces_invariant": "I-18",
+        "blocking_if_failed": true
+      }
     },
     "D": {
       "name": "F8 micro",

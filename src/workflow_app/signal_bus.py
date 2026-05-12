@@ -107,9 +107,7 @@ class SignalBus(QObject):
     # Emitted when the project is unlinked
     config_unloaded = Signal()
 
-    # --- Autocast (module-12/TASK-1) ---
-    # Emitted before autocast with the name of the next command
-    autocast_advancing = Signal(str)          # next_command_name
+    # --- Pipeline advance (module-12/TASK-1) ---
     # Emitted when interactive mode is ready for manual advance
     interactive_advance_ready = Signal(int)   # command_exec_id
     # Emitted by CommandQueueWidget when user clicks "Próximo"
@@ -144,6 +142,15 @@ class SignalBus(QObject):
     run_command_in_workspace_terminal = Signal(str) # sends text + Enter — workspace terminal only
     paste_text_in_terminal = Signal(str)            # text only (no Enter — inserts inline)
     paste_text_in_workspace_terminal = Signal(str)  # text only (no Enter) — workspace terminal
+    submit_enter_to_terminal = Signal()             # bare Enter (\r) to interactive terminal
+    submit_enter_to_workspace_terminal = Signal()   # bare Enter (\r) to workspace terminal
+    # Blue-arrow Kimi dispatch — paste + (delay_ms) + Enter, tracked by
+    # MetricsBar as a command dispatch (bumps workspace epoch + releases
+    # idle lock). Use this instead of `run_command_in_workspace_terminal`
+    # for the blue-arrow path because Kimi's Rich prompt swallows Enter
+    # when the delay is too short. Caller picks the delay (1s default,
+    # 3s when subsequent to /clear because the TUI repaint takes longer).
+    kimi_blue_arrow_dispatched = Signal(str, int)   # prompt, delay_ms
     # Generic PTY sessions bound to a concrete terminal channel.
     # channel values used by the app: "interactive" | "workspace"
     terminal_output_chunk_received = Signal(str, str)  # channel, chunk
@@ -172,6 +179,20 @@ class SignalBus(QObject):
 
     # --- Terminal focus (switch to output + focus terminal widget) ---
     focus_interactive_terminal = Signal()
+
+    # --- Terminal activity / idle (status dots) ---
+    # Emitted by OutputPanel._on_chunk() on every PTY data chunk — turns dot yellow.
+    terminal_activity = Signal(str)   # channel ("interactive" | "workspace")
+    # Emitted on the legacy heuristic path (terminal_session_finished) — starts a
+    # 2s hardening window. Authoritative skill notify files no longer route
+    # through this signal; they call MetricsBar._enter_authoritative_idle()
+    # directly via QFileSystemWatcher and set the dot green immediately.
+    terminal_force_idle = Signal(str) # channel ("interactive" | "workspace")
+
+    # --- Autocast (header toggle) ---
+    # Emitted by MetricsBar when the autocast loop wants to fire the next queue item.
+    # CommandQueueWidget connects this to a programmatic click on `queue-btn-play-next`.
+    autocast_step_requested = Signal()
 
 
 # Module-level singleton — always import `signal_bus`, never instantiate SignalBus directly

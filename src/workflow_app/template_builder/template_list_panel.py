@@ -111,7 +111,7 @@ _INTERACTIVE_CMDS = frozenset({
     "/optimize:scaffolds", "/optimize:blueprints", "/optimize:guardrails",
     "/optimize:integrations",
     # F4 — WBS (genuine interviews)
-    "/modules:create-core", "/modules:create-variants",
+    "/modules:create-core", "/modules:create-decomposition",
     "/rollout-strategy-create",
     # F4b — Micro
     "/micro-architecture", "/micro:plan", "/micro:setup",

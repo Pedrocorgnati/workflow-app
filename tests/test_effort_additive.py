@@ -4,13 +4,11 @@ Covers:
   - EffortLevel enum values mirror Claude Code /effort CLI flags
   - CommandSpec.effort defaults to STANDARD (backward compat)
   - Quick templates auto-tag HIGH-effort commands
-  - Autocast CLI emits --effort flag in both interactive and auto modes
   - Mapping helpers roundtrip through DB strings
 """
 
 from __future__ import annotations
 
-from workflow_app.command_queue.autocast_cli import build_launch_plan
 from workflow_app.domain import (
     CommandSpec,
     EffortLevel,
@@ -138,59 +136,3 @@ def test_quick_templates_auto_tag_heavy_commands_as_high():
                 )
 
 
-# ─── Autocast CLI --effort flag emission ──────────────────────────────────── #
-
-
-def test_autocast_emits_effort_flag_interactive():
-    spec = CommandSpec(
-        name="/prd-create",
-        model=ModelName.OPUS,
-        interaction_type=InteractionType.INTERACTIVE,
-        position=1,
-        effort=EffortLevel.HIGH,
-    )
-    plan = build_launch_plan(spec, "clauded")
-    assert "--effort" in plan.argv
-    idx = plan.argv.index("--effort")
-    assert plan.argv[idx + 1] == "high"
-
-
-def test_autocast_emits_effort_flag_auto():
-    spec = CommandSpec(
-        name="/prd-create",
-        model=ModelName.OPUS,
-        interaction_type=InteractionType.AUTO,
-        position=1,
-        effort=EffortLevel.MAX,
-    )
-    plan = build_launch_plan(spec, "clauded")
-    assert "--effort" in plan.argv
-    idx = plan.argv.index("--effort")
-    assert plan.argv[idx + 1] == "max"
-
-
-def test_autocast_emits_medium_for_standard_effort():
-    spec = CommandSpec(
-        name="/npm-run",
-        model=ModelName.SONNET,
-        interaction_type=InteractionType.AUTO,
-        position=1,
-        effort=EffortLevel.STANDARD,
-    )
-    plan = build_launch_plan(spec, "clauded")
-    assert "--effort" in plan.argv
-    idx = plan.argv.index("--effort")
-    assert plan.argv[idx + 1] == "medium"
-
-
-def test_autocast_low_effort():
-    spec = CommandSpec(
-        name="/clear",
-        model=ModelName.SONNET,
-        interaction_type=InteractionType.AUTO,
-        position=1,
-        effort=EffortLevel.LOW,
-    )
-    plan = build_launch_plan(spec, "clauded")
-    idx = plan.argv.index("--effort")
-    assert plan.argv[idx + 1] == "low"

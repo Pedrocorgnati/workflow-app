@@ -41,6 +41,31 @@ class TestOutputPanelInitialState:
         assert panel._pipeline_runner is None
 
 
+class TestOutputPanelHeuristicIdleByChannel:
+    """The heuristic 2s `_idle_timer` is armed for INTERACTIVE channel
+    only. Workspace bypasses it (Kimi's prompt emits subtle PTY chunks
+    indefinitely, so a silence heuristic never fires anyway and would
+    collide with the explicit notify-file path).
+    """
+
+    def test_interactive_chunk_arms_idle_timer(self, panel):
+        """Default panel (interactive mode) MUST arm the 2s timer. This
+        is how Claude flips green when no notify file is written."""
+        # `panel` fixture creates OutputPanel() = interactive mode
+        panel._on_chunk("hello")
+        assert panel._idle_timer.isActive()
+
+    def test_workspace_chunk_does_not_arm_idle_timer(self, qapp, qtbot):
+        """Workspace panel must NOT arm the heuristic — Kimi's prompt
+        emits subtle bytes forever; silence is unreliable there."""
+        from workflow_app.output_panel.output_panel import OutputPanel
+        ws = OutputPanel(workspace_mode=True)
+        qtbot.addWidget(ws)
+        ws.show()
+        ws._on_chunk("hello from kimi")
+        assert not ws._idle_timer.isActive()
+
+
 class TestOutputPanelAppendOutput:
     def test_append_shows_text(self, panel, qtbot):
         """append_output inserts text into the terminal widget."""

@@ -3,7 +3,7 @@
 Covers the path-resolution contract (v1.1) introduced after the Onda 8 bug
 where multi-segment relative `progress_path` values were silently joined to
 `loop_root.parent`, producing path duplication like
-`output/daily-loop/output/daily-loop/{slug}/PROGRESS.md`.
+`blacksmith/loop-archives/blacksmith/loop-archives/{slug}/PROGRESS.md`.
 
 Contract enforced here:
   - Absolute paths -> used as-is.
@@ -87,7 +87,7 @@ def _base_config(loop_root: Path, *, progress_path: str | None = "PROGRESS.md") 
 
 @pytest.fixture
 def loop_root(tmp_path: Path) -> Path:
-    """Create the typical layout: tmp_path/output/daily-loop/{slug}/."""
+    """Create the typical layout: tmp_path/blacksmith/loop-archives/{slug}/."""
     root = tmp_path / "output" / "daily-loop" / "fullprofile-hardening-onda8"
     root.mkdir(parents=True)
     (root / "tasks").mkdir()
@@ -113,14 +113,14 @@ class TestResolveLoopPath:
         self, loop_root: Path
     ) -> None:
         """Regression for Onda 8 bug — was joining to loop_root.parent and
-        producing /tmp/.../output/daily-loop/output/daily-loop/{slug}/PROGRESS.md."""
+        producing /tmp/.../blacksmith/loop-archives/blacksmith/loop-archives/{slug}/PROGRESS.md."""
         result = resolve_loop_path(
-            "output/daily-loop/fullprofile-hardening-onda8/PROGRESS.md",
+            "blacksmith/loop-archives/fullprofile-hardening-onda8/PROGRESS.md",
             loop_root,
             label="progress_path",
         )
-        # Must resolve UNDER loop_root, never duplicating output/daily-loop prefix.
-        assert "output/daily-loop/output/daily-loop" not in str(result)
+        # Must resolve UNDER loop_root, never duplicating blacksmith/loop-archives prefix.
+        assert "blacksmith/loop-archives/blacksmith/loop-archives" not in str(result)
         # Must be loop_root / declared_path:
         assert result == (loop_root / "output" / "daily-loop"
                           / "fullprofile-hardening-onda8" / "PROGRESS.md").resolve()
@@ -191,7 +191,7 @@ class TestBuildDailyLoopSpecs:
         """Onda 8 bug regression — used to produce path duplication via
         loop_root.parent + multi-segment-relative. Now resolves under loop_root.
 
-        We stage PROGRESS.md INSIDE loop_root/output/daily-loop/.../ to match
+        We stage PROGRESS.md INSIDE loop_root/blacksmith/loop-archives/.../ to match
         the new (deterministic) resolution rule.
         """
         nested = loop_root / "output" / "daily-loop" / "fullprofile-hardening-onda8"
@@ -199,7 +199,7 @@ class TestBuildDailyLoopSpecs:
         _write_progress(nested, items=[("001", " ", "tgt", "T-sonnet-medium")])
         cfg = _base_config(
             loop_root,
-            progress_path="output/daily-loop/fullprofile-hardening-onda8/PROGRESS.md",
+            progress_path="blacksmith/loop-archives/fullprofile-hardening-onda8/PROGRESS.md",
         )
         specs = build_daily_loop_specs(cfg, loop_root)
         # 1 clear + 5 body (model sonnet/effort medium/:do/model opus/:review-done — review-done effort dedup)
@@ -844,7 +844,7 @@ class TestOnda8RegressionReplay:
                 "version": "1.0.0",
                 "slug": "fullprofile-hardening-onda8",
                 "loop_root": str(loop_root),
-                "progress_path": "output/daily-loop/fullprofile-hardening-onda8/PROGRESS.md",
+                "progress_path": "blacksmith/loop-archives/fullprofile-hardening-onda8/PROGRESS.md",
                 "tasks_dir": "tasks",
                 "log_path": "_LOOP-LOG.md",
                 "total_items": 1,

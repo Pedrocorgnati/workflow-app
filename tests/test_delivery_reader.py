@@ -779,6 +779,120 @@ def test_locks_i04_partial_raises(tmp_path: Path) -> None:
     assert isinstance(result, DeliveryInvalid)
 
 
+def test_signed_off_block_loads_on_done_module(tmp_path: Path) -> None:
+    """signed_off persists alongside artifacts when state=done."""
+    wbs = tmp_path / "wbs"
+    wbs.mkdir()
+    done_module = _module(
+        "done",
+        history=[
+            {
+                "from": "pending",
+                "to": "done",
+                "at": "2026-04-12T12:00:00Z",
+                "by": "build-module-pipeline",
+                "note": "",
+            }
+        ],
+    )
+    done_module["signed_off"] = {
+        "result": "APROVADO",
+        "at": "2026-04-12T13:00:00Z",
+        "by": "delivery:sign-off",
+        "release_notes": "output/docs/x/delivery/RELEASE-NOTES-MILESTONE-1.md",
+        "note": None,
+    }
+    payload = {
+        "version": 1,
+        "project": _base_project(wbs),
+        "current_module": "module-1-crud",
+        "execution_mode": "sequential",
+        "modules": {"module-1-crud": done_module},
+        "skeleton": _base_skeleton(),
+        "locks": _base_locks_null(),
+        "metadata": _base_metadata(),
+    }
+    _write_delivery(wbs / DELIVERY_FILENAME, payload)
+
+    result = DeliveryReader().load(wbs)
+    assert isinstance(result, DeliveryFound)
+    so = result.delivery.modules["module-1-crud"].signed_off
+    assert so is not None
+    assert so.result == "APROVADO"
+    assert so.by == "delivery:sign-off"
+    assert so.release_notes is not None
+
+
+def test_signed_off_rejected_when_state_not_done(tmp_path: Path) -> None:
+    """signed_off only allowed on done modules — invariant guards against
+    accidental writes on creation/execution/qa stages."""
+    wbs = tmp_path / "wbs"
+    wbs.mkdir()
+    creation_module = _module("creation")
+    creation_module["signed_off"] = {
+        "result": "APROVADO",
+        "at": "2026-04-12T13:00:00Z",
+        "by": "delivery:sign-off",
+        "release_notes": None,
+        "note": None,
+    }
+    payload = {
+        "version": 1,
+        "project": _base_project(wbs),
+        "current_module": "module-1-crud",
+        "execution_mode": "sequential",
+        "modules": {"module-1-crud": creation_module},
+        "skeleton": _base_skeleton(),
+        "locks": _base_locks_null(),
+        "metadata": _base_metadata(),
+    }
+    _write_delivery(wbs / DELIVERY_FILENAME, payload)
+
+    result = DeliveryReader().load(wbs)
+    assert isinstance(result, DeliveryInvalid)
+    assert "signed_off" in (result.details or "")
+
+
+def test_signed_off_rejects_legacy_ts_field_in_history(tmp_path: Path) -> None:
+    """History entries must use `at` (not `ts`); regression test for the
+    sign-off bug that bricked the [DCP: Specific-Flow] button."""
+    wbs = tmp_path / "wbs"
+    wbs.mkdir()
+    bad_module = _module(
+        "done",
+        history=[
+            {
+                "from": "pending",
+                "to": "done",
+                "at": "2026-04-12T12:00:00Z",
+                "by": "build-module-pipeline",
+                "note": "",
+            },
+            {
+                "from": "done",
+                "to": "done",
+                "ts": "2026-04-12T13:00:00Z",  # WRONG: should be "at"
+                "by": "delivery:sign-off",
+                "note": "APROVADO",
+            },
+        ],
+    )
+    payload = {
+        "version": 1,
+        "project": _base_project(wbs),
+        "current_module": "module-1-crud",
+        "execution_mode": "sequential",
+        "modules": {"module-1-crud": bad_module},
+        "skeleton": _base_skeleton(),
+        "locks": _base_locks_null(),
+        "metadata": _base_metadata(),
+    }
+    _write_delivery(wbs / DELIVERY_FILENAME, payload)
+
+    result = DeliveryReader().load(wbs)
+    assert isinstance(result, DeliveryInvalid)
+
+
 def test_rework_without_target_raises(tmp_path: Path) -> None:
     payload = {
         "version": 1,

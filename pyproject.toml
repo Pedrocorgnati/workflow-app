@@ -35,6 +35,7 @@ packages = ["src/workflow_app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+cache_dir = ".cache/.pytest_cache"
 
 [tool.hatch.envs.default.scripts]
 db-seed = "python3 scripts/seed.py"
@@ -43,6 +44,7 @@ db-reset = "python3 scripts/seed.py --reset"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+cache-dir = ".cache/.ruff_cache"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
@@ -52,6 +54,7 @@ ignore = ["E501"]  # line too long handled by formatter
 python_version = "3.10"
 ignore_missing_imports = true
 exclude = ["tests/", "scripts/"]
+cache_dir = ".cache/.mypy_cache"
 
 [tool.mutmut]
 paths_to_mutate = "src/workflow_app/"

@@ -110,6 +110,9 @@ class CommandSpec:
     phase: str = "F?"                              # Pipeline phase (F1, F2, ...)
     config_path: str = ""                         # e.g. ".claude/projects/meu-projeto.json"
     effort: EffortLevel = EffortLevel.STANDARD    # Claude Code /effort level
+    testid: str = ""                              # data-testid override for queue item widget
+    blocked_reason: str = ""                      # If set, item renders as ERRO with this message
+    kimi_eligible: bool = False                   # True if this spec came from a kimi_eligible loop item
 
     def display_name(self) -> str:
         """Return formatted display string."""

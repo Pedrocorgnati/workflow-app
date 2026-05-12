@@ -199,7 +199,7 @@ def test_on_command_completed_auto_advances_to_next(manager):
     assert manager._current_index == 1
 
 
-def test_on_command_completed_interactive_does_not_autocast(manager):
+def test_on_command_completed_interactive_does_not_advance(manager):
     """INTERACTIVE type: successful completion must NOT auto-advance."""
     spec = _spec(interaction_type=InteractionType.INTERACTIVE)
     manager.set_queue([spec])

@@ -30,7 +30,7 @@ _HIGH_EFFORT_COMMANDS: frozenset[str] = frozenset({
     "/lld-create",
     "/threat-model-create",
     "/modules:create-core",
-    "/modules:create-variants",
+    "/modules:create-decomposition",
     "/modules:create-structure",
     "/modules:create-coverage",
     "/modules:review-created",
@@ -137,7 +137,7 @@ def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
         emitted before them.
 
     Applied to: Brief, Modules, Deploy, Mkt, Business, QA, Micro-Architecture,
-    Autocast, Blog. NOT applied to: Daily (context flows through the full
+    Listener Test, Blog. NOT applied to: Daily (context flows through the full
     session by design) or Intake Review (already hand-authored with triplets).
 
     Optimization: /model e /effort so sao reemitidos quando o valor MUDA em
@@ -206,8 +206,9 @@ TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
     _spec("/intake:obvious",            _O, _I,  2),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",              _O, _I,  3),
+    _spec("/intake:question",             _O, _A,  3),
+    _spec("/intake:response",             _O, _I,  3),
     _spec("/intake:front-end",            _O, _I,  4),
-    _spec("/tools:next-feature-research", _O, _I,  5),
     _spec("/tech-feasibility",            _O, _I,  5),
     _spec("/break-intake",                _S, _A,  6),
     _spec("/prd-create",                  _O, _I,  7),
@@ -232,11 +233,15 @@ TEMPLATE_BRIEF_NEW: list[CommandSpec] = _inject_clears([
     _spec("/review-prd-flow",           _O, _I, 24),
     _spec("/auto-flow rocks",           _S, _A, 25),
     _spec("/optimize:analyse-cmd",      _S, _A, 26),
-    _spec("/optimize:scaffolds",        _O, _I, 27),
-    _spec("/optimize:blueprints",       _O, _I, 28),
-    _spec("/optimize:guardrails",       _S, _I, 29),
-    _spec("/optimize:integrations",     _O, _I, 30),
-    _spec("/optimize:review",           _S, _A, 31),
+    # {specific-insertion} — runtime hook: workflow-app injeta aqui os comandos
+    # specific do projeto ativo (.claude/projects/{slug}.json > specific_commands.active[]).
+    # Ver ai-forge/workflow-rules/WORKFLOW-APP-RULES.md §4 e blacksmith/loop-archives/workflow-app-specific-insertion/PROMPT.md.
+    _spec("/optimize:cmd-insert",       _O, _I, 27),
+    _spec("/optimize:scaffolds",        _O, _I, 28),
+    _spec("/optimize:blueprints",       _O, _I, 29),
+    _spec("/optimize:guardrails",       _S, _I, 30),
+    _spec("/optimize:integrations",     _O, _I, 31),
+    _spec("/optimize:review",           _S, _A, 32),
 ])
 
 # ─── Brief: Feature (from z-templates/start.md [feature]) ───────────────────── #
@@ -247,8 +252,9 @@ TEMPLATE_BRIEF_FEATURE: list[CommandSpec] = _inject_clears([
     _spec("/intake:obvious",            _O, _I,  2),
     _spec("/intake:analyze",            _S, _A,  2),
     _spec("/intake:enhance",              _O, _I,  3),
+    _spec("/intake:question",             _O, _A,  3),
+    _spec("/intake:response",             _O, _I,  3),
     _spec("/intake:front-end",            _O, _I,  4),
-    _spec("/tools:next-feature-research", _O, _I,  5),
     _spec("/tech-feasibility",            _O, _I,  5),
     _spec("/break-intake",                _S, _A,  6),
     _spec("/prd-create",                  _O, _I,  7),
@@ -264,6 +270,10 @@ TEMPLATE_BRIEF_FEATURE: list[CommandSpec] = _inject_clears([
     _spec("/review-prd-flow",           _O, _I, 17),
     _spec("/auto-flow rocks",           _S, _A, 18),
     _spec("/optimize:analyse-cmd",      _S, _A, 19),
+    # {specific-insertion} — runtime hook: workflow-app injeta aqui os comandos
+    # specific do projeto ativo (.claude/projects/{slug}.json > specific_commands.active[]).
+    # Ver ai-forge/workflow-rules/WORKFLOW-APP-RULES.md §4.
+    _spec("/optimize:cmd-insert",       _O, _I, 19),
     _spec("/optimize:scaffolds",        _O, _I, 19),
     _spec("/optimize:blueprints",       _O, _I, 19),
     _spec("/optimize:guardrails",       _S, _I, 20),
@@ -277,7 +287,7 @@ TEMPLATE_MODULES: list[CommandSpec] = _inject_clears([
     _spec("/clear",                     _S, _A, 0),
     _spec("/modules:create-core",       _O, _I, 1),
     _spec("/modules:create-blueprints", _S, _A, 2),
-    _spec("/modules:create-variants",   _O, _I, 3),
+    _spec("/modules:create-decomposition", _O, _I, 3),
     _spec("/modules:create-structure",  _S, _A, 4),
     _spec("/modules:create-coverage",   _S, _A, 5),
     _spec("/modules:user-stories",      _S, _A, 6),
@@ -287,6 +297,32 @@ TEMPLATE_MODULES: list[CommandSpec] = _inject_clears([
     _spec("/modules:build-milestones",       _S, _I, 10),
     _spec("/modules:build-shared-skeleton",  _S, _A, 11),
     _spec("/delivery:init",                  _S, _A, 12),
+])
+
+# ─── Migration (WordPress legacy → Next.js multi-tenant) ────────────────────── #
+# Usado quando o projeto migra N sites WP em hosting Apache (HostGator/UOL/etc)
+# para um monorepo Next.js multi-tenant. Sequencia: scrape → mapa de redirects →
+# .htaccess por tenant → bootstrap zonas Cloudflare → cutover DNS sequencial.
+
+TEMPLATE_MIGRATION: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                          _S, _A, 0),
+    _spec("/migration:wp-scrape",            _O, _I, 1),
+    _spec("/migration:redirect-map",         _O, _I, 2),
+    _spec("/migration:htaccess-gen",         _S, _A, 3),
+    _spec("/seo:cloudflare-zone-bootstrap",  _S, _I, 4),
+    _spec("/migration:dns-cutover",          _S, _I, 5),
+])
+
+# ─── HostGator multi-tenant (build orquestrado + deploy + NAP validation) ──── #
+# Sequencia operacional pos-migracao para projetos com N tenants estaticos
+# em HostGator compartilhado: build N-output → validacao NAP local SEO →
+# commit + rsync deploy multi-dominio.
+
+TEMPLATE_HOSTGATOR: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                          _S, _A, 0),
+    _spec("/multitenant:build-orchestrate",  _S, _I, 1),
+    _spec("/seo:nap-validate",               _O, _A, 2),
+    _spec("/commit:hostgator",               _S, _I, 3),
 ])
 
 # ─── Deploy (from z-templates/deploy.md) ─────────────────────────────────────── #
@@ -317,6 +353,21 @@ TEMPLATE_DAILY: list[CommandSpec] = [
     _spec("/daily:do",       _S, _A, 3),
     _spec("/daily:validate", _S, _A, 4),
     _spec("/daily:review",   _S, _A, 5),
+]
+
+# ─── Create Daily Loop (preparo no terminal — gera blacksmith/loop-archives/{slug}/) ── #
+# Roda /daily-loop como orquestrador unico que internamente encadeia
+# scan -> plan -> enumerate. Saida: PROGRESS.md + tasks/T-{model}-{effort}.md +
+# _LOOP-CONFIG.json. Depois desse template, o usuario carrega o _LOOP-CONFIG.json
+# em metrics-project-pill e clica [Execute daily loop] (queue-btn-execute-daily-loop)
+# para expandir os items pendentes na fila.
+#
+# Frontmatter de /daily-loop declara model: opus, effort: high — repetimos aqui
+# para que /clear, /model e /effort sejam injetados no padrao do workflow-app.
+
+TEMPLATE_CREATE_DAILY_LOOP: list[CommandSpec] = [
+    _spec("/clear",       _O, _A, 0),
+    _spec("/daily-loop",  _O, _A, 1, effort=EffortLevel.HIGH),
 ]
 
 # ─── Intake Seed (preparacao do INTAKE para /intake-review:seed) ─────────────── #
@@ -467,7 +518,7 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
 #
 # Ajustes sobre o clone naive (analise Level 2 primary+secondary):
 #  - /skill:mcp-codex recebe argumento explicito (skip_prompt implicito via topic),
-#    caso contrario entraria em modo interativo e quebraria o autocast.
+#    caso contrario entraria em modo interativo e quebraria a fila.
 #  - list-improove em HIGH (satura antes do MAX — comando criativo/inferencial).
 #
 # Anti-overload (splits baseados em tamanho real dos comandos subjacentes):
@@ -480,7 +531,7 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
 #  - /build-verify entre P0+P1 e P2 para garantir que P0+P1 nao quebraram.
 #  - /validate-stack antes do veredito para audit completo da stack.
 #  - /assets:create apos review-executed para scan final de placeholders de
-#    imagem e gerar prompts em output/assets/ASSETS-TO-CREATE.md (append-only).
+#    imagem e gerar prompts em forged-goods/assets/ASSETS-TO-CREATE.md (append-only).
 #
 # Limitacao conhecida: se /intake-review:review-executed emitir REPROVADO, o
 # Ciclo 2 (re-run de create-gaplist com gaps residuais) precisa ser disparado
@@ -774,9 +825,12 @@ TEMPLATE_MICRO_ARCHITECTURE: list[CommandSpec] = _inject_clears([
     _spec("/review-executed-micro-architecture", _O, _A, 7),
 ])
 
-# ─── Autocast Test (F4b/Daily — validação do ciclo de autocast) ─────────────── #
+# ─── Listener Test (valida o ciclo dos dots listener-{interactive,workspace}) ── #
+# Mistura comandos AUTO (test-autoflow-auto, dispara notify-terminal-idle no fim)
+# e INTERACTIVE (test-autoflow-interactive). Util para testar dispatch via
+# [Rodar próximo] tanto no Claude (verde) quanto no Kimi (azul, via /skill:).
 
-TEMPLATE_AUTOCAST_TEST: list[CommandSpec] = _inject_clears([
+TEMPLATE_LISTENER_TEST: list[CommandSpec] = _inject_clears([
     _spec("/clear",                     _S, _A, 0),
     _spec("/test-autoflow-auto",        _S, _A, 1),
     _spec("/test-autoflow-auto",        _S, _A, 2),

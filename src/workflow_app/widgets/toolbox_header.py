@@ -24,6 +24,8 @@ from workflow_app.signal_bus import signal_bus
 
 SKILLS_DATA: list[tuple[str, str, str]] = [
     ("mcp-codex",    "/skill:mcp-codex",                    "Pair programming com Codex MCP (4 níveis)"),
+    ("mcp-kimi",     "/skill:mcp-kimi",                      "Persona-aware Kimi orchestrator"),
+    ("double-mcp",   "/skill:double-mcp",                    "Co-execução paralela Codex+Kimi com merge"),
     ("resolve-gaps", "/skill:resolve-gaps",                  "Resolução interativa de gaps"),
     ("resume-flow",  "/skill:resume-flow",                   "Retomada inteligente após limite de contexto"),
     ("budget-al",    "/skill:budget-alignment",              "Alinhamento de orçamento"),
@@ -37,9 +39,7 @@ SKILLS_DATA: list[tuple[str, str, str]] = [
     ("exec-ready",   "/skill:execution-readiness-verifier",  "Verificação de readiness"),
     ("handoff",      "/skill:handoff-alignment",             "Alinhamento de handoff"),
     ("integ-bnd",    "/skill:integration-boundary-decision", "Decisão de boundary de integração"),
-    ("metric-pr",    "/skill:metric-priority-arbiter",       "Arbitragem: SLO vs deadline vs custo"),
     ("observab",     "/skill:observability-decision",        "Decisão de observabilidade"),
-    ("proc-pause",   "/skill:process-pause-signal",          "Sinal de pausa em loops 2+"),
     ("qa-sev",       "/skill:qa-severity-decider",           "Classificação de severidade QA"),
     ("sec-gate",     "/skill:security-review-gate",          "Gate de revisão de segurança"),
     ("test-fail",    "/skill:test-failure-decision",         "Decisão para falhas de teste persistentes"),

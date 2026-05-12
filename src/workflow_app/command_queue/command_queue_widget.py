@@ -14,12 +14,16 @@ import copy
 import json
 import logging
 from pathlib import Path
+import os
 import re
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QDialog,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -32,27 +36,28 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app import dcp as dcp_pkg
-from workflow_app.command_queue.autocast_cli import build_launch_plan
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
+from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
 from workflow_app.dcp.specific_flow_handler import build_paste_command_only
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
 from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, InteractionType, ModelName
-from workflow_app.sdk.pty_runner import PtyRunner
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
     TEMPLATE_AUTO_IMPROOVE,
-    TEMPLATE_AUTOCAST_TEST,
     TEMPLATE_BLOG,
     TEMPLATE_BOILERPLATE,
     TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
+    TEMPLATE_CREATE_DAILY_LOOP,
     TEMPLATE_DAILY,
     TEMPLATE_DEPLOY,
-    TEMPLATE_INTAKE_MAX_REVIEW,
+    TEMPLATE_HOSTGATOR,
     TEMPLATE_INTAKE_REVIEW,
     TEMPLATE_INTAKE_SEED,
     TEMPLATE_JSON,
+    TEMPLATE_LISTENER_TEST,
+    TEMPLATE_MIGRATION,
     TEMPLATE_MKT,
     TEMPLATE_MODULES,
     TEMPLATE_PYTHON_IMPROOVE,
@@ -90,6 +95,19 @@ _TAB_INACTIVE_STYLE = (
 )
 
 logger = logging.getLogger(__name__)
+
+_MODEL_MAP = {
+    "opus": ModelName.OPUS,
+    "sonnet": ModelName.SONNET,
+    "haiku": ModelName.HAIKU,
+}
+
+_EFFORT_MAP = {
+    "low": EffortLevel.LOW,
+    "medium": EffortLevel.STANDARD,
+    "high": EffortLevel.HIGH,
+    "max": EffortLevel.MAX,
+}
 
 
 class _CollapsibleSection(QWidget):
@@ -213,12 +231,30 @@ class CommandQueueWidget(QWidget):
 
         self._items: list[CommandItemWidget] = []
         self._pipeline_manager = None
-        self._autocast_active = False
-        self._loop_active = False  # Loop mode: restart queue when all commands finish
         self._cli_binary = "clauded"  # Active CLI instance (updated via instance_selected)
-        self._autocast_runner: PtyRunner | None = None
-        self._autocast_current_item: CommandItemWidget | None = None
-        self._autocast_stop_requested = False
+
+        # Pending modal-confirmation Enter (currently used by /effort to
+        # auto-dismiss Claude Code's confirmation prompt). Stored so the
+        # next dispatch can cancel it — otherwise the late Enter fires
+        # into AskUserQuestion menus or other interactive prompts of the
+        # next command and selects the default option.
+        self._pending_modal_enter_timer: QTimer | None = None
+
+        # Tracks whether the LAST workspace dispatch was /clear. The next
+        # blue-arrow Kimi dispatch reads this to add 2s extra delay before
+        # Enter (Kimi takes longer to render its prompt right after a clear
+        # because the whole TUI is being repainted from scratch).
+        self._last_workspace_dispatch_was_clear: bool = False
+
+        # Onda 4: SPECIFIC-FLOW.json path of the currently-loaded DCP queue,
+        # set by `_on_dcp_specific_flow_clicked` after a successful load.
+        # When set, [Remove] persists the deleted command name to
+        # overrides.skipped[] in this file so the next reload (or regen
+        # without --reset-overrides) honors the deletion. Cleared by any
+        # other pipeline_ready emission to avoid leaking DCP context into
+        # legacy templates.
+        self._current_dcp_flow_path: Path | None = None
+
         self._setup_ui()
         self._connect_signals()
 
@@ -267,21 +303,40 @@ class CommandQueueWidget(QWidget):
             ("daily", "Daily tasks: scan → plan → do → validate → review",
              lambda: self._load_quick_template(TEMPLATE_DAILY, name="Daily"),
              "queue-btn-daily"),
+            ("Create daily loop",
+             "Create Daily Loop — roda /daily-loop no terminal (Opus/HIGH). "
+             "Pipeline interativo: scan -> plan -> enumerate. Gera "
+             "blacksmith/loop-archives/{slug}/ com PROGRESS.md, tasks/T-{model}-{effort}.md "
+             "e _LOOP-CONFIG.json. Depois carregue o _LOOP-CONFIG.json em "
+             "metrics-project-pill e clique [Execute daily loop].",
+             self._on_create_daily_loop_clicked,
+             "queue-btn-create-daily-loop"),
+            ("Cmd Single",
+             "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
+             "avulso sem preparo terminal. Selecione um .md com heading canonico "
+             "(# /grupo:nome) e o workflow-app expande a sub-sequencia inline.",
+             self._on_cmd_single_clicked,
+             "queue-btn-cmd-single"),
+            ("Execute daily loop",
+             "Execute Daily Loop — expande a fila finita gerada por Create. "
+             "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
+             "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
+             "/daily-loop:review-done (Opus/standard, /skill:double-mcp Level 3 "
+             "CROSS_ADVERSARIAL — analogo per-item de /review-executed-task, "
+             "reverte+corrige+re-acceptance se achar regressao). Final: "
+             "/daily-loop:review global em Opus/HIGH. /clear/model/effort "
+             "dedupados entre buckets.",
+             self._on_daily_loop_clicked, "queue-btn-execute-daily-loop"),
             ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
              lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
              "queue-btn-intake-seed"),
             ("intake-review", "Intake Review (F9): create-checklist → list-improove → compare → create-gaplist → execute-gaplist-p0 → execute-gaplist-p1 → execute-gaplist-p2 → review-executed → clear",
              lambda: self._load_quick_template(TEMPLATE_INTAKE_REVIEW, name="Intake Review"),
              "queue-btn-intake-review"),
-            ("intake-max-review", "Intake MAX Review — clone do Intake Review com Opus/MAX em todo fluxo + gates /skill:mcp-codex adversarial (clear final mantem Haiku/LOW). Versao deep para entrega de alta profundidade.",
-             lambda: self._load_quick_template(TEMPLATE_INTAKE_MAX_REVIEW, name="Intake MAX Review"),
-             "queue-btn-intake-max-review"),
             ("delivery plan", "Planejamento: analyse → identify → create-tasks",
              self._on_delivery_plan_clicked, "queue-btn-delivery-plan"),
             ("delivery qa", "Validacao: qa-gate → mcp-review → sign-off",
              self._on_delivery_qa_clicked, "queue-btn-delivery-qa"),
-            ("micro-json", "Configura project.json para micro-arquitetura",
-             self._on_micro_json_clicked, "queue-btn-micro-json"),
             ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
              lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
              "queue-btn-blog"),
@@ -306,16 +361,20 @@ class CommandQueueWidget(QWidget):
             ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
              lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
              "queue-btn-modules"),
-            ("DCP: Gerar Pipeline", "Cola /build-module-pipeline no terminal — decide automaticamente entre novo pipeline ou --regenerate baseado no delivery.json",
+            ("DCP: Gerar Pipeline (regen)",
+             "DESTRUTIVO quando SPECIFIC-FLOW.json ja existe.\n"
+             "Cola /build-module-pipeline no terminal — decide automaticamente entre novo "
+             "pipeline (state=pending) ou --regenerate (sobrescreve, salva .bak-{ISO}). "
+             "Edicoes manuais no SPECIFIC-FLOW.json sao perdidas. "
+             "Modal de confirmacao aparece antes do paste quando o arquivo ja existe.",
              self._on_dcp_build_clicked, "queue-btn-dcp-build"),
-            ("DCP: Specific-Flow", "Le o SPECIFIC-FLOW.json do modulo atual e carrega os comandos na fila para execucao via Autocast",
+            ("DCP: Specific-Flow (load)",
+             "Le o SPECIFIC-FLOW.json do modulo atual e carrega os comandos na fila para "
+             "execucao manual.\n"
+             "ATENCAO: deletes/reorder na fila visual sao TRANSIENT — re-clicar este botao "
+             "recarrega do disco e os itens removidos voltam. Para fix permanente, edite "
+             "MODULE-META.json e regenere via [DCP: Gerar Pipeline].",
              self._on_dcp_specific_flow_clicked, "queue-btn-dcp-specific-flow"),
-            ("wbs", "[legacy WBS] WBS dinâmico — analisa modules existentes e gera tasks",
-             self._on_wbs_clicked, "queue-btn-wbs"),
-            ("create", "[legacy WBS] WBS create — F5: auto-flow create por module + validate + reforge",
-             self._on_wbs_create_clicked, "queue-btn-wbs-create"),
-            ("execute", "[legacy WBS] WBS execute — F7+F8: build + execute por module + complemento",
-             self._on_wbs_execute_clicked, "queue-btn-wbs-execute"),
             ("specific-flow (legacy)", "[legacy custom-template] — use DCP: Specific-Flow",
              self._on_specific_flow_clicked, "queue-btn-specific-flow"),
             ("qa", "[legacy F9] QA + auditoria de stack (selecione a stack no modal)",
@@ -323,6 +382,7 @@ class CommandQueueWidget(QWidget):
             ("deploy", "[legacy F11] CI/CD, infra, pre-deploy, SLO, changelog",
              lambda: self._load_quick_template(TEMPLATE_DEPLOY, name="Deploy"),
              "queue-btn-deploy"),
+
         ])
         self._apply_dcp_reader_gating(workflow_content)
         header_layout.addWidget(workflow_content)
@@ -340,18 +400,14 @@ class CommandQueueWidget(QWidget):
              self._on_boilerplate_clicked, "queue-btn-boilerplate"),
             ("micro-arch", "Carrega pipeline de micro-arquitetura",
              self._on_micro_arch_clicked, "queue-btn-micro-arch"),
-            ("autocast-test", "Testa ciclo completo do autocast",
-             lambda: self._load_quick_template(TEMPLATE_AUTOCAST_TEST, name="Autocast Test"),
-             "queue-btn-autocast-test"),
+            ("listener-test", "Testa o ciclo do listener-workspace dot. Carrega /test-autoflow-auto (compativel Kimi via /skill:test-autoflow-auto).",
+             lambda: self._load_quick_template(TEMPLATE_LISTENER_TEST, name="Listener Test"),
+             "queue-btn-listener-test"),
             ("python-improove", "Auto-Improove Python — /model opus + /effort high + 20× (/clear + /auto-improove:python). Delega trechos deterministicos dos comandos para scripts Python co-localizados. Sem vinculo com projeto.",
              self._on_python_improove_clicked,
              "queue-btn-python-improove"),
-            ("Sonnet", "Envia /model sonnet no terminal",
-             lambda: signal_bus.run_command_in_terminal.emit("/model sonnet"),
-             "queue-btn-model-sonnet"),
-            ("Opus", "Envia /model opus no terminal",
-             lambda: signal_bus.run_command_in_terminal.emit("/model opus"),
-             "queue-btn-model-opus"),
+            ("micro-json", "Configura project.json para micro-arquitetura",
+             self._on_micro_json_clicked, "queue-btn-micro-json"),
         ])
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
@@ -371,9 +427,17 @@ class CommandQueueWidget(QWidget):
         pl = QHBoxLayout(play_bar)
         pl.setContentsMargins(8, 5, 8, 5)
 
+        # "Rodar próximo" — botão dominante da play bar (primeira posição,
+        # verde #16A34A, stretch=7). Executa o proximo item pendente da fila e
+        # para. Funciona em qualquer item (auto ou interactive). Diferente do
+        # _btn_next ("Continuar: X") que aparece SO em pause de interactive.
         self._play_btn = QPushButton("▶  Rodar próximo")
         self._play_btn.setProperty("testid", "queue-btn-play-next")
         self._play_btn.setFixedHeight(32)
+        self._play_btn.setToolTip(
+            "Executa o proximo item pendente da fila e para.\n"
+            "Funciona com qualquer item — auto ou interactive."
+        )
         self._play_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
             "  border: none; border-radius: 5px;"
@@ -382,47 +446,43 @@ class CommandQueueWidget(QWidget):
             "QPushButton:pressed { background-color: #166534; }"
             "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
         )
-        self._play_btn.clicked.connect(self.run_next_pending)
+        self._play_btn.clicked.connect(self._on_step_btn_clicked)
         pl.addWidget(self._play_btn, stretch=7)
 
-        # Autocast button — runs all AUTO commands sequentially, stops on INTERACTIVE
-        self._autocast_btn = QPushButton("Autocast")
-        self._autocast_btn.setProperty("testid", "queue-btn-autocast")
-        self._autocast_btn.setFixedHeight(32)
-        self._autocast_btn.setToolTip(
-            "Executa comandos automáticos em sequência.\n"
-            "Para ao chamar o primeiro comando interativo."
+        # Use Kimi checkbox — quando marcado, [Rodar próximo] (queue-btn-play-next)
+        # clica na seta AZUL (kimi) ao inves da VERDE (claude) para items que
+        # estao na whitelist Kimi (kimi_whitelist.is_kimi_compatible). Items
+        # fora da whitelist seguem rodando no Claude independente do estado do
+        # checkbox. Ocupa o slot que antes era do botão Autocast (removido).
+        _kimi_box = QWidget()
+        _kimi_box.setProperty("testid", "queue-div-use-kimi")
+        _kimi_box.setFixedHeight(32)
+        _kimi_box.setStyleSheet(
+            "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
+            "  border-radius: 5px; }"
         )
-        self._autocast_btn.setStyleSheet(
-            "QPushButton { background-color: #7C3AED; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #6D28D9; }"
-            "QPushButton:pressed { background-color: #5B21B6; }"
-            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+        _kbl = QHBoxLayout(_kimi_box)
+        _kbl.setContentsMargins(10, 0, 10, 0)
+        _kbl.setSpacing(8)
+        self._use_kimi_chk = QCheckBox("Use Kimi")
+        self._use_kimi_chk.setProperty("testid", "queue-chk-use-kimi")
+        self._use_kimi_chk.setToolTip(
+            "Quando marcado, [Rodar próximo] dispara via Kimi (seta azul) para\n"
+            "items kimi-compatible. Items fora da whitelist seguem rodando no\n"
+            "Claude (seta verde) — checkbox e ignorado nesse caso."
         )
-        self._autocast_btn.clicked.connect(self._on_autocast_clicked)
-        pl.addWidget(self._autocast_btn, stretch=2)
-
-        # Loop button — runs autocast in a loop (restarts queue when finished)
-        self._loop_btn = QPushButton("Loop")
-        self._loop_btn.setProperty("testid", "queue-btn-loop")
-        self._loop_btn.setFixedHeight(32)
-        self._loop_btn.setToolTip(
-            "Executa comandos em loop contínuo.\n"
-            "Quando o último termina, reinicia pelo primeiro.\n"
-            "Clique 'Parar' para interromper."
+        self._use_kimi_chk.setStyleSheet(
+            "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
+            "  background: transparent; border: none; padding: 0; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
+            "  border: 1px solid #52525B; border-radius: 3px; }"
+            "QCheckBox::indicator:checked { background-color: #3B82F6;"
+            "  border: 1px solid #3B82F6; border-radius: 3px; }"
+            "QCheckBox::indicator:hover { border-color: #93C5FD; }"
         )
-        self._loop_btn.setStyleSheet(
-            "QPushButton { background-color: #0891B2; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #0E7490; }"
-            "QPushButton:pressed { background-color: #155E75; }"
-            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
-        )
-        self._loop_btn.clicked.connect(self._on_loop_clicked)
-        pl.addWidget(self._loop_btn, stretch=2)
+        _kbl.addWidget(self._use_kimi_chk)
+        pl.addWidget(_kimi_box, stretch=2)
 
         # Botão JSON — copia path do project.json para o clipboard
         self._json_btn = QPushButton("JSON")
@@ -455,6 +515,7 @@ class CommandQueueWidget(QWidget):
         )
         self._ws_btn.clicked.connect(self._on_copy_ws_path)
         pl.addWidget(self._ws_btn, stretch=1)
+
         main_layout.addWidget(play_bar)
 
         # Template indicator label — shows which template/button was clicked
@@ -704,7 +765,18 @@ class CommandQueueWidget(QWidget):
         signal_bus.pipeline_error_occurred.connect(self._on_pipeline_error_with_message)
         signal_bus.interactive_advance_ready.connect(self._on_interactive_advance_ready)
         signal_bus.instance_selected.connect(self._on_instance_selected)
+        signal_bus.autocast_step_requested.connect(self._on_autocast_step_requested)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
+
+    def _on_autocast_step_requested(self) -> None:
+        """Programmatic click on `queue-btn-play-next` driven by the autocast loop.
+
+        Emits no-op when the button is disabled (e.g. queue empty or already
+        running) — the autocast state machine in MetricsBar interprets the
+        absence of a busy transition as 'queue empty' and stops itself.
+        """
+        if self._play_btn.isEnabled():
+            self._play_btn.click()
 
     # ──────────────────────────────────── Section tabs (accordion) ─── #
 
@@ -746,13 +818,6 @@ class CommandQueueWidget(QWidget):
     def set_pipeline_manager(self, pipeline_manager) -> None:
         """Inject the PipelineManager to enable can_reorder guards."""
         self._pipeline_manager = pipeline_manager
-
-    def run_next_pending(self) -> None:
-        """Find the first row not yet sent to terminal and trigger it."""
-        for item in self._items:
-            if item.is_pending_run():
-                item._on_run_clicked()
-                return
 
     def _on_copy_json_path(self) -> None:
         """Copia o caminho relativo do project.json para o clipboard."""
@@ -1030,87 +1095,6 @@ class CommandQueueWidget(QWidget):
         )
         self._load_quick_template(template, name="Micro-Architecture")
 
-    def _on_wbs_clicked(self) -> None:
-        """Build WBS template dynamically from existing modules."""
-        from workflow_app.config.app_state import app_state
-        from workflow_app.templates.quick_templates import _inject_clears
-        from workflow_app.templates.wbs_template_builder import build_wbs_template
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o WBS.", "warning"
-            )
-            return
-
-        config = app_state.config
-        template = build_wbs_template(
-            wbs_root=config.wbs_root,
-            project_dir=str(config.project_dir),
-        )
-
-        if not template:
-            signal_bus.toast_requested.emit(
-                "Nenhum module encontrado em modules/. Execute /auto-flow modules primeiro.",
-                "warning",
-            )
-            return
-
-        self._load_quick_template(_inject_clears(template), name="WBS")
-
-    def _on_wbs_create_clicked(self) -> None:
-        """Build WBS create template dynamically (F5: auto-flow create + validate + reforge)."""
-        from workflow_app.config.app_state import app_state
-        from workflow_app.templates.quick_templates import _inject_clears
-        from workflow_app.templates.wbs_template_builder import build_wbs_create_template
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o WBS Create.", "warning"
-            )
-            return
-
-        config = app_state.config
-        template = build_wbs_create_template(
-            wbs_root=config.wbs_root,
-            project_dir=str(config.project_dir),
-        )
-
-        if not template:
-            signal_bus.toast_requested.emit(
-                "Nenhum module encontrado em modules/. Execute /auto-flow modules primeiro.",
-                "warning",
-            )
-            return
-
-        self._load_quick_template(_inject_clears(template), name="WBS Create")
-
-    def _on_wbs_execute_clicked(self) -> None:
-        """Build WBS execute template dynamically (F7+F8: build + execute per module + complemento)."""
-        from workflow_app.config.app_state import app_state
-        from workflow_app.templates.quick_templates import _inject_clears
-        from workflow_app.templates.wbs_template_builder import build_wbs_execute_template
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o WBS Execute.", "warning"
-            )
-            return
-
-        config = app_state.config
-        template = build_wbs_execute_template(
-            wbs_root=config.wbs_root,
-            project_dir=str(config.project_dir),
-        )
-
-        if not template:
-            signal_bus.toast_requested.emit(
-                "Nenhum module encontrado em modules/. Execute /auto-flow modules primeiro.",
-                "warning",
-            )
-            return
-
-        self._load_quick_template(_inject_clears(template), name="WBS Execute")
-
     def _on_specific_flow_clicked(self) -> None:
         """Load SPECIFIC-FLOW.json generated by /workflow-custom-template.
 
@@ -1363,8 +1347,69 @@ class CommandQueueWidget(QWidget):
             )
             return
 
+        # Gate 6 — dependency readiness (mirrors CLI invariant I-10, step 11).
+        # Only for pending → creation; modules past pending were already gated at
+        # their own transition. Without this check the button pastes a command
+        # destined to exit 1 with a cryptic CLI message.
+        if module.state == "pending" and module.dependencies:
+            blockers = [
+                dep_id
+                for dep_id in module.dependencies
+                if dep_id not in delivery.modules
+                or delivery.modules[dep_id].state != "done"
+            ]
+            if blockers:
+                dep_lines = []
+                for dep_id in blockers:
+                    dep = delivery.modules.get(dep_id)
+                    state_label = dep.state if dep else "ausente"
+                    dep_lines.append(f"  • {dep_id} — {state_label}")
+                QMessageBox.warning(
+                    self,
+                    "DCP — Dependências não concluídas",
+                    f"Módulo {cm_id!r} não pode iniciar (pending → creation).\n\n"
+                    "Dependências pendentes:\n" + "\n".join(dep_lines) + "\n\n"
+                    "Complete o loop de cada dependência até state=done primeiro.",
+                )
+                return
+
         # All gates passed — choose --regenerate when module is past pending
         regenerate = module.state != "pending"
+
+        # Destructive guard — when --regenerate AND SPECIFIC-FLOW.json already
+        # exists on disk, surface metadata + warn about manual-edit loss before
+        # pasting. CLI still backs up to .bak-{ISO_UTC} but the queue UI will
+        # re-mirror the regenerated file, so any manual deletes are wiped.
+        if regenerate:
+            flow_path = wbs_root / "modules" / cm_id / "SPECIFIC-FLOW.json"
+            if flow_path.exists():
+                command_count: int | None = None
+                try:
+                    flow_data = json.loads(flow_path.read_text(encoding="utf-8"))
+                    if isinstance(flow_data, dict):
+                        commands_raw = flow_data.get("commands")
+                        if isinstance(commands_raw, list):
+                            command_count = len(commands_raw)
+                except (json.JSONDecodeError, OSError):
+                    command_count = None
+
+                from workflow_app.dialogs.confirm_regenerate_specific_flow_modal import (
+                    ConfirmRegenerateSpecificFlowModal,
+                )
+
+                modal = ConfirmRegenerateSpecificFlowModal(
+                    flow_path=flow_path,
+                    command_count=command_count,
+                    cm_id=cm_id,
+                    parent=self,
+                )
+                if modal.exec() != QDialog.DialogCode.Accepted:
+                    logger.info(
+                        "[DCP] regen cancelado pelo usuario (modulo=%s, cmds=%s)",
+                        cm_id, command_count,
+                    )
+                    return
+
         cmd = build_paste_command_only(
             config=config, current_module=cm_id, regenerate=regenerate,
         )
@@ -1378,7 +1423,7 @@ class CommandQueueWidget(QWidget):
         Reads delivery.json to resolve `current_module`, then uses the
         DCP-9.2 cascade (artifacts.last_specific_flow -> custom_workflow_root)
         to locate the JSON and populate the queue via `pipeline_ready`.
-        The user can then run the pipeline via Autocast.
+        The user can then dispatch each item with [Rodar próximo].
         """
         from workflow_app.config.app_state import app_state
 
@@ -1448,9 +1493,23 @@ class CommandQueueWidget(QWidget):
         )
 
         if flow_path is None or not flow_path.exists():
+            dep_extra = ""
+            if module is not None and module.state == "pending" and module.dependencies:
+                unmet = [
+                    dep_id for dep_id in module.dependencies
+                    if dep_id not in delivery.modules
+                    or delivery.modules[dep_id].state != "done"
+                ]
+                if unmet:
+                    labels = [
+                        f"{d}({delivery.modules[d].state})"
+                        if d in delivery.modules else f"{d}(ausente)"
+                        for d in unmet
+                    ]
+                    dep_extra = f" Deps bloqueantes: {', '.join(labels)}."
             signal_bus.toast_requested.emit(
                 f"SPECIFIC-FLOW.json nao encontrado para {cm_id}. "
-                "Execute [DCP: Gerar Pipeline] primeiro.",
+                f"Execute [DCP: Gerar Pipeline] primeiro.{dep_extra}",
                 "warning",
             )
             return
@@ -1473,6 +1532,28 @@ class CommandQueueWidget(QWidget):
                 "SPECIFIC-FLOW.json invalido: campo 'commands' deve ser uma lista.", "error"
             )
             return
+
+        # Onda 4: honor operator-persisted skip list. overrides.skipped[]
+        # is a list of fully-rendered command name strings. Filter happens
+        # before model/effort mapping so skipped commands never enter the queue.
+        overrides = data.get("overrides") if isinstance(data.get("overrides"), dict) else {}
+        skipped_raw = overrides.get("skipped") if isinstance(overrides, dict) else None
+        skipped_set: set[str] = (
+            {s for s in skipped_raw if isinstance(s, str) and s}
+            if isinstance(skipped_raw, list) else set()
+        )
+        if skipped_set:
+            before = len(commands_raw)
+            commands_raw = [
+                c for c in commands_raw
+                if not (isinstance(c, dict) and c.get("name") in skipped_set)
+            ]
+            removed = before - len(commands_raw)
+            if removed:
+                logger.info(
+                    "[DCP] overrides.skipped filtrou %d comandos (de %d para %d)",
+                    removed, before, len(commands_raw),
+                )
 
         _model_map = {
             "opus": ModelName.OPUS,
@@ -1522,6 +1603,717 @@ class CommandQueueWidget(QWidget):
         self._template_label.setText(f"  \U0001f4cb  DCP: {cm_id} — {project}")
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"DCP {cm_id}")
+        signal_bus.pipeline_ready.emit(specs)
+        # Onda 4: arm DCP context AFTER pipeline_ready. load_pipeline()
+        # resets _current_dcp_flow_path to None at its start; we re-arm
+        # here so subsequent _on_remove_requested calls persist to disk.
+        # Order matters: emit is synchronous (Qt direct connection), so
+        # load_pipeline runs to completion before this assignment.
+        self._current_dcp_flow_path = flow_path
+
+    def _on_cmd_single_clicked(self) -> None:
+        """Reduced pipeline for a single command MD (no prep, no JSON).
+
+        Steps:
+          1. Open MD file dialog.
+          2. Extract cmd_target_slash from heading or frontmatter.
+          3. Decide create vs update via os.path.exists.
+          4. Expand sub-sequence inline into queue-command-list.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar MD do comando",
+            str(Path.cwd()),
+            "Markdown Files (*.md);;All Files (*)",
+        )
+        if not path:
+            return
+
+        md_path = Path(path)
+        try:
+            content = md_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            signal_bus.toast_requested.emit(
+                f"Erro ao ler {md_path.name}: {exc}", "error"
+            )
+            return
+
+        # Step 3: extract cmd_target_slash
+        cmd_target_slash = ""
+        fm_match = re.search(r"^cmd_target:\s*([^\r\n]+)", content, re.MULTILINE)
+        if fm_match:
+            cmd_target_slash = fm_match.group(1).strip()
+        if not cmd_target_slash:
+            heading_match = re.search(r"^#\s+(/[^\s\n]+)", content, re.MULTILINE)
+            if heading_match:
+                cmd_target_slash = heading_match.group(1).strip()
+
+        if not cmd_target_slash:
+            signal_bus.toast_requested.emit(
+                f"MD {md_path.name} nao tem heading canonico (# /grupo:nome) "
+                "nem cmd_target no header. Abortando.",
+                "error",
+            )
+            return
+
+        # Step 4: decide action
+        target_disk = cmd_target_slash.lstrip("/").replace(":", "/")
+        cmd_file_path = Path.cwd() / ".claude" / "commands" / f"{target_disk}.md"
+        cmd_action = "update" if cmd_file_path.exists() else "create"
+
+        # Build sub-sequence
+        md_path_str = str(md_path.resolve())
+        commands = [
+            "/clear",
+            "/model opus",
+            "/effort high",
+            f"/cmd:{cmd_action} {md_path_str}",
+            f"/cmd:review {cmd_target_slash} {md_path_str}",
+        ]
+        if self._use_kimi_chk.isChecked():
+            commands.extend([
+                "/clear",
+                f"/cmd:kimi-pair-analyse --approved {md_path_str}",
+                f"/kimi:pair-execute --approved {md_path_str}",
+            ])
+
+        specs: list[CommandSpec] = []
+        for i, cmd in enumerate(commands, start=1):
+            specs.append(
+                CommandSpec(
+                    name=cmd,
+                    model=ModelName.OPUS,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=EffortLevel.HIGH,
+                    position=i,
+                )
+            )
+
+        self._template_label.setText(
+            f"  \U0001f4cb  Cmd Single: {cmd_target_slash} ({cmd_action})"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"Cmd Single {cmd_target_slash}")
+        signal_bus.pipeline_ready.emit(specs)
+
+        hint = ""
+        if cmd_action == "create":
+            hint = (
+                " Comando novo detectado. Rode "
+                "python3 ai-forge/scripts/generate-workflow-index.py "
+                "para registrar no indice."
+            )
+        signal_bus.toast_requested.emit(
+            f"Fila renderizada: {len(specs)} comandos.{hint}", "success"
+        )
+
+    def _on_create_daily_loop_clicked(self) -> None:
+        """Unified loop runner: detects JSON format and expands queue.
+
+        - *-loop.json  -> expand iteration_template per item + finalization
+        - _LOOP-CONFIG.json (daily-loop) -> delegate to legacy _on_daily_loop_clicked
+        """
+        from workflow_app.config.app_state import app_state
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um loop JSON em metrics-project-pill antes de executar.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        raw = config.raw if isinstance(config.raw, dict) else {}
+
+        # Discriminate by schema
+        if raw.get("kind") == "daily-loop" and "daily_loop" in raw:
+            self._on_daily_loop_clicked()
+            return
+
+        if "iteration_template" in raw and "items" in raw and "finalization" in raw:
+            try:
+                specs = self._expand_loop_json_specs(raw, str(config.config_path))
+            except Exception as exc:
+                signal_bus.toast_requested.emit(
+                    f"Erro ao expandir loop JSON: {exc}", "error"
+                )
+                return
+
+            if not specs:
+                signal_bus.toast_requested.emit(
+                    "Loop JSON sem comandos para executar.", "info"
+                )
+                return
+
+            slug = str(raw.get("name", "")) or "loop"
+            item_count = sum(
+                1
+                for s in specs
+                if not s.name.startswith(("/model ", "/effort ", "/clear"))
+            )
+            self._template_label.setText(
+                f"  \U0001f4cb  Loop: {slug} ({item_count} comandos)"
+            )
+            self._template_label.setVisible(True)
+            self._maybe_auto_save(f"Loop {slug}")
+            signal_bus.pipeline_ready.emit(specs)
+            return
+
+        signal_bus.toast_requested.emit(
+            "Projeto carregado nao e um loop valido. "
+            "Carregue um _LOOP-CONFIG.json ou um *-loop.json.",
+            "warning",
+        )
+
+    def _expand_loop_json_specs(
+        self, raw: dict, config_path: str
+    ) -> list[CommandSpec]:
+        """Expand a *-loop.json into a list of CommandSpec based on mode."""
+        mode = raw.get("mode", "task")
+
+        if mode == "task":
+            return self._expand_loop_task_specs(raw, config_path)
+        if mode == "cmd":
+            return self._expand_loop_cmd_specs(raw, config_path)
+        if mode == "both":
+            return self._expand_loop_both_specs(raw, config_path)
+
+        raise ValueError(f"Modo de loop nao reconhecido: {mode}")
+
+    def _expand_loop_task_specs(
+        self, raw: dict, config_path: str
+    ) -> list[CommandSpec]:
+        """Expand a task-mode *-loop.json (pre/exec/post)."""
+        iteration_template = raw.get("iteration_template", {})
+        items = raw.get("items", [])
+        finalization = raw.get("finalization", {})
+        loop_name = str(raw.get("name", "")) or "loop"
+
+        return self._do_expand_loop_specs(
+            iteration_template, items, finalization, loop_name, config_path
+        )
+
+    def _expand_loop_cmd_specs(
+        self, raw: dict, config_path: str
+    ) -> list[CommandSpec]:
+        """Expand a cmd-mode *-loop.json (pre/exec_create/exec_update/kimi_eligible_wrapper)."""
+        iteration_template = raw.get("iteration_template", {})
+        items = raw.get("items", [])
+        finalization = raw.get("finalization", {})
+        loop_name = str(raw.get("name", "")) or "loop"
+
+        specs: list[CommandSpec] = []
+        current_model = ModelName.SONNET
+        current_effort = EffortLevel.STANDARD
+        pos = 1
+
+        def _add_command(cmd: str, testid: str = "", kimi_eligible: bool = False) -> None:
+            nonlocal current_model, current_effort, pos
+            stripped = cmd.strip()
+            if stripped.startswith("/model "):
+                model_str = stripped.split(None, 1)[1].lower()
+                current_model = _MODEL_MAP.get(model_str, current_model)
+                specs.append(
+                    CommandSpec(
+                        name=stripped,
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                        testid=testid,
+                        kimi_eligible=kimi_eligible,
+                    )
+                )
+                pos += 1
+                return
+            if stripped.startswith("/effort "):
+                effort_str = stripped.split(None, 1)[1].lower()
+                current_effort = _EFFORT_MAP.get(effort_str, current_effort)
+                specs.append(
+                    CommandSpec(
+                        name=stripped,
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=current_effort,
+                        position=pos,
+                        testid=testid,
+                        kimi_eligible=kimi_eligible,
+                    )
+                )
+                pos += 1
+                return
+            if stripped == "/clear":
+                specs.append(
+                    CommandSpec(
+                        name="/clear",
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                        testid=testid,
+                        kimi_eligible=kimi_eligible,
+                    )
+                )
+                pos += 1
+                return
+
+            specs.append(
+                CommandSpec(
+                    name=stripped,
+                    model=current_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path=config_path,
+                    effort=current_effort,
+                    position=pos,
+                    testid=testid,
+                    kimi_eligible=kimi_eligible,
+                )
+            )
+            pos += 1
+
+        for item in items:
+            task_path = (
+                str(item.get("task_path", ""))
+                if isinstance(item, dict)
+                else ""
+            )
+            cmd_action = (
+                str(item.get("cmd_action", ""))
+                if isinstance(item, dict)
+                else ""
+            )
+            cmd_target_slash = (
+                str(item.get("cmd_target_slash", ""))
+                if isinstance(item, dict)
+                else ""
+            )
+            kimi_eligible = (
+                bool(item.get("kimi_eligible", False))
+                if isinstance(item, dict)
+                else False
+            )
+
+            for cmd in iteration_template.get("pre", []):
+                resolved = (
+                    cmd.replace("{task_path}", task_path)
+                    .replace("{name}", loop_name)
+                )
+                _add_command(resolved, kimi_eligible=kimi_eligible)
+
+            exec_key = "exec_create" if cmd_action == "create" else "exec_update"
+            for cmd in iteration_template.get(exec_key, []):
+                resolved = (
+                    cmd.replace("{task_path}", task_path)
+                    .replace("{cmd_target_slash}", cmd_target_slash)
+                    .replace("{name}", loop_name)
+                )
+                _add_command(resolved, kimi_eligible=kimi_eligible)
+
+            if (
+                kimi_eligible
+                and "kimi_eligible_wrapper" in iteration_template
+                and self._use_kimi_chk.isChecked()
+            ):
+                for cmd in iteration_template.get("kimi_eligible_wrapper", []):
+                    resolved = (
+                        cmd.replace("{task_path}", task_path)
+                        .replace("{name}", loop_name)
+                    )
+                    _add_command(resolved, kimi_eligible=kimi_eligible)
+
+        for cmd in finalization.get("commands", []):
+            resolved = cmd.replace("{name}", loop_name)
+            _add_command(resolved)
+
+        return specs
+
+    def _expand_loop_both_specs(
+        self, raw: dict, config_path: str
+    ) -> list[CommandSpec]:
+        """Expand a both-mode *-loop.json (task + cmd interleaved)."""
+        iteration_template = raw.get("iteration_template", {})
+        items = raw.get("items", [])
+        finalization = raw.get("finalization", {})
+        loop_name = str(raw.get("name", "")) or "loop"
+
+        specs: list[CommandSpec] = []
+        current_model = ModelName.SONNET
+        current_effort = EffortLevel.STANDARD
+        pos = 1
+
+        def _add_command(cmd: str, testid: str = "") -> None:
+            nonlocal current_model, current_effort, pos
+            stripped = cmd.strip()
+            if stripped.startswith("/model "):
+                model_str = stripped.split(None, 1)[1].lower()
+                current_model = _MODEL_MAP.get(model_str, current_model)
+                specs.append(
+                    CommandSpec(
+                        name=stripped,
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                    )
+                )
+                pos += 1
+                return
+            if stripped.startswith("/effort "):
+                effort_str = stripped.split(None, 1)[1].lower()
+                current_effort = _EFFORT_MAP.get(effort_str, current_effort)
+                specs.append(
+                    CommandSpec(
+                        name=stripped,
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=current_effort,
+                        position=pos,
+                    )
+                )
+                pos += 1
+                return
+            if stripped == "/clear":
+                specs.append(
+                    CommandSpec(
+                        name="/clear",
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                    )
+                )
+                pos += 1
+                return
+
+            specs.append(
+                CommandSpec(
+                    name=stripped,
+                    model=current_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path=config_path,
+                    effort=current_effort,
+                    position=pos,
+                    testid=testid,
+                )
+            )
+            pos += 1
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            task_type = str(item.get("task_type", ""))
+            item_id = str(item.get("id", ""))
+
+            if task_type == "ambiguous":
+                specs.append(
+                    CommandSpec(
+                        name=f"[BLOQUEADO] Item {item_id} - task_type ambiguo",
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=current_effort,
+                        position=pos,
+                        blocked_reason="task_type ambiguo - resolva em /loop:mark-type",
+                    )
+                )
+                pos += 1
+                continue
+
+            task_path = str(item.get("task_path", ""))
+
+            if task_type == "task":
+                task_template = iteration_template.get("task", {})
+                kimi_eligible = bool(item.get("kimi_eligible", False))
+
+                phases = ["pre", "exec", "post"]
+                if kimi_eligible and "kimi_eligible_wrapper" in task_template:
+                    phases = ["pre", "kimi_eligible_wrapper", "post"]
+
+                for phase in phases:
+                    for cmd in task_template.get(phase, []):
+                        resolved = (
+                            cmd.replace("{task_path}", task_path)
+                            .replace("{name}", loop_name)
+                        )
+                        _add_command(resolved)
+
+            elif task_type == "cmd":
+                cmd_template = iteration_template.get("cmd", {})
+                cmd_complexity = str(item.get("cmd_complexity", ""))
+                cmd_action = str(item.get("cmd_action", ""))
+                cmd_target_slash = str(item.get("cmd_target_slash", ""))
+                kimi_eligible = bool(item.get("kimi_eligible", False))
+
+                if cmd_complexity == "single":
+                    expanded_commands = item.get("expanded_commands", [])
+                    for cmd in expanded_commands:
+                        resolved = (
+                            cmd.replace("{task_path}", task_path)
+                            .replace("{name}", loop_name)
+                        )
+                        _add_command(resolved, testid="queue-item-cmd-single")
+                else:
+                    for cmd in cmd_template.get("pre", []):
+                        resolved = (
+                            cmd.replace("{task_path}", task_path)
+                            .replace("{name}", loop_name)
+                        )
+                        _add_command(resolved)
+
+                    exec_key = "exec_create" if cmd_action == "create" else "exec_update"
+                    for cmd in cmd_template.get(exec_key, []):
+                        resolved = (
+                            cmd.replace("{task_path}", task_path)
+                            .replace("{cmd_target_slash}", cmd_target_slash)
+                            .replace("{name}", loop_name)
+                        )
+                        _add_command(resolved)
+
+                    if kimi_eligible and "kimi_eligible_wrapper" in cmd_template:
+                        for cmd in cmd_template.get("kimi_eligible_wrapper", []):
+                            resolved = (
+                                cmd.replace("{task_path}", task_path)
+                                .replace("{name}", loop_name)
+                            )
+                            _add_command(resolved)
+
+        for cmd in finalization.get("commands", []):
+            resolved = cmd.replace("{name}", loop_name)
+            _add_command(resolved)
+
+        return specs
+
+    def _do_expand_loop_specs(
+        self,
+        iteration_template: dict,
+        items: list,
+        finalization: dict,
+        loop_name: str,
+        config_path: str,
+    ) -> list[CommandSpec]:
+        """Shared expansion logic for task-mode iteration_template."""
+        specs: list[CommandSpec] = []
+        current_model = ModelName.SONNET
+        current_effort = EffortLevel.STANDARD
+        pos = 1
+
+        def _add_command(cmd: str, kimi_eligible: bool = False) -> None:
+            nonlocal current_model, current_effort, pos
+            stripped = cmd.strip()
+            if stripped.startswith("/model "):
+                model_str = stripped.split(None, 1)[1].lower()
+                current_model = _MODEL_MAP.get(model_str, current_model)
+                specs.append(
+                    CommandSpec(
+                        name=stripped,
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                        kimi_eligible=kimi_eligible,
+                    )
+                )
+                pos += 1
+                return
+            if stripped.startswith("/effort "):
+                effort_str = stripped.split(None, 1)[1].lower()
+                current_effort = _EFFORT_MAP.get(effort_str, current_effort)
+                specs.append(
+                    CommandSpec(
+                        name=stripped,
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=current_effort,
+                        position=pos,
+                        kimi_eligible=kimi_eligible,
+                    )
+                )
+                pos += 1
+                return
+            if stripped == "/clear":
+                specs.append(
+                    CommandSpec(
+                        name="/clear",
+                        model=current_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                        kimi_eligible=kimi_eligible,
+                    )
+                )
+                pos += 1
+                return
+
+            specs.append(
+                CommandSpec(
+                    name=stripped,
+                    model=current_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path=config_path,
+                    effort=current_effort,
+                    position=pos,
+                    kimi_eligible=kimi_eligible,
+                )
+            )
+            pos += 1
+
+        for item in items:
+            task_path = (
+                str(item.get("task_path", ""))
+                if isinstance(item, dict)
+                else ""
+            )
+            kimi_eligible = (
+                bool(item.get("kimi_eligible", False))
+                if isinstance(item, dict)
+                else False
+            )
+
+            phases = ["pre", "exec", "post"]
+            if (
+                kimi_eligible
+                and "kimi_eligible_wrapper" in iteration_template
+                and self._use_kimi_chk.isChecked()
+            ):
+                phases = ["pre", "kimi_eligible_wrapper", "post"]
+
+            for phase in phases:
+                commands = iteration_template.get(phase, [])
+                for cmd in commands:
+                    resolved = cmd.replace("{task_path}", task_path).replace(
+                        "{name}", loop_name
+                    )
+                    _add_command(resolved, kimi_eligible=kimi_eligible)
+
+        for cmd in finalization.get("commands", []):
+            resolved = cmd.replace("{name}", loop_name)
+            _add_command(resolved)
+
+        return specs
+
+    def _on_daily_loop_clicked(self) -> None:
+        """Expand a daily-loop _LOOP-CONFIG.json + PROGRESS.md into the queue.
+
+        Requires the metrics-project-pill to point at blacksmith/loop-archives/{slug}/_LOOP-CONFIG.json
+        (generated by /daily-loop:enumerate). One queue entry per pending item,
+        with /clear at position 0 and /model/X /effort/Y emitted only when
+        the bucket changes between consecutive items.
+
+        Failed items ([!]) are NOT re-queued — fix them manually in PROGRESS.md
+        or re-run /daily-loop:enumerate.
+
+        Pre-flight: if `{loop_root}/.review-blocked` is present (dropped by
+        /daily-loop:review-created when its 3-round self-healing loop exhausts
+        with blockers remaining), a confirmation modal is shown before
+        expanding the queue. Defense-in-depth alongside the terminal-side gate.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        from workflow_app.config.app_state import app_state
+        from workflow_app.daily_loop import (
+            DailyLoopConfigError,
+            build_daily_loop_specs,
+            read_review_blocked_sentinel,
+        )
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um _LOOP-CONFIG.json em metrics-project-pill antes de usar Daily loop.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        raw = config.raw if isinstance(config.raw, dict) else {}
+
+        if raw.get("kind") != "daily-loop" or "daily_loop" not in raw:
+            signal_bus.toast_requested.emit(
+                "Projeto carregado nao e um _LOOP-CONFIG.json. "
+                "Rode /daily-loop no terminal e carregue o JSON gerado.",
+                "warning",
+            )
+            return
+
+        loop_root = Path(config.config_path).parent
+
+        sentinel = read_review_blocked_sentinel(loop_root)
+        if sentinel is not None:
+            slug_for_modal = str(raw.get("daily_loop", {}).get("slug", "")) or "daily-loop"
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Daily Loop — Review BLOQUEADO")
+            box.setText(
+                f"O preparo do loop \"{slug_for_modal}\" foi REPROVADO por "
+                "/daily-loop:review-created."
+            )
+            blocker_line = (
+                f"\n\nBlockers remanescentes: {sentinel.blocker_count}"
+                if sentinel.blocker_count
+                else ""
+            )
+            box.setInformativeText(
+                "Sentinel `.review-blocked` encontrado em:\n"
+                f"{sentinel.path}\n\n"
+                "Recomendado: Cancelar, ler _LOOP-CREATED-AUDIT.md, corrigir "
+                "blockers e re-rodar /daily-loop:review-created."
+                f"{blocker_line}\n\n"
+                "Executar mesmo assim?"
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            yes_btn = box.button(QMessageBox.StandardButton.Yes)
+            yes_btn.setText("Executar mesmo assim")
+            cancel_btn = box.button(QMessageBox.StandardButton.Cancel)
+            cancel_btn.setText("Cancelar")
+            choice = box.exec()
+            if choice != QMessageBox.StandardButton.Yes:
+                logger.info(
+                    "[daily-loop] %s execution cancelled (.review-blocked override declined)",
+                    slug_for_modal,
+                )
+                signal_bus.toast_requested.emit(
+                    "Execucao cancelada — .review-blocked ativo.",
+                    "info",
+                )
+                return
+            logger.warning(
+                "[daily-loop] %s executing despite .review-blocked sentinel "
+                "(blockers=%d, user override)",
+                slug_for_modal,
+                sentinel.blocker_count,
+            )
+
+        try:
+            specs = build_daily_loop_specs(raw, loop_root)
+        except DailyLoopConfigError as exc:
+            signal_bus.toast_requested.emit(f"Daily loop invalido: {exc}", "error")
+            return
+        except OSError as exc:
+            signal_bus.toast_requested.emit(f"Erro ao ler PROGRESS.md: {exc}", "error")
+            return
+
+        if not specs:
+            signal_bus.toast_requested.emit(
+                "PROGRESS.md sem itens pendentes — loop concluido. "
+                "Rode /daily-loop:review --slug X para o veredito final.",
+                "info",
+            )
+            return
+
+        slug = str(raw.get("daily_loop", {}).get("slug", "")) or "daily-loop"
+        item_count = sum(1 for s in specs if s.name.startswith("/daily-loop:do "))
+        logger.info("[daily-loop] loading %s (%d items, %d specs)", slug, item_count, len(specs))
+
+        self._template_label.setText(f"  \U0001f4cb  Daily loop: {slug} ({item_count} itens)")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"Daily loop {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
     def _on_auto_improove_balanced_clicked(self) -> None:
@@ -1597,7 +2389,7 @@ class CommandQueueWidget(QWidget):
         Abre BoilerplatePathDialog para o usuario colar o path do repo legado.
         Em seguida injeta config_path por-spec:
           - /boilerplate:scan → repo_path (caminho fornecido)
-          - demais /boilerplate:* → staging_path = output/boilerplates/_staging/{basename(repo_path)}
+          - demais /boilerplate:* → staging_path = output/workspace/boilerplates/_staging/{basename(repo_path)}
           - /clear, /model X, /effort Y → "" (sem arg)
 
         O patch em main_window._on_pipeline_ready preserva esses config_path
@@ -1625,7 +2417,7 @@ class CommandQueueWidget(QWidget):
             )
             return
 
-        staging_path = f"output/boilerplates/_staging/{basename}"
+        staging_path = f"output/workspace/boilerplates/_staging/{basename}"
 
         raw = copy.deepcopy(TEMPLATE_BOILERPLATE)
         # Injeta config_path por spec. Headers (/clear, /model, /effort) ficam vazios.
@@ -1746,6 +2538,12 @@ class CommandQueueWidget(QWidget):
 
     def load_pipeline(self, specs: list[CommandSpec]) -> None:
         """Populate the queue with CommandSpec objects."""
+        # Onda 4: clear DCP context — the new pipeline isn't (yet) backed by
+        # a SPECIFIC-FLOW.json. The DCP handler will re-arm
+        # _current_dcp_flow_path AFTER this signal returns, so DCP-sourced
+        # loads end up with the path correctly set. Non-DCP sources stay None.
+        self._current_dcp_flow_path = None
+
         # Clear existing
         for item in self._items:
             item.deleteLater()
@@ -1809,9 +2607,57 @@ class CommandQueueWidget(QWidget):
         item.cancel_requested.connect(self._on_cancel_requested)
         item.run_in_terminal_requested.connect(signal_bus.run_command_in_terminal)
         item.run_in_terminal_requested.connect(self._on_run_command)
-        item.run_in_kimi_terminal_requested.connect(signal_bus.run_command_in_workspace_terminal)
+        # Mirror /clear to workspace when Use Kimi is checked. This fires on
+        # ANY path that emits run_in_terminal_requested (per-item green play,
+        # autocast clicks via play_btn, etc.) so the duplicate dispatch is
+        # not coupled to a single entry point in this widget.
+        item.run_in_terminal_requested.connect(self._mirror_clear_to_workspace_if_kimi_checked)
+        item.run_in_kimi_terminal_requested.connect(self._dispatch_blue_arrow)
         item.run_in_kimi_terminal_requested.connect(self._on_run_command)
         return item
+
+    # Default delay between paste and Enter for the blue-arrow Kimi path.
+    _KIMI_BLUE_ARROW_DEFAULT_DELAY_MS: int = 1_000
+    # Extra delay added when the previous workspace dispatch was /clear:
+    # Kimi takes longer to repaint the prompt after a full TUI clear.
+    _KIMI_AFTER_CLEAR_EXTRA_DELAY_MS: int = 2_000
+
+    def _dispatch_blue_arrow(self, kimi_prompt: str) -> None:
+        """Forward a blue-arrow click to `kimi_blue_arrow_dispatched` with
+        the right delay. If the previous workspace dispatch was /clear, add
+        2s extra because Kimi's TUI repaint after a clear is slower than
+        normal — without the extra delay, Enter lands before /skill: is
+        composed and the command is silently dropped.
+        """
+        if self._last_workspace_dispatch_was_clear:
+            delay = (
+                self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+                + self._KIMI_AFTER_CLEAR_EXTRA_DELAY_MS
+            )
+            self._last_workspace_dispatch_was_clear = False  # consumed
+        else:
+            delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+        signal_bus.kimi_blue_arrow_dispatched.emit(kimi_prompt, delay)
+
+    def _mirror_clear_to_workspace_if_kimi_checked(self, cmd_text: str) -> None:
+        """When /clear is dispatched to interactive AND Use Kimi is checked,
+        also emit it to the workspace terminal so both CLI sessions clear
+        their context simultaneously, AND set the after-clear flag so the
+        next blue-arrow Kimi dispatch uses the extended 3s delay (Kimi's
+        TUI repaint after a clear is slower than normal).
+
+        Connected to `item.run_in_terminal_requested` so it runs for every
+        per-item green-button dispatch (the entry point most users actually
+        click). The "Rodar próximo" path bypasses item signals and emits
+        directly to the bus, so it has its own clear-both branch (which
+        also sets the flag).
+        """
+        if not cmd_text or not cmd_text.strip():
+            return
+        head = cmd_text.strip().split(None, 1)[0].lower()
+        if head == "/clear" and self._use_kimi_chk.isChecked():
+            signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+            self._last_workspace_dispatch_was_clear = True
 
     # ──────────────────────────────────────── Quick-save helpers ─────── #
 
@@ -1990,13 +2836,6 @@ class CommandQueueWidget(QWidget):
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.ERRO)
-        # Stop autocast/loop on failure
-        if self._loop_active:
-            self._stop_loop()
-            signal_bus.toast_requested.emit("Loop: parado por erro", "warning")
-        elif self._autocast_active:
-            self._stop_autocast()
-            signal_bus.toast_requested.emit("Autocast: parado por erro", "warning")
 
     def _on_command_skipped(self, index: int) -> None:
         item = self._item_at(index + 1)
@@ -2006,12 +2845,74 @@ class CommandQueueWidget(QWidget):
     def _on_remove_requested(self, position: int) -> None:
         item = self._item_at(position)
         if item:
+            removed_name = item.get_spec().name
             self._items_layout.removeWidget(item)
             item.deleteLater()
             self._items = [i for i in self._items if i.get_spec().position != position]
             if not self._items:
                 self._empty_widget.setVisible(True)
                 self._list_widget.setVisible(False)
+            # Onda 4: when the queue is backed by a SPECIFIC-FLOW.json (DCP
+            # context, set by _on_dcp_specific_flow_clicked), persist the
+            # deletion to overrides.skipped[] so the next reload (or regen
+            # without --reset-overrides) honors it. Without this, the user
+            # has to re-delete the same broken commands every time they
+            # click [DCP: Specific-Flow].
+            self._persist_dcp_skip(removed_name)
+
+    def _persist_dcp_skip(self, command_name: str) -> None:
+        """Append `command_name` to overrides.skipped[] of the current DCP flow.
+
+        No-op when the queue isn't sourced from a SPECIFIC-FLOW.json (legacy
+        templates, ad-hoc pipelines). Failure to persist is surfaced as a
+        warning toast but does NOT undo the in-memory deletion — the user
+        already saw the item disappear from the queue, restoring it would
+        be more confusing than a non-fatal warning.
+        """
+        flow_path = self._current_dcp_flow_path
+        if flow_path is None or not command_name:
+            return
+        if not flow_path.exists():
+            logger.warning(
+                "[DCP] persist skip: flow path %s nao existe; override descartado",
+                flow_path,
+            )
+            return
+        try:
+            data = json.loads(flow_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            signal_bus.toast_requested.emit(
+                f"DCP: falha ao ler SPECIFIC-FLOW.json para persistir override: {exc}",
+                "warning",
+            )
+            return
+        if not isinstance(data, dict):
+            return
+        overrides = data.get("overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+            data["overrides"] = overrides
+        skipped = overrides.get("skipped")
+        if not isinstance(skipped, list):
+            skipped = []
+            overrides["skipped"] = skipped
+        if command_name in skipped:
+            return
+        skipped.append(command_name)
+        try:
+            flow_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            logger.info(
+                "[DCP] persisted skip %r in %s (total skipped=%d)",
+                command_name, flow_path.name, len(skipped),
+            )
+        except OSError as exc:
+            signal_bus.toast_requested.emit(
+                f"DCP: falha ao gravar override em {flow_path.name}: {exc}",
+                "warning",
+            )
 
     def _on_skip_requested(self, position: int) -> None:
         item = self._item_at(position)
@@ -2066,271 +2967,11 @@ class CommandQueueWidget(QWidget):
             signal_bus.paste_text_in_terminal.emit(text)
             signal_bus.focus_interactive_terminal.emit()
 
-    # ─────────────────────────────────────────────── Autocast ──────── #
+    # ───────────────────────────────────── Queue dispatch ──────────── #
 
     def _on_instance_selected(self, name: str) -> None:
-        """Track the active CLI binary for autocast command building."""
+        """Track the active CLI binary for downstream routing."""
         self._cli_binary = name
-
-    def _on_autocast_clicked(self) -> None:
-        """Toggle autocast mode on/off."""
-        if self._autocast_active:
-            self._stop_autocast()
-        else:
-            self._start_autocast()
-
-    def _on_loop_clicked(self) -> None:
-        """Toggle loop mode on/off."""
-        if self._loop_active:
-            self._stop_loop()
-        else:
-            self._start_loop()
-
-    def _start_loop(self) -> None:
-        """Activate loop mode and start autocast."""
-        self._loop_active = True
-        self._loop_btn.setText("Parar")
-        self._loop_btn.setStyleSheet(
-            "QPushButton { background-color: #DC2626; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #B91C1C; }"
-            "QPushButton:pressed { background-color: #991B1B; }"
-        )
-        signal_bus.toast_requested.emit("Loop ativado", "info")
-        # Start autocast if not already running
-        if not self._autocast_active:
-            self._start_autocast()
-
-    def _stop_loop(self) -> None:
-        """Deactivate loop mode and stop autocast."""
-        self._loop_active = False
-        self._loop_btn.setText("Loop")
-        self._loop_btn.setStyleSheet(
-            "QPushButton { background-color: #0891B2; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #0E7490; }"
-            "QPushButton:pressed { background-color: #155E75; }"
-            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
-        )
-        if self._autocast_active:
-            self._stop_autocast()
-
-    def _reset_all_items_to_pending(self) -> None:
-        """Reset all items in the queue back to pending state for loop restart."""
-        for item in self._items:
-            item.reset_to_pending()
-
-    def _start_autocast(self) -> None:
-        """Activate autocast and trigger the first pending command."""
-        if self._autocast_runner is not None or any(
-            item._status == CommandStatus.EXECUTANDO for item in self._items
-        ):
-            signal_bus.toast_requested.emit(
-                "Há um comando em execução. Aguarde ou pare a execução atual.",
-                "warning",
-            )
-            return
-
-        logger.info("[Autocast] starting with instance=%s", self._cli_binary)
-        self._autocast_stop_requested = False
-        self._autocast_active = True
-        self._set_autocast_button_state(True)
-        signal_bus.toast_requested.emit("Autocast ativado", "info")
-        self._autocast_advance()
-
-    def _set_autocast_button_state(self, active: bool) -> None:
-        """Render the Autocast button for the current run state."""
-        self._autocast_btn.setText("Parar" if active else "Autocast")
-        if active:
-            self._autocast_btn.setStyleSheet(
-                "QPushButton { background-color: #DC2626; color: #FAFAFA;"
-                "  border: none; border-radius: 5px;"
-                "  font-size: 11px; font-weight: 700; }"
-                "QPushButton:hover { background-color: #B91C1C; }"
-                "QPushButton:pressed { background-color: #991B1B; }"
-            )
-        else:
-            self._autocast_btn.setStyleSheet(
-                "QPushButton { background-color: #7C3AED; color: #FAFAFA;"
-                "  border: none; border-radius: 5px;"
-                "  font-size: 11px; font-weight: 700; }"
-                "QPushButton:hover { background-color: #6D28D9; }"
-                "QPushButton:pressed { background-color: #5B21B6; }"
-                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
-            )
-
-    def _finish_autocast_ui(self) -> None:
-        """Reset the Autocast button state without touching the runner."""
-        self._autocast_active = False
-        self._set_autocast_button_state(False)
-
-    def _stop_autocast(self) -> None:
-        """Stop autocast and terminate the active PTY session, if any."""
-        logger.info("[Autocast] stop requested")
-        self._finish_autocast_ui()
-        runner = self._autocast_runner
-        item = self._autocast_current_item
-        if runner is None:
-            self._autocast_stop_requested = False
-            return
-        self._autocast_stop_requested = True
-        if item is not None and item._status == CommandStatus.EXECUTANDO:
-            item.reset_to_pending()
-        runner.terminate()
-
-    def _resolve_autocast_cwd(self) -> str:
-        """Return the project root where slash commands should run."""
-        from workflow_app.config.app_state import app_state
-
-        if app_state.has_config and app_state.config:
-            return str(app_state.config.project_dir)
-
-        cwd = Path.cwd()
-        for candidate in (cwd, *cwd.parents):
-            if (
-                (candidate / ".claude" / "commands").is_dir()
-                and (candidate / "CLAUDE.md").is_file()
-            ):
-                return str(candidate)
-        return str(cwd)
-
-    def _create_autocast_runner(self) -> PtyRunner:
-        """Factory extracted for tests."""
-        return PtyRunner()
-
-    def _start_autocast_command(self, item: CommandItemWidget, spec: CommandSpec) -> bool:
-        """Launch one queue item in its own PTY-backed subprocess."""
-        try:
-            plan = build_launch_plan(spec, self._cli_binary)
-        except ValueError as exc:
-            signal_bus.toast_requested.emit(str(exc), "warning")
-            self._finish_autocast_ui()
-            return False
-
-        runner = self._create_autocast_runner()
-        channel = plan.channel
-        self._autocast_runner = runner
-        self._autocast_current_item = item
-        self._autocast_stop_requested = False
-
-        item._mark_as_sent()
-        item.set_status(CommandStatus.EXECUTANDO)
-
-        runner.output_received.connect(
-            lambda chunk, ch=channel: signal_bus.terminal_output_chunk_received.emit(ch, chunk)
-        )
-        runner.error_occurred.connect(self._on_autocast_runner_error)
-        runner.command_completed.connect(
-            lambda _name, ok, ch=channel: self._on_autocast_runner_completed(ch, ok)
-        )
-
-        signal_bus.terminal_worker_changed.emit(channel, runner)
-        signal_bus.terminal_session_started.emit(channel)
-        signal_bus.terminal_output_chunk_received.emit(
-            channel,
-            f"\n\x1b[32m$\x1b[0m {plan.display_command}\n",
-        )
-        signal_bus.focus_interactive_terminal.emit()
-        if spec.interaction_type == InteractionType.INTERACTIVE:
-            signal_bus.toast_requested.emit(
-                f"Autocast: aguardando {spec.name} (interativo)",
-                "info",
-            )
-
-        runner.start_process(
-            argv=list(plan.argv),
-            command_name=spec.name,
-            cwd=self._resolve_autocast_cwd(),
-            env_overrides=plan.env_overrides,
-        )
-        return True
-
-    def _on_autocast_runner_error(self, message: str) -> None:
-        """Show the concrete runner error on the active queue item."""
-        item = self._autocast_current_item
-        if item is not None and item._status == CommandStatus.EXECUTANDO:
-            item.set_status(CommandStatus.ERRO, error_message=message)
-        logger.error("[Autocast] runner error: %s", message)
-
-    def _on_autocast_runner_completed(self, channel: str, success: bool) -> None:
-        """Advance the queue based on the real subprocess exit status."""
-        item = self._autocast_current_item
-        self._autocast_runner = None
-        self._autocast_current_item = None
-        signal_bus.terminal_session_finished.emit(channel)
-
-        if self._autocast_stop_requested:
-            self._autocast_stop_requested = False
-            return
-
-        if item is None:
-            return
-
-        if success:
-            item.set_status(CommandStatus.CONCLUIDO)
-            signal_bus.terminal_output_chunk_received.emit(channel, "\n✓ Concluído\n")
-            if self._autocast_active:
-                self._autocast_advance()
-            return
-
-        if item._status != CommandStatus.ERRO:
-            item.set_status(CommandStatus.ERRO)
-        signal_bus.terminal_output_chunk_received.emit(channel, "\n✕ Erro\n")
-
-        if self._loop_active:
-            self._loop_active = False
-            self._loop_btn.setText("Loop")
-            self._loop_btn.setStyleSheet(
-                "QPushButton { background-color: #0891B2; color: #FAFAFA;"
-                "  border: none; border-radius: 5px;"
-                "  font-size: 11px; font-weight: 700; }"
-                "QPushButton:hover { background-color: #0E7490; }"
-                "QPushButton:pressed { background-color: #155E75; }"
-                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
-            )
-            signal_bus.toast_requested.emit("Loop: parado por erro", "warning")
-
-        if self._autocast_active:
-            self._finish_autocast_ui()
-            signal_bus.toast_requested.emit("Autocast: parado por erro", "warning")
-
-    def _autocast_advance(self) -> None:
-        """Advance to the next queue item when the current subprocess exits."""
-        if not self._autocast_active:
-            return
-
-        next_item = self._find_next_pending()
-        if next_item is None:
-            if self._loop_active:
-                signal_bus.toast_requested.emit("Loop: reiniciando fila", "info")
-                self._reset_all_items_to_pending()
-                QTimer.singleShot(300, self._autocast_advance)
-                return
-            self._finish_autocast_ui()
-            signal_bus.toast_requested.emit("Autocast: fila concluída", "success")
-            return
-
-        spec = next_item.get_spec()
-        name_lower = spec.name.strip().lower()
-
-        logger.info(
-            "[Autocast] next=%s interaction=%s model=%s",
-            spec.name,
-            spec.interaction_type,
-            spec.model,
-        )
-
-        # /model and /clear are queue helpers only; each real subprocess already
-        # receives its own model/config, so these rows complete immediately.
-        if name_lower.startswith("/model") or name_lower == "/clear":
-            next_item._mark_as_sent()
-            next_item.set_status(CommandStatus.CONCLUIDO)
-            QTimer.singleShot(0, self._autocast_advance)
-            return
-
-        self._start_autocast_command(next_item, spec)
 
     def _find_next_pending(self) -> CommandItemWidget | None:
         """Find the first item not yet sent to terminal."""
@@ -2338,3 +2979,103 @@ class CommandQueueWidget(QWidget):
             if item.is_pending_run():
                 return item
         return None
+
+    def _on_step_btn_clicked(self) -> None:
+        """Run the next pending item once and stop. Manual step-by-step.
+
+        Dispatches EVERY pending item to the terminal — including queue
+        helpers (/clear, /model X, /effort Y). The dispatcher uses
+        run_command_in_terminal (Claude) or run_command_in_workspace_terminal
+        (Kimi), pasting into the already-open CLI session. So /clear actually
+        clears context and /model/effort actually switch the session's
+        model/effort. Skipping helpers here would silently break model/effort
+        transitions.
+        """
+        next_item = self._find_next_pending()
+        if next_item is None:
+            signal_bus.toast_requested.emit(
+                "Fila vazia — nenhum item pendente para executar.",
+                "info",
+            )
+            return
+
+        spec = next_item.get_spec()
+
+        # Dispatch via Kimi (blue arrow) or Claude (green arrow).
+        # Routing rule:
+        #   - checkbox checked AND command in kimi whitelist
+        #     AND item's _kimi_btn is actually visible -> kimi click
+        #   - otherwise -> claude (green) click
+        # The triple condition guards against whitelist/visibility divergence
+        # (real risk flagged by /skill:mcp-kimi senior-reviewer): if the
+        # per-item _kimi_btn was hidden by some future spec mutation while
+        # is_kimi_compatible still returns True, fall back to claude rather
+        # than dispatch a kimi action with no visual feedback.
+        #
+        # Asymmetry note: kimi branch delegates to _on_kimi_clicked (which
+        # internally does signal emit + _mark_as_sent). Claude branch
+        # orchestrates manually. Contract: _on_kimi_clicked is the canonical
+        # handler of the blue arrow — do not inline its body here, mirror its
+        # invocation. If _on_kimi_clicked grows side effects, this routing
+        # automatically inherits them (single source of truth).
+        cmd_text = next_item.command_text()
+        cmd_head = spec.name.strip().split(None, 1)[0].lower()
+        use_kimi = (
+            self._use_kimi_chk.isChecked()
+            and is_kimi_compatible(spec.name)
+            and getattr(next_item, "_kimi_btn", None) is not None
+            and next_item._kimi_btn.isVisible()
+        )
+
+        # ALWAYS cancel any pending modal-confirmation Enter from a previous
+        # dispatch. Otherwise a 1s-delayed Enter scheduled by a previous
+        # /effort can fire into the next command's AskUserQuestion menu
+        # and silently select the default option.
+        self._cancel_pending_modal_enter()
+
+        # Special case: /clear with Use Kimi checkbox active clears BOTH
+        # CLI sessions (interactive + workspace). The two emits drive
+        # MetricsBar's per-channel auto-idle independently, so each dot
+        # turns green on its own 1s timer.
+        clear_both = (
+            cmd_head == "/clear" and self._use_kimi_chk.isChecked()
+        )
+        if clear_both:
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            next_item._mark_as_sent()
+            self._last_workspace_dispatch_was_clear = True
+        elif use_kimi:
+            next_item._on_kimi_clicked()
+            self._last_workspace_dispatch_was_clear = False  # consumed by blue arrow
+        else:
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            next_item._mark_as_sent()
+            # Pure interactive dispatch does not affect the workspace flag.
+
+        # /effort pede confirmação no Claude Code: agenda um Enter extra 1s
+        # depois para aceitar o prompt automaticamente. O timer é cancelado
+        # se um novo dispatch acontecer antes do Enter firar (proteção
+        # contra firar dentro de AskUserQuestion do próximo comando).
+        if spec.name.strip().lower().startswith("/effort"):
+            self._arm_pending_modal_enter()
+
+    def _arm_pending_modal_enter(self) -> None:
+        """Schedule a 1s Enter to dismiss /effort's confirmation modal,
+        cancellable by the next dispatch."""
+        self._cancel_pending_modal_enter()
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(signal_bus.submit_enter_to_terminal.emit)
+        t.start(1000)
+        self._pending_modal_enter_timer = t
+
+    def _cancel_pending_modal_enter(self) -> None:
+        """Drop any pending modal-confirmation Enter. Called by every new
+        dispatch so a stale Enter can never land in a future command's
+        interactive prompt."""
+        if self._pending_modal_enter_timer is not None:
+            self._pending_modal_enter_timer.stop()
+            self._pending_modal_enter_timer = None

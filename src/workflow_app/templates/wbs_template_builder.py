@@ -127,7 +127,7 @@ def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandS
     specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
-    # ── F7: Per-module FASE A.2 (TDD, optional) + execute + review ──────────
+    # ── F7: Per-module FASE B-tdd (TDD, optional; ex A.2) + execute + review ──
     # Skip TDD specs quando MODULE-META.tdd.required == false (usuario remove manualmente)
     for module_path in modules:
         specs.append(_spec(f"/tdd:test-plan {module_path}", _O, 0))
@@ -216,7 +216,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/update-tasks:analyse", _S, 0))
     specs.append(_spec("/update-tasks:execute", _S, 0))
 
-    # ── F7: Per-module FASE A.2 (TDD, optional) + execute + review ──────────
+    # ── F7: Per-module FASE B-tdd (TDD, optional; ex A.2) + execute + review ──
     # Skip TDD specs quando MODULE-META.tdd.required == false (usuario remove manualmente)
     for module_path in modules:
         specs.append(_spec(f"/tdd:test-plan {module_path}", _O, 0))
