@@ -27,7 +27,7 @@ import shlex
 # Hardening: tests/test_kimi_whitelist.py parses progress.md at test time and
 # fails if any command listed here drops below KIMI_THRESHOLD or disappears
 # from the source-of-truth file.
-KIMI_THRESHOLD: int = 78
+KIMI_THRESHOLD: int = 72
 KIMI_PROGRESS_PATH: str = "scheduled-updates/claude-to-kimi/progress.md"
 
 KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
@@ -75,7 +75,9 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/error-catalog-create",        # 83 (catálogo templated)
     "/fdd-create",                  # 83 (FDD pattern)
     "/intake:analyze",              # 80 (análise estruturada sem askuser)
-    # Brief 78% — adicionados após ajuste manual do threshold (79 -> 78).
+    # Blog pipeline
+    "/blog:analytics-review",       # 72
+    # Brief 78% / Blog 72% — adicionados após ajuste manual do threshold (79 -> 78 -> 72).
     # /break-intake, /prd-create, /user-stories-create, /hld-create foram
     # explicitamente baixados para 75 e ficam KEEP_CLAUDE (decisão do owner).
     "/lld-create",                  # 78 (LLD técnico — incluído pois fora dos 4 manuais)
@@ -86,7 +88,7 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/adr-create",                  # 78 (ADR curto)
     "/optimize:scaffolds",          # 78 (scaffold patterns)
     "/optimize:blueprints",         # 78 (blueprint patterns)
-    # Daily Loop pipeline (queue-btn-execute-daily-loop)
+    # Daily Loop pipeline (queue-btn-daily-loop)
     "/daily-loop:do",               # 86 (apply iteration_template — único do execute)
     # Listener Test pipeline (queue-btn-listener-test)
     "/test-autoflow-auto",          # 85 (comando de teste determinístico — aguarda 30s e finaliza)

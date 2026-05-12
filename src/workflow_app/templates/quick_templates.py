@@ -355,11 +355,19 @@ TEMPLATE_DAILY: list[CommandSpec] = [
     _spec("/daily:review",   _S, _A, 5),
 ]
 
+# ─── Study (from .claude/commands/study.md) ────────────────────────────────────
+# Pesquisa estruturada com output dual (user-friendly + tecnico).
+# 3 modos: --simple, --deep, --heavy. Gera forged-goods/research/{name}.md.
+
+TEMPLATE_STUDY: list[CommandSpec] = [
+    _spec("/study", _O, _I, 0, effort=EffortLevel.HIGH),
+]
+
 # ─── Create Daily Loop (preparo no terminal — gera blacksmith/loop-archives/{slug}/) ── #
 # Roda /daily-loop como orquestrador unico que internamente encadeia
 # scan -> plan -> enumerate. Saida: PROGRESS.md + tasks/T-{model}-{effort}.md +
 # _LOOP-CONFIG.json. Depois desse template, o usuario carrega o _LOOP-CONFIG.json
-# em metrics-project-pill e clica [Execute daily loop] (queue-btn-execute-daily-loop)
+# em metrics-project-pill e clica [Execute daily loop] (queue-btn-daily-loop)
 # para expandir os items pendentes na fila.
 #
 # Frontmatter de /daily-loop declara model: opus, effort: high — repetimos aqui

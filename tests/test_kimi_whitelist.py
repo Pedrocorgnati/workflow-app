@@ -49,7 +49,7 @@ class TestWhitelist:
         # + 8 (brief, score 78 após threshold ajustado para 78)
         # + 1 (daily-loop:do, score 86)
         # + 1 (test-autoflow-auto, score 85) = 45
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 45
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 46
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):

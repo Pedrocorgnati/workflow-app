@@ -63,7 +63,7 @@ class ReviewBlockedSentinel:
     exhausts its 3-round self-healing loop with blockers remaining.
 
     The workflow-app reads `{loop_root}/.review-blocked` before expanding the
-    queue (`queue-btn-execute-daily-loop`). When present, the user is shown a
+    queue (`queue-btn-daily-loop`). When present, the user is shown a
     confirmation modal summarising the blockers and must explicitly accept to
     proceed.
 
@@ -543,6 +543,337 @@ def build_daily_loop_specs(
             position=0,
             effort=EffortLevel.HIGH,
             phase="daily-loop",
+        )
+    )
+
+    for i, spec in enumerate(specs, start=1):
+        spec.position = i
+
+    return specs
+
+
+# ---------------------------------------------------------------------------
+# /loop pipeline (queue-btn-loop) — backtick-aware variant
+# ---------------------------------------------------------------------------
+#
+# The /loop pipeline (created 2026-05-12, family of /loop --task|--cmd|--cmd-single|--both)
+# emits PROGRESS.md rows where the `Target` column may contain literal
+# `|` characters inside backtick-wrapped inline code (e.g. mode flags like
+# `--simple|--deep|--heavy`). The legacy `_ITEM_ROW` regex stops at the
+# first `|` regardless of backtick context, making `--deep` look like a
+# bucket id and triggering `DailyLoopConfigError: item 001 referencia
+# bucket inexistente: '--deep'`.
+#
+# The functions below are deliberate clones of `parse_progress_items` and
+# `build_daily_loop_specs` with a single change: column splitting respects
+# backtick-bounded segments. The legacy daily-loop entrypoints are kept
+# untouched so existing archives keep working byte-for-byte.
+
+
+def _split_md_row_backtick_aware(line: str) -> list[str]:
+    """Split a markdown table row by `|`, ignoring pipes inside backticks.
+
+    Returns the cells between pipes (without the leading/trailing empty
+    cells caused by the row's own `| ... |` framing). Caller must strip
+    each cell.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    in_backtick = False
+    for ch in line:
+        if ch == "`":
+            in_backtick = not in_backtick
+            current.append(ch)
+        elif ch == "|" and not in_backtick:
+            cells.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    cells.append("".join(current))
+    return cells
+
+
+_LOOP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_LOOP_MARK_RE = re.compile(r"^\[(?P<mark>[ x!])\]$")
+_LOOP_BUCKET_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def parse_progress_items_loop(progress_md_text: str) -> list[ProgressItem]:
+    """Backtick-aware variant of `parse_progress_items` for the /loop pipeline.
+
+    Accepts the same PROGRESS.md schema as daily-loop (columns: ID, Status,
+    Target, Bucket [, ...]) but the Target cell may contain literal `|`
+    inside backtick-wrapped inline code without breaking the parser.
+
+    A line is treated as an item row iff:
+      - it starts with `|`,
+      - splits into >=5 cells (counting leading/trailing empties),
+      - cell[1] matches the ID regex,
+      - cell[2] matches `[x]`, `[ ]`, or `[!]`,
+      - cell[4] matches the bucket regex.
+
+    Header rows, separators, and free-form prose are silently skipped.
+    """
+    items: list[ProgressItem] = []
+    for line in progress_md_text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = _split_md_row_backtick_aware(line)
+        # `| a | b | c |` splits into ['', ' a ', ' b ', ' c ', ''] = 5 cells
+        if len(cells) < 5:
+            continue
+        id_raw = cells[1].strip()
+        mark_raw = cells[2].strip()
+        target_raw = cells[3].strip()
+        bucket_raw = cells[4].strip()
+
+        if not _LOOP_ID_RE.match(id_raw):
+            continue
+        mark_m = _LOOP_MARK_RE.match(mark_raw)
+        if mark_m is None:
+            continue
+        if not _LOOP_BUCKET_RE.match(bucket_raw):
+            continue
+
+        mark = mark_m.group("mark")
+        if mark == "x":
+            status = "done"
+        elif mark == "!":
+            status = "failed"
+        else:
+            status = "pending"
+        items.append(
+            ProgressItem(
+                item_id=id_raw,
+                status=status,
+                target=target_raw,
+                bucket_id=bucket_raw,
+            )
+        )
+    return items
+
+
+def build_loop_specs(
+    raw_config: dict[str, Any],
+    loop_root: Path | str,
+) -> list[CommandSpec]:
+    """Expand a `/loop`-flavoured `_LOOP-CONFIG.json` + PROGRESS.md into a queue.
+
+    Behaviour mirrors `build_daily_loop_specs` exactly, except PROGRESS.md is
+    parsed by `parse_progress_items_loop` (backtick-aware). Use this entrypoint
+    for the new `/loop` family (`queue-btn-loop`); keep
+    `build_daily_loop_specs` for legacy `queue-btn-daily-loop`.
+
+    Args:
+        raw_config: parsed `_LOOP-CONFIG.json` (root dict; same V3 + kind:
+            daily-loop schema as the legacy daily-loop pipeline).
+        loop_root:  resolved filesystem path of
+            `blacksmith/loop-archives/{slug}/`.
+
+    Returns:
+        list[CommandSpec] ready for `signal_bus.pipeline_ready.emit(...)`.
+        Empty list if no pending items.
+
+    Raises:
+        DailyLoopConfigError: missing `daily_loop` block, missing
+        PROGRESS.md, invalid bucket_id reference, or unknown model/effort
+        value.
+    """
+    daily_loop = raw_config.get("daily_loop")
+    if not isinstance(daily_loop, dict):
+        raise DailyLoopConfigError(
+            "_LOOP-CONFIG.json sem bloco 'daily_loop' — gere via /loop ou /daily-loop:enumerate"
+        )
+
+    slug = str(daily_loop.get("slug", "")).strip()
+    if not slug:
+        raise DailyLoopConfigError("daily_loop.slug ausente")
+
+    bucket_index = _resolve_bucket_index(daily_loop)
+
+    loop_root_path = Path(loop_root)
+    progress_path = resolve_loop_path(
+        daily_loop.get("progress_path"),
+        loop_root_path,
+        label="progress_path",
+        default="PROGRESS.md",
+    )
+
+    if not progress_path.exists():
+        raise DailyLoopConfigError(
+            "PROGRESS.md nao encontrado.\n"
+            f"  declarado em _LOOP-CONFIG.json:  progress_path = {daily_loop.get('progress_path')!r}\n"
+            f"  loop_root resolvido:              {loop_root_path}\n"
+            f"  caminho final calculado:          {progress_path}\n"
+            "  acao: rode /loop ou /daily-loop:enumerate para regerar OU corrija "
+            "progress_path no JSON (filename-only relativo a loop_root, ou path absoluto)."
+        )
+
+    items = parse_progress_items_loop(progress_path.read_text(encoding="utf-8"))
+    pending = [it for it in items if it.status == "pending"]
+
+    if not pending:
+        return []
+
+    do_command = str(daily_loop.get("do_command", "/daily-loop:do")).strip() or "/daily-loop:do"
+    review_done_command = str(
+        daily_loop.get("review_done_command", "/daily-loop:review-done")
+    ).strip() or "/daily-loop:review-done"
+    clear_between_items = bool(daily_loop.get("clear_between_items", False))
+    _REVIEW_DONE_MODEL: ModelName = ModelName.OPUS
+    _REVIEW_DONE_EFFORT: EffortLevel = EffortLevel.STANDARD
+
+    specs: list[CommandSpec] = []
+
+    specs.append(
+        CommandSpec(
+            name="/clear",
+            model=ModelName.SONNET,
+            interaction_type=InteractionType.AUTO,
+            config_path="",
+            position=0,
+        )
+    )
+
+    current_model: ModelName | None = None
+    current_effort: EffortLevel | None = None
+
+    for idx, item in enumerate(pending):
+        if clear_between_items and idx > 0:
+            specs.append(
+                CommandSpec(
+                    name="/clear",
+                    model=ModelName.SONNET,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                )
+            )
+            current_model = None
+            current_effort = None
+
+        bucket = bucket_index.get(item.bucket_id)
+        if bucket is None:
+            raise DailyLoopConfigError(
+                f"item {item.item_id} referencia bucket inexistente: {item.bucket_id!r}"
+            )
+        model, effort = _bucket_to_model_effort(bucket)
+
+        if model != current_model:
+            specs.append(
+                CommandSpec(
+                    name=f"/model {model.value.lower()}",
+                    model=model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                )
+            )
+            current_model = model
+
+        if effort != current_effort:
+            specs.append(
+                CommandSpec(
+                    name=f"/effort {effort.value.lower()}",
+                    model=model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                )
+            )
+            current_effort = effort
+
+        specs.append(
+            CommandSpec(
+                name=f"{do_command} --slug {slug} --item {item.item_id}",
+                model=model,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                position=0,
+                effort=effort,
+                phase="loop",
+            )
+        )
+
+        if _REVIEW_DONE_MODEL != current_model:
+            specs.append(
+                CommandSpec(
+                    name=f"/model {_REVIEW_DONE_MODEL.value.lower()}",
+                    model=_REVIEW_DONE_MODEL,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                )
+            )
+            current_model = _REVIEW_DONE_MODEL
+        if _REVIEW_DONE_EFFORT != current_effort:
+            specs.append(
+                CommandSpec(
+                    name=f"/effort {_REVIEW_DONE_EFFORT.value.lower()}",
+                    model=_REVIEW_DONE_MODEL,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                )
+            )
+            current_effort = _REVIEW_DONE_EFFORT
+
+        specs.append(
+            CommandSpec(
+                name=f"{review_done_command} --slug {slug} --item {item.item_id}",
+                model=_REVIEW_DONE_MODEL,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                position=0,
+                effort=_REVIEW_DONE_EFFORT,
+                phase="loop",
+            )
+        )
+
+    review_command = str(
+        daily_loop.get("review_command", "/daily-loop:review")
+    ).strip() or "/daily-loop:review"
+
+    specs.append(
+        CommandSpec(
+            name="/clear",
+            model=ModelName.SONNET,
+            interaction_type=InteractionType.AUTO,
+            config_path="",
+            position=0,
+        )
+    )
+    if current_model != ModelName.OPUS:
+        specs.append(
+            CommandSpec(
+                name="/model opus",
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                position=0,
+            )
+        )
+        current_model = ModelName.OPUS
+    if current_effort != EffortLevel.HIGH:
+        specs.append(
+            CommandSpec(
+                name="/effort high",
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                position=0,
+            )
+        )
+        current_effort = EffortLevel.HIGH
+    specs.append(
+        CommandSpec(
+            name=f"{review_command} --slug {slug}",
+            model=ModelName.OPUS,
+            interaction_type=InteractionType.AUTO,
+            config_path="",
+            position=0,
+            effort=EffortLevel.HIGH,
+            phase="loop",
         )
     )
 

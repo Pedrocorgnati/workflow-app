@@ -591,6 +591,8 @@ class MainWindow(QMainWindow):
                     continue  # respeita config_path pre-setado por _on_boilerplate_clicked
                 if spec.name.startswith("/auto-improove:"):
                     continue  # auto-improove opera sobre o proprio SystemForge, sem project.json
+                if spec.name.startswith("/blog:"):
+                    continue  # blog opera sobre o proprio SystemForge, sem project.json
                 spec.config_path = rel
 
         self._command_queue.load_pipeline(commands)

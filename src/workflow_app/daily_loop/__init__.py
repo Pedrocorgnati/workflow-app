@@ -11,7 +11,9 @@ from workflow_app.daily_loop.loader import (
     DailyLoopConfigError,
     ReviewBlockedSentinel,
     build_daily_loop_specs,
+    build_loop_specs,
     parse_progress_items,
+    parse_progress_items_loop,
     read_review_blocked_sentinel,
     resolve_loop_path,
 )
@@ -20,7 +22,9 @@ __all__ = [
     "DailyLoopConfigError",
     "ReviewBlockedSentinel",
     "build_daily_loop_specs",
+    "build_loop_specs",
     "parse_progress_items",
+    "parse_progress_items_loop",
     "read_review_blocked_sentinel",
     "resolve_loop_path",
 ]

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from workflow_app import dcp as dcp_pkg
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
+from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
 from workflow_app.dcp.specific_flow_handler import build_paste_command_only
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
@@ -51,7 +52,6 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_BUSINESS,
     TEMPLATE_CREATE_DAILY_LOOP,
     TEMPLATE_DAILY,
-    TEMPLATE_DEPLOY,
     TEMPLATE_HOSTGATOR,
     TEMPLATE_INTAKE_REVIEW,
     TEMPLATE_INTAKE_SEED,
@@ -61,6 +61,7 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_MKT,
     TEMPLATE_MODULES,
     TEMPLATE_PYTHON_IMPROOVE,
+    TEMPLATE_STUDY,
 )
 
 _DROP_INDICATOR_COLOR = QColor("#F59E0B")  # Amber-400
@@ -258,6 +259,70 @@ class CommandQueueWidget(QWidget):
         self._setup_ui()
         self._connect_signals()
 
+    # ─────────────────────────────────────────────── Attachment proxy ─── #
+
+    class _AttachmentProxy:
+        """Proxy que implementa a interface pill para DoublePhaseButton."""
+
+        def __init__(self, widget, loader):
+            self._widget = widget
+            self._loader = loader
+
+        def has_attachment(self):
+            from workflow_app.config.app_state import app_state
+            return app_state.has_config and app_state.config is not None
+
+        def generate_from_attachment(self):
+            self._loader()
+
+    def _on_daily_command_ready(self, command_line: str) -> None:
+        spec = CommandSpec(
+            name=command_line,
+            model=ModelName.OPUS,
+            interaction_type=InteractionType.INTERACTIVE,
+            position=len(self._items) + 1,
+        )
+        self.add_command(spec)
+        self._template_label.setText("  \U0001f4cb  Daily")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Daily")
+
+    def _on_daily_loop_command_ready(self, command_line: str) -> None:
+        spec = CommandSpec(
+            name=command_line,
+            model=ModelName.OPUS,
+            interaction_type=InteractionType.INTERACTIVE,
+            position=len(self._items) + 1,
+        )
+        self.add_command(spec)
+        self._template_label.setText("  \U0001f4cb  Daily Loop")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Daily Loop")
+
+    def _on_loop_command_ready(self, command_line: str) -> None:
+        spec = CommandSpec(
+            name=command_line,
+            model=ModelName.OPUS,
+            interaction_type=InteractionType.INTERACTIVE,
+            position=len(self._items) + 1,
+        )
+        self.add_command(spec)
+        self._template_label.setText("  \U0001f4cb  Loop")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Loop")
+
+    def _on_study_command_ready(self, command_line: str) -> None:
+        spec = CommandSpec(
+            name=command_line,
+            model=ModelName.OPUS,
+            interaction_type=InteractionType.INTERACTIVE,
+            position=len(self._items) + 1,
+        )
+        self.add_command(spec)
+        self._template_label.setText("  \U0001f4cb  Study")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Study")
+
     # ─────────────────────────────────────────────────────────── UI ──── #
 
     def _setup_ui(self) -> None:
@@ -284,8 +349,8 @@ class CommandQueueWidget(QWidget):
         tab_bar_layout.setSpacing(3)
 
         self._sec_tabs: list[QPushButton] = []
-        _tab_testids = ("queue-tab-daily", "queue-tab-workflow", "queue-tab-auxiliar")
-        for i, label in enumerate(("Daily", "Workflow", "Auxiliar")):
+        _tab_testids = ("queue-tab-pipelines", "queue-tab-workflow", "queue-tab-auxiliar")
+        for i, label in enumerate(("Pipelines", "Workflow", "Auxiliar")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
@@ -298,11 +363,105 @@ class CommandQueueWidget(QWidget):
         # ── Section contents (only one visible at a time) ────────────────
         self._sec_contents: list[QWidget] = []
 
-        # Daily
-        daily_content = self._build_section_grid([
-            ("daily", "Daily tasks: scan → plan → do → validate → review",
-             lambda: self._load_quick_template(TEMPLATE_DAILY, name="Daily"),
-             "queue-btn-daily"),
+        # Pipelines
+        daily_pill = self._AttachmentProxy(
+            self, lambda: self._load_quick_template(TEMPLATE_DAILY, name="Daily")
+        )
+        daily_btn = DoublePhaseButton(
+            label="daily",
+            pipeline_name="/daily",
+            argument_hint="[descricao da task] [config.json] [--tasklist <path.md>]",
+            default_md_dir="blacksmith/daily/",
+            radio_summaries={},
+            pill=daily_pill,
+            on_command_ready=self._on_daily_command_ready,
+            parent=self,
+        )
+        daily_btn.setProperty("testid", "queue-btn-daily")
+
+        daily_loop_pill = self._AttachmentProxy(
+            self, self._on_daily_loop_clicked
+        )
+        daily_loop_btn = DoublePhaseButton(
+            label="daily-loop",
+            pipeline_name="/daily-loop",
+            argument_hint="[descricao da task] [config.json] [--tasklist <path.md>]",
+            default_md_dir="blacksmith/daily-loop/",
+            radio_summaries={},
+            pill=daily_loop_pill,
+            on_command_ready=self._on_daily_loop_command_ready,
+            parent=self,
+        )
+        daily_loop_btn.setProperty("testid", "queue-btn-daily-loop")
+        daily_loop_btn.setToolTip(
+            "Execute Daily Loop — expande a fila finita gerada por Create. "
+            "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
+            "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
+            "/daily-loop:review-done (Opus/standard, /skill:double-mcp Level 3 "
+            "CROSS_ADVERSARIAL — analogo per-item de /review-executed-task, "
+            "reverte+corrige+re-acceptance se achar regressao). Final: "
+            "/daily-loop:review global em Opus/HIGH. /clear/model/effort "
+            "dedupados entre buckets."
+        )
+        daily_loop_btn.setStyleSheet(_SECTION_BTN_STYLE)
+
+        loop_pill = self._AttachmentProxy(
+            self, self._on_loop_clicked
+        )
+        loop_btn = DoublePhaseButton(
+            label="loop",
+            pipeline_name="/loop",
+            argument_hint="--task <path.md> [--name <slug>] | --cmd <path.md> [--name <slug>] | --cmd-single <path.md> | --both <path.md> [--name <slug>]",
+            default_md_dir="blacksmith/loop/",
+            radio_summaries={
+                "--task": "para iterar execucao de tasks ja criadas em modulo ou micro-architecture",
+                "--cmd": "para criar ou atualizar varios slash-commands do SystemForge em batch completo",
+                "--cmd-single": "para criar ou atualizar um unico slash-command via sub-pipeline reduzida direta",
+                "--both": "para fluxos que vao conter tasks variadas e criacao de comandos",
+            },
+            pill=loop_pill,
+            on_command_ready=self._on_loop_command_ready,
+            parent=self,
+        )
+        loop_btn.setProperty("testid", "queue-btn-loop")
+        loop_btn.setToolTip(
+            "Loop — expande fila finita gerada por /loop (--task|--cmd|--cmd-single|--both). "
+            "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
+            "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
+            "/daily-loop:review-done (Opus/standard, /skill:double-mcp Level 3 "
+            "CROSS_ADVERSARIAL). Final: /daily-loop:review global em Opus/HIGH. "
+            "/clear/model/effort dedupados entre buckets."
+        )
+        loop_btn.setStyleSheet(_SECTION_BTN_STYLE)
+
+        study_pill = self._AttachmentProxy(
+            self, lambda: self._load_quick_template(TEMPLATE_STUDY, name="Study")
+        )
+        study_btn = DoublePhaseButton(
+            label="study",
+            pipeline_name="/study",
+            argument_hint='"<duvida>" [path.md] [--name <slug>] [--simple|--deep|--heavy]',
+            default_md_dir="blacksmith/study/",
+            radio_summaries={
+                "--simple": "para estudo rapido com 1 fonte e output enxuto pra revisao imediata",
+                "--deep": "para estudo intermediario com triangulacao de fontes e debate moderado de hipoteses",
+                "--heavy": "para estudo denso com scope-decompose, loops de pesquisa e sintese profunda final",
+            },
+            pill=study_pill,
+            on_command_ready=self._on_study_command_ready,
+            parent=self,
+        )
+        study_btn.setProperty("testid", "queue-btn-study")
+        study_btn.setToolTip(
+            "Study — pesquisa estruturada com output dual (user-friendly + tecnico). "
+            "3 modos: --simple (rapido, 1 fonte), --deep (triangulacao, debate), "
+            "--heavy (scope-decompose, sintese profunda). Gera "
+            "forged-goods/research/{name}.md."
+        )
+        study_btn.setStyleSheet(_SECTION_BTN_STYLE)
+
+        pipelines_content = self._build_section_grid([
+            daily_btn,
             ("Create daily loop",
              "Create Daily Loop — roda /daily-loop no terminal (Opus/HIGH). "
              "Pipeline interativo: scan -> plan -> enumerate. Gera "
@@ -311,22 +470,9 @@ class CommandQueueWidget(QWidget):
              "metrics-project-pill e clique [Execute daily loop].",
              self._on_create_daily_loop_clicked,
              "queue-btn-create-daily-loop"),
-            ("Cmd Single",
-             "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
-             "avulso sem preparo terminal. Selecione um .md com heading canonico "
-             "(# /grupo:nome) e o workflow-app expande a sub-sequencia inline.",
-             self._on_cmd_single_clicked,
-             "queue-btn-cmd-single"),
-            ("Execute daily loop",
-             "Execute Daily Loop — expande a fila finita gerada por Create. "
-             "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
-             "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
-             "/daily-loop:review-done (Opus/standard, /skill:double-mcp Level 3 "
-             "CROSS_ADVERSARIAL — analogo per-item de /review-executed-task, "
-             "reverte+corrige+re-acceptance se achar regressao). Final: "
-             "/daily-loop:review global em Opus/HIGH. /clear/model/effort "
-             "dedupados entre buckets.",
-             self._on_daily_loop_clicked, "queue-btn-execute-daily-loop"),
+            daily_loop_btn,
+            loop_btn,
+            study_btn,
             ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
              lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
              "queue-btn-intake-seed"),
@@ -344,8 +490,8 @@ class CommandQueueWidget(QWidget):
              self._on_auto_improove_balanced_clicked,
              "queue-btn-auto-improove-balanced"),
         ])
-        header_layout.addWidget(daily_content)
-        self._sec_contents.append(daily_content)
+        header_layout.addWidget(pipelines_content)
+        self._sec_contents.append(pipelines_content)
 
         # Workflow
         workflow_content = self._build_section_grid([
@@ -375,14 +521,6 @@ class CommandQueueWidget(QWidget):
              "recarrega do disco e os itens removidos voltam. Para fix permanente, edite "
              "MODULE-META.json e regenere via [DCP: Gerar Pipeline].",
              self._on_dcp_specific_flow_clicked, "queue-btn-dcp-specific-flow"),
-            ("specific-flow (legacy)", "[legacy custom-template] — use DCP: Specific-Flow",
-             self._on_specific_flow_clicked, "queue-btn-specific-flow"),
-            ("qa", "[legacy F9] QA + auditoria de stack (selecione a stack no modal)",
-             self._on_qa_clicked, "queue-btn-qa"),
-            ("deploy", "[legacy F11] CI/CD, infra, pre-deploy, SLO, changelog",
-             lambda: self._load_quick_template(TEMPLATE_DEPLOY, name="Deploy"),
-             "queue-btn-deploy"),
-
         ])
         self._apply_dcp_reader_gating(workflow_content)
         header_layout.addWidget(workflow_content)
@@ -408,6 +546,12 @@ class CommandQueueWidget(QWidget):
              "queue-btn-python-improove"),
             ("micro-json", "Configura project.json para micro-arquitetura",
              self._on_micro_json_clicked, "queue-btn-micro-json"),
+            ("Cmd Single",
+             "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
+             "avulso sem preparo terminal. Selecione um .md com heading canonico "
+             "(# /grupo:nome) e o workflow-app expande a sub-sequencia inline.",
+             self._on_cmd_single_clicked,
+             "queue-btn-cmd-single"),
         ])
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
@@ -781,7 +925,7 @@ class CommandQueueWidget(QWidget):
     # ──────────────────────────────────── Section tabs (accordion) ─── #
 
     def _build_section_grid(
-        self, buttons: list[tuple[str, str, object, str]], cols: int = 3
+        self, buttons: list[tuple[str, str, object, str] | QWidget], cols: int = 3
     ) -> QWidget:
         """Create a content widget with a 3-column grid of styled buttons."""
         content = QWidget()
@@ -789,14 +933,18 @@ class CommandQueueWidget(QWidget):
         grid = QGridLayout(content)
         grid.setContentsMargins(5, 4, 5, 5)
         grid.setSpacing(3)
-        for i, (label, tooltip, callback, testid) in enumerate(buttons):
-            btn = QPushButton(label)
-            btn.setToolTip(tooltip)
-            btn.setStyleSheet(_SECTION_BTN_STYLE)
-            if testid:
-                btn.setProperty("testid", testid)
-            btn.clicked.connect(callback)
-            grid.addWidget(btn, i // cols, i % cols)
+        for i, item in enumerate(buttons):
+            if isinstance(item, QWidget):
+                grid.addWidget(item, i // cols, i % cols)
+            else:
+                label, tooltip, callback, testid = item
+                btn = QPushButton(label)
+                btn.setToolTip(tooltip)
+                btn.setStyleSheet(_SECTION_BTN_STYLE)
+                if testid:
+                    btn.setProperty("testid", testid)
+                btn.clicked.connect(callback)
+                grid.addWidget(btn, i // cols, i % cols)
         return content
 
     def _switch_section(self, index: int) -> None:
@@ -1094,83 +1242,6 @@ class CommandQueueWidget(QWidget):
             f"Micro-Architecture '{slug}': {next_n}-{slug}", "success"
         )
         self._load_quick_template(template, name="Micro-Architecture")
-
-    def _on_specific_flow_clicked(self) -> None:
-        """Load SPECIFIC-FLOW.json generated by /workflow-custom-template.
-
-        Reads the pre-generated JSON directly — does NOT call _load_quick_template
-        because the JSON already contains /model and /clear commands.
-        config_path is left empty; main_window._on_pipeline_ready sets it on load.
-        """
-        from workflow_app.config.app_state import app_state
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o Specific Flow.", "warning"
-            )
-            return
-
-        config = app_state.config
-        custom_root = config.custom_workflow_root or f"{config.wbs_root}/specific-flow"
-        flow_path = Path(config.project_dir) / custom_root / "SPECIFIC-FLOW.json"
-
-        if not flow_path.exists():
-            signal_bus.toast_requested.emit(
-                f"SPECIFIC-FLOW.json não encontrado em {custom_root}/. "
-                "Execute /workflow-custom-template primeiro.",
-                "warning",
-            )
-            return
-
-        try:
-            data = json.loads(flow_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            signal_bus.toast_requested.emit(
-                f"Erro ao ler SPECIFIC-FLOW.json: {exc}", "error"
-            )
-            return
-
-        _model_map = {
-            "opus": ModelName.OPUS,
-            "sonnet": ModelName.SONNET,
-            "haiku": ModelName.HAIKU,
-        }
-        specs: list[CommandSpec] = []
-        for i, cmd in enumerate(data.get("commands", []), start=1):
-            name = cmd.get("name", "")
-            model = _model_map.get(str(cmd.get("model", "sonnet")).lower(), ModelName.SONNET)
-            interaction = (
-                InteractionType.INTERACTIVE
-                if str(cmd.get("interaction", "auto")).lower() == "inter"
-                else InteractionType.AUTO
-            )
-            specs.append(
-                CommandSpec(
-                    name=name,
-                    model=model,
-                    interaction_type=interaction,
-                    config_path="",
-                    position=i,
-                )
-            )
-
-        if not specs:
-            signal_bus.toast_requested.emit("SPECIFIC-FLOW.json está vazio.", "warning")
-            return
-
-        project = data.get("project", config.project_name)
-        self._template_label.setText(f"  \U0001f4cb  Specific Flow — {project}")
-        self._template_label.setVisible(True)
-        self._maybe_auto_save("Specific Flow")
-        signal_bus.pipeline_ready.emit(specs)
-
-    def _on_qa_clicked(self) -> None:
-        """Open QA modal with stack options."""
-        from workflow_app.dialogs.qa_stack_dialog import QAStackDialog
-
-        dlg = QAStackDialog(parent=self)
-        if dlg.exec() == QAStackDialog.Accepted:
-            self._load_quick_template(dlg.selected_template, name="QA")
 
     # ────────────────────────────────────────────────────────── DCP ── #
 
@@ -2314,6 +2385,128 @@ class CommandQueueWidget(QWidget):
         self._template_label.setText(f"  \U0001f4cb  Daily loop: {slug} ({item_count} itens)")
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"Daily loop {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+
+    def _on_loop_clicked(self) -> None:
+        """Expand a /loop pipeline _LOOP-CONFIG.json + PROGRESS.md into the queue.
+
+        Clone of `_on_daily_loop_clicked` adapted for the new `/loop`
+        family (`/loop --task|--cmd|--cmd-single|--both`, created 2026-05-12).
+        The only behavioural difference is the PROGRESS.md parser:
+        `build_loop_specs` uses `parse_progress_items_loop` which is
+        backtick-aware and tolerates literal `|` characters inside
+        backtick-wrapped inline code in the Target column (e.g. mode
+        flag enumerations like `--simple|--deep|--heavy`). The legacy
+        button (`queue-btn-daily-loop`) keeps the original
+        non-backtick-aware parser for byte-for-byte backwards
+        compatibility with old archives.
+
+        Requires the metrics-project-pill to point at the
+        `_LOOP-CONFIG.json` of a `/loop`-flavoured pipeline (same V3 +
+        kind: daily-loop schema as the legacy daily-loop).
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        from workflow_app.config.app_state import app_state
+        from workflow_app.daily_loop import (
+            DailyLoopConfigError,
+            build_loop_specs,
+            read_review_blocked_sentinel,
+        )
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Carregue um _LOOP-CONFIG.json em metrics-project-pill antes de usar Loop.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        raw = config.raw if isinstance(config.raw, dict) else {}
+
+        if raw.get("kind") != "daily-loop" or "daily_loop" not in raw:
+            signal_bus.toast_requested.emit(
+                "Projeto carregado nao e um _LOOP-CONFIG.json. "
+                "Rode /loop no terminal e carregue o JSON gerado.",
+                "warning",
+            )
+            return
+
+        loop_root = Path(config.config_path).parent
+
+        sentinel = read_review_blocked_sentinel(loop_root)
+        if sentinel is not None:
+            slug_for_modal = str(raw.get("daily_loop", {}).get("slug", "")) or "loop"
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Loop — Review BLOQUEADO")
+            box.setText(
+                f"O preparo do loop \"{slug_for_modal}\" foi REPROVADO por "
+                "/daily-loop:review-created."
+            )
+            blocker_line = (
+                f"\n\nBlockers remanescentes: {sentinel.blocker_count}"
+                if sentinel.blocker_count
+                else ""
+            )
+            box.setInformativeText(
+                "Sentinel `.review-blocked` encontrado em:\n"
+                f"{sentinel.path}\n\n"
+                "Recomendado: Cancelar, ler _LOOP-CREATED-AUDIT.md, corrigir "
+                "blockers e re-rodar /daily-loop:review-created."
+                f"{blocker_line}\n\n"
+                "Executar mesmo assim?"
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            yes_btn = box.button(QMessageBox.StandardButton.Yes)
+            yes_btn.setText("Executar mesmo assim")
+            cancel_btn = box.button(QMessageBox.StandardButton.Cancel)
+            cancel_btn.setText("Cancelar")
+            choice = box.exec()
+            if choice != QMessageBox.StandardButton.Yes:
+                logger.info(
+                    "[loop] %s execution cancelled (.review-blocked override declined)",
+                    slug_for_modal,
+                )
+                signal_bus.toast_requested.emit(
+                    "Execucao cancelada — .review-blocked ativo.",
+                    "info",
+                )
+                return
+            logger.warning(
+                "[loop] %s executing despite .review-blocked sentinel "
+                "(blockers=%d, user override)",
+                slug_for_modal,
+                sentinel.blocker_count,
+            )
+
+        try:
+            specs = build_loop_specs(raw, loop_root)
+        except DailyLoopConfigError as exc:
+            signal_bus.toast_requested.emit(f"Loop invalido: {exc}", "error")
+            return
+        except OSError as exc:
+            signal_bus.toast_requested.emit(f"Erro ao ler PROGRESS.md: {exc}", "error")
+            return
+
+        if not specs:
+            signal_bus.toast_requested.emit(
+                "PROGRESS.md sem itens pendentes — loop concluido. "
+                "Rode /daily-loop:review --slug X para o veredito final.",
+                "info",
+            )
+            return
+
+        slug = str(raw.get("daily_loop", {}).get("slug", "")) or "loop"
+        item_count = sum(1 for s in specs if s.name.startswith("/daily-loop:do "))
+        logger.info("[loop] loading %s (%d items, %d specs)", slug, item_count, len(specs))
+
+        self._template_label.setText(f"  \U0001f4cb  Loop: {slug} ({item_count} itens)")
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"Loop {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
     def _on_auto_improove_balanced_clicked(self) -> None:

@@ -658,7 +658,7 @@ class TestReviewBlockedSentinel:
 
     The sentinel is a marker file dropped by /daily-loop:review-created
     (FASE 6) when the audit's 3-round self-healing exhausts with blockers
-    remaining. The workflow-app reads it to gate `queue-btn-execute-daily-loop`
+    remaining. The workflow-app reads it to gate `queue-btn-daily-loop`
     behind a confirmation modal.
     """
 
