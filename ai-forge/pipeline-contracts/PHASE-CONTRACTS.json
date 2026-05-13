@@ -1,6 +1,7 @@
 {
-  "version": "1.6.0",
-  "updated_at": "2026-05-10",
+  "version": "1.7.0-pre",
+  "updated_at": "2026-05-13",
+  "updated_note": "HT-05 mitigation — meta-loop estrategia-de-separacao prep: declared 4 new /dcp:* advisory gates (congruence-check, temporality-check, meta-completeness, directive-injector) que serao consumidos pelo /dcp:build-and-load apos item 006 do meta-loop. Versao bumpeada para 1.7.0-pre — final 1.7.0 sera marcada apos item 007 com smoke test verde.",
   "gates": [
     {
       "gate_id": "B-dcp.exit",
@@ -9,6 +10,48 @@
       "condition": "SPECIFIC-FLOW.json valid AND condition_resolved emitted per step",
       "blocks": ["B.2", "B.3"],
       "on_fail": "abort with exit 1"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.congruence",
+      "phase": "B-dcp",
+      "command": "/dcp:congruence-check",
+      "condition": "every StepSpec.condition predicate evaluates True against current MODULE-META + delivery.json + project.json",
+      "blocks": ["B.2", "B.3"],
+      "on_fail": "abort with exit 6 (LOW_SIGNAL) — fila NAO recebe specs incoerentes",
+      "advisory": false,
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.temporality",
+      "phase": "B-dcp",
+      "command": "/dcp:temporality-check",
+      "condition": "marketing-ready AND foundations-first AND deploy-after-tests AND sign-off-only-on-done preservados na ordem do SPECIFIC-FLOW",
+      "blocks": ["B.2", "B.3"],
+      "on_fail": "abort with exit 6 (LOW_SIGNAL)",
+      "advisory": false,
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.meta-completeness",
+      "phase": "B-dcp",
+      "command": "/dcp:meta-completeness",
+      "condition": "MODULE-META.json tem todos os campos obrigatorios + campos novos relevantes (Tabela 2 do AUDIT-RESULTS) preenchidos para o modulo corrente",
+      "blocks": [],
+      "on_fail": "warning — lista campos faltantes com sugestoes de valor inferido; NAO bloqueia paste",
+      "advisory": true,
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.directive-injector",
+      "phase": "B-dcp",
+      "command": "/dcp:directive-injector",
+      "condition": "SPECIFIC-FLOW.json com directives `/clear`, `/model`, `/effort` normalizadas conforme GROUP_MAP de WORKFLOW-APP-RULES.md:29-44",
+      "blocks": [],
+      "on_fail": "exit 1 — SPECIFIC-FLOW.json corrupted",
+      "advisory": false,
+      "idempotent": true,
+      "tripwire": "rodar UMA UNICA vez per build — re-emissao na mesma sessao proibida (HT-04 tripwire (1))",
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
     }
   ],
   "canonical_loop": {
