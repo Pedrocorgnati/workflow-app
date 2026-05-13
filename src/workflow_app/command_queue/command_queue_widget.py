@@ -2,7 +2,7 @@
 CommandQueueWidget — 280px right panel showing the command queue.
 
 States:
-  - Empty: "Nenhum pipeline configurado." + [Criar Pipeline] button
+  - Empty: placeholder (vazio)
   - With commands: scrollable list of CommandItemWidget rows + [+] button at bottom
 
 Width: fixed 280px (min 240px, max 360px)
@@ -27,10 +27,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -44,23 +42,20 @@ from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
 from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, InteractionType, ModelName
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
-    TEMPLATE_AUTO_IMPROOVE,
     TEMPLATE_BLOG,
+    TEMPLATE_BLOG_STOCKPILE,
     TEMPLATE_BOILERPLATE,
     TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
-    TEMPLATE_CREATE_DAILY_LOOP,
     TEMPLATE_DAILY,
     TEMPLATE_HOSTGATOR,
     TEMPLATE_INTAKE_REVIEW,
     TEMPLATE_INTAKE_SEED,
     TEMPLATE_JSON,
-    TEMPLATE_LISTENER_TEST,
     TEMPLATE_MIGRATION,
     TEMPLATE_MKT,
     TEMPLATE_MODULES,
-    TEMPLATE_PYTHON_IMPROOVE,
     TEMPLATE_STUDY,
 )
 
@@ -217,7 +212,6 @@ class _DroppableContainer(QWidget):
 class CommandQueueWidget(QWidget):
     """Right sidebar showing the pipeline command queue."""
 
-    new_pipeline_requested = Signal()
     add_command_requested = Signal()
     reorder_requested = Signal(int, int)  # from_pos, to_pos (spec positions / indicator idx)
     save_requested = Signal()
@@ -300,16 +294,160 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save("Daily Loop")
 
     def _on_loop_command_ready(self, command_line: str) -> None:
-        spec = CommandSpec(
-            name=command_line,
-            model=ModelName.OPUS,
-            interaction_type=InteractionType.INTERACTIVE,
-            position=len(self._items) + 1,
-        )
-        self.add_command(spec)
-        self._template_label.setText("  \U0001f4cb  Loop")
+        """Expand `/loop --{mode} <path.md> [--name <slug>]` into its
+        canonical sub-command sequence per `.claude/commands/loop.md` FASE 2.
+
+        Antes (legado): empilhava o comando centralizador como UMA entrada
+        unica na fila — o que forcava o orquestrador `/loop` a sequenciar as
+        sub-fases dentro de uma unica conversa, perdendo o pareamento canonico
+        `/clear` + `/model` + `/effort` entre fases.
+
+        Agora: faz o splice em runtime, materializando as 5 (--task/--cmd),
+        7 (--both) ou sub-pipeline reduzida (--cmd-single) sub-fases como
+        especs separadas, todas com OPUS/HIGH e `/clear` entre elas, conforme
+        `ai-forge/workflow-rules/WORKFLOW-APP-RULES.md`.
+        """
+        tokens = command_line.strip().split()
+        mode = None
+        path_arg = ""
+        name_arg = ""
+
+        if len(tokens) >= 2 and tokens[0] == "/loop":
+            i = 1
+            while i < len(tokens):
+                t = tokens[i]
+                if t in ("--task", "--cmd", "--cmd-single", "--both"):
+                    mode = t
+                    if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                        path_arg = tokens[i + 1]
+                        i += 2
+                        continue
+                elif t == "--name" and i + 1 < len(tokens):
+                    name_arg = tokens[i + 1]
+                    i += 2
+                    continue
+                i += 1
+
+        if mode is None or not path_arg:
+            spec = CommandSpec(
+                name=command_line,
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.INTERACTIVE,
+                position=len(self._items) + 1,
+            )
+            self.add_command(spec)
+            self._template_label.setText("  \U0001f4cb  Loop")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save("Loop")
+            return
+
+        slug = name_arg or Path(path_arg).stem
+
+        if mode == "--cmd-single":
+            md_path = Path(path_arg)
+            if not md_path.is_absolute():
+                md_path = (Path.cwd() / md_path).resolve()
+            try:
+                content = md_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                signal_bus.toast_requested.emit(
+                    f"Erro ao ler {md_path}: {exc}", "error"
+                )
+                return
+
+            cmd_target_slash = ""
+            fm_match = re.search(r"^cmd_target:\s*([^\r\n]+)", content, re.MULTILINE)
+            if fm_match:
+                cmd_target_slash = fm_match.group(1).strip()
+            if not cmd_target_slash:
+                heading_match = re.search(r"^#\s+(/[^\s\n]+)", content, re.MULTILINE)
+                if heading_match:
+                    cmd_target_slash = heading_match.group(1).strip()
+            if not cmd_target_slash:
+                signal_bus.toast_requested.emit(
+                    f"MD {md_path.name} sem heading canonico (# /grupo:nome) "
+                    "nem cmd_target no header. Abortando.",
+                    "error",
+                )
+                return
+
+            target_disk = cmd_target_slash.lstrip("/").replace(":", "/")
+            cmd_file_path = Path.cwd() / ".claude" / "commands" / f"{target_disk}.md"
+            cmd_action = "update" if cmd_file_path.exists() else "create"
+
+            md_path_str = str(md_path)
+            commands = [
+                "/clear",
+                "/model opus",
+                "/effort high",
+                f"/cmd:{cmd_action} {md_path_str}",
+                f"/cmd:review {cmd_target_slash} {md_path_str}",
+            ]
+            if self._use_kimi_chk.isChecked():
+                commands.extend([
+                    "/clear",
+                    f"/cmd:kimi-pair-analyse --approved {md_path_str}",
+                    f"/kimi:pair-execute --approved {md_path_str}",
+                ])
+            label = f"  \U0001f4cb  Loop --cmd-single: {cmd_target_slash} ({cmd_action})"
+            auto_save_label = f"Loop --cmd-single {cmd_target_slash}"
+        else:
+            mode_flag = mode
+            if mode == "--task":
+                sub_names = [
+                    f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
+                    f"/loop:individual-analysis --name {slug}",
+                    f"/loop:integration --name {slug}",
+                    f"/loop:review --name {slug}",
+                    f"/loop:workflow-app --name {slug}",
+                ]
+            elif mode == "--cmd":
+                sub_names = [
+                    f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
+                    f"/loop:individual-analysis {mode_flag} --name {slug}",
+                    f"/loop:integration {mode_flag} --name {slug}",
+                    f"/loop:review {mode_flag} --name {slug}",
+                    f"/loop:workflow-app {mode_flag} --name {slug}",
+                ]
+            else:  # --both
+                sub_names = [
+                    f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
+                    f"/loop:mark-type --name {slug}",
+                    f"/loop:individual-analysis {mode_flag} --name {slug}",
+                    f"/loop:integration {mode_flag} --name {slug}",
+                    f"/loop:review {mode_flag} --name {slug}",
+                    f"/loop:check-tasks-and-cmd --name {slug}",
+                    f"/loop:workflow-app {mode_flag} --name {slug}",
+                ]
+
+            commands = ["/clear", "/model opus", "/effort high", sub_names[0]]
+            for sub in sub_names[1:]:
+                commands.append("/clear")
+                commands.append(sub)
+
+            label = f"  \U0001f4cb  Loop {mode}: {slug} ({len(sub_names)} fases)"
+            auto_save_label = f"Loop {mode} {slug}"
+
+        specs: list[CommandSpec] = []
+        for i, cmd in enumerate(commands, start=1):
+            specs.append(
+                CommandSpec(
+                    name=cmd,
+                    model=ModelName.OPUS,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=EffortLevel.HIGH,
+                    position=i,
+                )
+            )
+
+        self._template_label.setText(label)
         self._template_label.setVisible(True)
-        self._maybe_auto_save("Loop")
+        self._maybe_auto_save(auto_save_label)
+        signal_bus.pipeline_ready.emit(specs)
+        signal_bus.toast_requested.emit(
+            f"Fila renderizada: {len(specs)} comandos.", "success"
+        )
 
     def _on_study_command_ready(self, command_line: str) -> None:
         spec = CommandSpec(
@@ -333,11 +471,14 @@ class CommandQueueWidget(QWidget):
         # Header — tab row (Daily | Workflow | Auxiliar) + accordion content
         header = QWidget()
         header.setObjectName("CommandQueueHeader")
+        header.setProperty("testid", "output-toolbar-left")
+        header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         header.setStyleSheet(
-            "background-color: #27272A; border-bottom: 1px solid #3F3F46;"
+            "QWidget#CommandQueueHeader { background-color: #27272A;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(4, 4, 4, 4)
         header_layout.setSpacing(0)
 
         # ── Tab bar (3 buttons in a row) ─────────────────────────────────
@@ -378,6 +519,7 @@ class CommandQueueWidget(QWidget):
             parent=self,
         )
         daily_btn.setProperty("testid", "queue-btn-daily")
+        daily_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
         daily_loop_pill = self._AttachmentProxy(
             self, self._on_daily_loop_clicked
@@ -462,33 +604,21 @@ class CommandQueueWidget(QWidget):
 
         pipelines_content = self._build_section_grid([
             daily_btn,
-            ("Create daily loop",
-             "Create Daily Loop — roda /daily-loop no terminal (Opus/HIGH). "
-             "Pipeline interativo: scan -> plan -> enumerate. Gera "
-             "blacksmith/loop-archives/{slug}/ com PROGRESS.md, tasks/T-{model}-{effort}.md "
-             "e _LOOP-CONFIG.json. Depois carregue o _LOOP-CONFIG.json em "
-             "metrics-project-pill e clique [Execute daily loop].",
-             self._on_create_daily_loop_clicked,
-             "queue-btn-create-daily-loop"),
             daily_loop_btn,
             loop_btn,
             study_btn,
-            ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
-             lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
-             "queue-btn-intake-seed"),
-            ("intake-review", "Intake Review (F9): create-checklist → list-improove → compare → create-gaplist → execute-gaplist-p0 → execute-gaplist-p1 → execute-gaplist-p2 → review-executed → clear",
-             lambda: self._load_quick_template(TEMPLATE_INTAKE_REVIEW, name="Intake Review"),
-             "queue-btn-intake-review"),
-            ("delivery plan", "Planejamento: analyse → identify → create-tasks",
-             self._on_delivery_plan_clicked, "queue-btn-delivery-plan"),
-            ("delivery qa", "Validacao: qa-gate → mcp-review → sign-off",
-             self._on_delivery_qa_clicked, "queue-btn-delivery-qa"),
             ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
              lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
              "queue-btn-blog"),
-            ("auto-improove", "Melhoria contínua do SystemForge — 1 iteração (~10% por rodada, use Loop ×10). Sem vínculo com projeto.",
-             self._on_auto_improove_balanced_clicked,
-             "queue-btn-auto-improove-balanced"),
+            ("blog stockpile",
+             "Blog Stockpile — gera + promove + publica no GitHub. "
+             "Fase 1 (geracao): expand-keywords → cluster-keywords → prioritize-topics → "
+             "deduplicate-topics → generate-briefs → write-articles (stockpile) → "
+             "review-seo → quality-gate (--mode stockpile). "
+             "Fase 2 (deploy): stockpile-promote (--skip-commit) → hreflang-map → "
+             "commit:multilanguage (commit + push GitHub).",
+             lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
+             "queue-btn-blog-stockpile"),
         ])
         header_layout.addWidget(pipelines_content)
         self._sec_contents.append(pipelines_content)
@@ -505,7 +635,7 @@ class CommandQueueWidget(QWidget):
              lambda: self._load_quick_template(TEMPLATE_BRIEF_FEATURE, name="Brief \u2014 Feature"),
              "queue-btn-brief-feat"),
             ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
-             lambda: self._load_quick_template(TEMPLATE_MODULES, name="Modules"),
+             self._on_modules_clicked,
              "queue-btn-modules"),
             ("DCP: Gerar Pipeline (regen)",
              "DESTRUTIVO quando SPECIFIC-FLOW.json ja existe.\n"
@@ -536,22 +666,18 @@ class CommandQueueWidget(QWidget):
              "queue-btn-mkt"),
             ("boilerplate", "Boilerplate: scan → convert-nextjs → cleanup → persona → mockify → persona-assets → enhance-fe → gen-sql → finalize. Abre modal para path do repo (NAO le project.json).",
              self._on_boilerplate_clicked, "queue-btn-boilerplate"),
-            ("micro-arch", "Carrega pipeline de micro-arquitetura",
-             self._on_micro_arch_clicked, "queue-btn-micro-arch"),
-            ("listener-test", "Testa o ciclo do listener-workspace dot. Carrega /test-autoflow-auto (compativel Kimi via /skill:test-autoflow-auto).",
-             lambda: self._load_quick_template(TEMPLATE_LISTENER_TEST, name="Listener Test"),
-             "queue-btn-listener-test"),
-            ("python-improove", "Auto-Improove Python — /model opus + /effort high + 20× (/clear + /auto-improove:python). Delega trechos deterministicos dos comandos para scripts Python co-localizados. Sem vinculo com projeto.",
-             self._on_python_improove_clicked,
-             "queue-btn-python-improove"),
-            ("micro-json", "Configura project.json para micro-arquitetura",
-             self._on_micro_json_clicked, "queue-btn-micro-json"),
             ("Cmd Single",
              "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
              "avulso sem preparo terminal. Selecione um .md com heading canonico "
              "(# /grupo:nome) e o workflow-app expande a sub-sequencia inline.",
              self._on_cmd_single_clicked,
              "queue-btn-cmd-single"),
+            ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
+             lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
+             "queue-btn-intake-seed"),
+            ("intake-review", "Intake Review (F9): create-checklist → list-improove → compare → create-gaplist → execute-gaplist-p0 → execute-gaplist-p1 → execute-gaplist-p2 → review-executed → clear",
+             lambda: self._load_quick_template(TEMPLATE_INTAKE_REVIEW, name="Intake Review"),
+             "queue-btn-intake-review"),
         ])
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
@@ -560,16 +686,27 @@ class CommandQueueWidget(QWidget):
         self._active_section = 1
         self._apply_section_styles()
 
-        main_layout.addWidget(header)
+        # Exposed so MainWindow can place it as a sibling of output-toolbar.
+        self.header_widget = header
 
         # Play bar — big play button
         play_bar = QWidget()
         play_bar.setStyleSheet(
             "background-color: #1C1C1F; border-bottom: 1px solid #3F3F46;"
         )
-        play_bar.setFixedHeight(44)
-        pl = QHBoxLayout(play_bar)
+        play_bar.setFixedHeight(82)
+        pl = QVBoxLayout(play_bar)
         pl.setContentsMargins(8, 5, 8, 5)
+        pl.setSpacing(4)
+
+        play_row_top = QHBoxLayout()
+        play_row_top.setContentsMargins(0, 0, 0, 0)
+        play_row_top.setSpacing(8)
+        play_row_bottom = QHBoxLayout()
+        play_row_bottom.setContentsMargins(0, 0, 0, 0)
+        play_row_bottom.setSpacing(8)
+        pl.addLayout(play_row_top)
+        pl.addLayout(play_row_bottom)
 
         # "Rodar próximo" — botão dominante da play bar (primeira posição,
         # verde #16A34A, stretch=7). Executa o proximo item pendente da fila e
@@ -578,6 +715,7 @@ class CommandQueueWidget(QWidget):
         self._play_btn = QPushButton("▶  Rodar próximo")
         self._play_btn.setProperty("testid", "queue-btn-play-next")
         self._play_btn.setFixedHeight(32)
+        self._play_btn.setMinimumWidth(84)
         self._play_btn.setToolTip(
             "Executa o proximo item pendente da fila e para.\n"
             "Funciona com qualquer item — auto ou interactive."
@@ -591,7 +729,80 @@ class CommandQueueWidget(QWidget):
             "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
         )
         self._play_btn.clicked.connect(self._on_step_btn_clicked)
-        pl.addWidget(self._play_btn, stretch=7)
+
+        # Container "div" envolvendo o queue-btn-play-next para alvo de testes
+        # de UI (data-testid). Mantem o stretch=2 original do play_btn.
+        self._play_btn_container = QWidget()
+        self._play_btn_container.setProperty("testid", "queue-btn-play-next-container")
+        _play_btn_container_layout = QHBoxLayout(self._play_btn_container)
+        _play_btn_container_layout.setContentsMargins(0, 0, 0, 0)
+        _play_btn_container_layout.setSpacing(0)
+        _play_btn_container_layout.addWidget(self._play_btn)
+        play_row_top.addWidget(self._play_btn_container, stretch=2)
+
+        # Autocast (segunda posicao — invertido com schedule em Iter 12).
+        # Width dobrada vs original (minimumWidth 140) e setinha dupla ▶▶.
+        # Emite via signal_bus para a state machine em metrics_bar.
+        self._btn_autocast = QPushButton("▶▶  autocast")
+        self._btn_autocast.setProperty("testid", "autocast-btn")
+        self._btn_autocast.setCheckable(True)
+        self._btn_autocast.setFixedHeight(32)
+        self._btn_autocast.setMinimumWidth(84)
+        self._btn_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_autocast.setToolTip(
+            "Autocast: dispara [Rodar proximo] em loop ate a fila esvaziar"
+        )
+        self._btn_autocast.setStyleSheet(
+            "QPushButton { background-color: #1E3A8A; color: #FAFAFA;"
+            "  border: 1px solid #3B82F6; border-radius: 5px;"
+            "  font-size: 12px; font-weight: 700; padding: 0 10px; }"
+            "QPushButton:hover { background-color: #1D4ED8; }"
+            "QPushButton:checked { background-color: #DC2626; border-color: #EF4444; }"
+            "QPushButton:checked:hover { background-color: #B91C1C; }"
+        )
+
+        def _on_autocast_play_toggled(checked: bool) -> None:
+            self._btn_autocast.setText("▶▶  parar" if checked else "▶▶  autocast")
+            signal_bus.autocast_toggle_requested.emit(bool(checked))
+
+        def _on_autocast_state_synced(checked: bool) -> None:
+            # Programmatic state change (e.g., arm timeout auto-stop). Update
+            # the play bar button without re-emitting toggle_requested to
+            # avoid recursive feedback into the state machine.
+            if self._btn_autocast.isChecked() == bool(checked):
+                return
+            self._btn_autocast.blockSignals(True)
+            self._btn_autocast.setChecked(bool(checked))
+            self._btn_autocast.setText("▶▶  parar" if checked else "▶▶  autocast")
+            self._btn_autocast.blockSignals(False)
+
+        self._btn_autocast.toggled.connect(_on_autocast_play_toggled)
+        signal_bus.autocast_state_changed.connect(_on_autocast_state_synced)
+        play_row_top.addWidget(self._btn_autocast, stretch=2)
+
+        # Schedule-autocast (terceira posicao — invertido com autocast em
+        # Iter 12). Width menor (minimumWidth=42) que o autocast adjacente.
+        self._btn_schedule_autocast = QPushButton("agendar")
+        self._btn_schedule_autocast.setProperty("testid", "schedule-autocast-btn")
+        self._btn_schedule_autocast.setFixedHeight(32)
+        self._btn_schedule_autocast.setMinimumWidth(42)
+        self._btn_schedule_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_schedule_autocast.setToolTip(
+            "Agendar disparo automatico do autocast"
+        )
+        self._btn_schedule_autocast.setStyleSheet(
+            "QPushButton { background-color: #27272A; color: #D4D4D8;"
+            "  border: 1px solid #52525B; border-radius: 5px;"
+            "  font-size: 11px; font-weight: 600; padding: 0 8px; }"
+            "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
+        )
+        self._btn_schedule_autocast.clicked.connect(
+            lambda: signal_bus.schedule_autocast_requested.emit()
+        )
+        play_row_bottom.addWidget(self._btn_schedule_autocast, stretch=1)
+        # schedule-autocast-btn e queue-div-use-kimi compartilham o mesmo
+        # stretch para se redimensionarem identicamente conforme a janela.
 
         # Use Kimi checkbox — quando marcado, [Rodar próximo] (queue-btn-play-next)
         # clica na seta AZUL (kimi) ao inves da VERDE (claude) para items que
@@ -626,39 +837,51 @@ class CommandQueueWidget(QWidget):
             "QCheckBox::indicator:hover { border-color: #93C5FD; }"
         )
         _kbl.addWidget(self._use_kimi_chk)
-        pl.addWidget(_kimi_box, stretch=2)
+        play_row_bottom.addWidget(_kimi_box, stretch=1)
 
-        # Botão JSON — copia path do project.json para o clipboard
-        self._json_btn = QPushButton("JSON")
-        self._json_btn.setProperty("testid", "queue-btn-json-path")
-        self._json_btn.setFixedHeight(32)
-        self._json_btn.setToolTip("Copia o caminho do project.json\ne digita no terminal automaticamente")
-        self._json_btn.setStyleSheet(
-            "QPushButton { background-color: #D97706; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #B45309; }"
-            "QPushButton:pressed { background-color: #92400E; }"
-            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+        # --force Kimi checkbox (terceira posicao em play_row_bottom). Quando
+        # marcado, o fluxo da seta verde (per-item e "Rodar proximo") passa a
+        # cuspir no terminal-workspace-output em vez do interactive, /model e
+        # /effort viram apenas bolinha amarela sem dispatch, /clear vai SO para
+        # o workspace, e cada comando ganha 'skill:' apos a barra inicial
+        # (/create-task -> /skill:create-task). Sem o check, comportamento
+        # permanece identico ao anterior. Copia do layout do queue-div-use-kimi.
+        _force_kimi_box = QWidget()
+        _force_kimi_box.setProperty("testid", "queue-div-force-kimi")
+        _force_kimi_box.setFixedHeight(32)
+        _force_kimi_box.setStyleSheet(
+            "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
+            "  border-radius: 5px; }"
         )
-        self._json_btn.clicked.connect(self._on_copy_json_path)
-        pl.addWidget(self._json_btn, stretch=1)
+        _fkbl = QHBoxLayout(_force_kimi_box)
+        _fkbl.setContentsMargins(10, 0, 10, 0)
+        _fkbl.setSpacing(8)
+        self._force_kimi_chk = QCheckBox("--force Kimi")
+        self._force_kimi_chk.setProperty("testid", "queue-chk-force-kimi")
+        self._force_kimi_chk.setToolTip(
+            "Quando marcado, a seta verde dispara comandos no terminal\n"
+            "workspace com prefixo /skill: ; /model e /effort viram apenas\n"
+            "bolinha amarela; /clear vai so para o workspace. Sem o check,\n"
+            "comportamento permanece identico ao anterior."
+        )
+        self._force_kimi_chk.setStyleSheet(
+            "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
+            "  background: transparent; border: none; padding: 0; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
+            "  border: 1px solid #52525B; border-radius: 3px; }"
+            "QCheckBox::indicator:checked { background-color: #3B82F6;"
+            "  border: 1px solid #3B82F6; border-radius: 3px; }"
+            "QCheckBox::indicator:hover { border-color: #93C5FD; }"
+        )
+        _fkbl.addWidget(self._force_kimi_chk)
+        play_row_bottom.addWidget(_force_kimi_box, stretch=1)
 
-        # Botão WS — copia workspace_root para o clipboard
-        self._ws_btn = QPushButton("WS")
-        self._ws_btn.setProperty("testid", "queue-btn-ws-path")
-        self._ws_btn.setFixedHeight(32)
-        self._ws_btn.setToolTip("Copia o workspace_root do projeto\ne digita no terminal automaticamente")
-        self._ws_btn.setStyleSheet(
-            "QPushButton { background-color: #059669; color: #FAFAFA;"
-            "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #047857; }"
-            "QPushButton:pressed { background-color: #065F46; }"
-            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
-        )
-        self._ws_btn.clicked.connect(self._on_copy_ws_path)
-        pl.addWidget(self._ws_btn, stretch=1)
+        # Mutual exclusivity entre Use Kimi e --force Kimi (review MEDIUM 5).
+        # Tambem esconde a seta azul per-item quando --force Kimi esta ativo
+        # (review HIGH 1: spec "seta azul nao usada" interpretada como prescritiva).
+        self._force_kimi_chk.toggled.connect(self._on_force_kimi_toggled)
+        self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
 
         main_layout.addWidget(play_bar)
 
@@ -687,122 +910,21 @@ class CommandQueueWidget(QWidget):
         main_layout.addWidget(self._last_cmd_label)
 
         # Stacked content (empty state vs list)
+        # Notepad foi removido em Iter 12 — _content_stack agora ocupa toda a
+        # area abaixo da play_bar sem splitter intermediario.
         self._content_stack = QWidget()
         content_layout = QVBoxLayout(self._content_stack)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
         self._content_stack.setMinimumHeight(100)
+        main_layout.addWidget(self._content_stack, stretch=1)
 
-        # ── Notepad ───────────────────────────────────────────────────────── #
-        notepad_container = QWidget()
-        notepad_container.setObjectName("NotepadContainer")
-        notepad_container.setStyleSheet(
-            "QWidget#NotepadContainer { background-color: #1C1C1F; border-top: 1px solid #3F3F46; }"
-        )
-        notepad_vl = QVBoxLayout(notepad_container)
-        notepad_vl.setContentsMargins(0, 0, 0, 0)
-        notepad_vl.setSpacing(0)
-
-        notepad_header = QWidget()
-        notepad_header.setFixedHeight(26)
-        notepad_header.setStyleSheet(
-            "background-color: #27272A; border-bottom: 1px solid #3F3F46;"
-        )
-        nh_layout = QHBoxLayout(notepad_header)
-        nh_layout.setContentsMargins(8, 0, 6, 0)
-        nh_layout.setSpacing(4)
-        notepad_title = QLabel("📝 Bloco de Notas")
-        notepad_title.setStyleSheet(
-            "color: #A1A1AA; font-size: 10px; font-weight: 600; border: none;"
-        )
-        nh_layout.addWidget(notepad_title, stretch=1)
-        clear_notepad_btn = QPushButton("Limpar")
-        clear_notepad_btn.setFixedHeight(18)
-        clear_notepad_btn.setStyleSheet(
-            "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
-            "  border: 1px solid #52525B; border-radius: 3px;"
-            "  font-size: 9px; padding: 1px 6px; }"
-            "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
-        )
-        nh_layout.addWidget(clear_notepad_btn)
-        notepad_vl.addWidget(notepad_header)
-
-        self._notepad_edit = QPlainTextEdit()
-        self._notepad_edit.setProperty("testid", "queue-notepad")
-        self._notepad_edit.setPlaceholderText("Escreva aqui e clique Enviar…")
-        self._notepad_edit.setAttribute(
-            Qt.WidgetAttribute.WA_InputMethodEnabled, True,
-        )
-        self._notepad_edit.setStyleSheet(
-            "QPlainTextEdit {"
-            "  background-color: #18181B; color: #FAFAFA;"
-            "  border: none; font-size: 11px; padding: 4px 8px;"
-            "  font-family: monospace; }"
-        )
-        notepad_vl.addWidget(self._notepad_edit)
-
-        send_bar = QWidget()
-        send_bar.setFixedHeight(38)
-        send_bar.setStyleSheet(
-            "background-color: #1C1C1F; border-top: 1px solid #3F3F46;"
-        )
-        send_bar_layout = QHBoxLayout(send_bar)
-        send_bar_layout.setContentsMargins(4, 3, 8, 3)
-        send_bar_layout.addStretch()
-
-        notepad_send_btn = QPushButton("➤")
-        notepad_send_btn.setFixedSize(32, 32)
-        notepad_send_btn.setToolTip("Enviar")
-        notepad_send_btn.setStyleSheet(
-            "QPushButton { background-color: #2563EB; color: #FAFAFA;"
-            "  border: none; border-radius: 16px;"
-            "  font-size: 14px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #1D4ED8; }"
-            "QPushButton:pressed { background-color: #1E40AF; }"
-        )
-        notepad_send_btn.clicked.connect(self._on_notepad_send)
-        clear_notepad_btn.clicked.connect(self._notepad_edit.clear)
-        send_bar_layout.addWidget(notepad_send_btn)
-        notepad_vl.addWidget(send_bar)
-
-        notepad_container.setMinimumHeight(80)
-
-        # ── QSplitter: lista de comandos + notepad ───────────────────────────
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setObjectName("CommandNoteSplitter")
-        splitter.setHandleWidth(4)
-        splitter.addWidget(self._content_stack)
-        splitter.addWidget(notepad_container)
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setStyleSheet(
-            "QSplitter::handle { background-color: #3F3F46; }"
-            "QSplitter::handle:hover { background-color: #52525B; }"
-            "QSplitter::handle:pressed { background-color: #71717A; }"
-        )
-        main_layout.addWidget(splitter, stretch=1)
-
-        # Empty state
+        # Empty state — placeholder vazio (texto e botao "Criar Pipeline"
+        # removidos; criacao de pipeline acontece via outros fluxos).
         self._empty_widget = QWidget()
         el = QVBoxLayout(self._empty_widget)
         el.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        el.setSpacing(12)
-        empty_label = QLabel("Nenhum pipeline\nconfigurado.")
-        empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_label.setStyleSheet("color: #71717A; font-size: 13px;")
-        el.addWidget(empty_label)
-
-        self._create_pipeline_btn = QPushButton("Criar Pipeline")
-        self._create_pipeline_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #FBBF24;"
-            "  border: 1px solid #FBBF24; border-radius: 4px;"
-            "  padding: 6px 14px; font-weight: 600; }"
-            "QPushButton:hover { background-color: #78350F; }"
-        )
-        self._create_pipeline_btn.clicked.connect(self.new_pipeline_requested)
-        el.addWidget(self._create_pipeline_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        el.setSpacing(0)
 
         # List view
         self._list_widget = QWidget()
@@ -830,7 +952,6 @@ class CommandQueueWidget(QWidget):
         self._items_container.setStyleSheet("background-color: #18181B;")
         self._items_container.setAcceptDrops(True)
         self._items_container.installEventFilter(self)
-        self._notepad_edit.installEventFilter(self)
         self._items_layout = QVBoxLayout(self._items_container)
         self._items_layout.setContentsMargins(0, 0, 0, 0)
         self._items_layout.setSpacing(0)
@@ -853,7 +974,7 @@ class CommandQueueWidget(QWidget):
             "  border: none; font-size: 12px; }"
             "QPushButton:hover { color: #FDE68A; }"
         )
-        add_btn.clicked.connect(self.add_command_requested)
+        add_btn.clicked.connect(self._on_inline_add_clicked)
         al.addWidget(add_btn)
 
         save_btn = QPushButton("💾 Salvar")
@@ -967,41 +1088,6 @@ class CommandQueueWidget(QWidget):
         """Inject the PipelineManager to enable can_reorder guards."""
         self._pipeline_manager = pipeline_manager
 
-    def _on_copy_json_path(self) -> None:
-        """Copia o caminho relativo do project.json para o clipboard."""
-        import os
-
-        from workflow_app.config.app_state import app_state
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
-            return
-
-        abs_config = app_state.config.config_path
-        project_dir = str(app_state.config.project_dir)
-        try:
-            rel = os.path.relpath(abs_config, project_dir)
-        except ValueError:
-            rel = abs_config
-        QApplication.clipboard().setText(rel)
-        signal_bus.paste_text_in_terminal.emit(rel)
-        signal_bus.focus_interactive_terminal.emit()
-        signal_bus.toast_requested.emit("Caminho JSON copiado e digitado no terminal.", "info")
-
-    def _on_copy_ws_path(self) -> None:
-        """Copia o workspace_root do projeto para o clipboard e digita no terminal."""
-        from workflow_app.config.app_state import app_state
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
-            return
-
-        ws = app_state.config.workspace_root
-        QApplication.clipboard().setText(ws)
-        signal_bus.paste_text_in_terminal.emit(ws)
-        signal_bus.focus_interactive_terminal.emit()
-        signal_bus.toast_requested.emit("workspace_root copiado e digitado no terminal.", "info")
-
     def _load_single_command(
         self,
         name: str,
@@ -1067,182 +1153,6 @@ class CommandQueueWidget(QWidget):
         if dlg.exec() == BriefTemplateDialog.Accepted:
             self._load_quick_template(dlg.selected_template)
 
-    def _on_micro_json_clicked(self) -> None:
-        """Show name dialog and patch project JSON for feature paths (micro-json config)."""
-        from pathlib import Path
-
-        from workflow_app.config.app_state import app_state
-        from workflow_app.config.config_parser import parse_config
-        from workflow_app.dialogs.micro_arch_name_dialog import MicroArchNameDialog
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o Micro-JSON.", "warning"
-            )
-            return
-
-        dlg = MicroArchNameDialog(parent=self)
-        if dlg.exec() != MicroArchNameDialog.Accepted:
-            return
-
-        slug = dlg.slug
-        config = app_state.config
-        config_path = Path(config.config_path)
-
-        # ── Read raw JSON ──────────────────────────────────────────────────
-        try:
-            raw = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            signal_bus.toast_requested.emit(f"Erro ao ler project.json: {exc}", "error")
-            return
-
-        # ── Derive base paths (strip /features/... if already set) ──────────
-        base_brief = re.sub(r"/features(/.*)?$", "", config.brief_root)
-        new_brief = f"{base_brief}/features/{slug}"
-        base_docs = re.sub(r"/features(/.*)?$", "", config.docs_root)
-        new_docs = f"{base_docs}/features/{slug}"
-        base_wbs = re.sub(r"/features(/.*)?$", "", config.wbs_root)
-        new_wbs = f"{base_wbs}/features/{slug}"
-
-        # ── Patch paths based on JSON version ─────────────────────────────
-        if "basic_flow" in raw:
-            # V3
-            raw["basic_flow"]["brief_root"] = new_brief
-            raw["basic_flow"]["docs_root"] = new_docs
-            raw["basic_flow"]["wbs_root"] = new_wbs
-            pt = raw.get("project_type", {})
-            if isinstance(pt, dict):
-                if "new" in pt and isinstance(pt["new"], dict):
-                    pt["new"]["enabled"] = False
-                feature_entry = pt.get("feature", {})
-                if isinstance(feature_entry, dict):
-                    feature_entry["enabled"] = True
-                    pt["feature"] = feature_entry
-                else:
-                    pt["feature"] = {"enabled": True}
-                raw["project_type"] = pt
-        elif "brief_root" in raw or "docs_root" in raw:
-            # V2
-            raw["brief_root"] = new_brief
-            raw["docs_root"] = new_docs
-            raw["wbs_root"] = new_wbs
-            pt = raw.get("project_type", {})
-            if isinstance(pt, dict):
-                pt["new"] = False
-                pt["feature"] = True
-                raw["project_type"] = pt
-            elif isinstance(pt, str):
-                raw["project_type"] = "feature"
-        else:
-            # V1 — inject brief_root explicitly
-            raw["brief_root"] = new_brief
-
-        # ── Add feature entry to features list if present ─────────────────
-        if "features" in raw and isinstance(raw["features"], list):
-            existing = {f.get("slug") for f in raw["features"] if isinstance(f, dict)}
-            if slug not in existing:
-                raw["features"].append({
-                    "slug": slug,
-                    "name": slug.replace("-", " ").title(),
-                })
-
-        # ── Write back ────────────────────────────────────────────────────
-        try:
-            config_path.write_text(
-                json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception as exc:
-            signal_bus.toast_requested.emit(f"Erro ao salvar project.json: {exc}", "error")
-            return
-
-        # ── Reload config in app_state ────────────────────────────────────
-        try:
-            new_config = parse_config(str(config_path))
-            app_state.set_config(new_config)
-            signal_bus.config_loaded.emit(str(config_path))
-        except Exception as exc:
-            signal_bus.toast_requested.emit(f"Erro ao recarregar config: {exc}", "error")
-            return
-
-        signal_bus.toast_requested.emit(
-            f"Feature '{slug}' configurada. Paths: brief/docs/wbs → /features/{slug}", "success"
-        )
-
-    def _on_micro_arch_clicked(self) -> None:
-        """Load micro-architecture template using current feature config."""
-        from pathlib import Path
-
-        from workflow_app.config.app_state import app_state
-        from workflow_app.templates.quick_templates import _inject_clears
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o Micro-Architecture.", "warning"
-            )
-            return
-
-        config = app_state.config
-
-        # Extract slug from wbs_root (expected: .../features/{slug})
-        wbs_parts = config.wbs_root.rstrip("/").split("/")
-        if len(wbs_parts) < 2 or wbs_parts[-2] != "features":
-            signal_bus.toast_requested.emit(
-                "Execute o Micro-JSON primeiro para configurar a feature.", "warning"
-            )
-            return
-
-        slug = wbs_parts[-1]
-
-        # ── Compute next sequential number for micro-architecture dir ────
-        project_dir = Path(config.project_dir)
-        micro_arch_base = project_dir / config.wbs_root / "micro-architecture"
-        next_n = 1
-        if micro_arch_base.is_dir():
-            existing_nums: list[int] = []
-            for child in micro_arch_base.iterdir():
-                if child.is_dir():
-                    match = re.match(r"^(\d+)-", child.name)
-                    if match:
-                        existing_nums.append(int(match.group(1)))
-            if existing_nums:
-                next_n = max(existing_nums) + 1
-
-        micro_arch_path = f"{config.wbs_root}/micro-architecture/{next_n}-{slug}"
-
-        # ── Build dynamic template ───────────────────────────────────────
-        _O = ModelName.OPUS
-        _S = ModelName.SONNET
-        _I = InteractionType.INTERACTIVE
-        _A = InteractionType.AUTO
-
-        def _spec_local(
-            name: str,
-            model: ModelName,
-            interaction: InteractionType,
-            pos: int,
-        ) -> CommandSpec:
-            return CommandSpec(
-                name=name,
-                model=model,
-                interaction_type=interaction,
-                position=pos,
-            )
-
-        template = _inject_clears([
-            _spec_local("/feature-brief-create",               _O, _I, 1),
-            _spec_local("/intake:analyze",                     _S, _A, 2),
-            _spec_local("/intake:enhance",                     _O, _I, 3),
-            _spec_local("/micro-architecture",                 _S, _I, 4),
-            _spec_local("/review-created-micro-architecture",  _O, _A, 5),
-            _spec_local(f"/auto-flow execute {micro_arch_path}", _S, _A, 6),
-            _spec_local(f"/review-executed-micro-architecture {micro_arch_path}", _O, _A, 7),
-        ])
-
-        signal_bus.toast_requested.emit(
-            f"Micro-Architecture '{slug}': {next_n}-{slug}", "success"
-        )
-        self._load_quick_template(template, name="Micro-Architecture")
-
     # ────────────────────────────────────────────────────────── DCP ── #
 
     def _apply_dcp_reader_gating(self, workflow_content: QWidget) -> None:
@@ -1265,6 +1175,99 @@ class CommandQueueWidget(QWidget):
                 btn.setEnabled(False)
                 btn.setToolTip("Requer T-035 (reader)")
                 break
+
+    def _on_modules_clicked(self) -> None:
+        """Carrega TEMPLATE_MODULES com fallback defensivo para ROCK-MAP.md.
+
+        3 cenarios de fallback (conforme _DECISIONS-ITERS-9-11.md > Iter 9 > GAP 2.6
+        e GAP 5.1):
+          (a) ROCK-MAP.md ausente: toast info, log informativo.
+          (b) ROCK-MAP.md malformado (parse error): toast warning, log com error_class.
+          (c) ROCK-MAP.md com 0 rocks alem do skeleton: toast info "0 rocks, fila
+              estatica (feature trivial)".
+
+        Em todos os 3 cenarios, carrega TEMPLATE_MODULES estatico via
+        `_load_quick_template` (alinhado com §21.4 v2). Expansao dinamica por
+        N rocks fica para o module `modules-phase` (Sem 3).
+        """
+        import logging
+        from pathlib import Path
+
+        from workflow_app.config.app_state import app_state
+
+        log = logging.getLogger(__name__)
+
+        rock_map_path: Path | None = None
+        fallback_reason = "missing"
+        try:
+            if app_state.has_config and app_state.config is not None:
+                brief_root = getattr(app_state.config, "brief_root", None)
+                project_dir = getattr(app_state.config, "project_dir", None)
+                if brief_root and project_dir:
+                    rock_map_path = Path(project_dir) / brief_root / "ROCK-MAP.md"
+        except Exception as exc:  # noqa: BLE001 - defensivo, qualquer erro = fallback
+            log.warning("[modules] erro ao resolver brief_root: %s: %s",
+                        type(exc).__name__, exc)
+
+        if rock_map_path is None or not rock_map_path.exists():
+            log.info(
+                "[modules] ROCK-MAP.md ausente (path=%s); usando TEMPLATE_MODULES "
+                "estatico (operador nao rodou /break-intake ou projeto e single-rock).",
+                rock_map_path,
+            )
+            signal_bus.toast_requested.emit("Sem ROCK-MAP, fila estatica", "info")
+            return self._load_quick_template(TEMPLATE_MODULES, name="Modules")
+
+        # ROCK-MAP.md existe; tentar parse defensivo
+        try:
+            content = rock_map_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            log.warning(
+                "[modules] ROCK-MAP.md mal formado em %s (%s: %s); fallback para "
+                "TEMPLATE_MODULES estatico. Re-rode /break-intake ou edite manualmente.",
+                rock_map_path, type(exc).__name__, exc,
+            )
+            signal_bus.toast_requested.emit(
+                "ROCK-MAP corrompido, fila estatica", "warning"
+            )
+            return self._load_quick_template(TEMPLATE_MODULES, name="Modules")
+
+        # Conta rocks: linhas com pattern INTAKE-ROCK-{N}.md (exclui skeleton)
+        import re
+
+        try:
+            rock_matches = re.findall(r"INTAKE-ROCK-(\d+)\.md", content)
+            n_rocks = len(set(rock_matches))
+        except Exception as exc:  # noqa: BLE001 - parse defensivo
+            log.warning(
+                "[modules] ROCK-MAP.md parse falhou em %s (%s: %s); fallback estatico.",
+                rock_map_path, type(exc).__name__, exc,
+            )
+            signal_bus.toast_requested.emit(
+                "ROCK-MAP corrompido, fila estatica", "warning"
+            )
+            return self._load_quick_template(TEMPLATE_MODULES, name="Modules")
+
+        if n_rocks == 0:
+            log.info(
+                "[modules] ROCK-MAP.md tem 0 rocks alem do skeleton em %s; "
+                "feature trivial, usando TEMPLATE_MODULES estatico "
+                "(sem checklist-loop expansion).",
+                rock_map_path,
+            )
+            signal_bus.toast_requested.emit(
+                "0 rocks, fila estatica (feature trivial)", "info"
+            )
+            return self._load_quick_template(TEMPLATE_MODULES, name="Modules")
+
+        # ROCK-MAP valido com N rocks - expansao dinamica fica para Sem 3 module.
+        # Por enquanto carrega template base + log informativo.
+        log.info(
+            "[modules] ROCK-MAP.md OK em %s (%d rocks); carregando TEMPLATE_MODULES "
+            "base (expansao dinamica pendente do module modules-phase).",
+            rock_map_path, n_rocks,
+        )
+        return self._load_quick_template(TEMPLATE_MODULES, name="Modules")
 
     def _on_dcp_build_clicked(self) -> None:
         """Paste canonical `/build-module-pipeline` command — Phase A pre-req gate.
@@ -1585,24 +1588,66 @@ class CommandQueueWidget(QWidget):
             )
             return
 
+        # M5 hibrida (TRILHA 3 — meta-loop estrategia-de-separacao):
+        # carga delegada para helper privado reusavel por /dcp:build-and-load.
+        self._enqueue_specific_flow(
+            flow_path=flow_path,
+            cm_id=cm_id,
+            default_project_name=config.project_name,
+            prefix_commands=None,
+        )
+
+    def _enqueue_specific_flow(
+        self,
+        flow_path: Path,
+        cm_id: str,
+        default_project_name: str,
+        prefix_commands: list[dict] | None = None,
+    ) -> bool:
+        """Le SPECIFIC-FLOW.json e enfileira commands na fila do workflow-app.
+
+        Helper privado extraido em 2026-05-13 (TRILHA 3 + POS-TRILHA do meta-loop
+        estrategia-de-separacao, decisao M5 hibrida do usuario). Reusado por:
+          - _on_dcp_specific_flow_clicked (caminho UX click-to-load)
+          - /dcp:build-and-load (caminho programatico atomico build+validate+load)
+
+        Args:
+          flow_path: Path do SPECIFIC-FLOW.json a carregar.
+          cm_id: module_id para label da fila.
+          default_project_name: nome de projeto fallback quando SPECIFIC-FLOW.json
+            nao declarar `project` field.
+          prefix_commands: lista opcional de dicts com schema compativel
+            (`{name, model, effort, phase, interaction}`) a prependar antes dos
+            commands do flow. Usado por /dcp:build-and-load para injetar
+            /dcp:congruence-check, /dcp:temporality-check, etc antes do flow.
+
+        Returns:
+          True se enqueue foi bem sucedido (`signal_bus.pipeline_ready` emitido).
+          False quando flow_path invalido, JSON corrupto, ou specs vazias
+          (toasts ja emitidos antes do return).
+        """
         try:
             data = json.loads(flow_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             signal_bus.toast_requested.emit(f"Erro ao ler SPECIFIC-FLOW.json: {exc}", "error")
-            return
+            return False
 
         if not isinstance(data, dict):
             signal_bus.toast_requested.emit(
                 "SPECIFIC-FLOW.json invalido: root deve ser um objeto JSON.", "error"
             )
-            return
+            return False
 
         commands_raw = data.get("commands", [])
         if not isinstance(commands_raw, list):
             signal_bus.toast_requested.emit(
                 "SPECIFIC-FLOW.json invalido: campo 'commands' deve ser uma lista.", "error"
             )
-            return
+            return False
+
+        # prefix_commands prependa antes do flow (uso programatico via /dcp:build-and-load)
+        if prefix_commands:
+            commands_raw = list(prefix_commands) + commands_raw
 
         # Onda 4: honor operator-persisted skip list. overrides.skipped[]
         # is a list of fully-rendered command name strings. Filter happens
@@ -1667,10 +1712,11 @@ class CommandQueueWidget(QWidget):
 
         if not specs:
             signal_bus.toast_requested.emit("SPECIFIC-FLOW.json esta vazio.", "warning")
-            return
+            return False
 
-        project = data.get("project", config.project_name)
-        logger.info("[DCP] loading pipeline from %s (%d commands)", flow_path, len(specs))
+        project = data.get("project", default_project_name)
+        logger.info("[DCP] loading pipeline from %s (%d commands, prefix=%d)",
+                    flow_path, len(specs), len(prefix_commands or []))
         self._template_label.setText(f"  \U0001f4cb  DCP: {cm_id} — {project}")
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"DCP {cm_id}")
@@ -1681,6 +1727,7 @@ class CommandQueueWidget(QWidget):
         # Order matters: emit is synchronous (Qt direct connection), so
         # load_pipeline runs to completion before this assignment.
         self._current_dcp_flow_path = flow_path
+        return True
 
     def _on_cmd_single_clicked(self) -> None:
         """Reduced pipeline for a single command MD (no prep, no JSON).
@@ -1777,64 +1824,6 @@ class CommandQueueWidget(QWidget):
             )
         signal_bus.toast_requested.emit(
             f"Fila renderizada: {len(specs)} comandos.{hint}", "success"
-        )
-
-    def _on_create_daily_loop_clicked(self) -> None:
-        """Unified loop runner: detects JSON format and expands queue.
-
-        - *-loop.json  -> expand iteration_template per item + finalization
-        - _LOOP-CONFIG.json (daily-loop) -> delegate to legacy _on_daily_loop_clicked
-        """
-        from workflow_app.config.app_state import app_state
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um loop JSON em metrics-project-pill antes de executar.",
-                "warning",
-            )
-            return
-
-        config = app_state.config
-        raw = config.raw if isinstance(config.raw, dict) else {}
-
-        # Discriminate by schema
-        if raw.get("kind") == "daily-loop" and "daily_loop" in raw:
-            self._on_daily_loop_clicked()
-            return
-
-        if "iteration_template" in raw and "items" in raw and "finalization" in raw:
-            try:
-                specs = self._expand_loop_json_specs(raw, str(config.config_path))
-            except Exception as exc:
-                signal_bus.toast_requested.emit(
-                    f"Erro ao expandir loop JSON: {exc}", "error"
-                )
-                return
-
-            if not specs:
-                signal_bus.toast_requested.emit(
-                    "Loop JSON sem comandos para executar.", "info"
-                )
-                return
-
-            slug = str(raw.get("name", "")) or "loop"
-            item_count = sum(
-                1
-                for s in specs
-                if not s.name.startswith(("/model ", "/effort ", "/clear"))
-            )
-            self._template_label.setText(
-                f"  \U0001f4cb  Loop: {slug} ({item_count} comandos)"
-            )
-            self._template_label.setVisible(True)
-            self._maybe_auto_save(f"Loop {slug}")
-            signal_bus.pipeline_ready.emit(specs)
-            return
-
-        signal_bus.toast_requested.emit(
-            "Projeto carregado nao e um loop valido. "
-            "Carregue um _LOOP-CONFIG.json ou um *-loop.json.",
-            "warning",
         )
 
     def _expand_loop_json_specs(
@@ -2509,72 +2498,6 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save(f"Loop {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
-    def _on_auto_improove_balanced_clicked(self) -> None:
-        """Load the auto-improove balanced flow (Daily tab).
-
-        Comportamento especial: NÃO requer projeto carregado e NÃO anexa
-        config_path a nenhum comando. Este template opera sobre o próprio
-        SystemForge (.claude/commands/, ai-forge/), sem vínculo com projeto.
-
-        Para recalcular as quantidades: /auto-improove:update-workflow-template
-        """
-        raw = copy.deepcopy(TEMPLATE_AUTO_IMPROOVE)
-        for spec in raw:
-            spec.config_path = ""  # Sem project.json — opera sobre o SystemForge
-
-        self._template_label.setText("  \U0001f4cb  Auto-Improove")
-        self._template_label.setVisible(True)
-        self._maybe_auto_save("Auto-Improove")
-
-        expanded: list[CommandSpec] = []
-        current_model = None
-        for spec in raw:
-            if spec.name == "/clear":
-                expanded.append(spec)
-                continue
-            if spec.model != current_model:
-                model_spec = CommandSpec(
-                    name=f"/model {spec.model.value.lower()}",
-                    model=spec.model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    position=0,
-                )
-                expanded.append(model_spec)
-                current_model = spec.model
-            expanded.append(spec)
-
-        for i, spec in enumerate(expanded, start=1):
-            spec.position = i
-
-        signal_bus.pipeline_ready.emit(expanded)
-        signal_bus.toast_requested.emit(
-            "Auto-Improove carregado — sem projeto. Use Loop ×10 para completar tudo.", "info"
-        )
-
-    def _on_python_improove_clicked(self) -> None:
-        """Load the python-improove flow (Auxiliar tab).
-
-        Comportamento especial: NAO requer projeto carregado e NAO anexa
-        config_path a nenhum comando. Opera sobre o proprio SystemForge
-        (.claude/commands/), igual ao auto-improove balanced.
-        """
-        raw = copy.deepcopy(TEMPLATE_PYTHON_IMPROOVE)
-        for spec in raw:
-            spec.config_path = ""
-
-        self._template_label.setText("  \U0001f4cb  Python Improove")
-        self._template_label.setVisible(True)
-        self._maybe_auto_save("Python Improove")
-
-        for i, spec in enumerate(raw, start=1):
-            spec.position = i
-
-        signal_bus.pipeline_ready.emit(raw)
-        signal_bus.toast_requested.emit(
-            "Python Improove carregado — sem projeto. 20 iteracoes.", "info"
-        )
-
     def _on_boilerplate_clicked(self) -> None:
         """Carrega o pipeline boilerplate (9 passos).
 
@@ -2660,62 +2583,6 @@ class CommandQueueWidget(QWidget):
             f"Boilerplate carregado: 9 passos sobre {basename}", "success"
         )
 
-    def _on_delivery_plan_clicked(self) -> None:
-        """Build Delivery PLAN template (before code — analyse/identify/create-tasks)."""
-        from workflow_app.config.app_state import app_state
-        from workflow_app.templates.quick_templates import _inject_clears
-        from workflow_app.templates.delivery_template_builder import build_delivery_plan_template
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o Delivery.", "warning"
-            )
-            return
-
-        config = app_state.config
-        template = build_delivery_plan_template(
-            docs_root=config.docs_root,
-            project_dir=str(config.project_dir),
-            wbs_root=config.wbs_root,
-        )
-
-        if not template:
-            signal_bus.toast_requested.emit(
-                "Nenhuma milestone encontrada em MILESTONES.md (nem MILESTONES.seeded.md). Execute /modules:build-milestones ou /intake-review:seed primeiro.",
-                "warning",
-            )
-            return
-
-        self._load_quick_template(_inject_clears(template), name="Delivery Plan")
-
-    def _on_delivery_qa_clicked(self) -> None:
-        """Build Delivery QA template (after code — qa-gate/mcp-review/sign-off)."""
-        from workflow_app.config.app_state import app_state
-        from workflow_app.templates.quick_templates import _inject_clears
-        from workflow_app.templates.delivery_template_builder import build_delivery_qa_template
-
-        if not app_state.has_config or not app_state.config:
-            signal_bus.toast_requested.emit(
-                "Carregue um projeto antes de usar o Delivery.", "warning"
-            )
-            return
-
-        config = app_state.config
-        template = build_delivery_qa_template(
-            docs_root=config.docs_root,
-            project_dir=str(config.project_dir),
-            wbs_root=config.wbs_root,
-        )
-
-        if not template:
-            signal_bus.toast_requested.emit(
-                "Nenhuma milestone encontrada em MILESTONES.md (nem MILESTONES.seeded.md). Execute /modules:build-milestones ou /intake-review:seed primeiro.",
-                "warning",
-            )
-            return
-
-        self._load_quick_template(_inject_clears(template), name="Delivery QA")
-
     def _on_run_command(self, cmd_text: str) -> None:
         """Update last-command label and highlight the matching queue row."""
         parts = cmd_text.strip().split()
@@ -2755,6 +2622,7 @@ class CommandQueueWidget(QWidget):
 
         self._empty_widget.setVisible(False)
         self._list_widget.setVisible(True)
+        self._emit_progress_metrics()
 
     def load_commands(self, commands: list[CommandSpec]) -> None:
         """Alias for load_pipeline() — called via signal pipeline_created."""
@@ -2775,6 +2643,66 @@ class CommandQueueWidget(QWidget):
 
         self._empty_widget.setVisible(False)
         self._list_widget.setVisible(True)
+        self._emit_progress_metrics()
+
+    def _on_inline_add_clicked(self) -> None:
+        """[+] Adicionar Comando — abre dialog simples (input + submit) e
+        injeta o texto como proximo comando a executar.
+
+        Comportamento: o item entra entre a ultima linha "sent" (ponto
+        ambar) e a primeira linha "pending" (seta verde). Chamadas
+        sucessivas empilham apos o ultimo injetado. Item e transiente —
+        nao persiste em template/JSON/memoria; load_pipeline() / clear()
+        o apagam.
+        """
+        from PySide6.QtWidgets import QInputDialog
+
+        text, ok = QInputDialog.getText(
+            self,
+            "Adicionar Comando",
+            "Comando a executar como proximo:",
+        )
+        if not ok:
+            return
+        cleaned = text.strip() if text else ""
+        if not cleaned:
+            return
+        self._inject_next_command(cleaned)
+
+    def _inject_next_command(self, text: str) -> None:
+        """Cria CommandSpec transiente e insere apos sent/injected items.
+
+        kimi_eligible=True forca a seta azul visivel independente do
+        whitelist (ver CommandItemWidget._setup_ui).
+        """
+        spec = CommandSpec(
+            name=text,
+            model=ModelName.SONNET,
+            interaction_type=InteractionType.AUTO,
+            kimi_eligible=True,
+        )
+        item = self._make_item(spec)
+        item._is_injected = True
+
+        # Insertion index: depois do ultimo item sent OU injected.
+        insert_idx = 0
+        for i, existing in enumerate(self._items):
+            if existing._is_sent or getattr(existing, "_is_injected", False):
+                insert_idx = i + 1
+
+        # _items_layout = [items..., stretch]. insertWidget(K, w) coloca
+        # w antes do K-esimo filho, entao insert_idx == len(self._items)
+        # coloca w entre o ultimo item e o stretch.
+        self._items_layout.insertWidget(insert_idx, item)
+        self._items.insert(insert_idx, item)
+
+        # Renumerar position 1-based para manter _item_at() coerente.
+        for i, it in enumerate(self._items, start=1):
+            it.get_spec().position = i
+
+        self._empty_widget.setVisible(False)
+        self._list_widget.setVisible(True)
+        self._emit_progress_metrics()
 
     def clear_queue(self) -> None:
         for item in self._items:
@@ -2784,12 +2712,39 @@ class CommandQueueWidget(QWidget):
         self._last_cmd_label.setVisible(False)
         self._empty_widget.setVisible(True)
         self._list_widget.setVisible(False)
+        self._emit_progress_metrics()
 
     def _item_at(self, position: int) -> CommandItemWidget | None:
         for item in self._items:
             if item.get_spec().position == position:
                 return item
         return None
+
+    _DONE_STATUSES = (
+        CommandStatus.CONCLUIDO,
+        CommandStatus.ERRO,
+        CommandStatus.PULADO,
+    )
+
+    def _emit_progress_metrics(self) -> None:
+        """Emit metrics_updated(done, total) so queue-progress-ring reflects the queue.
+
+        done = items that left the pending state by either:
+          - being dispatched to a terminal (_is_sent True — the amber-dot UX,
+            which is how live runs mark progress); or
+          - reaching a terminal CommandStatus (CONCLUIDO/ERRO/PULADO — used by
+            the resume path that hydrates state from DB).
+        total = len(self._items). Failed/skipped count as done because they
+        are no longer pending — the ring represents finished/total, not
+        success/total.
+        """
+        total = len(self._items)
+        done = sum(
+            1
+            for i in self._items
+            if i._is_sent or i._status in self._DONE_STATUSES
+        )
+        signal_bus.metrics_updated.emit(done, total)
 
     def _make_item(self, spec: CommandSpec) -> CommandItemWidget:
         """Create a CommandItemWidget with can_reorder_fn injected."""
@@ -2798,16 +2753,29 @@ class CommandQueueWidget(QWidget):
         item.skip_requested.connect(self._on_skip_requested)
         item.retry_requested.connect(self._on_retry_requested)
         item.cancel_requested.connect(self._on_cancel_requested)
-        item.run_in_terminal_requested.connect(signal_bus.run_command_in_terminal)
-        item.run_in_terminal_requested.connect(self._on_run_command)
-        # Mirror /clear to workspace when Use Kimi is checked. This fires on
-        # ANY path that emits run_in_terminal_requested (per-item green play,
-        # autocast clicks via play_btn, etc.) so the duplicate dispatch is
-        # not coupled to a single entry point in this widget.
-        item.run_in_terminal_requested.connect(self._mirror_clear_to_workspace_if_kimi_checked)
+        # Per-item green arrow passa por _dispatch_green_arrow — handler
+        # unico responsavel por (a) decidir o terminal de destino conforme
+        # estado de --force Kimi, (b) chamar _on_run_command quando o
+        # comando foi efetivamente despachado (label + highlight usam
+        # SEMPRE a string original do item, nunca a transformada), e (c)
+        # mirror de /clear para o workspace no fluxo Use Kimi legado.
+        # Centralizar a logica num unico slot elimina inconsistencia entre
+        # caminhos paralelos (issue HIGH 3 do review adversarial).
+        item.run_in_terminal_requested.connect(self._dispatch_green_arrow)
         item.run_in_kimi_terminal_requested.connect(self._dispatch_blue_arrow)
         item.run_in_kimi_terminal_requested.connect(self._on_run_command)
+        item.sent_state_changed.connect(self._on_item_sent_state_changed)
+        # --force Kimi pode estar ativo no momento da criacao do item: aplica
+        # imediatamente a regra de visibilidade da seta azul para o item novo.
+        if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
+            btn = getattr(item, "_kimi_btn", None)
+            if btn is not None:
+                btn.setVisible(False)
         return item
+
+    def _on_item_sent_state_changed(self, _is_sent: bool) -> None:
+        """Item toggled the amber-dot (sent) state — refresh queue-progress-ring."""
+        self._emit_progress_metrics()
 
     # Default delay between paste and Enter for the blue-arrow Kimi path.
     _KIMI_BLUE_ARROW_DEFAULT_DELAY_MS: int = 1_000
@@ -2832,6 +2800,131 @@ class CommandQueueWidget(QWidget):
             delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
         signal_bus.kimi_blue_arrow_dispatched.emit(kimi_prompt, delay)
 
+    def _on_force_kimi_toggled(self, checked: bool) -> None:
+        """Quando --force Kimi liga: desliga Use Kimi e esconde a seta azul
+        em todos os items. Quando desliga: re-habilita seta azul respeitando
+        a regra original de visibilidade (whitelist OU spec.kimi_eligible)."""
+        if checked and self._use_kimi_chk.isChecked():
+            # Bloqueia o handler reverso temporariamente para evitar re-entrancy.
+            self._use_kimi_chk.blockSignals(True)
+            self._use_kimi_chk.setChecked(False)
+            self._use_kimi_chk.blockSignals(False)
+        self._use_kimi_chk.setEnabled(not checked)
+        self._refresh_kimi_btn_visibility()
+
+    def _on_use_kimi_toggled(self, checked: bool) -> None:
+        """Quando Use Kimi liga e --force Kimi tambem esta marcado, desmarca
+        este (modos mutuamente exclusivos). Sem efeito caso contrario."""
+        if checked and self._force_kimi_chk.isChecked():
+            self._force_kimi_chk.blockSignals(True)
+            self._force_kimi_chk.setChecked(False)
+            self._force_kimi_chk.blockSignals(False)
+            self._use_kimi_chk.setEnabled(True)
+            self._refresh_kimi_btn_visibility()
+
+    def _refresh_kimi_btn_visibility(self) -> None:
+        """Aplica regra de visibilidade das setas azuis per-item.
+
+        Com --force Kimi marcado, esconde TODAS as setas azuis. Sem o force,
+        repete a regra original aplicada em CommandItemWidget._setup_ui:
+        visivel quando whitelist OR spec.kimi_eligible."""
+        force_on = self._force_kimi_chk.isChecked()
+        for item in self._items:
+            btn = getattr(item, "_kimi_btn", None)
+            if btn is None:
+                continue
+            if force_on:
+                btn.setVisible(False)
+                continue
+            spec = item.get_spec()
+            visible = is_kimi_compatible(spec.name) or spec.kimi_eligible
+            btn.setVisible(visible)
+
+    # Diretorios pesquisados para resolver existencia de uma skill quando
+    # --force Kimi reescreve `/cmd` como `/skill:cmd`. Caches resolvidos uma
+    # unica vez por instancia para evitar IO repetido no hot path.
+    _SKILL_SEARCH_DIRS = (".claude/commands/skill", ".agents/skills")
+
+    @classmethod
+    def _resolve_skill_target(cls, slug: str) -> bool:
+        """True quando existe arquivo `{slug}.md` em qualquer skill dir.
+
+        slug = parte apos `/skill:` e antes do primeiro espaco/argumento.
+        Idempotente para chamadas repetidas (filesystem check is cheap and
+        already cached pelo SO; nao introduzimos cache em memoria para
+        manter o sinal sempre fresco apos `git pull` durante a sessao)."""
+        import os
+        if not slug:
+            return False
+        # `slug` pode conter ":" para namespacing (ex: qa:trace) — quando
+        # presente, o arquivo em disco vive em sub-diretorio: qa/trace.md.
+        rel_path = slug.replace(":", "/") + ".md"
+        for base in cls._SKILL_SEARCH_DIRS:
+            if os.path.exists(os.path.join(base, rel_path)):
+                return True
+        return False
+
+    @staticmethod
+    def _inject_skill_prefix(cmd_text: str) -> str:
+        """Insere 'skill:' apos a barra inicial do comando.
+
+        /create-task -> /skill:create-task. Idempotente (`/skill:foo` permanece
+        intacto) e preserva whitespace lider. Comandos sem `/` retornam
+        inalterados — _dispatch_green_arrow os trata como prompt livre."""
+        if not cmd_text:
+            return cmd_text
+        stripped = cmd_text.lstrip()
+        if not stripped.startswith("/") or stripped.startswith("/skill:"):
+            return cmd_text
+        leading = cmd_text[: len(cmd_text) - len(stripped)]
+        return f"{leading}/skill:{stripped[1:]}"
+
+    def _dispatch_green_arrow(self, cmd_text: str) -> None:
+        """Handler unico para `item.run_in_terminal_requested` (seta verde).
+
+        Default path (force-kimi off): emite para terminal interactive e
+        atualiza label/highlight com o cmd_text original. Mirror legado de
+        `/clear`+Use Kimi tambem roda aqui (substitui o slot separado que
+        existia antes do refactor).
+
+        --force Kimi path: roteia para terminal workspace com prefixo /skill:;
+        `/model` e `/effort` viram bolinha amarela SEM dispatch nem update de
+        label/highlight (suprimidos pelo modo); `/clear` vai SO para workspace.
+        Comandos sem skill wrapper existente disparam toast e abortam o
+        dispatch (issue HIGH 2 do review adversarial)."""
+        if not getattr(self, "_force_kimi_chk", None) or not self._force_kimi_chk.isChecked():
+            # Legacy: dispatch + bookkeeping + mirror /clear quando Use Kimi.
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            self._mirror_clear_to_workspace_if_kimi_checked(cmd_text)
+            return
+        head = cmd_text.strip().split(None, 1)[0].lower() if cmd_text.strip() else ""
+        if head.startswith("/model") or head.startswith("/effort"):
+            # Bolinha amarela so — _on_run_clicked do item ja chama _mark_as_sent.
+            # NAO atualizamos label/highlight pois o comando nao foi enviado.
+            return
+        if head == "/clear":
+            signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            self._last_workspace_dispatch_was_clear = True
+            return
+        # Demais slash commands: injetar /skill: apos validar wrapper.
+        if head.startswith("/"):
+            slug = head[1:].split()[0] if head else ""
+            if slug and not self._resolve_skill_target(slug):
+                signal_bus.toast_requested.emit(
+                    f"--force Kimi: skill '{slug}' nao encontrada em "
+                    ".claude/commands/skill/ nem .agents/skills/ — dispatch abortado.",
+                    "warn",
+                )
+                return
+        transformed = self._inject_skill_prefix(cmd_text)
+        signal_bus.run_command_in_workspace_terminal.emit(transformed)
+        # IMPORTANTE: label/highlight usam SEMPRE a string ORIGINAL para que
+        # _highlight_current_command consiga bater contra item.command_text().
+        # Issue HIGH 3 do review adversarial (highlight quebrado no play-next).
+        self._on_run_command(cmd_text)
+
     def _mirror_clear_to_workspace_if_kimi_checked(self, cmd_text: str) -> None:
         """When /clear is dispatched to interactive AND Use Kimi is checked,
         also emit it to the workspace terminal so both CLI sessions clear
@@ -2846,6 +2939,10 @@ class CommandQueueWidget(QWidget):
         also sets the flag).
         """
         if not cmd_text or not cmd_text.strip():
+            return
+        # --force Kimi ja roteou /clear para o workspace via _dispatch_green_arrow.
+        # Sem esta guarda haveria emissao dupla para o workspace terminal.
+        if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
             return
         head = cmd_text.strip().split(None, 1)[0].lower()
         if head == "/clear" and self._use_kimi_chk.isChecked():
@@ -2963,11 +3060,6 @@ class CommandQueueWidget(QWidget):
         return True
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        # Reset input method on notepad focus to prevent rare IME freeze
-        if obj is self._notepad_edit and event.type() == QEvent.Type.FocusIn:
-            im = QApplication.inputMethod()
-            if im is not None:
-                im.reset()
         if obj is self._items_container:
             if event.type() == QEvent.Type.DragEnter:
                 if event.mimeData().hasText():
@@ -3024,16 +3116,19 @@ class CommandQueueWidget(QWidget):
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.CONCLUIDO)
+            self._emit_progress_metrics()
 
     def _on_command_failed(self, index: int, _msg: str) -> None:
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.ERRO)
+            self._emit_progress_metrics()
 
     def _on_command_skipped(self, index: int) -> None:
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.PULADO)
+            self._emit_progress_metrics()
 
     def _on_remove_requested(self, position: int) -> None:
         item = self._item_at(position)
@@ -3045,6 +3140,7 @@ class CommandQueueWidget(QWidget):
             if not self._items:
                 self._empty_widget.setVisible(True)
                 self._list_widget.setVisible(False)
+            self._emit_progress_metrics()
             # Onda 4: when the queue is backed by a SPECIFIC-FLOW.json (DCP
             # context, set by _on_dcp_specific_flow_clicked), persist the
             # deletion to overrides.skipped[] so the next reload (or regen
@@ -3153,13 +3249,6 @@ class CommandQueueWidget(QWidget):
         self._btn_next.setText("Próximo →")
         signal_bus.interactive_advance_triggered.emit()
 
-    def _on_notepad_send(self) -> None:
-        """Send notepad text to terminal (no Enter, no clear), then focus terminal."""
-        text = self._notepad_edit.toPlainText()
-        if text:
-            signal_bus.paste_text_in_terminal.emit(text)
-            signal_bus.focus_interactive_terminal.emit()
-
     # ───────────────────────────────────── Queue dispatch ──────────── #
 
     def _on_instance_selected(self, name: str) -> None:
@@ -3225,6 +3314,40 @@ class CommandQueueWidget(QWidget):
         # /effort can fire into the next command's AskUserQuestion menu
         # and silently select the default option.
         self._cancel_pending_modal_enter()
+
+        # --force Kimi: rota dedicada para o workspace terminal. /model e
+        # /effort viram apenas bolinha amarela (sem dispatch). /clear vai
+        # SO para o workspace. Demais comandos ganham prefixo /skill:. A
+        # seta azul nao participa deste fluxo — checamos antes do branch
+        # use_kimi para garantir precedencia.
+        if self._force_kimi_chk.isChecked():
+            if cmd_head.startswith("/model") or cmd_head.startswith("/effort"):
+                # Bolinha amarela so — sem dispatch e sem update de label.
+                next_item._mark_as_sent()
+                return
+            if cmd_head == "/clear":
+                signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+                self._on_run_command(cmd_text)
+                next_item._mark_as_sent()
+                self._last_workspace_dispatch_was_clear = True
+                return
+            # Validar skill wrapper antes de despachar (HIGH 2).
+            slug = cmd_head[1:].split()[0] if cmd_head.startswith("/") else ""
+            if slug and not self._resolve_skill_target(slug):
+                signal_bus.toast_requested.emit(
+                    f"--force Kimi: skill '{slug}' nao encontrada em "
+                    ".claude/commands/skill/ nem .agents/skills/ — dispatch abortado.",
+                    "warn",
+                )
+                return
+            transformed = self._inject_skill_prefix(cmd_text)
+            signal_bus.run_command_in_workspace_terminal.emit(transformed)
+            # Bookkeeping com cmd_text ORIGINAL (nao transformado) para que
+            # _highlight_current_command consiga bater contra item.command_text()
+            # — issue HIGH 3 do review adversarial.
+            self._on_run_command(cmd_text)
+            next_item._mark_as_sent()
+            return
 
         # Special case: /clear with Use Kimi checkbox active clears BOTH
         # CLI sessions (interactive + workspace). The two emits drive
