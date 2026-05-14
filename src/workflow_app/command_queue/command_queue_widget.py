@@ -38,6 +38,9 @@ from workflow_app.command_queue.command_item_widget import CommandItemWidget
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
 from workflow_app.dcp.specific_flow_handler import build_paste_command_only
+from workflow_app.services.delivery_invalid_formatter import (
+    format_delivery_invalid_popup,
+)
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
 from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, InteractionType, ModelName
 from workflow_app.signal_bus import signal_bus
@@ -1330,10 +1333,49 @@ class CommandQueueWidget(QWidget):
             )
             return
         if isinstance(result, DeliveryInvalid):
-            QMessageBox.information(
-                self, "DCP",
-                f"delivery.json invalido: {result.error}. Rode /delivery:validate.",
+            body, clipboard_text = format_delivery_invalid_popup(
+                result.path, result.error, result.details,
             )
+            project_slug = (
+                getattr(config, "project_name", None)
+                or getattr(config, "name", None)
+                or "(desconhecido)"
+            )
+            # Telemetry: count of distinct schema errors and project slug so
+            # operators can correlate popups with logs without re-parsing JSON.
+            try:
+                _err_count = (
+                    len(json.loads(result.details))
+                    if result.details
+                    else 0
+                )
+            except (json.JSONDecodeError, TypeError):
+                _err_count = 0
+            logger.info(
+                "DCP preflight Gate 2 fail: %d errors in delivery.json (project=%s)",
+                _err_count, project_slug,
+            )
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("DCP build cancelado: delivery.json invalido")
+            box.setText(body)
+            box.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
+            copy_btn = box.addButton(
+                "Copiar erros", QMessageBox.ButtonRole.ActionRole
+            )
+            close_btn = box.addButton(
+                "Fechar", QMessageBox.ButtonRole.RejectRole
+            )
+            box.setDefaultButton(close_btn)
+            box.exec()
+            if box.clickedButton() is copy_btn:
+                QApplication.clipboard().setText(clipboard_text)
+                signal_bus.toast_requested.emit(
+                    "Erros copiados para o clipboard.", "info"
+                )
             return
         if isinstance(result, DeliveryFutureVersion):
             QMessageBox.information(self, "DCP", result.message)
