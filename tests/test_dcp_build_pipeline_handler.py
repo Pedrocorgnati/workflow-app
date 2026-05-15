@@ -676,3 +676,101 @@ def test_pipeline_regen_modal_rejected_blocks_emission(
     assert armed_ctx == [None], (
         "rejected modal must NOT arm _pending_dcp_load_ctx"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+# Guard automatico: ai-forge/scripts/validate-delivery-json.py
+#
+# Loop 05-14-fix-dcp-build-button-pipeline-tasklist TASK-5 — smoke test do
+# script standalone que valida delivery.json contra o schema Pydantic canonico
+# (workflow_app.models.delivery.Delivery). Cobre cenario invalido (exit 1) +
+# cenario valido (exit 0), garantindo defesa em profundidade contra regressao
+# do bug original (12 erros Pydantic em task-manager-desktop/delivery.json
+# cancelando silenciosamente o queue-btn-dcp-build).
+# ─────────────────────────────────────────────────────────────────────────── #
+
+
+def _validate_delivery_script_path() -> Path:
+    """Resolve repo root walking up ate encontrar a arvore com `ai-forge/scripts/`
+    + `CLAUDE.md` (skip do submodulo workflow-app que tambem tem `.git`)."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "ai-forge" / "scripts" / "validate-delivery-json.py"
+        if candidate.exists() and (parent / "CLAUDE.md").exists():
+            return candidate
+    raise RuntimeError("repo root nao encontrado a partir de %s" % here)
+
+
+def test_validate_delivery_json_script_rejects_invalid(tmp_path: Path) -> None:
+    """Script retorna exit 1 + stderr com erros Pydantic para delivery.json
+    estruturalmente invalido (faltando campos obrigatorios). Cobre AC-006.4
+    (smoke test cenario invalido)."""
+
+    import subprocess
+
+    script = _validate_delivery_script_path()
+    assert script.exists(), f"script ausente: {script}"
+
+    invalid = tmp_path / "delivery.json"
+    invalid.write_text(json.dumps({"invalid": "schema", "missing": "fields"}))
+
+    result = subprocess.run(
+        ["python3", str(script), str(invalid)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1, (
+        f"script deveria retornar exit 1 para delivery.json invalido, "
+        f"retornou {result.returncode}. stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert "INVALID" in result.stderr, (
+        f"stderr deveria conter marker INVALID, recebido: {result.stderr!r}"
+    )
+
+
+def test_validate_delivery_json_script_accepts_valid(tmp_path: Path) -> None:
+    """Script retorna exit 0 + stdout `OK:` quando o `delivery.json` em tmpdir
+    e um round-trip da fixture canonica `output/wbs/task-manager-desktop/delivery.json`
+    (corrigida pelo item 002 deste mesmo loop). Cobre AC-006.4 (smoke test cenario
+    valido)."""
+
+    import subprocess
+
+    script = _validate_delivery_script_path()
+    assert script.exists(), f"script ausente: {script}"
+
+    # Fonte: delivery.json valido do task-manager-desktop (fixed pelo item 002).
+    # Usamos o arquivo do repo como input canonico para garantir que o schema
+    # Pydantic atual aceita o formato em uso. Se essa fixture quebrar, o smoke
+    # test denuncia a regressao antes do hook PreToolUse bloquear o commit.
+    repo_root = script.parents[2]
+    fixture = repo_root / "output" / "wbs" / "task-manager-desktop" / "delivery.json"
+    if not fixture.exists():
+        pytest.skip(f"fixture canonica ausente: {fixture}")
+
+    # Round-trip via Pydantic para isolar o teste de qualquer eventual
+    # modificacao manual no arquivo entre a TASK-1 (item 002) e este smoke.
+    from workflow_app.models.delivery import Delivery  # type: ignore
+
+    parsed = Delivery.model_validate(json.loads(fixture.read_text()))
+    valid = tmp_path / "delivery.json"
+    valid.write_text(parsed.model_dump_json())
+
+    result = subprocess.run(
+        ["python3", str(script), str(valid)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, (
+        f"script deveria retornar exit 0 para delivery.json valido, "
+        f"retornou {result.returncode}. stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert "OK:" in result.stdout, (
+        f"stdout deveria conter marker `OK:`, recebido: {result.stdout!r}"
+    )
