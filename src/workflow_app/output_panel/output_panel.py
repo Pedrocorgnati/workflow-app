@@ -189,15 +189,29 @@ class OutputPanel(QWidget):
         self._schedule_resize()
 
     def _schedule_resize(self) -> None:
-        """Debounce terminal geometry recalculation."""
+        """Recalculate terminal geometry and apply atomically.
+
+        Apply directly (no QTimer debounce): the 150ms window between Qt
+        geometry update and PTY size creates an incoherence frame where
+        TUIs render at the old width but receive new SIGWINCH soon after,
+        triggering line-duplication and cursor desync. The `_resize_timer`
+        is intentionally left instantiated to avoid legacy breakage but
+        is no longer started here.
+        """
         cols, rows = self._terminal.recompute_grid()
         if cols != self._cols or rows != self._rows:
             self._pending_cols = cols
             self._pending_rows = rows
-            self._resize_timer.start()  # restart 150ms debounce
+            self._apply_pending_resize()
 
     def _apply_pending_resize(self) -> None:
-        """Apply the pending resize after debounce period."""
+        """Apply the pending resize atomically in a single frame.
+
+        Order is shell -> screen -> recompute_grid -> update so the PTY
+        SIGWINCH is delivered before pyte resizes its buffer. Inverting
+        this (screen first) leaves pyte with a buffer the PTY hasn't
+        acknowledged, so the next render flushes onto the wrong grid.
+        """
         cols = self._pending_cols
         rows = self._pending_rows
         if cols == self._cols and rows == self._rows:
@@ -205,7 +219,16 @@ class OutputPanel(QWidget):
         self._cols = cols
         self._rows = rows
 
-        # Resize pyte screen (preserves buffer where possible)
+        # Resize shell PTY first (sends SIGWINCH so the TUI re-renders for
+        # the new geometry before pyte processes the next chunk).
+        if self._shell is not None:
+            self._shell.resize(cols, rows)
+        if self._pipeline_runner is not None:
+            resize = getattr(self._pipeline_runner, "resize", None)
+            if callable(resize):
+                resize(cols, rows)
+
+        # Then resize pyte screen (preserves buffer where possible).
         try:
             self._screen.resize(lines=rows, columns=cols)
         except Exception:  # noqa: BLE001
@@ -214,13 +237,11 @@ class OutputPanel(QWidget):
             self._history_cursor = 0
             self._has_pending_render = False
 
-        # Resize shell PTY and active pipeline runner
-        if self._shell is not None:
-            self._shell.resize(cols, rows)
-        if self._pipeline_runner is not None:
-            resize = getattr(self._pipeline_runner, "resize", None)
-            if callable(resize):
-                resize(cols, rows)
+        # Force the canvas to recompute its grid against the new cols/rows
+        # and repaint in the same frame.
+        if self._terminal is not None:
+            self._terminal.recompute_grid()
+            self._terminal.update()
 
     # ─────────────────────────────────────────────────────── Signals ─── #
 

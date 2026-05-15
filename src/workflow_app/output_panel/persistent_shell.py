@@ -12,15 +12,21 @@ import codecs
 import fcntl
 import logging
 import os
+import select
+import signal
 import struct
 import subprocess
+import sys
 import termios
+import time
 
 from PySide6.QtCore import QObject, QSocketNotifier, Signal
 
 logger = logging.getLogger(__name__)
 
 _SHELL = os.environ.get("SHELL", "/bin/bash")
+
+DEBUG_RAW_PTY = os.environ.get("WORKFLOW_APP_DEBUG_PTY", "") == "1"
 
 
 class PersistentShell(QObject):
@@ -114,15 +120,33 @@ class PersistentShell(QObject):
 
     def resize(self, cols: int, rows: int) -> None:
         """Resize the PTY."""
-        self._cols = cols
-        self._rows = rows
+        if cols == self._cols and rows == self._rows:
+            return
+        self._cols, self._rows = cols, rows
         if self._master_fd is None:
             return
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
-        try:
-            fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
-        except OSError:
-            pass
+        fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, winsize)
+        deadline = time.monotonic() + 0.05
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([self._master_fd], [], [], 0.005)
+            if not ready:
+                break
+            try:
+                chunk = os.read(self._master_fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            text = self._utf8_decoder.decode(chunk)
+            if text:
+                self.output_received.emit(text)
+        if self._proc and self._proc.pid:
+            try:
+                pgid = os.getpgid(self._proc.pid)
+                os.killpg(pgid, signal.SIGWINCH)
+            except (ProcessLookupError, PermissionError):
+                pass
 
     def terminate(self) -> None:
         if self._notifier:
@@ -144,6 +168,8 @@ class PersistentShell(QObject):
             return
         try:
             data = os.read(self._master_fd, 65536)
+            if DEBUG_RAW_PTY:
+                sys.stderr.write(f"[pty-raw len={len(data)}] {data[:120]!r}\n")
             # Use incremental decoder to handle multi-byte UTF-8 sequences
             # that may be split across multiple os.read() calls (e.g. accented chars).
             text = self._utf8_decoder.decode(data)

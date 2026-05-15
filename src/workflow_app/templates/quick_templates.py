@@ -4,11 +4,40 @@ Quick template definitions for header buttons.
 Defines static command sequences for all non-dynamic header buttons.
 The WBS button is dynamic and handled by wbs_template_builder.py
 (including interleaved Codex plugin review steps during execute flow).
+
+CURATED TEMPLATES - INTENTIONAL OMISSIONS
+-----------------------------------------
+These templates intentionally cover a curated subset of the ~555 SystemForge
+slash commands. Each TEMPLATE_* tuple represents one operator-facing flow
+(brief, modules, deploy, daily, marketing, business, QA, micro-architecture).
+A command being absent from quick_templates.py is NOT a sync gap.
+
+Rules of thumb for what belongs here:
+  - Commands that the operator triggers as a sequence from a UI button
+  - Commands that need a deterministic order with /clear, /model, /effort
+    directives injected between them
+  - Commands part of a recurring operational flow (daily, deploy, etc)
+
+Commands that do NOT belong here:
+  - One-off utilities (/cache-clear, /reset:*, /sync:*, /memory:*)
+  - Subcommands of dynamic subflows already covered by wbs_template_builder.py
+    or daily_loop/loop-app templates (modules:*, qa:*, intake-review:*,
+    delivery:*, dcp:*, loop:*, daily-loop:*, study:*, etc)
+  - Stack-specific review commands (nextjs:*, python:*, android:*, etc) which
+    are dispatched by /validate-stack
+  - Skill commands (/skill:*) which are invoked from inside other commands
+  - Meta tooling (/cmd:*, /auto-improove:*, /optimize:*, /tools:*) operated
+    individually
+  - Plugin-namespaced commands (vercel:*, codex-plugin:*)
+
+/cmd:readme-upd Fase 6 (sync templates) reports gaps but MUST NOT auto-add
+commands from the categories above. Only add when the target template clearly
+needs the command (human decision via AskUserQuestion).
 """
 
 from __future__ import annotations
 
-from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, EffortLevel, FlagSpec, InteractionType, ModelName
 
 # ─── Short aliases ──────────────────────────────────────────────────────────── #
 
@@ -818,36 +847,18 @@ TEMPLATE_QA_PYTHON: list[CommandSpec] = _build_qa_template(_QA_PYTHON)
 TEMPLATE_QA_ANDROID: list[CommandSpec] = _build_qa_template(_QA_ANDROID)
 TEMPLATE_QA_REACT_NATIVE: list[CommandSpec] = _build_qa_template(_QA_REACT_NATIVE)
 
-# ─── Micro-Architecture (F4b) ────────────────────────────────────────────────── #
-# Full flow: feature brief (sem break-intake) → micro-arch WBS → review
+# ─── Micro-Architecture DCP-lite (F4b) ───────────────────────────────────────── #
+# Pipeline /micro:* de 5 comandos que produz PRD + USER-STORIES + ARCHITECTURE +
+# _micro-flow-hints + modules consumiveis por queue-btn-dcp-build (DCP completo).
+# Substitui o orquestrador legado /micro-architecture + /micro:setup + /micro:plan.
+# Referencia: blacksmith/loop/05-13-micro-architecture-refactor.md Parte 2.
 
 TEMPLATE_MICRO_ARCHITECTURE: list[CommandSpec] = _inject_clears([
-    _spec("/clear",                              _S, _A, 0),
-    _spec("/feature-brief-create",               _O, _I, 1),
-    _spec("/intake:obvious",                     _O, _I, 2),
-    _spec("/intake:analyze",                     _S, _A, 2),
-    _spec("/intake:enhance",                     _O, _I, 3),
-    _spec("/micro-architecture",                 _S, _I, 4),
-    _spec("/review-created-micro-architecture",  _S, _A, 5),
-    _spec("/auto-flow execute",                  _S, _A, 6),
-    _spec("/review-executed-micro-architecture", _O, _A, 7),
-])
-
-# ─── Listener Test (valida o ciclo dos dots listener-{interactive,workspace}) ── #
-# Mistura comandos AUTO (test-autoflow-auto, dispara notify-terminal-idle no fim)
-# e INTERACTIVE (test-autoflow-interactive). Util para testar dispatch via
-# [Rodar próximo] tanto no Claude (verde) quanto no Kimi (azul, via /skill:).
-
-TEMPLATE_LISTENER_TEST: list[CommandSpec] = _inject_clears([
-    _spec("/clear",                     _S, _A, 0),
-    _spec("/test-autoflow-auto",        _S, _A, 1),
-    _spec("/test-autoflow-auto",        _S, _A, 2),
-    _spec("/test-autoflow-interactive", _S, _I, 3),
-    _spec("/test-autoflow-interactive", _S, _I, 4),
-    _spec("/test-autoflow-auto",        _S, _A, 5),
-    _spec("/test-autoflow-interactive", _S, _I, 6),
-    _spec("/test-autoflow-auto",        _S, _A, 7),
-    _spec("/test-autoflow-auto",        _S, _A, 8),
+    _spec("/micro:brief",              _O, _I, 1, effort=EffortLevel.HIGH),
+    _spec("/micro:architecture",       _O, _A, 2, effort=EffortLevel.HIGH),
+    _spec("/micro:specific-flow-prep", _O, _A, 3, effort=EffortLevel.HIGH),
+    _spec("/micro:modularize",         _O, _A, 4, effort=EffortLevel.HIGH),
+    _spec("/micro:review",             _O, _A, 5, effort=EffortLevel.HIGH),
 ])
 
 # ─── Auto-Improove Balanced Flow (Daily tab) ────────────────────────────────── #
@@ -894,18 +905,6 @@ TEMPLATE_AUTO_IMPROOVE: list[CommandSpec] = [
 # << END AUTO-GENERATED >>
 
 
-# ─── Python Improove (Auxiliar tab) ─────────────────────────────────────────── #
-# Sequencia dedicada para /auto-improove:python.
-# Estrutura: /model opus + /effort high + 20× (/clear + /auto-improove:python).
-# Sem vinculo com projeto — opera sobre os comandos do proprio SystemForge.
-
-TEMPLATE_PYTHON_IMPROOVE: list[CommandSpec] = [
-    _spec("/model opus",            _O, _A, 0),
-    _spec("/effort high",           _O, _A, 1),
-    *_repeats("/auto-improove:python", _O, 20, 2),
-]
-
-
 # ─── Blog SEO (INIT flow from .claude/commands/blog/) ────────────────────────── #
 # Full INIT pipeline: strategy → keywords → clusters → articles → deploy.
 # /clear between independent steps; /model inserted by _load_quick_template.
@@ -932,6 +931,26 @@ TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
     _spec("/blog:deploy",                 _S, _A, 17),
     _spec("/blog:hreflang-map",           _H, _A, 18),
 ])
+
+# ─── Blog Stockpile (gera + push remoto; sem promote, sem hreflang, sem commit:multilanguage) ─ #
+# Fase 1 (steps 1-8): gera pacotes em .claude/blog/data/stockpile/ (auto-flow stockpile).
+# Fase 2 (step 9): commit + push do stockpile/ via /blog:stockpile-push (idempotente).
+# Promote para content/{locale}/blog/ e hreflang sao responsabilidade do workflow GitHub
+# Actions cron 13h UTC (promote-from-stockpile.yml), NAO desta pipeline local.
+
+TEMPLATE_BLOG_STOCKPILE: list[CommandSpec] = _inject_clears([
+    _spec("/clear",                                        _S, _A,  0),
+    _spec("/blog:expand-keywords",                         _S, _A,  1),
+    _spec("/blog:cluster-keywords",                        _O, _A,  2),
+    _spec("/blog:prioritize-topics",                       _S, _A,  3),
+    _spec("/blog:deduplicate-topics",                      _S, _A,  4),
+    _spec("/blog:generate-briefs",                         _O, _A,  5),
+    _spec("/blog:write-articles --output-dir stockpile",   _O, _A,  6),
+    _spec("/blog:review-seo --mode stockpile",             _S, _A,  7),
+    _spec("/blog:quality-gate --mode stockpile",           _S, _A,  8),
+    _spec("/blog:stockpile-push",                          _S, _A,  9),
+])
+
 
 # ─── Boilerplate (from .claude/commands/boilerplate/) ───────────────────────── #
 # Pipeline de 9 passos que converte um repo legado num boilerplate Next.js
@@ -962,4 +981,51 @@ QA_STACK_TEMPLATES: dict[str, list[CommandSpec]] = {
     "Python": TEMPLATE_QA_PYTHON,
     "Android": TEMPLATE_QA_ANDROID,
     "React Native": TEMPLATE_QA_REACT_NATIVE,
+}
+
+
+# ─── Command flag specs for modal argument dialog ───────────────────────────── #
+# Migrated from raw argument_hint strings to structured FlagSpec definitions.
+# Placeholders (<slug>, <path.md>) live ONLY as placeholder text in FlagSpec;
+# they are NEVER concatenated to the final command string.
+
+COMMAND_FLAG_SPECS: dict[str, CommandSpec] = {
+    "/loop": CommandSpec(
+        name="/loop",
+        flags_with_value=[
+            FlagSpec(name="task", label="Tasklist", placeholder="caminho/para/tasklist.md"),
+            FlagSpec(name="cmd", label="Comando", placeholder="caminho/para/comando.md"),
+            FlagSpec(name="cmd-single", label="Cmd Single", placeholder="caminho/para/comando.md"),
+            FlagSpec(name="both", label="Both", placeholder="caminho/para/tasklist.md"),
+            FlagSpec(name="name", label="Nome", placeholder="slug"),
+        ],
+        flags_boolean=[],
+    ),
+    "/daily-loop": CommandSpec(
+        name="/daily-loop",
+        flags_with_value=[
+            FlagSpec(name="tasklist", label="Tasklist", placeholder="caminho/para/tasklist.md"),
+        ],
+        flags_boolean=[],
+    ),
+    "/daily": CommandSpec(
+        name="/daily",
+        flags_with_value=[
+            FlagSpec(name="tasklist", label="Tasklist", placeholder="caminho/para/tasklist.md"),
+        ],
+        flags_boolean=[],
+    ),
+    "/study": CommandSpec(
+        name="/study",
+        flags_with_value=[
+            FlagSpec(name="name", label="Nome", placeholder="slug"),
+            FlagSpec(
+                name="mode",
+                label="Modo",
+                placeholder="",
+                options=["--simple", "--deep", "--heavy"],
+            ),
+        ],
+        flags_boolean=[],
+    ),
 }

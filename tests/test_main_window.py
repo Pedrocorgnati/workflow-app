@@ -23,15 +23,16 @@ def test_layout_has_splitter(qapp):
 
     window = MainWindow()
     assert window._splitter is not None
-    assert window._splitter.count() == 2
+    # CommandQueueWidget foi reparenteado para dentro do output-toolbar,
+    # entao o splitter principal hospeda apenas o output_container.
+    assert window._splitter.count() == 1
 
 
 def test_command_queue_width_constraints(qapp):
     from workflow_app.main_window import MainWindow
 
     window = MainWindow()
-    # Command queue is the second widget in the splitter (left tab)
-    cmd_queue = window._splitter.widget(1)
+    cmd_queue = window._command_queue
     # Width is flexible; just verify the widget exists
     assert cmd_queue is not None
     assert cmd_queue.width() > 0

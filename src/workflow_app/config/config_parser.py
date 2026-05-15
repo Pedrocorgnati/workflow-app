@@ -36,6 +36,7 @@ class PipelineConfig:
     workspace_root: str            # root do código gerado
     custom_workflow_root: str = "" # onde fica o SPECIFIC-FLOW.json
     language: str = "pt-BR"        # idioma da interface do projeto
+    queue_root: str = ""           # path do storage dedicado do queue_state
     raw: dict = field(default_factory=dict, repr=False)  # JSON original completo
 
     @property
@@ -97,6 +98,7 @@ def parse_config(path: str) -> PipelineConfig:
         custom_workflow_root = bf.get(
             "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
         )
+        queue_root = bf.get("queue_root", "")
     elif "docs_root" in raw or "wbs_root" in raw:
         # V2 — campos direto no root
         brief_root = raw.get("brief_root", raw.get("docs_root", ""))
@@ -106,6 +108,7 @@ def parse_config(path: str) -> PipelineConfig:
         custom_workflow_root = raw.get(
             "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
         )
+        queue_root = raw.get("queue_root", "")
     elif "output_root" in raw:
         # V1 — apenas output_root como string
         output_root = str(raw["output_root"])
@@ -114,12 +117,14 @@ def parse_config(path: str) -> PipelineConfig:
         wbs_root = f"{output_root}/wbs"
         workspace_root = f"{output_root}/workspace"
         custom_workflow_root = f"{wbs_root}/specific-flow"
+        queue_root = raw.get("queue_root", "")
     elif is_loop_json:
         # Loop JSON (task-loop, cmd-loop, both-loop)
         brief_root = ""
         docs_root = ""
         wbs_root = ""
         workspace_root = ""
+        queue_root = raw.get("queue_root", "")
         custom_workflow_root = ""
     else:
         raise ConfigError(
@@ -143,6 +148,10 @@ def parse_config(path: str) -> PipelineConfig:
                 language = lang_key
                 break
 
+    # Fallback queue_root: derive canonical path from project slug
+    if not queue_root and not is_loop_json:
+        queue_root = f"output/wbs/pipeline-position/{resolved.stem}.json"
+
     return PipelineConfig(
         config_path=str(resolved),
         project_name=project_name,
@@ -152,6 +161,7 @@ def parse_config(path: str) -> PipelineConfig:
         workspace_root=workspace_root,
         custom_workflow_root=custom_workflow_root,
         language=language,
+        queue_root=queue_root,
         raw=raw,
     )
 

@@ -235,6 +235,8 @@ class ModuleArtifacts(BaseModel):
     git_tag: Optional[str] = None
     execution: Optional[ExecutionArtifact] = None
     qa: Optional[QaArtifact] = None
+    directive_injector_run_at: Optional[Iso8601Utc] = None
+    """ISO-8601 timestamp do ultimo /dcp:directive-injector neste modulo (tripwire HT-04 #1 idempotencia)."""
 
 
 class ModuleState(BaseModel):

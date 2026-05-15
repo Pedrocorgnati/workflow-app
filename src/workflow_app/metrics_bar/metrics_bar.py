@@ -1,15 +1,15 @@
 """
-MetricsBar — 48px top toolbar for project, instance selection, navigation and metrics.
+MetricsBar — 80px top toolbar for project, instance selection, navigation and metrics.
 
-Layout (left to right):
-  [project pill / Selecionar] │ [clauded] [kimid] [codex] [clauded2] │ [Workflow] [Comandos] [Toolbox] │ (metrics) │ (stretch) │ [📡] [⚙]
+Layout:
+  Row 1 (top):    [project pill / Selecionar] │ (metrics) │ (stretch)
 
 Git info: overlay label, bottom-right corner, updated via git_info_updated signal.
 
 Specs:
-  Height: 48px fixed
+  Height: 80px fixed (single row)
   Background: #27272A
-  Border-bottom: 1px solid #3F3F46
+  Border-bottom: none
 """
 
 from __future__ import annotations
@@ -17,8 +17,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QFileSystemWatcher, Qt, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import (
+    QDateTime,
+    QFileSystemWatcher,
+    QMimeData,
+    QSettings,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import QDrag, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -27,10 +35,100 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
 _SCHEDULE_STATE_FILE = Path.home() / ".workflow-app" / "schedule-autocast.json"
+
+# ─── Instance buttons drag&drop (output-toolbar-center-top) ───────────────── #
+#
+# Os botoes do `instance-group` (clauded/kimid/clauded2/kimid2) sao reordenaveis
+# via drag&drop. A ordem persiste em QSettings("SystemForge", "WorkflowApp")
+# sob `_INSTANCE_ORDER_SETTINGS_KEY` e e restaurada na proxima abertura do app.
+_CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "clauded2", "kimid2"]
+_INSTANCE_ORDER_SETTINGS_KEY = "MetricsBar/instanceOrder"
+_INSTANCE_DRAG_MIME = "application/x-workflow-instance-button"
+_INSTANCE_DRAG_THRESHOLD = 6
+
+
+class _DraggableInstanceButton(QPushButton):
+    """QPushButton arrastavel dentro de _InstanceDropZone.
+
+    Inicia QDrag depois que o cursor se move alem de _INSTANCE_DRAG_THRESHOLD
+    pixels com o botao esquerdo pressionado. O clique normal continua funcionando
+    quando nao ha movimento significativo (QDrag.exec() intercepta o release
+    quando o drag inicia, impedindo o `clicked` espurio).
+    """
+
+    def __init__(self, name: str, parent: QWidget | None = None) -> None:
+        super().__init__(name, parent)
+        self._instance_name = name
+        self._drag_start = None
+
+    def mousePressEvent(self, event):  # noqa: N802 (Qt API)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # noqa: N802 (Qt API)
+        if not (event.buttons() & Qt.MouseButton.LeftButton) or self._drag_start is None:
+            super().mouseMoveEvent(event)
+            return
+        delta = (event.position().toPoint() - self._drag_start).manhattanLength()
+        if delta < _INSTANCE_DRAG_THRESHOLD:
+            super().mouseMoveEvent(event)
+            return
+        self._drag_start = None
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_INSTANCE_DRAG_MIME, self._instance_name.encode("utf-8"))
+        drag.setMimeData(mime)
+        pixmap = self.grab()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(event.position().toPoint())
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self.unsetCursor()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802 (Qt API)
+        self._drag_start = None
+        self.unsetCursor()
+        super().mouseReleaseEvent(event)
+
+
+class _InstanceDropZone(QWidget):
+    """Container que aceita drops de _DraggableInstanceButton e dispara callback."""
+
+    def __init__(self, on_drop, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._on_drop = on_drop
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):  # noqa: N802 (Qt API)
+        if event.mimeData().hasFormat(_INSTANCE_DRAG_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802 (Qt API)
+        if event.mimeData().hasFormat(_INSTANCE_DRAG_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802 (Qt API)
+        if not event.mimeData().hasFormat(_INSTANCE_DRAG_MIME):
+            event.ignore()
+            return
+        raw = bytes(event.mimeData().data(_INSTANCE_DRAG_MIME))
+        name = raw.decode("utf-8", errors="replace")
+        drop_x = event.position().toPoint().x()
+        self._on_drop(name, drop_x)
+        event.acceptProposedAction()
+
 
 # ─── Styles ───────────────────────────────────────────────────────────────── #
 
@@ -190,15 +288,29 @@ class TerminalStatusDot(QWidget):
     _IDLE_STYLE = f"QWidget {{ background-color: #22C55E; border-radius: {_SIZE // 2}px; }}"
     _BUSY_STYLE = f"QWidget {{ background-color: #F59E0B; border-radius: {_SIZE // 2}px; }}"
 
-    def __init__(self, channel: str, label: str, parent: "QWidget | None" = None) -> None:
+    def __init__(
+        self,
+        channel: str,
+        label: str,
+        parent: "QWidget | None" = None,
+        *,
+        size: int = _SIZE,
+    ) -> None:
         super().__init__(parent)
         self._channel = channel
         self._label = label
         self._busy = False
+        self._size = int(size)
+        self._idle_style = (
+            f"QWidget {{ background-color: #22C55E; border-radius: {self._size // 2}px; }}"
+        )
+        self._busy_style = (
+            f"QWidget {{ background-color: #F59E0B; border-radius: {self._size // 2}px; }}"
+        )
         self.setProperty("testid", f"listener-{channel}")
-        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setFixedSize(self._size, self._size)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(self._IDLE_STYLE)
+        self.setStyleSheet(self._idle_style)
         self.setToolTip(f"{label}: parado")
 
     @property
@@ -213,7 +325,7 @@ class TerminalStatusDot(QWidget):
         if busy == self._busy:
             return
         self._busy = busy
-        self.setStyleSheet(self._BUSY_STYLE if busy else self._IDLE_STYLE)
+        self.setStyleSheet(self._busy_style if busy else self._idle_style)
         self.setToolTip(f"{self._label}: {'executando' if busy else 'parado'}")
         self.busy_changed.emit(self._channel, busy)
 
@@ -221,16 +333,16 @@ class TerminalStatusDot(QWidget):
 class MetricsBar(QWidget):
     """48px project selector, instance selection, and navigation toolbar."""
 
-    view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Toolbox, 3=Kanban
+    view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Kanban
     config_change_requested = Signal(str)   # path of selected .json
     config_unload_requested = Signal()      # user clicked ✕ on project pill
 
     def __init__(self, signal_bus=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("MetricsBar")
-        self.setFixedHeight(48)
+        self.setFixedHeight(38)
         self.setStyleSheet(
-            "background-color: #27272A; border-bottom: 1px solid #3F3F46;"
+            "QWidget#MetricsBar { background-color: #27272A; }"
         )
 
         # Resolve signal bus: accept injected instance or fall back to singleton
@@ -267,10 +379,8 @@ class MetricsBar(QWidget):
         self._setup_git_overlay()
         self._connect_signals()
 
-        # Restore remote toggle state from persisted config
-        from workflow_app.config.app_config import AppConfig
-        if AppConfig.get("remote_mode_enabled", False):
-            self._btn_remote.setChecked(True)
+        # Remote mode removido 2026-05-12 — botao e estado persistido foram
+        # eliminados; o RemoteServer (se ainda instanciado) permanece dormente.
 
         # Reflect current project state (if a project was loaded before MetricsBar init)
         from workflow_app.config.app_state import app_state
@@ -282,9 +392,17 @@ class MetricsBar(QWidget):
     # ─────────────────────────────────────────────────────────── UI ──── #
 
     def _setup_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        top_row = QWidget()
+        top_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        top_row.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(top_row)
+        layout.setContentsMargins(8, 5, 8, 5)
         layout.setSpacing(4)
+        outer.addWidget(top_row)
 
         # ── Project pill / select button ──────────────────────────────── #
         self._project_pill = QWidget()
@@ -337,39 +455,77 @@ class MetricsBar(QWidget):
         self._feature_name_input.setReadOnly(True)
         self._feature_name_input.hide()
 
-        self._proj_select_btn = QPushButton("Selecionar Projeto...")
-        self._proj_select_btn.setFixedHeight(28)
-        self._proj_select_btn.setStyleSheet(
+        _SELECT_BTN_STYLE = (
             "QPushButton { background: transparent; color: #FBBF24; border: 1px solid #FBBF24;"
-            "  border-radius: 5px; font-size: 11px; font-weight: 600; padding: 0 10px; }"
+            "  border-radius: 5px; font-size: 11px; font-weight: 600; padding: 0 12px; }"
             "QPushButton:hover { background: rgba(251, 191, 36, 0.12); }"
         )
+
+        self._proj_select_btn = QPushButton("Projeto")
+        self._proj_select_btn.setProperty("testid", "metrics-btn-proj-select")
+        self._proj_select_btn.setToolTip("Abrir project.json (parte de .claude/projects/)")
+        self._proj_select_btn.setFixedHeight(28)
+        self._proj_select_btn.setStyleSheet(_SELECT_BTN_STYLE)
         self._proj_select_btn.clicked.connect(self._on_proj_select)
+
+        self._loop_select_btn = QPushButton("Loop")
+        self._loop_select_btn.setProperty("testid", "metrics-btn-loop-select")
+        self._loop_select_btn.setToolTip("Abrir _LOOP-CONFIG.json (parte de blacksmith/)")
+        self._loop_select_btn.setFixedHeight(28)
+        self._loop_select_btn.setStyleSheet(_SELECT_BTN_STYLE)
+        self._loop_select_btn.clicked.connect(self._on_loop_select)
+
+        self._proj_open_btn = QPushButton("Abrir")
+        self._proj_open_btn.setProperty("testid", "metrics-btn-proj-open")
+        self._proj_open_btn.setToolTip("Abrir pasta do projeto no explorador de arquivos")
+        self._proj_open_btn.setFixedHeight(28)
+        self._proj_open_btn.setStyleSheet(_SELECT_BTN_STYLE)
+        self._proj_open_btn.clicked.connect(self._on_proj_open)
+
+        # ── Instance toggle buttons (clauded group) ───────────────────── #
+        # Task 4 (loop 05-13-workflow-app-layout-2):
+        #   4a: adicionado `kimid2` apos `clauded2` (mirror clauded2 — interactive terminal).
+        #   4d: removido `codex` (eliminado do layout + handler orfao).
+        # 2026-05-14: botoes sao reordenaveis via drag&drop (output-toolbar-center-top).
+        # Ordem persiste em QSettings/_INSTANCE_ORDER_SETTINGS_KEY e e restaurada aqui.
+        self._instance_order_settings = QSettings("SystemForge", "WorkflowApp")
+        instance_order = self._load_instance_order()
+        self._instance_btns: list[_DraggableInstanceButton] = []
+        self._instance_group = _InstanceDropZone(self._on_instance_button_dropped)
+        self._instance_group.setProperty("testid", "instance-group")
+        self._instance_group.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._instance_group.setStyleSheet("background: transparent;")
+        _ig_layout = QHBoxLayout(self._instance_group)
+        _ig_layout.setContentsMargins(0, 0, 0, 0)
+        _ig_layout.setSpacing(4)
+
+        for name in instance_order:
+            btn = _DraggableInstanceButton(name, parent=self._instance_group)
+            btn.setFixedHeight(28)
+            btn.setToolTip(
+                f"{name} — clique para selecionar. Arraste para reordenar."
+            )
+            # Lambda usa self._instance_btns.index(b) para obter o indice ATUAL
+            # do botao no momento do clique (apos qualquer reorderacao).
+            btn.clicked.connect(
+                lambda _checked=False, b=btn, n=name: self._on_instance_clicked(
+                    self._instance_btns.index(b), n
+                )
+            )
+            self._instance_btns.append(btn)
+            _ig_layout.addWidget(btn)
+
+        self._apply_instance_styles()
+        # _instance_group NOT added here — reparented to output-toolbar-center by MainWindow.
 
         layout.addWidget(self._project_pill)
         layout.addWidget(self._feature_name_input)
         layout.addWidget(self._proj_select_btn)
-        layout.addSpacing(4)
-        layout.addWidget(self._make_separator())
-        layout.addSpacing(4)
+        layout.addWidget(self._loop_select_btn)
 
-        # ── Instance toggle buttons (clauded group) ───────────────────── #
-        _instance_names = ["clauded", "kimid", "codex", "clauded2"]
-        self._instance_btns: list[QPushButton] = []
-
-        for i, name in enumerate(_instance_names):
-            btn = QPushButton(name)
-            btn.setFixedHeight(28)
-            btn.clicked.connect(lambda _checked=False, idx=i, n=name: self._on_instance_clicked(idx, n))
-            self._instance_btns.append(btn)
-            layout.addWidget(btn)
-
-        self._apply_instance_styles()
-        layout.addSpacing(4)
-        layout.addWidget(self._make_separator())
-        layout.addSpacing(4)
-
-        # ── Navigation buttons (Workflow | Comandos | Toolbox) ────────── #
+        # ── Navigation buttons (Workflow | Comandos) ────────────────── #
+        # Criados aqui mas posicionados mais a direita (no slot antes
+        # ocupado pelo botao de Modo Remoto, removido em 2026-05-12).
         font_nav = QFont("Inter", 10)
         font_nav.setWeight(QFont.Weight.Medium)
 
@@ -379,7 +535,6 @@ class MetricsBar(QWidget):
         self._btn_workflow.setFont(font_nav)
         self._btn_workflow.setMinimumWidth(80)
         self._btn_workflow.clicked.connect(lambda: self._on_nav_clicked(0))
-        layout.addWidget(self._btn_workflow)
 
         self._btn_comandos = QPushButton("Comandos")
         self._btn_comandos.setProperty("testid", "nav-btn-comandos")
@@ -387,80 +542,120 @@ class MetricsBar(QWidget):
         self._btn_comandos.setFont(font_nav)
         self._btn_comandos.setMinimumWidth(80)
         self._btn_comandos.clicked.connect(lambda: self._on_nav_clicked(1))
-        layout.addWidget(self._btn_comandos)
-
-        self._btn_toolbox = QPushButton("Toolbox")
-        self._btn_toolbox.setProperty("testid", "nav-btn-toolbox")
-        self._btn_toolbox.setFixedHeight(28)
-        self._btn_toolbox.setFont(font_nav)
-        self._btn_toolbox.setMinimumWidth(80)
-        self._btn_toolbox.clicked.connect(lambda: self._on_nav_clicked(2))
-        layout.addWidget(self._btn_toolbox)
-
-        self._btn_kanban = QPushButton("Kanban")
-        self._btn_kanban.setProperty("testid", "nav-btn-kanban")
-        self._btn_kanban.setFixedHeight(28)
-        self._btn_kanban.setFont(font_nav)
-        self._btn_kanban.setMinimumWidth(80)
-        self._btn_kanban.clicked.connect(lambda: self._on_nav_clicked(3))
-        layout.addWidget(self._btn_kanban)
 
         self._nav_btns = [
             self._btn_workflow,
             self._btn_comandos,
-            self._btn_toolbox,
-            self._btn_kanban,
         ]
         self._apply_nav_styles()
 
-        # ── Listeners + Autocast frame (own div, separated from nav) ────── #
-        layout.addSpacing(6)
+        # ── Header actions slot (4th div) ─────────────────────────────── #
+        # Populated by MainWindow with the JSON/WS/mcp-* quick-action
+        # buttons (moved from output-toolbar 2026-05-12). Empty placeholder
+        # if MainWindow doesn't fill it.
+        self._header_actions = QWidget()
+        self._header_actions.setObjectName("HeaderActions")
+        self._header_actions_layout = QHBoxLayout(self._header_actions)
+        self._header_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self._header_actions_layout.setSpacing(6)
+        layout.addWidget(self._header_actions)
+
+        # ── Listeners + ring frame (own div, NOT added to metrics_bar layout) ──
+        # Migration 2026-05-12 (Iter 12): listeners-frame foi movido para uma
+        # nova barra horizontal acima do toggle_bar no output_container do
+        # main_window. As instancias seguem owned por MetricsBar para preservar
+        # state machine (idle timers, dot busy tracking, ring updates). O
+        # main_window reparente _listeners_frame ao montar sua barra.
         self._listeners_frame = QFrame()
         self._listeners_frame.setObjectName("ListenersFrame")
         self._listeners_frame.setProperty("testid", "listeners-frame")
+        self._listeners_frame.setMinimumHeight(108)
+        # Task 9 (loop 05-13-workflow-app-layout-2): border interna removida
+        # para eliminar duplicacao com a border externa do OutputToolbar
+        # (output-toolbar-right), que envelopa este frame apos a migracao
+        # Iter 12. O frame permanece como container de layout (margens 12/8
+        # e spacing 16) hospedando dots, queue-progress-ring, queue-count-col.
         self._listeners_frame.setStyleSheet(
-            "QFrame#ListenersFrame { background-color: transparent;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+            "QFrame#ListenersFrame { background-color: transparent; }"
         )
         lf = QHBoxLayout(self._listeners_frame)
-        lf.setContentsMargins(8, 2, 8, 2)
-        lf.setSpacing(8)
+        lf.setContentsMargins(12, 8, 12, 8)
+        lf.setSpacing(16)
 
-        self._dot_interactive = TerminalStatusDot("interactive", "Claude CLI", self._listeners_frame)
-        self._dot_workspace = TerminalStatusDot("workspace", "Kimi CLI", self._listeners_frame)
+        self._dot_interactive = TerminalStatusDot(
+            "interactive", "Claude CLI", self._listeners_frame, size=88,
+        )
+        self._dot_workspace = TerminalStatusDot(
+            "workspace", "Kimi CLI", self._listeners_frame, size=88,
+        )
         lf.addWidget(self._dot_interactive)
         lf.addWidget(self._dot_workspace)
 
-        # MARKER_SCHEDULE_AUTOCAST_BUTTON
-        self._btn_schedule_autocast = QPushButton("agendar")
-        self._btn_schedule_autocast.setProperty("testid", "schedule-autocast-btn")
-        self._btn_schedule_autocast.setFixedHeight(28)
-        self._btn_schedule_autocast.setMinimumWidth(76)
-        self._btn_schedule_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_schedule_autocast.setToolTip(
-            "Agendar disparo automatico do autocast"
+        # queue-progress-ring posicionado lado a lado com os dots
+        # (Iter 11 > GAP 4.4). Discreto: conta entradas de queue-command-list,
+        # nao mede tempo. Atualizado via signal_bus.metrics_updated.
+        from workflow_app.widgets.queue_progress_ring import QueueProgressRing
+        self._queue_progress_ring = QueueProgressRing(self._listeners_frame, diameter=88)
+        lf.addWidget(self._queue_progress_ring)
+
+        # Contador textual "executados/faltantes" deslocado do centro do ring
+        # para a direita (Iter 12: ring agora exibe percentual).
+        self._lbl_queue_count = QLabel("0/0")
+        self._lbl_queue_count.setObjectName("QueueCountLabel")
+        self._lbl_queue_count.setProperty("testid", "queue-count-label")
+        self._lbl_queue_count.setToolTip("Comandos executados / total")
+        # Largura alinhada aos demais itens do listeners-frame
+        # (TerminalStatusDot e QueueProgressRing usam size/diameter=88).
+        self._lbl_queue_count.setFixedWidth(88)
+        # Task 5 (loop 05-13-workflow-app-layout-2): altura reduzida para
+        # acomodar nova row de toggles abaixo mantendo altura do
+        # listeners-frame inalterada (inner area 92 = 54 label + 4 spacing + 34 toggles).
+        self._lbl_queue_count.setFixedHeight(54)
+        self._lbl_queue_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_queue_count.setStyleSheet(
+            "color: #D4D4D8; font-size: 16px; font-weight: 600;"
         )
-        self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_IDLE)
+
+        # Task 5 (loop 05-13-workflow-app-layout-2): coluna que envelopa
+        # queue-count-label (topo) + row com terminal-layout-toggle e
+        # terminal-workspace-collapse (base). Os 2 toggles sao reparenteados
+        # por MainWindow._build_output_toolbar para self._queue_count_toggles_layout.
+        self._queue_count_col = QWidget(self._listeners_frame)
+        self._queue_count_col.setFixedWidth(88)
+        _qc_col_layout = QVBoxLayout(self._queue_count_col)
+        _qc_col_layout.setContentsMargins(0, 0, 0, 0)
+        _qc_col_layout.setSpacing(4)
+        _qc_col_layout.addWidget(self._lbl_queue_count)
+
+        self._queue_count_toggles_row = QWidget(self._queue_count_col)
+        self._queue_count_toggles_row.setProperty(
+            "testid", "queue-count-toggles-row"
+        )
+        self._queue_count_toggles_row.setFixedHeight(34)
+        self._queue_count_toggles_layout = QHBoxLayout(
+            self._queue_count_toggles_row
+        )
+        self._queue_count_toggles_layout.setContentsMargins(0, 0, 0, 0)
+        self._queue_count_toggles_layout.setSpacing(4)
+        _qc_col_layout.addWidget(self._queue_count_toggles_row)
+
+        lf.addWidget(self._queue_count_col)
+
+        # Migration 2026-05-12 (TASK-1 AC-1.4): autocast e schedule-autocast
+        # buttons foram movidos para o play_bar do CommandQueueWidget. As
+        # instancias permanecem aqui (hidden, NoParent layout) para preservar
+        # a state machine existente — toggle/click sao driveados via signal_bus
+        # (`autocast_toggle_requested`, `schedule_autocast_requested`).
+        self._btn_schedule_autocast = QPushButton("agendar")
+        self._btn_schedule_autocast.setProperty("testid", "schedule-autocast-btn-legacy")
+        self._btn_schedule_autocast.setVisible(False)
         self._btn_schedule_autocast.clicked.connect(self._on_schedule_clicked)
-        lf.addWidget(self._btn_schedule_autocast)
 
         self._btn_autocast = QPushButton("autocast")
-        self._btn_autocast.setProperty("testid", "autocast-btn")
+        self._btn_autocast.setProperty("testid", "autocast-btn-legacy")
         self._btn_autocast.setCheckable(True)
-        self._btn_autocast.setFixedHeight(28)
-        self._btn_autocast.setMinimumWidth(76)
-        self._btn_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_autocast.setToolTip(
-            "Autocast: dispara [Rodar próximo] em loop até a fila esvaziar"
-        )
-        self._btn_autocast.setStyleSheet(_AUTOCAST_OFF)
+        self._btn_autocast.setVisible(False)
         self._btn_autocast.toggled.connect(self._on_autocast_toggled)
-        lf.addWidget(self._btn_autocast)
-
-        layout.addWidget(self._listeners_frame)
-        layout.addSpacing(4)
-
-        layout.addWidget(self._make_separator())
 
         # ── Token counter ─────────────────────────────────────────────── #
         self._lbl_tokens = QLabel()
@@ -488,41 +683,13 @@ class MetricsBar(QWidget):
 
         layout.addStretch(1)
 
-        # ── Remote mode toggle ─────────────────────────────────────────── #
-        self._btn_remote = self._make_remote_toggle_btn()
-
-        self._lbl_remote_addr = QLabel("")
-        self._lbl_remote_addr.setObjectName("RemoteAddressLabel")
-        self._lbl_remote_addr.setStyleSheet(
-            "color: #22C55E; font-family: monospace; font-size: 11px;"
-        )
-        self._lbl_remote_addr.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._lbl_remote_addr.setVisible(False)
-
-        self._btn_copy_ip = QPushButton("📋")
-        self._btn_copy_ip.setObjectName("CopyIpButton")
-        self._btn_copy_ip.setFixedSize(22, 22)
-        self._btn_copy_ip.setToolTip("Copiar IP:Porta")
-        self._btn_copy_ip.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  border-radius: 3px; font-size: 12px; color: #71717A; }"
-            "QPushButton:hover { background-color: #3F3F46; }"
-        )
-        self._btn_copy_ip.setVisible(False)
-
-        self._lbl_connection_badge = QLabel("● Conectado")
-        self._lbl_connection_badge.setObjectName("RemoteConnectionBadge")
-        self._lbl_connection_badge.setStyleSheet(
-            "color: #22C55E; font-size: 11px;"
-        )
-        self._lbl_connection_badge.setVisible(False)
-
-        layout.addWidget(self._btn_remote)
-        layout.addWidget(self._lbl_remote_addr)
-        layout.addWidget(self._btn_copy_ip)
-        layout.addWidget(self._lbl_connection_badge)
+        # ── Nav group (Workflow | Comandos) ────────────────────────────── #
+        # Botões mantidos no layout (lógica/sinais preservados) mas ocultos —
+        # a tela ativa é sempre Workflow (índice 0).
+        layout.addWidget(self._btn_workflow)
+        layout.addWidget(self._btn_comandos)
+        self._btn_workflow.hide()
+        self._btn_comandos.hide()
 
         # ── DataTest toggle ───────────────────────────────────────────── #
         self._btn_datatest = QPushButton("DataTest")
@@ -530,23 +697,22 @@ class MetricsBar(QWidget):
         self._btn_datatest.setCheckable(True)
         self._btn_datatest.setToolTip("Exibir data-testid em todos os componentes")
         self._btn_datatest.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #A1A1AA;"
-            "  border: 1px solid #52525B; border-radius: 6px;"
+            "QPushButton { background-color: transparent; color: #4ADE80;"
+            "  border: 1px solid #16A34A; border-radius: 6px;"
             "  font-size: 11px; font-weight: 600; padding: 0 6px; }"
-            "QPushButton:hover { color: #FAFAFA; background-color: #3F3F46;"
-            "  border-color: #71717A; }"
-            "QPushButton:checked { background-color: #DC2626; color: #FAFAFA;"
-            "  border-color: #DC2626; font-weight: 700; }"
+            "QPushButton:hover { color: #FAFAFA; background-color: #166534;"
+            "  border-color: #22C55E; }"
+            "QPushButton:checked { background-color: #16A34A; color: #FAFAFA;"
+            "  border-color: #16A34A; font-weight: 700; }"
         )
         self._btn_datatest.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_datatest.clicked.connect(
-            lambda checked: self._signal_bus.datatest_toggled.emit(checked)
-        )
-        layout.addWidget(self._btn_datatest)
+        # Task 3 (loop 05-13-workflow-app-layout-2): wiring agora pertence ao MainWindow
+        # (botao integrado a 4a coluna `output-toolbar-test-mode` com toggle radio-like
+        # exclusivo via QButtonGroup, emitindo `datatest_mode_changed`). O .clicked->emit
+        # antigo foi removido para evitar duplicidade de sinal.
+        # NOT added to metrics_bar layout — reparented to `output-toolbar-test-mode`
+        # column by MainWindow (first row of the new 4th sibling).
 
-        # ── Right controls ────────────────────────────────────────────── #
-        self._btn_prefs = self._make_icon_btn("\u2699\uFE0F", "Preferências")
-        layout.addWidget(self._btn_prefs)
 
     # Path where the notify script writes its signal.
     _NOTIFY_FILE = Path.home() / ".workflow-app" / "terminal-notify.json"
@@ -666,25 +832,6 @@ class MetricsBar(QWidget):
         )
         self._lbl_git_info.hide()
 
-    def _make_remote_toggle_btn(self) -> QPushButton:
-        btn = QPushButton("◉")  # U+25C9 Fisheye — BMP, no emoji font needed
-        btn.setObjectName("RemoteToggleButton")
-        btn.setFixedSize(36, 32)
-        btn.setToolTip("Modo Remoto: ativa servidor WebSocket para controle via Android")
-        btn.setCheckable(True)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: 1px solid transparent;"
-            "  border-radius: 6px; font-size: 18px; color: #D4D4D8; }"
-            "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA;"
-            "  border-color: #52525B; }"
-            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
-            "QPushButton:checked { color: #22C55E; font-size: 18px;"
-            "  background-color: rgba(34, 197, 94, 0.15);"
-            "  border: 1px solid rgba(34, 197, 94, 0.3); }"
-        )
-        return btn
-
     def _make_icon_btn(self, icon: str, tooltip: str) -> QPushButton:
         btn = QPushButton(icon)
         btn.setObjectName("IconButton")
@@ -736,6 +883,84 @@ class MetricsBar(QWidget):
                 _INSTANCE_SELECTED if i == self._selected_instance else _INSTANCE_UNSELECTED
             )
 
+    # ─── Drag & drop reordering (output-toolbar-center-top) ──────────── #
+
+    def _load_instance_order(self) -> list[str]:
+        """Le a ordem persistida e a reconcilia com o set canonico.
+
+        Mantem apenas nomes canonicos preservando a ordem do usuario; nomes
+        canonicos ausentes na persistencia (ex: depois de um upgrade que
+        adicionou um botao novo) sao anexados ao final.
+        """
+        canonical = list(_CANONICAL_INSTANCE_NAMES)
+        raw = self._instance_order_settings.value(_INSTANCE_ORDER_SETTINGS_KEY, None)
+        persisted: list[str] = []
+        if isinstance(raw, str) and raw:
+            try:
+                decoded = json.loads(raw)
+                if isinstance(decoded, list):
+                    persisted = [str(x) for x in decoded]
+            except json.JSONDecodeError:
+                persisted = []
+        elif isinstance(raw, list):
+            persisted = [str(x) for x in raw]
+
+        result = [n for n in persisted if n in canonical]
+        for n in canonical:
+            if n not in result:
+                result.append(n)
+        return result
+
+    def _save_instance_order(self) -> None:
+        order = [b._instance_name for b in self._instance_btns]
+        self._instance_order_settings.setValue(
+            _INSTANCE_ORDER_SETTINGS_KEY, json.dumps(order)
+        )
+
+    def _on_instance_button_dropped(self, name: str, drop_x: int) -> None:
+        """Reordena botoes no layout em resposta a um drop e persiste a ordem.
+
+        `drop_x` e a coordenada x do drop no sistema de coordenadas do
+        _instance_group. Posicao de insercao e calculada relativa aos centros
+        horizontais dos botoes vizinhos.
+        """
+        src_idx = next(
+            (i for i, b in enumerate(self._instance_btns) if b._instance_name == name),
+            None,
+        )
+        if src_idx is None:
+            return
+
+        visual_target = len(self._instance_btns)
+        for i, btn in enumerate(self._instance_btns):
+            center = btn.x() + btn.width() // 2
+            if drop_x < center:
+                visual_target = i
+                break
+
+        target_idx = visual_target - 1 if src_idx < visual_target else visual_target
+        if target_idx == src_idx:
+            return
+
+        selected_name: str | None = None
+        if 0 <= self._selected_instance < len(self._instance_btns):
+            selected_name = self._instance_btns[self._selected_instance]._instance_name
+
+        layout = self._instance_group.layout()
+        btn = self._instance_btns.pop(src_idx)
+        layout.removeWidget(btn)
+        self._instance_btns.insert(target_idx, btn)
+        layout.insertWidget(target_idx, btn)
+
+        if selected_name is not None:
+            for i, b in enumerate(self._instance_btns):
+                if b._instance_name == selected_name:
+                    self._selected_instance = i
+                    break
+
+        self._apply_instance_styles()
+        self._save_instance_order()
+
     # ─────────────────────────────────── Navigation (Workflow etc.) ──── #
 
     def _on_nav_clicked(self, index: int) -> None:
@@ -769,7 +994,30 @@ class MetricsBar(QWidget):
     _AUTOCAST_ARM_MS = 1500      # window after a click in which busy must appear
     _AUTOCAST_DEBOUNCE_MS = 1000 # delay before re-firing on both-green (per spec)
 
+    def _on_metrics_updated_for_ring(self, done: int, total: int) -> None:
+        """Atualiza queue-progress-ring e o label de contagem associado."""
+        try:
+            d, t = int(done), int(total)
+            if hasattr(self, "_queue_progress_ring"):
+                self._queue_progress_ring.set_progress(d, t)
+            if hasattr(self, "_lbl_queue_count"):
+                self._lbl_queue_count.setText(f"{d}/{t}")
+        except Exception:  # noqa: BLE001 - UI nao deve quebrar
+            pass
+
+    def _on_autocast_proxy_toggle(self, checked: bool) -> None:
+        """Receive autocast toggle from play_bar (signal_bus) and forward to
+        the existing toggle handler. Mirrors the legacy button state for
+        backwards compatibility (some tests still inspect `_btn_autocast`).
+        """
+        if self._btn_autocast.isChecked() != bool(checked):
+            self._btn_autocast.setChecked(bool(checked))
+        else:
+            self._on_autocast_toggled(bool(checked))
+
     def _on_autocast_toggled(self, checked: bool) -> None:
+        # Notify play_bar button to stay in sync (e.g., auto-stop via arm timeout).
+        self._signal_bus.autocast_state_changed.emit(bool(checked))
         if checked:
             self._autocast_phase = "awaiting-busy"
             self._btn_autocast.setText("parar")
@@ -847,6 +1095,14 @@ class MetricsBar(QWidget):
         self._dot_interactive.busy_changed.connect(self._on_dot_busy_changed)
         self._dot_workspace.busy_changed.connect(self._on_dot_busy_changed)
 
+        # Autocast/schedule buttons moved to play_bar (TASK-1 AC-1.4): receive
+        # toggle/click via signal_bus and proxy to the existing state machine.
+        bus.autocast_toggle_requested.connect(self._on_autocast_proxy_toggle)
+        bus.schedule_autocast_requested.connect(self._on_schedule_clicked)
+
+        # queue-progress-ring: tracking discreto via metrics_updated(done, total).
+        bus.metrics_updated.connect(self._on_metrics_updated_for_ring)
+
         # Release authoritative idle lock when the app sends a new command,
         # so the dot can turn yellow again on real activity. Bound methods
         # (not lambdas) so the singleton bus does not retain stale closures
@@ -859,14 +1115,8 @@ class MetricsBar(QWidget):
         # any helper auto-idle scheduled before it would fire mid-command.
         bus.kimi_blue_arrow_dispatched.connect(self._on_command_dispatched_workspace)
 
-        self._btn_prefs.clicked.connect(bus.preferences_requested)
-
-        self._btn_remote.clicked.connect(self._on_remote_toggled)
-        self._btn_copy_ip.clicked.connect(self._on_copy_ip)
-        bus.remote_server_started.connect(self._on_remote_server_started)
-        bus.remote_server_stopped.connect(self._on_remote_server_stopped)
-        bus.remote_client_connected.connect(self._on_remote_client_connected)
-        bus.remote_client_disconnected.connect(self._on_remote_client_disconnected)
+        # Modo Remoto removido 2026-05-12 — sem connections para
+        # remote_server_started/stopped/client_connected/disconnected.
 
         bus.tool_use_started.connect(self._on_tool_use_started)
         bus.tool_use_completed.connect(self._on_tool_use_completed)
@@ -881,103 +1131,144 @@ class MetricsBar(QWidget):
 
     _COPY_FEEDBACK_MS = 2000
 
-    def _on_remote_toggled(self, checked: bool) -> None:
-        from workflow_app.config.app_config import AppConfig
-        AppConfig.set("remote_mode_enabled", checked)
-        self._signal_bus.remote_mode_toggle_requested.emit(checked)
-        if not checked:
-            self._lbl_remote_addr.setVisible(False)
-            self._btn_copy_ip.setVisible(False)
-            self._lbl_connection_badge.setVisible(False)
-
-    def _on_copy_ip(self) -> None:
-        addr = self._lbl_remote_addr.text()
-        if addr:
-            QApplication.clipboard().setText(addr)
-            self._btn_copy_ip.setText("✓")
-            self._btn_copy_ip.setToolTip("Copiado!")
-            # Parented overload — Qt cancels the callback if `self` is
-            # destroyed before the timer fires (otherwise the lambda
-            # raises RuntimeError on the deleted C++ button).
-            QTimer.singleShot(
-                self._COPY_FEEDBACK_MS,
-                self,
-                self._reset_copy_ip_button,
-            )
-
-    def _reset_copy_ip_button(self) -> None:
-        self._btn_copy_ip.setText("📋")
-        self._btn_copy_ip.setToolTip("Copiar IP:Porta")
-
-    def _on_remote_server_started(self, address: str) -> None:
-        self._btn_remote.setChecked(True)
-        self._lbl_remote_addr.setText(address)
-        self._lbl_remote_addr.setVisible(True)
-        self._btn_copy_ip.setVisible(True)
-
-    def _on_remote_server_stopped(self) -> None:
-        self._btn_remote.setChecked(False)
-        self._lbl_remote_addr.setText("")
-        self._lbl_remote_addr.setVisible(False)
-        self._btn_copy_ip.setVisible(False)
-        self._lbl_connection_badge.setVisible(False)
-
-    def _on_remote_client_connected(self) -> None:
-        self._lbl_connection_badge.setVisible(True)
-
-    def _on_remote_client_disconnected(self) -> None:
-        self._lbl_connection_badge.setVisible(False)
+    # Handlers de Modo Remoto removidos em 2026-05-12 (botao eliminado).
 
     # ──────────────────────────────────────── Project widget slots ─── #
 
-    def _on_proj_select(self) -> None:
+    def _resolve_walk_up(self, *segments: str) -> str | None:
+        """Walk up from this module looking for a directory at `segments` join.
+
+        Returns the absolute path string if found, else None. Used to seed
+        the file picker at a sensible starting directory (.claude/projects
+        for Projeto, blacksmith for Loop).
+        """
+        candidate = Path(__file__).resolve()
+        target = Path(*segments)
+        while candidate != candidate.parent:
+            probe = candidate.joinpath(*segments)
+            if probe.is_dir():
+                return str(probe)
+            candidate = candidate.parent
+        return None
+
+    def _open_config_picker(self, title: str, fallback_segments: tuple[str, ...]) -> None:
+        """Shared picker for Projeto/Loop buttons.
+
+        Opens a getOpenFileName dialog starting at the dir of the currently
+        loaded config (when present); otherwise walks up to find the
+        `fallback_segments` directory; otherwise uses cwd. Performs loop-
+        schema validation on `*-loop.json` filenames. Emits
+        `config_change_requested(path)` on success.
+        """
         from workflow_app.config.app_state import app_state
         start_dir = str(Path.cwd())
         if app_state.has_config and app_state.config:
             start_dir = str(Path(app_state.config.config_path).parent)
         else:
-            candidate = Path(__file__).resolve()
-            while candidate != candidate.parent:
-                if (candidate / ".claude" / "projects").is_dir():
-                    start_dir = str(candidate / ".claude" / "projects")
-                    break
-                candidate = candidate.parent
+            resolved = self._resolve_walk_up(*fallback_segments)
+            if resolved:
+                start_dir = resolved
         path, _ = QFileDialog.getOpenFileName(
-            self, "Selecionar project.json", start_dir,
+            self, title, start_dir,
             "JSON Files (*.json);;All Files (*)",
         )
-        if path:
-            p = Path(path)
-            if p.name.endswith("-loop.json"):
-                try:
-                    raw = json.loads(p.read_text(encoding="utf-8"))
-                    required = ["schema_version", "name", "iteration_template", "items", "finalization"]
-                    if p.name.endswith("-cmd-loop.json") or p.name.endswith("-both-loop.json"):
-                        required.append("mode")
-                    missing = [f for f in required if f not in raw]
-                    if missing:
-                        self._signal_bus.toast_requested.emit(
-                            f"Schema invalido em {p.name}: campos ausentes {', '.join(missing)}. "
-                            "Verifique se o JSON segue o LOOP_CANONICAL_TEMPLATE.",
-                            "error",
-                        )
-                        return
-                    if "mode" in raw and raw["mode"] not in ("task", "cmd", "both"):
-                        self._signal_bus.toast_requested.emit(
-                            f"Schema invalido em {p.name}: modo '{raw.get('mode')}' nao reconhecido. "
-                            "Valores validos: task, cmd, both.",
-                            "error",
-                        )
-                        return
-                except Exception as exc:
+        if not path:
+            return
+        p = Path(path)
+        if p.name.endswith("-loop.json"):
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                required = ["schema_version", "name", "iteration_template", "items", "finalization"]
+                if p.name.endswith("-cmd-loop.json") or p.name.endswith("-both-loop.json"):
+                    required.append("mode")
+                missing = [f for f in required if f not in raw]
+                if missing:
                     self._signal_bus.toast_requested.emit(
-                        f"Erro ao ler {p.name}: {exc}", "error"
+                        f"Schema invalido em {p.name}: campos ausentes {', '.join(missing)}. "
+                        "Verifique se o JSON segue o LOOP_CANONICAL_TEMPLATE.",
+                        "error",
                     )
                     return
-            self.config_change_requested.emit(path)
+                if "mode" in raw and raw["mode"] not in ("task", "cmd", "both"):
+                    self._signal_bus.toast_requested.emit(
+                        f"Schema invalido em {p.name}: modo '{raw.get('mode')}' nao reconhecido. "
+                        "Valores validos: task, cmd, both.",
+                        "error",
+                    )
+                    return
+            except Exception as exc:
+                self._signal_bus.toast_requested.emit(
+                    f"Erro ao ler {p.name}: {exc}", "error"
+                )
+                return
+        self.config_change_requested.emit(path)
+
+    def _on_proj_select(self) -> None:
+        self._open_config_picker(
+            "Selecionar project.json", (".claude", "projects"),
+        )
+
+    def _on_loop_select(self) -> None:
+        self._open_config_picker(
+            "Selecionar _LOOP-CONFIG.json", ("blacksmith",),
+        )
 
     def _on_proj_unload(self) -> None:
         self.config_unload_requested.emit()
+
+    def _on_proj_open(self) -> None:
+        """Seleciona pasta de projeto, carrega-o e abre no file manager.
+
+        Fluxo:
+        1. Abre QFileDialog.getExistingDirectory para selecionar a pasta raiz.
+        2. Procura project.json em .claude/project.json ou .claude/projects/*.json.
+        3. Emite config_change_requested para carregar o projeto (o MainWindow
+           chama _load_config -> _restore_queue_from_storage automaticamente).
+        4. Abre a pasta no file manager do SO via QDesktopServices.
+        5. Toast explicito em todos os caminhos (Zero Silencio).
+        """
+        from pathlib import Path
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QFileDialog
+
+        start_dir = str(Path.cwd())
+        folder = QFileDialog.getExistingDirectory(
+            self, "Abrir pasta do projeto", start_dir
+        )
+        if not folder:
+            return
+
+        folder_path = Path(folder)
+
+        # Procura project.json canonico
+        candidates: list[Path] = [folder_path / ".claude" / "project.json"]
+        projects_dir = folder_path / ".claude" / "projects"
+        if projects_dir.exists():
+            candidates.extend(sorted(projects_dir.glob("*.json")))
+        config_path = None
+        for c in candidates:
+            if c.exists():
+                config_path = str(c)
+                break
+
+        if not config_path:
+            self._signal_bus.toast_requested.emit(
+                "Nenhum project.json encontrado nesta pasta. "
+                "Verifique se o diretorio contem .claude/project.json ou .claude/projects/*.json",
+                "error",
+            )
+            return
+
+        # Carrega projeto (MainWindow tratara o resto: queue-command-list, etc)
+        self.config_change_requested.emit(config_path)
+
+        # Abre pasta no file manager do SO
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_path)))
+        self._signal_bus.toast_requested.emit(
+            f"Projeto carregado e pasta aberta: {folder_path.name}", "success"
+        )
 
     def _on_config_loaded_signal(self, _path: str) -> None:
         from workflow_app.config.app_state import app_state
@@ -1009,6 +1300,8 @@ class MetricsBar(QWidget):
         self._project_name_lbl.show()
         self._proj_x.show()
         self._proj_select_btn.hide()
+        self._loop_select_btn.hide()
+        self._proj_open_btn.hide()
         if feature_name:
             self._feature_name_input.setText(feature_name)
             self._feature_name_input.show()
@@ -1021,6 +1314,8 @@ class MetricsBar(QWidget):
         self._feature_name_input.setText("")
         self._feature_name_input.hide()
         self._proj_select_btn.show()
+        self._loop_select_btn.show()
+        self._proj_open_btn.show()
 
     def _on_tool_use_started(self, tool_name: str) -> None:
         self._tool_use_count += 1
@@ -1312,7 +1607,7 @@ class MetricsBar(QWidget):
     _HELPER_COMMANDS: tuple[str, ...] = (
         "/model", "/effort", "/clear",            # slash-helpers
         "cd",                                      # bash directory change
-        "clauded", "kimid", "codex", "clauded2",  # CLI launches
+        "clauded", "kimid", "clauded2", "kimid2",  # CLI launches
     )
     _HELPER_AUTO_IDLE_MS: int = 1_000
     # Extra delay added to /clear on the workspace channel: Kimi's TUI
@@ -1502,10 +1797,12 @@ class MetricsBar(QWidget):
             return
         remaining = max(0, QDateTime.currentDateTime().secsTo(self._schedule_end_at))
         label = self._format_schedule_remaining(remaining)
+        tooltip = f"Clique para cancelar - dispara em {label}"
         self._btn_schedule_autocast.setText(label)
         self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_RUNNING)
-        self._btn_schedule_autocast.setToolTip(
-            f"Clique para cancelar - dispara em {label}"
+        self._btn_schedule_autocast.setToolTip(tooltip)
+        self._signal_bus.schedule_autocast_visual_changed.emit(
+            label, _SCHEDULE_RUNNING, tooltip
         )
 
     def _fire_schedule_autocast(self) -> None:
@@ -1520,6 +1817,9 @@ class MetricsBar(QWidget):
         self._btn_schedule_autocast.setText("disparado")
         self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_FIRED)
         self._btn_schedule_autocast.setToolTip("Autocast disparado")
+        self._signal_bus.schedule_autocast_visual_changed.emit(
+            "disparado", _SCHEDULE_FIRED, "Autocast disparado"
+        )
         QTimer.singleShot(2000, self._reset_schedule_visual_to_idle)
         self._btn_autocast.click()
 
@@ -1528,4 +1828,7 @@ class MetricsBar(QWidget):
         self._btn_schedule_autocast.setStyleSheet(_SCHEDULE_IDLE)
         self._btn_schedule_autocast.setToolTip(
             "Agendar disparo automatico do autocast"
+        )
+        self._signal_bus.schedule_autocast_visual_changed.emit(
+            "agendar", _SCHEDULE_IDLE, "Agendar disparo automatico do autocast"
         )

@@ -208,10 +208,10 @@ class SignalBridge:
             {"index": index, "status": "RUNNING"},
         )
 
-    def _on_command_completed(self, index: int) -> None:
+    def _on_command_completed(self, index: int, success: bool = True) -> None:
         self._send_message(
             "command_status_changed",
-            {"index": index, "status": "COMPLETED"},
+            {"index": index, "status": "COMPLETED", "success": success},
         )
 
     def _on_command_failed(self, index: int, error: str) -> None:

@@ -19,7 +19,7 @@ def _make_metrics_bar_bus():
         "pipeline_resumed", "pipeline_completed", "pipeline_cancelled",
         "metrics_updated", "metrics_snapshot", "tool_use_started",
         "tool_use_completed", "token_update", "git_info_updated",
-        "new_pipeline_requested", "history_panel_toggled", "preferences_requested",
+        "history_panel_toggled",
     ]:
         mock_sig = MagicMock()
         mock_sig.connect = MagicMock()
@@ -35,7 +35,7 @@ def test_ecu_metrics_bar_all_buttons_have_tooltips(qapp):
     bus = _make_metrics_bar_bus()
     bar = MetricsBar(bus)
 
-    for btn_name in ["_btn_remote", "_btn_copy_ip", "_btn_prefs"]:
+    for btn_name in ["_btn_remote", "_btn_copy_ip"]:
         btn = getattr(bar, btn_name)
         assert btn.toolTip() != "", f"ECU FAIL: {btn_name} sem tooltip"
 

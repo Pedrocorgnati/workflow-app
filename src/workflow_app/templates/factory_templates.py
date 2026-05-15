@@ -85,7 +85,8 @@ FACTORY_TEMPLATES: dict[str, tuple[str, list[CommandSpec]]] = {
         TEMPLATE_BUSINESS,
     ),
     "Micro-Architecture": (
-        "Brief de feature + micro-arquitetura pontual: feature-brief → intake → micro-architecture + review. 5 comandos.",
+        "DCP-lite /micro:*: brief → architecture → specific-flow-prep → modularize → review. "
+        "Saida consumivel por queue-btn-dcp-build. 5 comandos.",
         TEMPLATE_MICRO_ARCHITECTURE,
     ),
     "Blog SEO": (

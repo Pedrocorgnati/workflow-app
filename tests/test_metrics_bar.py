@@ -19,11 +19,6 @@ def bar(qapp):
 # ── Initial state ────────────────────────────────────────────────────────── #
 
 
-def test_prefs_btn_enabled_on_init(bar):
-    """Preferences button is enabled on init."""
-    assert bar._btn_prefs.isEnabled() is True
-
-
 def test_tokens_label_hidden_on_init(bar):
     """Token label is hidden until tokens arrive."""
     assert bar._lbl_tokens.isHidden()

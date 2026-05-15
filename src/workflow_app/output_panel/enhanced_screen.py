@@ -58,3 +58,12 @@ class EnhancedScreen(pyte.HistoryScreen):
             if self._saved_cursor is not None:
                 self.cursor = self._saved_cursor
                 self._saved_cursor = None
+
+    def resize(self, lines=None, columns=None) -> None:  # noqa: ANN001
+        # pyte#95: super().resize() resets DECOM and margins; preserve them.
+        saved_modes = set(self.mode)
+        saved_margins = self.margins
+        super().resize(lines, columns)
+        self.mode = saved_modes
+        if saved_margins:
+            self.margins = saved_margins

@@ -69,7 +69,7 @@ class PipelineManager:
         self._current_index: int = 0
         self._pipeline_exec_id: int | None = None
         self._paused: bool = False
-        self._permission_mode: str = "acceptEdits"
+        self._permission_mode: str = "autoAccept"
 
         # State machines: command_exec_id → CommandStateMachine
         self._state_machines: dict[int, CommandStateMachine] = {}
@@ -122,8 +122,7 @@ class PipelineManager:
             logger.warning("PipelineManager.start() called with empty queue")
             return
         if permission_mode is None:
-            from workflow_app.config.app_config import AppConfig
-            permission_mode = AppConfig.get("default_permission_mode", "acceptEdits")
+            permission_mode = "autoAccept"
         self._permission_mode = permission_mode
         self._paused = False
         self._fired_phase_triggers.clear()
@@ -417,7 +416,16 @@ class PipelineManager:
         self._launch_worker_for(spec, command_exec_id)
 
     def _launch_worker_for(self, spec: CommandSpec, command_exec_id: int) -> None:
-        """Instantiate and start ProcessRunner. Maintain reference in self._workers."""
+        """Instantiate and start ProcessRunner. Maintain reference in self._workers.
+
+        When `spec.kind == "local-action"`, bypass PTY and dispatch the
+        registered Python callable in-process, then emit command_completed
+        synchronously so the queue advances exactly like for slash commands.
+        """
+        if getattr(spec, "kind", "slash") == "local-action":
+            self._dispatch_local_action(spec, command_exec_id)
+            return
+
         runner = ProcessRunner()
         self._current_runner = runner
 
@@ -471,6 +479,43 @@ class PipelineManager:
             pass
         if self._current_runner is runner:
             self._current_runner = None
+
+    # ── Internal: local-action dispatch ─────────────────────────────── #
+
+    def _dispatch_local_action(self, spec: CommandSpec, command_exec_id: int) -> None:
+        """Invoke the registered local action and route the result through
+        the same callbacks used by the PTY-based slash path.
+
+        On unknown `local_action_id` or callable exception, behaves like a
+        worker error: state machine moves to ERRO, no advance.
+        """
+        from workflow_app.command_queue.local_actions import (
+            dispatch_local_action,
+            get_local_action,
+        )
+
+        action_id = getattr(spec, "local_action_id", None)
+        # Announce dispatch in the terminal so the user sees what ran.
+        display = spec.name if spec.name.startswith("/") else f"/{spec.name}"
+        self._signal_bus.output_chunk_received.emit(
+            f"\n\x1b[36m$\x1b[0m local-action {display} [{action_id or 'unknown'}]\n"
+        )
+
+        if not action_id or get_local_action(action_id) is None:
+            self._on_worker_error(
+                command_exec_id,
+                f"local-action unknown or missing action_id: {action_id!r}",
+            )
+            return
+
+        success = dispatch_local_action(action_id, spec)
+        if success:
+            self._on_command_completed(command_exec_id, True)
+        else:
+            self._on_worker_error(
+                command_exec_id,
+                f"local-action {action_id!r} returned False",
+            )
 
     # ── Internal: worker callbacks ────────────────────────────────────── #
 

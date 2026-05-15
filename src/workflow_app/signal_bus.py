@@ -34,7 +34,7 @@ class SignalBus(QObject):
 
     # --- Command execution ---
     command_started = Signal(int)         # command index
-    command_completed = Signal(int)       # command index
+    command_completed = Signal(int, bool)  # command index, success flag
     command_failed = Signal(int, str)     # command index, error message
     command_skipped = Signal(int)         # command index
     command_uncertain = Signal(int)       # command index (needs resume decision)
@@ -67,7 +67,6 @@ class SignalBus(QObject):
 
     # --- History ---
     history_panel_toggled = Signal()
-    preferences_requested = Signal()
 
     # --- SDK Adapter (module-08) ---
     # Emitted by _StopHook when agent terminates (command_name, exit_code)
@@ -134,7 +133,6 @@ class SignalBus(QObject):
     pipeline_retry_requested = Signal(int)    # command_index
 
     # --- MetricsBar actions (module-13/TASK-5 correction) ---
-    new_pipeline_requested = Signal()         # user clicked [+] New
     dry_run_requested = Signal()              # user clicked [▤] Dry Run
 
     # --- Terminal (run command directly in persistent shell) ---
@@ -159,7 +157,7 @@ class SignalBus(QObject):
     terminal_worker_changed = Signal(str, object)      # channel, runner
 
     # --- Instance selection (MetricsBar → CommandQueueWidget) ---
-    # Emitted when user selects a CLI instance (e.g. "clauded", "codex")
+    # Emitted when user selects a CLI instance (e.g. "clauded", "clauded2")
     instance_selected = Signal(str)          # binary_name
 
     # --- Remote Server (workflow-mobile feature) ---
@@ -175,7 +173,11 @@ class SignalBus(QObject):
     remote_client_disconnected = Signal()
 
     # --- DataTest debug mode ---
-    datatest_toggled = Signal(bool)        # True=show testid overlays, False=hide
+    datatest_toggled = Signal(bool)        # legado: True=show testid overlays, False=hide (mantido por compat; nao mais emitido pela UI)
+    # Task 3 (loop 05-13-workflow-app-layout-2): toggle radio-like com 3 modos.
+    # Modos: "off" (sem overlays), "all" (todos os testids), "body" (todos MENOS QAbstractButton),
+    # "buttons" (APENAS QAbstractButton). Emitido pelos botoes DataTest/BodyTest/BtnTest.
+    datatest_mode_changed = Signal(str)
 
     # --- Terminal focus (switch to output + focus terminal widget) ---
     focus_interactive_terminal = Signal()
@@ -193,6 +195,22 @@ class SignalBus(QObject):
     # Emitted by MetricsBar when the autocast loop wants to fire the next queue item.
     # CommandQueueWidget connects this to a programmatic click on `queue-btn-play-next`.
     autocast_step_requested = Signal()
+
+    # Migration 2026-05-12: autocast buttons moved to play_bar (CommandQueueWidget).
+    # Play bar widgets emit these; MetricsBar listens and drives the existing state
+    # machine (dots + timers stay in metrics_bar). Bool carries the toggle state.
+    autocast_toggle_requested = Signal(bool)
+    schedule_autocast_requested = Signal()
+
+    # MetricsBar emits while the schedule-autocast countdown is running so the
+    # visible button on the play bar (CommandQueueWidget) can mirror label,
+    # stylesheet and tooltip. Args: (label, stylesheet_qss, tooltip).
+    schedule_autocast_visual_changed = Signal(str, str, str)
+
+    # Emitted by MetricsBar AFTER the autocast state changed (including
+    # programmatic stops via _on_autocast_arm_timeout). Play bar button uses
+    # this to stay in sync with the state machine.
+    autocast_state_changed = Signal(bool)
 
 
 # Module-level singleton — always import `signal_bus`, never instantiate SignalBus directly

@@ -273,7 +273,7 @@ def test_contract_07_metrics_bar_reads_pipeline_data(qapp):
         "pipeline_resumed", "pipeline_completed", "pipeline_cancelled",
         "metrics_updated", "metrics_snapshot", "tool_use_started",
         "tool_use_completed", "token_update", "git_info_updated",
-        "new_pipeline_requested", "history_panel_toggled", "preferences_requested",
+        "history_panel_toggled",
     ]:
         mock_sig = MagicMock()
         mock_sig.connect = MagicMock()

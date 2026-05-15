@@ -27,8 +27,7 @@ class AppConfig:
     Usage:
         from workflow_app.config.app_config import AppConfig
 
-        mode = AppConfig.get("default_permission_mode", "acceptEdits")
-        AppConfig.set("default_permission_mode", "manual")
+        flag = AppConfig.get("remote_mode_enabled", False)
     """
 
     _CONFIG_PATH: Path = Path.home() / ".workflow-app" / "config.json"
@@ -37,7 +36,6 @@ class AppConfig:
 
     # Default values for all known preference keys
     _DEFAULTS: dict[str, Any] = {
-        "default_permission_mode": "acceptEdits",
         "remote_mode_enabled": False,  # workflow-mobile: start WebSocket server on launch
     }
 

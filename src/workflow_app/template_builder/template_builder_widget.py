@@ -659,6 +659,7 @@ class TemplateBuilderWidget(QWidget):
         cbl.addWidget(self._custom_model)
 
         add_custom = QPushButton("+")
+        add_custom.setProperty("testid", "tpl-add-custom-command")
         add_custom.setFixedSize(26, 26)
         add_custom.setStyleSheet(
             "QPushButton { background: #166534; color: #FAFAFA; border: none;"

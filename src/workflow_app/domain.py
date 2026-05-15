@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from typing import Literal, Optional
 
 # ─── Enums ──────────────────────────────────────────────────────────────── #
 
@@ -95,11 +96,21 @@ class PermissionMode(str, enum.Enum):
 
 
 @dataclass
+class FlagSpec:
+    """Specification of a command-line flag that requires a value."""
+    name: str
+    label: str
+    placeholder: str = ""
+    multiline: bool = False
+    options: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CommandSpec:
     """Specification of a single command in the pipeline queue.
 
     This is the primary transfer object between UI components
-    (PipelineCreatorWidget → MainWindow → PipelineManager).
+    (MainWindow → PipelineManager).
     """
     name: str                                     # e.g. "/prd-create"
     model: ModelName = ModelName.SONNET           # Claude model to use
@@ -113,6 +124,10 @@ class CommandSpec:
     testid: str = ""                              # data-testid override for queue item widget
     blocked_reason: str = ""                      # If set, item renders as ERRO with this message
     kimi_eligible: bool = False                   # True if this spec came from a kimi_eligible loop item
+    kind: Literal["slash", "local-action"] = "slash"  # Dispatch mode: external slash command vs in-process Python action
+    local_action_id: Optional[str] = None         # Identifier into local-actions registry (only when kind=="local-action")
+    flags_boolean: list[str] = field(default_factory=list)
+    flags_with_value: list[FlagSpec] = field(default_factory=list)
 
     def display_name(self) -> str:
         """Return formatted display string."""

@@ -145,6 +145,14 @@ class PhaseTriggerEngine:
                     estimated_seconds=spec.estimated_seconds,
                     phase=spec.phase,
                     config_path=spec.config_path,
+                    effort=spec.effort,
+                    testid=spec.testid,
+                    blocked_reason=spec.blocked_reason,
+                    kimi_eligible=spec.kimi_eligible,
+                    kind=getattr(spec, "kind", "slash"),
+                    local_action_id=getattr(spec, "local_action_id", None),
+                    flags_boolean=list(spec.flags_boolean),
+                    flags_with_value=list(spec.flags_with_value),
                 )
             )
             position += 1
