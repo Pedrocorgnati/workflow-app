@@ -18,13 +18,18 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.command_queue.double_phase_dialog import (
+    SLUG_RE,
     AutoGrowTextEdit,
     DoublePhaseArgumentDialog,
+    PathMdFieldWidget,
     RadioGroupWithSummary,
     _parse_argument_hint,
 )
 
-STUDY_HINT = '"<duvida>" [path.md] [--name <slug>] [--simple|--deep|--heavy]'
+STUDY_HINT = (
+    '"<duvida>" [path.md] [--loop <path.md>] [--name <slug>] '
+    "[--simple|--deep|--heavy]"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,11 +52,27 @@ def test_parser_classifies_quoted_angle_as_freetext():
     assert tokens[0].kind == "freetext"
 
 
-def test_parser_full_study_hint():
-    """Hint canonico do queue-btn-study: 4 tokens com kinds esperados."""
+def test_parser_full_study_hint_now_with_loop():
+    """Hint canonico do queue-btn-study apos task-021: 5 tokens.
+
+    `[--loop <path.md>]` vira `checkbox_with_path_md`; demais kinds preservados.
+    """
     tokens = _parse_argument_hint(STUDY_HINT)
     kinds = [t.kind for t in tokens]
-    assert kinds == ["freetext", "input", "checkbox", "enum_flag"]
+    assert kinds == [
+        "freetext",
+        "input",
+        "checkbox_with_path_md",
+        "checkbox_with_value",
+        "enum_flag",
+    ]
+    # checkbox_with_path_md carrega flag em .key (sem placeholder em .options).
+    cbp = tokens[2]
+    assert cbp.key == "--loop"
+    # checkbox_with_value carrega flag em .key e placeholder em .options[0].
+    cbv = tokens[3]
+    assert cbv.key == "--name"
+    assert cbv.options == ["slug"]
 
 
 def test_parser_keeps_outside_radio_kind_for_non_bracketed_pipes():
@@ -222,7 +243,9 @@ def test_freetext_serialization_no_quotes_for_single_token(qapp):
 
 
 def test_full_study_hint_renders_all_widget_kinds(qapp):
-    """Hint canonico instancia 1 freetext, 1 input, 1 checkbox, 1 enum_flag."""
+    """Hint canonico (com --loop) instancia 1 freetext, 1 input, 1 path picker,
+    2 checkboxes (--loop + --name) e 1 enum_flag.
+    """
     dlg = DoublePhaseArgumentDialog(
         pipeline_name="/study",
         argument_hint=STUDY_HINT,
@@ -234,11 +257,291 @@ def test_full_study_hint_renders_all_widget_kinds(qapp):
         },
     )
     assert len(dlg.findChildren(AutoGrowTextEdit)) == 1
-    # path.md gera input simples (QLineEdit).
-    assert len(dlg.findChildren(QLineEdit)) == 1
-    # [--name <slug>] cai como checkbox (fora do escopo desta task corrigir).
-    assert len(dlg.findChildren(QCheckBox)) == 1
+    # QLineEdits: input simples ([path.md]) + line interno do PathMdFieldWidget
+    # ([--loop <path.md>]) + line do checkbox_with_value ([--name <slug>]). Total 3.
+    assert len(dlg.findChildren(QLineEdit)) == 3
+    # 2 checkboxes: --loop + --name.
+    assert len(dlg.findChildren(QCheckBox)) == 2
+    # 1 PathMdFieldWidget (do [--loop <path.md>]).
+    assert len(dlg.findChildren(PathMdFieldWidget)) == 1
     rgs = dlg.findChildren(RadioGroupWithSummary)
     assert len(rgs) == 1
     assert rgs[0].button_group().exclusive() is True
+    dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# task-021: checkbox_with_path_md ([--flag <path.md>] / [--flag <path>])
+# ---------------------------------------------------------------------------
+
+
+def test_parser_checkbox_with_path_md_detects_kind():
+    """[--loop <path.md>] vira checkbox_with_path_md com key=--loop."""
+    tokens = _parse_argument_hint("[--loop <path.md>]")
+    assert len(tokens) == 1
+    assert tokens[0].kind == "checkbox_with_path_md"
+    assert tokens[0].key == "--loop"
+
+
+def test_parser_checkbox_with_path_md_accepts_short_path_placeholder():
+    """[--loop <path>] (sem .md) tambem vira checkbox_with_path_md."""
+    tokens = _parse_argument_hint("[--loop <path>]")
+    assert len(tokens) == 1
+    assert tokens[0].kind == "checkbox_with_path_md"
+    assert tokens[0].key == "--loop"
+
+
+def test_parser_path_md_legacy_still_works():
+    """[--tasklist <path.md>] -> checkbox_with_path_md (novo); [path.md] sem
+    -- continua caindo em input (regressao do parser preservada).
+    """
+    tokens = _parse_argument_hint("[path.md]")
+    assert len(tokens) == 1
+    # [path.md] nao tem '<>' nem '--' prefix -> input simples (regra atual).
+    assert tokens[0].kind == "input"
+
+
+def test_confirm_checkbox_with_path_md_emits_flag_value(qapp):
+    """Checkbox marcado + path nao vazio -> '--loop {path}' no comando final."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint="[--loop <path.md>]",
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chks = dlg.findChildren(QCheckBox)
+    assert len(chks) == 1
+    pws = dlg.findChildren(PathMdFieldWidget)
+    assert len(pws) == 1
+    chk = chks[0]
+    pw = pws[0]
+
+    chk.setChecked(True)
+    pw.set_text("foo.md")
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 1
+    assert spy.at(0)[0] == "/study --loop foo.md"
+    dlg.deleteLater()
+
+
+def test_confirm_checkbox_with_path_md_quotes_path_with_spaces(qapp):
+    """Path com espaco e quoted no comando final."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint="[--loop <path.md>]",
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chk = dlg.findChild(QCheckBox)
+    pw = dlg.findChild(PathMdFieldWidget)
+    chk.setChecked(True)
+    pw.set_text("minha pasta/foo.md")
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.at(0)[0] == '/study --loop "minha pasta/foo.md"'
+    dlg.deleteLater()
+
+
+def test_confirm_checkbox_with_path_md_empty_blocks_submit(qapp):
+    """Checkbox marcado + picker vazio -> submit bloqueado (task-022 AC1).
+
+    Comportamento anterior emitia '/study --loop' graceful; agora a lane
+    de validacao bloqueia submit porque `/study --loop` exige path.
+    """
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint="[--loop <path.md>]",
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chk = dlg.findChild(QCheckBox)
+    chk.setChecked(True)
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 0
+    assert dlg._btn_confirm is not None
+    assert dlg._btn_confirm.isEnabled() is False
+    dlg.deleteLater()
+
+
+def test_confirm_checkbox_with_path_md_unchecked_omits_flag(qapp):
+    """Checkbox desmarcado -> --loop ausente do comando final."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint="[--loop <path.md>]",
+        default_md_dir="",
+        radio_summaries={},
+    )
+    pw = dlg.findChild(PathMdFieldWidget)
+    pw.set_text("foo.md")
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.at(0)[0] == "/study"
+    dlg.deleteLater()
+
+
+def test_render_checkbox_with_path_md_picker_hidden_until_toggle(qapp):
+    """PathMdFieldWidget comeca oculto; ao marcar checkbox, fica visivel."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint="[--loop <path.md>]",
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chk = dlg.findChild(QCheckBox)
+    pw = dlg.findChild(PathMdFieldWidget)
+    # Estado inicial: picker oculto.
+    assert pw.isVisible() is False
+    # Marca: picker fica visivel (apos show do dialog).
+    dlg.show()
+    qapp.processEvents()
+    chk.setChecked(True)
+    qapp.processEvents()
+    assert pw.isVisible() is True
+    # Desmarca: oculta de novo, texto preservado.
+    pw.set_text("foo.md")
+    chk.setChecked(False)
+    qapp.processEvents()
+    assert pw.isVisible() is False
+    assert pw.text() == "foo.md"
+    dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# task-022: lane de validacao no modal (AC1, AC2, AC3, AC7d)
+# ---------------------------------------------------------------------------
+
+STUDY_VALIDATION_HINT = "[--loop <path.md>] [--name <slug>]"
+
+
+def test_validation_slug_re_accepts_valid_kebab_case():
+    """SLUG_RE casa kebab-case minusculo 1-50 chars."""
+    assert SLUG_RE.match("foo")
+    assert SLUG_RE.match("foo-bar")
+    assert SLUG_RE.match("05-15-study-flow-upgrade")
+    assert SLUG_RE.match("a" * 50)
+    # Rejeita uppercase, espaco, prefixo invalido, > 50 chars.
+    assert SLUG_RE.match("Foo") is None
+    assert SLUG_RE.match("foo bar") is None
+    assert SLUG_RE.match("-foo") is None
+    assert SLUG_RE.match("a" * 51) is None
+
+
+def test_validation_blocks_submit_when_loop_path_empty(qapp):
+    """AC1: --loop marcado + path vazio -> submit bloqueado + label visivel."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint=STUDY_VALIDATION_HINT,
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chks = dlg.findChildren(QCheckBox)
+    chk_loop = next(c for c in chks if "--loop" in c.text())
+    chk_loop.setChecked(True)
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 0
+    assert dlg._btn_confirm is not None
+    assert dlg._btn_confirm.isEnabled() is False
+    # Label do --loop renderizada e visivel (chave: indice do token --loop).
+    loop_idx = next(
+        i for i, tok in enumerate(dlg._tokens)
+        if tok.kind == "checkbox_with_path_md" and tok.key == "--loop"
+    )
+    err_lbl = dlg._error_labels[loop_idx]
+    # `isVisible` requer ancestor visivel; usar `isHidden`+text para
+    # validar que a label foi tornada visivel logicamente.
+    assert err_lbl.isHidden() is False
+    assert "path .md exigido" in err_lbl.text()
+    dlg.deleteLater()
+
+
+def test_validation_blocks_submit_when_name_slug_invalid(qapp):
+    """AC2: --name marcado + slug invalido -> submit bloqueado + label visivel."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint=STUDY_VALIDATION_HINT,
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chks = dlg.findChildren(QCheckBox)
+    chk_name = next(c for c in chks if "--name" in c.text())
+    chk_name.setChecked(True)
+    # Encontra o QLineEdit do --name (kind checkbox_with_value).
+    name_idx = next(
+        i for i, tok in enumerate(dlg._tokens)
+        if tok.kind == "checkbox_with_value" and tok.key == "--name"
+    )
+    _chk, edit = dlg._widgets[name_idx]
+    edit.setText("Foo Bar")  # Caracteres invalidos (uppercase + espaco).
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 0
+    assert dlg._btn_confirm is not None
+    assert dlg._btn_confirm.isEnabled() is False
+    err_lbl = dlg._error_labels[name_idx]
+    assert err_lbl.isHidden() is False
+    assert "slug exigido" in err_lbl.text()
+    dlg.deleteLater()
+
+
+def test_validation_enables_submit_when_all_valid(qapp):
+    """AC3: ambos validos -> submit habilitado e emite comando."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint=STUDY_VALIDATION_HINT,
+        default_md_dir="",
+        radio_summaries={},
+    )
+    chks = dlg.findChildren(QCheckBox)
+    chk_loop = next(c for c in chks if "--loop" in c.text())
+    chk_name = next(c for c in chks if "--name" in c.text())
+    chk_loop.setChecked(True)
+    chk_name.setChecked(True)
+
+    loop_idx = next(
+        i for i, tok in enumerate(dlg._tokens)
+        if tok.kind == "checkbox_with_path_md" and tok.key == "--loop"
+    )
+    name_idx = next(
+        i for i, tok in enumerate(dlg._tokens)
+        if tok.kind == "checkbox_with_value" and tok.key == "--name"
+    )
+    _, pw = dlg._widgets[loop_idx]
+    pw.set_text("foo.md")
+    _, edit = dlg._widgets[name_idx]
+    edit.setText("valid-slug")
+
+    assert dlg._btn_confirm is not None
+    assert dlg._btn_confirm.isEnabled() is True
+
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 1
+    assert spy.at(0)[0] == "/study --loop foo.md --name valid-slug"
+    dlg.deleteLater()
+
+
+def test_validation_no_errors_when_checkboxes_unchecked(qapp):
+    """AC7d: nenhum checkbox marcado -> botao habilitado mesmo com edits vazios."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint=STUDY_VALIDATION_HINT,
+        default_md_dir="",
+        radio_summaries={},
+    )
+    # Nenhum checkbox marcado por default.
+    assert dlg._btn_confirm is not None
+    assert dlg._btn_confirm.isEnabled() is True
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 1
+    assert spy.at(0)[0] == "/study"
     dlg.deleteLater()

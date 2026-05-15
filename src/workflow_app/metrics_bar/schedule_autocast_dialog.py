@@ -22,7 +22,7 @@ class ScheduleAutocastDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Agendar autocast")
-        self.setProperty("testid", "schedule-autocast-dialog")
+        self.setProperty("testid", "dialog-schedule-autocast")
         self.setModal(True)
         self._build_ui()
         self._wire_signals()

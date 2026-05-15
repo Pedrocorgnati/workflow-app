@@ -33,6 +33,7 @@ class SaveTemplateDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Salvar como Template")
+        self.setProperty("testid", "dialog-save-template")
         self.setModal(True)
         self.setMinimumWidth(420)
 
@@ -68,6 +69,7 @@ class SaveTemplateDialog(QDialog):
         layout.addWidget(name_label)
 
         self._name_edit = QLineEdit()
+        self._name_edit.setProperty("testid", "save-template-name-input")
         self._name_edit.setPlaceholderText("Ex: Pipeline Feature Rápida")
         self._name_edit.setStyleSheet(
             "QLineEdit { background-color: #27272A; color: #FAFAFA;"
@@ -114,6 +116,7 @@ class SaveTemplateDialog(QDialog):
         btn_row.addStretch()
 
         self._cancel_btn = QPushButton("Cancelar")
+        self._cancel_btn.setProperty("testid", "save-template-cancel")
         self._cancel_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
             "  border: 1px solid #52525B; border-radius: 4px; padding: 6px 16px; }"
@@ -123,6 +126,7 @@ class SaveTemplateDialog(QDialog):
         btn_row.addWidget(self._cancel_btn)
 
         self._save_btn = QPushButton("Salvar")
+        self._save_btn.setProperty("testid", "save-template-confirm")
         self._save_btn.setDefault(True)
         self._save_btn.setStyleSheet(
             "QPushButton { background-color: #B45309; color: #FAFAFA;"

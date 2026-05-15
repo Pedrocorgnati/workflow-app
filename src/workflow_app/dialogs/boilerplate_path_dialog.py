@@ -29,6 +29,7 @@ class BoilerplatePathDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Boilerplate — Repo Path")
+        self.setProperty("testid", "dialog-boilerplate-path")
         self.setModal(True)
         self.setFixedSize(560, 220)
         self._repo_path = ""
@@ -59,6 +60,7 @@ class BoilerplatePathDialog(QDialog):
         layout.addWidget(subtitle)
 
         self._input = QLineEdit()
+        self._input.setProperty("testid", "boilerplate-path-input")
         self._input.setPlaceholderText(
             "output/workspace/free-sites/algum-site.com"
         )
@@ -84,6 +86,7 @@ class BoilerplatePathDialog(QDialog):
         btn_row.addStretch()
 
         btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setProperty("testid", "boilerplate-path-cancel")
         btn_cancel.setFixedHeight(32)
         btn_cancel.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #A1A1AA;"

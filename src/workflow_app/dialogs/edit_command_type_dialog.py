@@ -33,6 +33,7 @@ class EditCommandTypeDialog(QDialog):
         super().__init__(parent)
         self._spec = spec
         self.setWindowTitle("Editar Tipo de Comando")
+        self.setProperty("testid", "dialog-edit-command-type")
         self.setMinimumSize(380, 270)
         self.setModal(True)
         self.setStyleSheet("background-color: #18181B;")
@@ -86,6 +87,7 @@ class EditCommandTypeDialog(QDialog):
         model_label.setStyleSheet(label_style)
         bl.addWidget(model_label)
         self._model_combo = QComboBox()
+        self._model_combo.setProperty("testid", "edit-command-type-combo")
         self._model_combo.addItems(["Opus", "Sonnet", "Haiku"])
         self._model_combo.setCurrentText(self._spec.model.value)
         self._model_combo.setStyleSheet(combo_style)
@@ -131,6 +133,7 @@ class EditCommandTypeDialog(QDialog):
         fl.addStretch()
 
         cancel_btn = QPushButton("Cancelar")
+        cancel_btn.setProperty("testid", "edit-command-type-cancel")
         cancel_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
             "  border: none; border-radius: 4px; padding: 8px 16px; }"
@@ -140,6 +143,7 @@ class EditCommandTypeDialog(QDialog):
         fl.addWidget(cancel_btn)
 
         save_btn = QPushButton("Salvar")
+        save_btn.setProperty("testid", "edit-command-type-confirm")
         save_btn.setObjectName("PrimaryButton")
         save_btn.setStyleSheet(
             "QPushButton { background-color: #FBBF24; color: #18181B;"

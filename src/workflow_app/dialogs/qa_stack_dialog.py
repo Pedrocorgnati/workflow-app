@@ -26,6 +26,7 @@ class QAStackDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("QA — Escolha a stack")
+        self.setProperty("testid", "dialog-qa-stack")
         self.setModal(True)
         self.setFixedSize(420, 240)
 

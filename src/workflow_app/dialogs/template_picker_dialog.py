@@ -31,6 +31,7 @@ class TemplatePickerDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Escolher Template")
+        self.setProperty("testid", "dialog-template-picker")
         self.setModal(True)
         self.setMinimumSize(460, 360)
 
@@ -62,6 +63,7 @@ class TemplatePickerDialog(QDialog):
         layout.addWidget(subtitle)
 
         self._list = QListWidget()
+        self._list.setProperty("testid", "template-picker-list")
         self._list.setStyleSheet(
             "QListWidget { background-color: #18181B; border: 1px solid #3F3F46;"
             "  border-radius: 8px; }"
@@ -84,6 +86,7 @@ class TemplatePickerDialog(QDialog):
         btn_row.addStretch()
 
         self._cancel_btn = QPushButton("Cancelar")
+        self._cancel_btn.setProperty("testid", "template-picker-cancel")
         self._cancel_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
             "  border: 1px solid #52525B; border-radius: 4px; padding: 6px 16px; }"
@@ -93,6 +96,7 @@ class TemplatePickerDialog(QDialog):
         btn_row.addWidget(self._cancel_btn)
 
         self._use_btn = QPushButton("Usar Template →")
+        self._use_btn.setProperty("testid", "template-picker-confirm")
         self._use_btn.setDefault(True)
         self._use_btn.setEnabled(False)
         self._use_btn.setStyleSheet(

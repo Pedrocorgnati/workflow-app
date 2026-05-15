@@ -28,6 +28,7 @@ class PermissionRequestDialog(QDialog):
     def __init__(self, parent=None, *, request_data: dict | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Permissão Solicitada")
+        self.setProperty("testid", "dialog-permission-request")
         self.setModal(True)
         self.setMinimumWidth(420)
         self.setObjectName("PermissionRequestDialog")
@@ -53,6 +54,7 @@ class PermissionRequestDialog(QDialog):
             self._request_data.get("action", str(self._request_data) or "Ação não especificada"),
         )
         desc_label = QLabel(description)
+        desc_label.setProperty("testid", "permission-request-details")
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet(
             "color: #FAFAF9; font-size: 13px; font-weight: 600;"
@@ -69,6 +71,7 @@ class PermissionRequestDialog(QDialog):
         btn_row.addStretch()
 
         reject_btn = QPushButton("Rejeitar")
+        reject_btn.setProperty("testid", "permission-request-deny")
         reject_btn.setFixedHeight(32)
         reject_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAF9;"
@@ -80,6 +83,7 @@ class PermissionRequestDialog(QDialog):
         btn_row.addWidget(reject_btn)
 
         allow_btn = QPushButton("Permitir")
+        allow_btn.setProperty("testid", "permission-request-allow")
         allow_btn.setDefault(True)
         allow_btn.setFixedHeight(32)
         allow_btn.setStyleSheet(

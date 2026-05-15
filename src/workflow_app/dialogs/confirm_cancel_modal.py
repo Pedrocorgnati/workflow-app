@@ -23,6 +23,7 @@ class ConfirmCancelModal(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Cancelar Pipeline")
+        self.setProperty("testid", "dialog-confirm-cancel")
         self.setModal(True)
         self.setMinimumWidth(360)
         self._setup_ui()
@@ -47,6 +48,7 @@ class ConfirmCancelModal(QDialog):
         )
         yes_btn = buttons.button(QDialogButtonBox.StandardButton.Yes)
         yes_btn.setText("Cancelar Pipeline")
+        yes_btn.setProperty("testid", "confirm-cancel-yes")
         yes_btn.setStyleSheet(
             "QPushButton { background-color: #7F1D1D; color: #FCA5A5;"
             "  border: 1px solid #991B1B; border-radius: 4px; padding: 6px 14px; }"
@@ -54,6 +56,7 @@ class ConfirmCancelModal(QDialog):
         )
         no_btn = buttons.button(QDialogButtonBox.StandardButton.No)
         no_btn.setText("Voltar")
+        no_btn.setProperty("testid", "confirm-cancel-no")
         no_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
             "  border: 1px solid #52525B; border-radius: 4px; padding: 6px 14px; }"

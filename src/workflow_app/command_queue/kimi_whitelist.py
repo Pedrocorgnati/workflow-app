@@ -116,6 +116,9 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/optimize:blueprints",         # 78 (blueprint patterns)
     # Daily Loop pipeline (queue-btn-daily-loop)
     "/daily-loop:do",               # 86 (apply iteration_template — único do execute)
+    # Loop rocksmash pipeline
+    "/loop-rocksmash:do",           # 86 (density split deterministic — zero AskUser, templates byte-exatos)
+    "/loop-rocksmash:rename",         # 91 (KIMI_PREFERRED — consolidador determinista pos-rocksmash)
     # Test-autoflow (deterministic test commands)
     "/test-autoflow-auto",          # 85 (comando de teste determinístico — aguarda 30s e finaliza)
     # Loop housekeeping

@@ -37,6 +37,7 @@ class ConfirmRegenerateSpecificFlowModal(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("DCP — Regenerar SPECIFIC-FLOW")
+        self.setProperty("testid", "dialog-confirm-regenerate")
         self.setModal(True)
         self.setMinimumWidth(480)
         self._setup_ui(flow_path, command_count, cm_id)
@@ -82,7 +83,7 @@ class ConfirmRegenerateSpecificFlowModal(QDialog):
         )
         yes_btn = buttons.button(QDialogButtonBox.StandardButton.Yes)
         yes_btn.setText("Regenerar (sobrescreve)")
-        yes_btn.setProperty("testid", "btn-confirm-regenerate")
+        yes_btn.setProperty("testid", "confirm-regenerate-btn-confirm")
         yes_btn.setStyleSheet(
             "QPushButton { background-color: #7F1D1D; color: #FCA5A5;"
             "  border: 1px solid #991B1B; border-radius: 4px; padding: 6px 14px; }"
@@ -90,7 +91,7 @@ class ConfirmRegenerateSpecificFlowModal(QDialog):
         )
         no_btn = buttons.button(QDialogButtonBox.StandardButton.No)
         no_btn.setText("Cancelar")
-        no_btn.setProperty("testid", "btn-cancel-regenerate")
+        no_btn.setProperty("testid", "confirm-regenerate-btn-cancel")
         no_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
             "  border: 1px solid #52525B; border-radius: 4px; padding: 6px 14px; }"

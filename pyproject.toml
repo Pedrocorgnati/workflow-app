@@ -26,6 +26,7 @@ dev = [
     "mypy>=1.8.0",
     "mutmut>=2.4",
 ]
+xterm = ["PySide6-WebEngine>=6.6.0"]
 
 [project.scripts]
 workflow-app = "workflow_app.main:main"

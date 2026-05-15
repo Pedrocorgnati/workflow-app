@@ -29,6 +29,7 @@ class BriefTemplateDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Brief — Escolha o tipo")
+        self.setProperty("testid", "dialog-brief-template")
         self.setModal(True)
         self.setFixedSize(380, 200)
 
@@ -68,6 +69,7 @@ class BriefTemplateDialog(QDialog):
         )
 
         btn_new = QPushButton("New")
+        btn_new.setProperty("testid", "brief-template-confirm")
         btn_new.setToolTip("Projeto novo completo (F1→F3, ~27 comandos)")
         btn_new.setStyleSheet(_big_btn.format(
             bg="#B45309", border="#D97706", hover="#D97706",
@@ -76,6 +78,7 @@ class BriefTemplateDialog(QDialog):
         btn_row.addWidget(btn_new)
 
         btn_feature = QPushButton("Feature")
+        btn_feature.setProperty("testid", "brief-template-cancel")
         btn_feature.setToolTip("Feature em projeto existente (~27 comandos)")
         btn_feature.setStyleSheet(_big_btn.format(
             bg="#3F3F46", border="#52525B", hover="#52525B",

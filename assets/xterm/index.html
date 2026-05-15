@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="vendor/xterm.css" />
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>html,body,#term{height:100%;margin:0;padding:0;background:#000;}</style>
+</head>
+<body>
+  <div id="term"></div>
+  <script>
+    const term = new Terminal({fontFamily: "monospace", fontSize: 13, scrollback: 5000});
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById("term"));
+    fit.fit();
+    window.term = term;
+    if (typeof qt !== "undefined" && qt.webChannelTransport) {
+      new QWebChannel(qt.webChannelTransport, function(channel){
+        const py = channel.objects.pyShell;
+        window.pyShell = py;
+        py.output_received.connect(function(data){ term.write(data); });
+        term.onData(function(data){ py.write_to_pty(data); });
+        term.onResize(function(size){ py.resize_pty(size.cols, size.rows); });
+      });
+    }
+    window.addEventListener("resize", function(){ fit.fit(); });
+  </script>
+</body>
+</html>

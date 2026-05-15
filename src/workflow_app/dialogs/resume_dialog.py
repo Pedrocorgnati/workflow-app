@@ -49,6 +49,7 @@ class ResumeDialog(QDialog):
         self._info = info
         self._user_choice: int = int(self.RESULT_CANCEL)
         self.setWindowTitle("Retomar Pipeline Interrompido")
+        self.setProperty("testid", "dialog-resume")
         self.setModal(True)
         self.setMinimumWidth(460)
         self._setup_ui()
@@ -110,6 +111,7 @@ class ResumeDialog(QDialog):
 
         # Action buttons
         btn_reexecute = QPushButton("Reexecutar comando incerto")
+        btn_reexecute.setProperty("testid", "resume-confirm")
         btn_reexecute.setDefault(True)
         btn_reexecute.setStyleSheet(
             "QPushButton { background-color: #FBBF24; color: #18181B;"
@@ -129,6 +131,7 @@ class ResumeDialog(QDialog):
         layout.addWidget(btn_skip)
 
         btn_cancel = QPushButton("Cancelar pipeline")
+        btn_cancel.setProperty("testid", "resume-cancel")
         btn_cancel.setStyleSheet(
             "QPushButton { background-color: transparent; color: #71717A;"
             "  border: 1px solid #3F3F46; border-radius: 4px; padding: 8px 14px; }"

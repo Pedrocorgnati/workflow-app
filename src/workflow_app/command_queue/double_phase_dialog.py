@@ -52,6 +52,9 @@ from workflow_app.domain import FlagSpec
 FREETEXT_MIN_HEIGHT = 32
 FREETEXT_MAX_HEIGHT = 240
 
+# Slug canonico para `--name`: kebab-case minusculo, 1-50 chars, comeca com [a-z0-9].
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
+
 
 class PathMdFieldWidget(QWidget):
     """Campo de path .md: QLineEdit + botao '...' que abre QFileDialog."""
@@ -119,6 +122,10 @@ class PathMdFieldWidget(QWidget):
 
     def set_text(self, text: str) -> None:
         self._line.setText(text)
+
+    @property
+    def line_edit(self) -> QLineEdit:
+        return self._line
 
 
 class RadioGroupWithSummary(QWidget):
@@ -250,7 +257,8 @@ class _Token:
         options: list[str] | None = None,
         key: str = "",
     ) -> None:
-        # "input" | "radio" | "checkbox" | "path_md" | "enum_flag" | "freetext"
+        # "input" | "radio" | "checkbox" | "checkbox_with_value" |
+        # "checkbox_with_path_md" | "path_md" | "enum_flag" | "freetext"
         self.kind = kind
         self.label = label
         self.options = options or []
@@ -260,6 +268,10 @@ class _Token:
 # Token freetext: identifica `<word>` (com ou sem aspas envolventes).
 # Exemplos cobertos: `<duvida>`, `"<duvida>"`, `<descricao>`.
 _FREETEXT_RE = re.compile(r'^"?\s*<[A-Za-z_][A-Za-z0-9_-]*>\s*"?$')
+
+# Token checkbox_with_value: `[--flag <placeholder>]` com placeholder != <path>/<path.md>.
+# Exemplo coberto: `[--name <slug>]` -> grupo 1="--name", grupo 2="slug".
+_CHECKBOX_WITH_VALUE_RE = re.compile(r"^(--[\w-]+)\s+<([A-Za-z_][A-Za-z0-9_-]*)>$")
 
 
 def _parse_argument_hint(hint: str) -> list[_Token]:
@@ -316,11 +328,40 @@ def _parse_argument_hint(hint: str) -> list[_Token]:
                     _Token(kind="enum_flag", label=inner, options=opts)
                 )
                 continue
+            # Checkbox + path picker: [--flag <path.md>] / [--flag <path>] com -- prefix.
+            # Avaliado ANTES de path_md para que tokens com -- prefix sejam opt-in
+            # via checkbox; tokens sem -- continuam caindo em path_md (retrocompat).
+            if inner.startswith("--") and (
+                "<path.md>" in inner or "<path>" in inner
+            ):
+                flag_name = inner.split()[0]
+                tokens.append(
+                    _Token(
+                        kind="checkbox_with_path_md",
+                        label=inner,
+                        key=flag_name,
+                    )
+                )
+                continue
             # Path .md custom: contem <path.md> ou <path>
             if "<path.md>" in inner or "<path>" in inner:
                 # Extrai a chave, ex: --tasklist <path.md>
                 key = inner.replace("<path.md>", "").replace("<path>", "").strip()
                 tokens.append(_Token(kind="path_md", label=inner, key=key))
+                continue
+            # Checkbox com valor: [--flag <placeholder>] com placeholder != <path>/<path.md>
+            m_cbv = _CHECKBOX_WITH_VALUE_RE.match(inner)
+            if m_cbv and inner.startswith("--"):
+                flag_name = m_cbv.group(1)
+                placeholder = m_cbv.group(2)
+                tokens.append(
+                    _Token(
+                        kind="checkbox_with_value",
+                        label=inner,
+                        key=flag_name,
+                        options=[placeholder],
+                    )
+                )
                 continue
             # Checkbox: comeca com --
             if inner.startswith("--"):
@@ -393,9 +434,15 @@ class DoublePhaseArgumentDialog(QDialog):
         self._structured_mode = bool(self._flags_boolean or self._flags_with_value or self._fixed_flag)
         self._tokens: list[_Token] = []
         self._widgets: list[QWidget] = []
+        self._error_labels: dict[int, QLabel] = {}
+        self._flag_error_labels: dict[str, QLabel] = {}
+        self._btn_confirm: QPushButton | None = None
         if not self._structured_mode:
             self._tokens = _parse_argument_hint(argument_hint)
         self._setup_ui()
+        # Sincroniza estado inicial do botao Confirmar (sem checkboxes marcados,
+        # nao gera erros e botao fica habilitado - preserva fluxo simples).
+        self._on_validate_changed()
 
     def _setup_ui(self) -> None:
         self.setObjectName("DoublePhaseArgumentDialog")
@@ -443,8 +490,8 @@ class DoublePhaseArgumentDialog(QDialog):
             empty.setStyleSheet("color: #A1A1AA; font-size: 12px;")
             form_layout.addWidget(empty)
         else:
-            for tok in self._tokens:
-                row = self._build_token_row(tok)
+            for i, tok in enumerate(self._tokens):
+                row = self._build_token_row(tok, i)
                 form_layout.addWidget(row)
 
         form_layout.addStretch()
@@ -540,6 +587,20 @@ class DoublePhaseArgumentDialog(QDialog):
                 if chk is not None:
                     chk.toggled.connect(container.setVisible)
 
+                # Lane de validacao (task-022): label de erro inline para
+                # flags com regras (--name kebab-case, --loop path .md).
+                if flag_spec.name in ("name", "loop"):
+                    err = QLabel("")
+                    err.setStyleSheet(
+                        "color: #DC2626; font-size: 11px; padding: 2px 0 0 0;"
+                    )
+                    err.setVisible(False)
+                    form_layout.addWidget(err)
+                    self._flag_error_labels[flag_spec.name] = err
+                    edit.textChanged.connect(self._on_validate_changed)
+                    if chk is not None:
+                        chk.toggled.connect(lambda _c: self._on_validate_changed())
+
         form_layout.addStretch()
         scroll.setWidget(form_container)
         main_layout.addWidget(scroll, stretch=1)
@@ -570,6 +631,7 @@ class DoublePhaseArgumentDialog(QDialog):
             "QPushButton:hover { background-color: #15803D; }"
         )
         btn_confirm.clicked.connect(self._on_confirm)
+        self._btn_confirm = btn_confirm
         btn_row.addWidget(btn_confirm)
 
         main_layout.addLayout(btn_row)
@@ -592,6 +654,21 @@ class DoublePhaseArgumentDialog(QDialog):
                 container, edit = self._flag_inputs.get(flag_spec.name, (None, None))
                 if container is not None and container.isVisible():
                     widgets.append(edit)
+        else:
+            # Modo legacy: _widgets contem QWidget OU tuple (chk, edit/pw) para
+            # checkbox_with_value e checkbox_with_path_md. Desempacotar tuplas
+            # para preservar ordem chk -> edit; quando o sub-widget e um
+            # PathMdFieldWidget (container), usar o line_edit interno como
+            # destino do tab focus.
+            for w in self._widgets:
+                if isinstance(w, tuple):
+                    for sub in w:
+                        if isinstance(sub, PathMdFieldWidget):
+                            widgets.append(sub.line_edit)
+                        else:
+                            widgets.append(sub)
+                else:
+                    widgets.append(w)
 
         if len(widgets) < 2:
             return
@@ -599,8 +676,12 @@ class DoublePhaseArgumentDialog(QDialog):
         for i in range(len(widgets) - 1):
             self.setTabOrder(widgets[i], widgets[i + 1])
 
-    def _build_token_row(self, token: _Token) -> QWidget:
-        """Constroi uma linha do formulario para um token."""
+    def _build_token_row(self, token: _Token, index: int = 0) -> QWidget:
+        """Constroi uma linha do formulario para um token.
+
+        `index` e a posicao do token em `self._tokens` (usado para indexar
+        `_error_labels` quando o kind admite validacao inline).
+        """
         row = QWidget()
         layout = QVBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -629,6 +710,77 @@ class DoublePhaseArgumentDialog(QDialog):
             )
             layout.addWidget(chk)
             self._widgets.append(chk)
+
+        elif token.kind == "checkbox_with_value":
+            # Checkbox + QLineEdit adjacente; input oculto ate o checkbox ser marcado.
+            chk = QCheckBox(token.label)
+            chk.setStyleSheet(
+                "QCheckBox { color: #D4D4D8; font-size: 12px; spacing: 6px; }"
+                "QCheckBox::indicator { width: 16px; height: 16px; }"
+            )
+            layout.addWidget(chk)
+
+            edit = QLineEdit()
+            placeholder = token.options[0] if token.options else "valor"
+            edit.setPlaceholderText(f"<{placeholder}>")
+            edit.setStyleSheet(
+                "background-color: #3F3F46; color: #FAFAFA;"
+                " border: 1px solid #52525B; border-radius: 4px;"
+                " padding: 4px 8px; font-size: 12px; font-family: monospace;"
+            )
+            edit.setVisible(False)
+            layout.addWidget(edit)
+
+            def _on_toggle(checked: bool, e: QLineEdit = edit) -> None:
+                e.setVisible(checked)
+                if checked:
+                    e.setFocus()
+
+            chk.toggled.connect(_on_toggle)
+            self._widgets.append((chk, edit))
+
+            # Lane de validacao (task-022): label de erro inline para --name.
+            err = QLabel("")
+            err.setStyleSheet(
+                "color: #DC2626; font-size: 11px; padding: 2px 0 0 0;"
+            )
+            err.setVisible(False)
+            layout.addWidget(err)
+            self._error_labels[index] = err
+            edit.textChanged.connect(self._on_validate_changed)
+            chk.toggled.connect(lambda _c: self._on_validate_changed())
+
+        elif token.kind == "checkbox_with_path_md":
+            # Checkbox + PathMdFieldWidget adjacente; picker oculto ate marcar.
+            chk = QCheckBox(token.label)
+            chk.setStyleSheet(
+                "QCheckBox { color: #D4D4D8; font-size: 12px; spacing: 6px; }"
+                "QCheckBox::indicator { width: 16px; height: 16px; }"
+            )
+            layout.addWidget(chk)
+
+            pw = PathMdFieldWidget(self._default_md_dir)
+            pw.setVisible(False)
+            layout.addWidget(pw)
+
+            def _on_toggle_path(checked: bool, p: PathMdFieldWidget = pw) -> None:
+                p.setVisible(checked)
+                if checked:
+                    p.line_edit.setFocus()
+
+            chk.toggled.connect(_on_toggle_path)
+            self._widgets.append((chk, pw))
+
+            # Lane de validacao (task-022): label de erro inline para --loop.
+            err = QLabel("")
+            err.setStyleSheet(
+                "color: #DC2626; font-size: 11px; padding: 2px 0 0 0;"
+            )
+            err.setVisible(False)
+            layout.addWidget(err)
+            self._error_labels[index] = err
+            pw.line_edit.textChanged.connect(self._on_validate_changed)
+            chk.toggled.connect(lambda _c: self._on_validate_changed())
 
         elif token.kind == "radio":
             label = QLabel("Opcao:")
@@ -669,7 +821,122 @@ class DoublePhaseArgumentDialog(QDialog):
 
         return row
 
+    def _validate_tokens(self) -> list[tuple[int, str]]:
+        """Retorna lista (token_index, error_message) para tokens invalidos.
+
+        Validacao limitada a (a) `checkbox_with_value` com key `--name`
+        (slug regex SLUG_RE quando marcado) e (b) `checkbox_with_path_md`
+        com key `--loop` (path .md obrigatorio quando marcado). Demais
+        tokens nao sao validados (preserva comportamento existente).
+        """
+        errors: list[tuple[int, str]] = []
+        for i, tok in enumerate(self._tokens):
+            if i >= len(self._widgets):
+                continue
+            widget = self._widgets[i]
+            if tok.kind == "checkbox_with_value" and tok.key == "--name":
+                if not (isinstance(widget, tuple) and len(widget) == 2):
+                    continue
+                chk, edit = widget
+                if isinstance(chk, QCheckBox) and chk.isChecked():
+                    val = edit.text().strip() if isinstance(edit, QLineEdit) else ""
+                    if not val or not SLUG_RE.match(val):
+                        errors.append(
+                            (i, "slug exigido: kebab-case minusculo, 1-50 chars")
+                        )
+            elif tok.kind == "checkbox_with_path_md" and tok.key == "--loop":
+                if not (isinstance(widget, tuple) and len(widget) == 2):
+                    continue
+                chk, pw = widget
+                if isinstance(chk, QCheckBox) and chk.isChecked():
+                    val = pw.text().strip() if isinstance(pw, PathMdFieldWidget) else ""
+                    if not val or not val.endswith(".md"):
+                        errors.append((i, "path .md exigido"))
+        return errors
+
+    def _validate_structured_flags(self) -> list[tuple[str, str]]:
+        """Versao do `_validate_tokens` para o ramo `structured_mode`.
+
+        Valida `--name` (SLUG_RE) e `--loop` (suffix .md) entre
+        `_flags_with_value` quando o checkbox correspondente esta marcado.
+        Demais flags ignoradas.
+        """
+        errors: list[tuple[str, str]] = []
+        if not self._structured_mode:
+            return errors
+        for flag_spec in self._flags_with_value:
+            chk = self._flag_checkboxes.get(flag_spec.name)
+            if chk is None or not chk.isChecked():
+                continue
+            pair = self._flag_inputs.get(flag_spec.name)
+            if pair is None:
+                continue
+            _container, edit = pair
+            if edit is None:
+                continue
+            val = edit.text().strip()
+            if flag_spec.name == "name":
+                if not val or not SLUG_RE.match(val):
+                    errors.append(
+                        (flag_spec.name, "slug exigido: kebab-case minusculo, 1-50 chars")
+                    )
+            elif flag_spec.name == "loop":
+                if not val or not val.endswith(".md"):
+                    errors.append((flag_spec.name, "path .md exigido"))
+        return errors
+
+    def _on_validate_changed(self) -> None:
+        """Recomputa erros e atualiza labels + estado do botao Confirmar.
+
+        Disparado por `chk.toggled` e `edit.textChanged` em tokens
+        validados; tambem invocado uma vez no final do `__init__` para
+        sincronizar estado inicial.
+        """
+        for lbl in self._error_labels.values():
+            lbl.setText("")
+            lbl.setVisible(False)
+        for lbl in self._flag_error_labels.values():
+            lbl.setText("")
+            lbl.setVisible(False)
+
+        token_errors = (
+            self._validate_tokens() if not self._structured_mode else []
+        )
+        flag_errors = (
+            self._validate_structured_flags() if self._structured_mode else []
+        )
+
+        for idx, msg in token_errors:
+            lbl = self._error_labels.get(idx)
+            if lbl is not None:
+                lbl.setText(msg)
+                lbl.setVisible(True)
+
+        for flag_name, msg in flag_errors:
+            lbl = self._flag_error_labels.get(flag_name)
+            if lbl is not None:
+                lbl.setText(msg)
+                lbl.setVisible(True)
+
+        if self._btn_confirm is not None:
+            self._btn_confirm.setEnabled(
+                len(token_errors) + len(flag_errors) == 0
+            )
+
     def _on_confirm(self) -> None:
+        # Defesa em profundidade (task-022): mesmo com botao habilitado por
+        # race condition, revalida antes de emitir o submit signal.
+        token_errors = (
+            self._validate_tokens() if not self._structured_mode else []
+        )
+        flag_errors = (
+            self._validate_structured_flags() if self._structured_mode else []
+        )
+        if token_errors or flag_errors:
+            # Reaplica labels (refresca UI) e bloqueia submit.
+            self._on_validate_changed()
+            return
+
         parts: list[str] = [self._pipeline_name]
 
         if self._structured_mode:
@@ -721,6 +988,34 @@ class DoublePhaseArgumentDialog(QDialog):
                             key = re.sub(r"<[^>]+>", "", key).strip()
                         if key:
                             parts.append(key)
+                elif tok.kind == "checkbox_with_value":
+                    assert isinstance(widget, tuple) and len(widget) == 2
+                    chk, edit = widget
+                    assert isinstance(chk, QCheckBox)
+                    assert isinstance(edit, QLineEdit)
+                    if chk.isChecked():
+                        val = edit.text().strip()
+                        if val:
+                            if any(c in val for c in (" ", "\t")):
+                                val = f'"{val}"'
+                            parts.append(f"{tok.key} {val}")
+                        else:
+                            # Graceful: emite --flag sem valor quando input vazio.
+                            parts.append(tok.key)
+                elif tok.kind == "checkbox_with_path_md":
+                    assert isinstance(widget, tuple) and len(widget) == 2
+                    chk, pw = widget
+                    assert isinstance(chk, QCheckBox)
+                    assert isinstance(pw, PathMdFieldWidget)
+                    if chk.isChecked():
+                        val = pw.text().strip()
+                        if val:
+                            if any(c in val for c in (" ", "\t")):
+                                val = f'"{val}"'
+                            parts.append(f"{tok.key} {val}")
+                        else:
+                            # Graceful: emite --flag sem valor quando picker vazio.
+                            parts.append(tok.key)
                 elif tok.kind == "radio":
                     assert isinstance(widget, RadioGroupWithSummary)
                     sel = widget.selected()

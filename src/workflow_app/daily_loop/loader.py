@@ -40,6 +40,7 @@ Design:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -300,6 +301,67 @@ def _resolve_item_commands(
     return None
 
 
+def _rewrite_bare_relative_md_tokens(
+    cmds: list[str],
+    loop_root: Path,
+    workspace_root: Path,
+    item_id: str,
+) -> list[str]:
+    """Defense-in-depth: rewrite bare-relative .md tokens to workspace-relative.
+
+    Catches the catastrophic bug where /loop:integration emitted item.target
+    cru (relative to loop_root) into items[*].commands instead of prefixing
+    with relpath(loop_root, workspace_root). The workflow-app queue runs
+    commands with cwd == workspace_root; a bare-relative token (`tasks/items/
+    task-NNN-*.md`) resolves to a non-existent path and breaks the queue
+    silently.
+
+    Strategy per token T ending in `.md`:
+      1. T absolute -> keep.
+      2. T resolves from workspace_root -> keep.
+      3. T resolves from loop_root (bare-relative bug) -> rewrite to
+         `relpath(loop_root, workspace_root) + "/" + T` and emit WARN.
+      4. Otherwise -> keep (W4b in /loop:workflow-app reports as blocker).
+
+    Fixed in 2026-05-15 after diagnosing the 3 broken _LOOP-CONFIG.json
+    files in blacksmith/loop-archives/ (loop-rocksmash-flow,
+    study-flow-upgrade, dual-script-finalize-decisoes).
+    """
+    import sys
+    try:
+        rel_loop = os.path.relpath(loop_root, workspace_root)
+    except ValueError:
+        return cmds
+
+    out: list[str] = []
+    for cmd in cmds:
+        tokens = cmd.split()
+        new_tokens: list[str] = []
+        rewritten = False
+        for tok in tokens:
+            if not tok.endswith(".md") or tok.startswith("/") or tok.startswith(rel_loop):
+                new_tokens.append(tok)
+                continue
+            ws_path = workspace_root / tok
+            if ws_path.exists():
+                new_tokens.append(tok)
+                continue
+            loop_path = loop_root / tok
+            if loop_path.exists():
+                fixed = f"{rel_loop}/{tok}"
+                print(
+                    f"[loader] WARN: item {item_id}: bare-relative path rewritten "
+                    f"({tok} -> {fixed}). Run /loop:integration to persist.",
+                    file=sys.stderr,
+                )
+                new_tokens.append(fixed)
+                rewritten = True
+            else:
+                new_tokens.append(tok)
+        out.append(" ".join(new_tokens) if rewritten else cmd)
+    return out
+
+
 # /daily-loop:do tem piso obrigatorio de modelo/effort. Persona forte protege
 # contra: PROGRESS.md corrompido, criterio de aceite aprovado erroneamente,
 # falhas silenciadas. haiku/low produziu regressoes no historico — coercoes
@@ -449,6 +511,10 @@ def build_daily_loop_specs(
     bucket_index = _resolve_bucket_index(daily_loop)
 
     loop_root_path = Path(loop_root)
+    workspace_root_path = Path(
+        str(raw_config.get("basic_flow", {}).get("workspace_root", "")).strip()
+        or loop_root_path
+    )
     progress_path = resolve_loop_path(
         daily_loop.get("progress_path"),
         loop_root_path,
@@ -566,6 +632,13 @@ def build_daily_loop_specs(
 
         _raise_if_ambiguous(daily_loop, item.item_id)
         canonical_cmds = _resolve_item_commands(daily_loop, item.item_id)
+        if canonical_cmds:
+            canonical_cmds = _rewrite_bare_relative_md_tokens(
+                canonical_cmds,
+                loop_root_path,
+                workspace_root_path,
+                item.item_id,
+            )
         if canonical_cmds:
             # Precedencia canonica: items[k].commands populado -> emitir cada
             # entrada literal como CommandSpec proprio (sem wrapper /slug/--item).
@@ -838,6 +911,10 @@ def build_loop_specs(
     bucket_index = _resolve_bucket_index(daily_loop)
 
     loop_root_path = Path(loop_root)
+    workspace_root_path = Path(
+        str(raw_config.get("basic_flow", {}).get("workspace_root", "")).strip()
+        or loop_root_path
+    )
     progress_path = resolve_loop_path(
         daily_loop.get("progress_path"),
         loop_root_path,
@@ -931,6 +1008,13 @@ def build_loop_specs(
 
         _raise_if_ambiguous(daily_loop, item.item_id)
         canonical_cmds = _resolve_item_commands(daily_loop, item.item_id)
+        if canonical_cmds:
+            canonical_cmds = _rewrite_bare_relative_md_tokens(
+                canonical_cmds,
+                loop_root_path,
+                workspace_root_path,
+                item.item_id,
+            )
         if canonical_cmds:
             # Precedencia canonica /loop --task|--cmd|--cmd-single|--both:
             # items[k].commands populada por /loop:integration -> emitir cada

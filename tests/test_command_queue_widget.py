@@ -1213,3 +1213,176 @@ class TestBugLiteralSlugRegression:
                 suspicious.append(f"{p.name}:{idx}: {raw.strip()}")
 
         assert len(suspicious) == 0, f"Linhas suspeitas de output ativo com placeholder: {suspicious}"
+
+
+# ─── queue-btn-study: expansao canonica por --simple/--deep/--heavy ───────── #
+
+
+def _spec_names(widget) -> list[str]:
+    return [item.get_spec().name for item in widget._items]
+
+
+class TestStudyButtonExpandsByMode:
+    """`_on_study_command_ready` materializa a sequencia canonica de subcomandos
+    `/study:*` conforme `.claude/commands/study.md` FASE 2, com /clear + /model +
+    /effort entre cada fase (GROUP_MAP["study"] = Opus/HIGH).
+
+    Contratos verificados:
+      - --simple (default): 7 fases (scope, research, write-user, review-user,
+        write-tech, validate, publish).
+      - --deep: 9 fases (+triangulate, +debate).
+      - --heavy: 9 fases (scope-decompose, enumerate, loop-research, loop-synth,
+        consolidate-user, review-user, consolidate-tech, validate, publish).
+      - Cada fase precedida por bloco /clear + /model opus + /effort high.
+      - --loop <path>: /study:publish recebe `--loop <path>` E auq-interview
+        e anexado como ultimo item (Task-023 preservado).
+      - --name explicito vence; senao deriva do path.md, senao slugifica prompt.
+    """
+
+    def _phase_indices(self, names: list[str]) -> list[int]:
+        return [i for i, n in enumerate(names) if n.startswith("/study:") or n.startswith("/tools:auq-interview")]
+
+    def test_simple_mode_default_renders_seven_phases(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo')
+        names = _spec_names(widget)
+        study_phases = [n for n in names if n.startswith("/study:")]
+        assert len(study_phases) == 7
+        assert study_phases[0].startswith("/study:scope ")
+        assert "--name foo" in study_phases[0]
+        assert study_phases[1] == "/study:research --name foo"
+        assert study_phases[2] == "/study:write-user --name foo"
+        assert study_phases[3] == "/study:review-user --name foo"
+        assert study_phases[4] == "/study:write-tech --name foo"
+        assert study_phases[5] == "/study:validate --name foo"
+        assert study_phases[6] == "/study:publish --name foo"
+
+    def test_deep_mode_renders_nine_phases_with_triangulate_and_debate(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo --deep')
+        names = _spec_names(widget)
+        study_phases = [n for n in names if n.startswith("/study:")]
+        assert len(study_phases) == 9
+        assert study_phases[2] == "/study:triangulate --name foo"
+        assert study_phases[4] == "/study:debate --name foo"
+        assert study_phases[-1] == "/study:publish --name foo"
+
+    def test_heavy_mode_renders_nine_phases_with_decompose_and_consolidate(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo --heavy')
+        names = _spec_names(widget)
+        study_phases = [n for n in names if n.startswith("/study:")]
+        assert len(study_phases) == 9
+        assert study_phases[0].startswith("/study:scope-decompose ")
+        assert study_phases[1] == "/study:enumerate --name foo"
+        assert study_phases[2] == "/study:loop-research --name foo"
+        assert study_phases[3] == "/study:loop-synth --name foo"
+        assert study_phases[4] == "/study:consolidate-user --name foo"
+        assert study_phases[5] == "/study:review-user --name foo"
+        assert study_phases[6] == "/study:consolidate-tech --name foo"
+        assert study_phases[7] == "/study:validate --name foo"
+        assert study_phases[8] == "/study:publish --name foo"
+
+    def test_each_phase_prefixed_by_clear_model_effort_block(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo')
+        names = _spec_names(widget)
+        # Bloco prep canonico: /clear + /model opus + /effort high antes de cada fase.
+        # 7 fases => 7 blocos => total 7 fases + 7*3 = 28 itens.
+        assert len(names) == 7 + 7 * 3
+        for i in range(7):
+            base = i * 4
+            assert names[base] == "/clear"
+            assert names[base + 1] == "/model opus"
+            assert names[base + 2] == "/effort high"
+
+    def test_loop_propagates_to_publish_and_appends_auq_interview(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo --loop bar.md')
+        names = _spec_names(widget)
+        publish = [n for n in names if n.startswith("/study:publish")][0]
+        assert publish == "/study:publish --name foo --loop bar.md"
+        assert names[-1] == "/tools:auq-interview --optimize bar.md"
+
+    def test_loop_quoted_path_with_spaces_is_preserved_in_publish(self, widget):
+        widget._on_study_command_ready(
+            '/study "duvida" --name foo --loop "blacksmith/loop/05-15 study/source.md"'
+        )
+        names = _spec_names(widget)
+        publish = [n for n in names if n.startswith("/study:publish")][0]
+        # shlex.quote encapsula o path com espaco em aspas simples.
+        assert "blacksmith/loop/05-15 study/source.md" in publish
+        assert names[-1] == "/tools:auq-interview --optimize blacksmith/loop/05-15 study/source.md"
+
+    def test_no_loop_keeps_publish_without_loop_and_no_auq(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo --deep')
+        names = _spec_names(widget)
+        publish = [n for n in names if n.startswith("/study:publish")][0]
+        assert publish == "/study:publish --name foo"
+        assert all("auq-interview" not in n for n in names)
+
+    def test_loop_flag_without_value_does_not_append_auq(self, widget):
+        widget._on_study_command_ready('/study "duvida" --name foo --loop')
+        names = _spec_names(widget)
+        assert all("auq-interview" not in n for n in names)
+
+    def test_loop_flag_followed_by_other_flag_does_not_append_auq(self, widget):
+        widget._on_study_command_ready('/study "duvida" --loop --name foo')
+        names = _spec_names(widget)
+        assert all("auq-interview" not in n for n in names)
+
+    def test_loop_without_positional_injects_loop_path_as_scope_input(self, widget):
+        """Fallback canonico (study.md FASE 1 regra 44): sem posicional + --loop
+        presente -> a PRIMEIRA fase recebe loop_path como input_path para que
+        scope-decompose/scope saiba o que estudar. Antes do fix o handler
+        empilhava `/study:scope-decompose --name <slug>` cego.
+        """
+        widget._on_study_command_ready(
+            '/study --loop blacksmith/loop/05-15-dcp-pipeline-perfect-flow-final.md --heavy --name study'
+        )
+        names = _spec_names(widget)
+        first_phase = [n for n in names if n.startswith("/study:")][0]
+        assert first_phase.startswith("/study:scope-decompose ")
+        assert "blacksmith/loop/05-15-dcp-pipeline-perfect-flow-final.md" in first_phase
+        assert "--name study" in first_phase
+        # Write-back continua propagando para /study:publish.
+        publish = [n for n in names if n.startswith("/study:publish")][0]
+        assert "--loop blacksmith/loop/05-15-dcp-pipeline-perfect-flow-final.md" in publish
+
+    def test_loop_without_positional_simple_mode_uses_scope(self, widget):
+        widget._on_study_command_ready(
+            '/study --loop blacksmith/loop/topic.md --simple'
+        )
+        names = _spec_names(widget)
+        first_phase = [n for n in names if n.startswith("/study:")][0]
+        assert first_phase.startswith("/study:scope ")
+        assert "blacksmith/loop/topic.md" in first_phase
+        # Slug deriva do stem do loop_path quando --name ausente.
+        assert "--name topic" in first_phase
+
+    def test_loop_with_positional_keeps_positional_does_not_duplicate(self, widget):
+        """Quando user fornece posicional E --loop, posicional vence (sem dup)."""
+        widget._on_study_command_ready(
+            '/study briefings/topic.md --loop blacksmith/loop/dest.md --simple --name foo'
+        )
+        names = _spec_names(widget)
+        first_phase = [n for n in names if n.startswith("/study:")][0]
+        assert "briefings/topic.md" in first_phase
+        assert "blacksmith/loop/dest.md" not in first_phase
+        publish = [n for n in names if n.startswith("/study:publish")][0]
+        assert "--loop blacksmith/loop/dest.md" in publish
+
+    def test_resubmit_replaces_queue_not_appends(self, widget):
+        widget._on_study_command_ready('/study "a" --name foo --loop bar.md')
+        first_len = len(widget._items)
+        widget._on_study_command_ready('/study "a" --name foo --loop bar.md')
+        # pipeline_ready substitui (clear + load), nao acumula.
+        assert len(widget._items) == first_len
+
+    def test_name_derived_from_path_md_when_not_explicit(self, widget):
+        widget._on_study_command_ready('/study briefings/topic.md --simple')
+        names = _spec_names(widget)
+        study_phases = [n for n in names if n.startswith("/study:")]
+        # Slug derivado do stem "topic".
+        assert all("--name topic" in n for n in study_phases[1:])
+
+    def test_name_slugified_from_prompt_when_no_path(self, widget):
+        widget._on_study_command_ready('/study "investigar Server Actions"')
+        names = _spec_names(widget)
+        # slugify("investigar Server Actions") -> "investigar-server-actions"
+        assert any("--name investigar-server-actions" in n for n in names)

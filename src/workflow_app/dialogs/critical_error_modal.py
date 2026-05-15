@@ -50,6 +50,7 @@ class CriticalErrorModal(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.setProperty("testid", "dialog-critical-error")
         self.setMinimumWidth(460)
         self.setModal(True)
         self.setWindowFlags(
@@ -70,6 +71,7 @@ class CriticalErrorModal(QDialog):
         layout.addWidget(title_lbl)
 
         msg_lbl = QLabel(message)
+        msg_lbl.setProperty("testid", "critical-error-message")
         msg_lbl.setWordWrap(True)
         msg_lbl.setStyleSheet(f"color: {_COLOR_TEXT}; font-size: 12px;")
         layout.addWidget(msg_lbl)
@@ -83,6 +85,7 @@ class CriticalErrorModal(QDialog):
         layout.addWidget(instr_lbl)
 
         btn = QPushButton("Fechar app")
+        btn.setProperty("testid", "critical-error-close")
         btn.setStyleSheet(
             f"background: {_COLOR_ERROR}; color: white; "
             f"border: none; border-radius: 4px; padding: 8px 20px; font-weight: bold;"

@@ -572,7 +572,7 @@ class MetricsBar(QWidget):
         self._listeners_frame.setMinimumHeight(108)
         # Task 9 (loop 05-13-workflow-app-layout-2): border interna removida
         # para eliminar duplicacao com a border externa do OutputToolbar
-        # (output-toolbar-right), que envelopa este frame apos a migracao
+        # (output-toolbar-col1-top), que envelopa este frame apos a migracao
         # Iter 12. O frame permanece como container de layout (margens 12/8
         # e spacing 16) hospedando dots, queue-progress-ring, queue-count-col.
         self._listeners_frame.setStyleSheet(
@@ -598,48 +598,30 @@ class MetricsBar(QWidget):
         self._queue_progress_ring = QueueProgressRing(self._listeners_frame, diameter=88)
         lf.addWidget(self._queue_progress_ring)
 
-        # Contador textual "executados/faltantes" deslocado do centro do ring
-        # para a direita (Iter 12: ring agora exibe percentual).
+        # Contador textual "executados/faltantes" — embutido dentro do
+        # queue-progress-ring (via QueueProgressRing.embed_count_label), em
+        # coluna com o percentual. Estilo final aplicado pelo proprio ring.
         self._lbl_queue_count = QLabel("0/0")
         self._lbl_queue_count.setObjectName("QueueCountLabel")
         self._lbl_queue_count.setProperty("testid", "queue-count-label")
         self._lbl_queue_count.setToolTip("Comandos executados / total")
-        # Largura alinhada aos demais itens do listeners-frame
-        # (TerminalStatusDot e QueueProgressRing usam size/diameter=88).
-        self._lbl_queue_count.setFixedWidth(88)
-        # Task 5 (loop 05-13-workflow-app-layout-2): altura reduzida para
-        # acomodar nova row de toggles abaixo mantendo altura do
-        # listeners-frame inalterada (inner area 92 = 54 label + 4 spacing + 34 toggles).
-        self._lbl_queue_count.setFixedHeight(54)
         self._lbl_queue_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_queue_count.setStyleSheet(
-            "color: #D4D4D8; font-size: 16px; font-weight: 600;"
-        )
+        self._queue_progress_ring.embed_count_label(self._lbl_queue_count)
 
-        # Task 5 (loop 05-13-workflow-app-layout-2): coluna que envelopa
-        # queue-count-label (topo) + row com terminal-layout-toggle e
-        # terminal-workspace-collapse (base). Os 2 toggles sao reparenteados
-        # por MainWindow._build_output_toolbar para self._queue_count_toggles_layout.
-        self._queue_count_col = QWidget(self._listeners_frame)
-        self._queue_count_col.setFixedWidth(88)
-        _qc_col_layout = QVBoxLayout(self._queue_count_col)
-        _qc_col_layout.setContentsMargins(0, 0, 0, 0)
-        _qc_col_layout.setSpacing(4)
-        _qc_col_layout.addWidget(self._lbl_queue_count)
-
-        self._queue_count_toggles_row = QWidget(self._queue_count_col)
+        # queue-count-toggles-row continua existindo (terminal-layout-toggle +
+        # terminal-workspace-collapse populados via MainWindow), mas agora vive
+        # em output-toolbar-queue-toggles (reparenteado por MainWindow). Mantemos
+        # o widget como orfao aqui ate que MainWindow._build_queue_toggles_column
+        # o reparenteie.
+        self._queue_count_toggles_row = QWidget()
         self._queue_count_toggles_row.setProperty(
             "testid", "queue-count-toggles-row"
         )
-        self._queue_count_toggles_row.setFixedHeight(34)
-        self._queue_count_toggles_layout = QHBoxLayout(
+        self._queue_count_toggles_layout = QVBoxLayout(
             self._queue_count_toggles_row
         )
         self._queue_count_toggles_layout.setContentsMargins(0, 0, 0, 0)
-        self._queue_count_toggles_layout.setSpacing(4)
-        _qc_col_layout.addWidget(self._queue_count_toggles_row)
-
-        lf.addWidget(self._queue_count_col)
+        self._queue_count_toggles_layout.setSpacing(6)
 
         # Migration 2026-05-12 (TASK-1 AC-1.4): autocast e schedule-autocast
         # buttons foram movidos para o play_bar do CommandQueueWidget. As
@@ -1136,20 +1118,34 @@ class MetricsBar(QWidget):
     # ──────────────────────────────────────── Project widget slots ─── #
 
     def _resolve_walk_up(self, *segments: str) -> str | None:
-        """Walk up from this module looking for a directory at `segments` join.
+        """Resolve `segments` ancorado na raiz do repositorio (marcador `.git`).
 
-        Returns the absolute path string if found, else None. Used to seed
-        the file picker at a sensible starting directory (.claude/projects
-        for Projeto, blacksmith for Loop).
+        Bugfix 2026-05-15: a versao anterior fazia walk-up retornando o
+        PRIMEIRO ancestral com a pasta — quebrava quando havia uma pasta
+        homonima intermediaria (ex: `ai-forge/workflow-app/blacksmith/`
+        vazio, criado por engano, era retornado em vez do canonico
+        `{repo_root}/blacksmith/`). Agora sobe ate achar `.git` (dir OU
+        arquivo, para cobrir worktrees) e ancora ali.
+
+        Returns o path absoluto se {repo_root}/{segments} existir, senao None.
+        Usado para seed do file picker (.claude/projects para Projeto,
+        blacksmith para Loop).
         """
-        candidate = Path(__file__).resolve()
-        target = Path(*segments)
-        while candidate != candidate.parent:
-            probe = candidate.joinpath(*segments)
-            if probe.is_dir():
-                return str(probe)
-            candidate = candidate.parent
-        return None
+        # `.git` sozinho nao serve como ancora: workflow-app e submodulo (tem
+        # `.git` proprio dentro de systemForge), e `~/.git` tambem existe (home
+        # dotfiles do usuario). Marcador unico do systemForge root: a pasta
+        # `ai-forge/workflow-app/` so existe ali. Procuramos por ele.
+        cur = Path(__file__).resolve().parent
+        repo_root: Path | None = None
+        while cur != cur.parent:
+            if (cur / "ai-forge" / "workflow-app").is_dir():
+                repo_root = cur
+                break
+            cur = cur.parent
+        if repo_root is None:
+            return None
+        target = repo_root.joinpath(*segments)
+        return str(target) if target.is_dir() else None
 
     def _open_config_picker(self, title: str, fallback_segments: tuple[str, ...]) -> None:
         """Shared picker for Projeto/Loop buttons.

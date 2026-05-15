@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 import os
@@ -52,7 +53,6 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_BLOG_STOCKPILE,
     TEMPLATE_BOILERPLATE,
     TEMPLATE_BRIEF_NEW,
-    TEMPLATE_BUSINESS,
     TEMPLATE_DAILY,
     TEMPLATE_HOSTGATOR,
     TEMPLATE_INTAKE_REVIEW,
@@ -123,6 +123,10 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "effort": EffortLevel.STANDARD,
     },
     "cmd_single": {
+        "model": ModelName.OPUS,
+        "effort": EffortLevel.HIGH,
+    },
+    "study": {
         "model": ModelName.OPUS,
         "effort": EffortLevel.HIGH,
     },
@@ -906,16 +910,192 @@ class CommandQueueWidget(QWidget):
         )
 
     def _on_study_command_ready(self, command_line: str) -> None:
-        spec = CommandSpec(
-            name=command_line,
-            model=ModelName.OPUS,
-            interaction_type=InteractionType.INTERACTIVE,
-            position=len(self._items) + 1,
+        """Expand `/study "<prompt>" [path.md] [--name <slug>] [--simple|--deep|--heavy] [--loop <path.md>]`
+        em sua sequencia canonica de subcomandos por modo, conforme
+        `.claude/commands/study.md` FASE 2 (7 fases em --simple, 9 em --deep/--heavy),
+        com /clear + /model + /effort entre cada fase (GROUP_MAP["study"] = Opus/HIGH).
+
+        Antes (legado): empilhava o orquestrador /study como UMA entrada unica,
+        forcando-o a sequenciar fases dentro de uma unica conversa — sem pareamento
+        canonico /clear + /model + /effort entre subcomandos.
+
+        Agora: faz splice em runtime, materializando cada subcomando como spec
+        separada na fila, alinhado a forma como queue-btn-loop ja opera.
+
+        --loop <path.md>: preserva contrato Task-023 — anexa
+        /tools:auq-interview --optimize <path> como ultimo item (com dedup vs spec
+        anterior dentro do mesmo batch).
+        """
+        try:
+            tokens = shlex.split(command_line)
+        except ValueError:
+            tokens = command_line.strip().split()
+
+        if not tokens or tokens[0] != "/study":
+            spec = CommandSpec(
+                name=command_line,
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.INTERACTIVE,
+                position=len(self._items) + 1,
+            )
+            self.add_command(spec)
+            self._template_label.setText("  \U0001f4cb  Study")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save("Study")
+            return
+
+        mode = "--simple"
+        name_arg = ""
+        loop_path: str | None = None
+        positional: list[str] = []
+        i = 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in ("--simple", "--deep", "--heavy"):
+                mode = t
+                i += 1
+            elif t == "--name" and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                name_arg = tokens[i + 1]
+                i += 2
+            elif t == "--loop" and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                loop_path = tokens[i + 1]
+                i += 2
+            else:
+                positional.append(t)
+                i += 1
+
+        # Fallback canonico (.claude/commands/study.md FASE 1, regra 44):
+        # sem posicional + --loop <path> presente -> loop_path vira {input_path}
+        # implicito da PRIMEIRA fase (/study:scope[/-decompose]), alem de seguir
+        # como write-back destination em /study:publish. Sem isso, scope-decompose
+        # roda cego e nao sabe o que estudar.
+        if not positional and loop_path:
+            positional = [loop_path]
+
+        slug = name_arg
+        if not slug:
+            for p in positional:
+                if p.endswith(".md"):
+                    slug = Path(p).stem
+                    break
+        if not slug and positional:
+            first = positional[0]
+            slug = re.sub(r"[^a-z0-9]+", "-", first.lower()).strip("-")[:60] or "study"
+        if not slug:
+            slug = "study"
+
+        positional_tail = " ".join(shlex.quote(p) for p in positional)
+        scope_args = f"{positional_tail} --name {slug}".strip() if positional_tail else f"--name {slug}"
+        publish_suffix = (
+            f" --loop {shlex.quote(loop_path)}" if loop_path else ""
         )
-        self.add_command(spec)
-        self._template_label.setText("  \U0001f4cb  Study")
+
+        if mode == "--heavy":
+            sub_names = [
+                f"/study:scope-decompose {scope_args}",
+                f"/study:enumerate --name {slug}",
+                f"/study:loop-research --name {slug}",
+                f"/study:loop-synth --name {slug}",
+                f"/study:consolidate-user --name {slug}",
+                f"/study:review-user --name {slug}",
+                f"/study:consolidate-tech --name {slug}",
+                f"/study:validate --name {slug}",
+                f"/study:publish --name {slug}{publish_suffix}",
+            ]
+        elif mode == "--deep":
+            sub_names = [
+                f"/study:scope {scope_args}",
+                f"/study:research --name {slug}",
+                f"/study:triangulate --name {slug}",
+                f"/study:write-user --name {slug}",
+                f"/study:debate --name {slug}",
+                f"/study:review-user --name {slug}",
+                f"/study:write-tech --name {slug}",
+                f"/study:validate --name {slug}",
+                f"/study:publish --name {slug}{publish_suffix}",
+            ]
+        else:
+            mode = "--simple"
+            sub_names = [
+                f"/study:scope {scope_args}",
+                f"/study:research --name {slug}",
+                f"/study:write-user --name {slug}",
+                f"/study:review-user --name {slug}",
+                f"/study:write-tech --name {slug}",
+                f"/study:validate --name {slug}",
+                f"/study:publish --name {slug}{publish_suffix}",
+            ]
+
+        study_cfg = GROUP_MAP.get("study", {})
+        study_model = study_cfg.get("model", ModelName.OPUS)
+        study_effort = study_cfg.get("effort", EffortLevel.HIGH)
+
+        specs: list[CommandSpec] = []
+        specs.extend(_build_prep_specs("study", start_position=1))
+        specs.append(
+            CommandSpec(
+                name=sub_names[0],
+                model=study_model,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                effort=study_effort,
+                position=len(specs) + 1,
+            )
+        )
+        for sub in sub_names[1:]:
+            specs.extend(_build_prep_specs("study", start_position=len(specs) + 1))
+            specs.append(
+                CommandSpec(
+                    name=sub,
+                    model=study_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=study_effort,
+                    position=len(specs) + 1,
+                )
+            )
+
+        if loop_path:
+            auq_name = f"/tools:auq-interview --optimize {loop_path}"
+            if not specs or specs[-1].name != auq_name:
+                specs.extend(_build_prep_specs("study", start_position=len(specs) + 1))
+                specs.append(
+                    CommandSpec(
+                        name=auq_name,
+                        model=ModelName.SONNET,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=EffortLevel.STANDARD,
+                        position=len(specs) + 1,
+                    )
+                )
+
+        label = f"  \U0001f4cb  Study {mode}: {slug} ({len(sub_names)} fases)"
+        self._template_label.setText(label)
         self._template_label.setVisible(True)
-        self._maybe_auto_save("Study")
+        self._maybe_auto_save(f"Study {mode} {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+        signal_bus.toast_requested.emit(
+            f"Fila renderizada: {len(specs)} comandos.", "success"
+        )
+
+    @staticmethod
+    def _extract_loop_path(command_line: str) -> str | None:
+        """Extrai o valor de `--loop <path>` de um command_line shell-like.
+
+        Suporta paths quoted (shlex). Retorna None se a flag estiver ausente,
+        sem valor, ou se o proximo token for outra flag (`--xxx`).
+        """
+        try:
+            tokens = shlex.split(command_line)
+        except ValueError:
+            return None
+        for i, tok in enumerate(tokens):
+            if tok == "--loop" and i + 1 < len(tokens):
+                nxt = tokens[i + 1]
+                if nxt and not nxt.startswith("--"):
+                    return nxt
+        return None
 
     # ─────────────────────────────────────────────────────────── UI ──── #
 
@@ -1046,7 +1226,7 @@ class CommandQueueWidget(QWidget):
         study_btn = DoublePhaseButton(
             label="study",
             pipeline_name="/study",
-            argument_hint='"<duvida>" [path.md] [--name <slug>] [--simple|--deep|--heavy]',
+            argument_hint='"<duvida>" [path.md] [--loop <path.md>] [--name <slug>] [--simple|--deep|--heavy]',
             default_md_dir="blacksmith/study/",
             radio_summaries={
                 "--simple": "para estudo rapido com 1 fonte e output enxuto pra revisao imediata",
@@ -1133,9 +1313,13 @@ class CommandQueueWidget(QWidget):
 
         # Auxiliar
         auxiliar_content = self._build_section_grid([
-            ("business", "Business: product-brief, SOW, budget, PDFs",
-             lambda: self._load_quick_template(TEMPLATE_BUSINESS, name="Business"),
-             "queue-btn-business"),
+            ("rocksmash",
+             "rocksmash — le metrics-project-pill (_LOOP-CONFIG.json kind=daily-loop), "
+             "expande para fila /loop-rocksmash:prepare + N pares :do/:review-done + "
+             "/loop-rocksmash:rename. Items kind=preparo/finalizacao sao ignorados; "
+             "directives /clear, /model, /effort auto-injetadas por bucket boundary.",
+             self._on_rocksmash_clicked,
+             "queue-btn-rocksmash"),
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
@@ -1484,17 +1668,18 @@ class CommandQueueWidget(QWidget):
         save_btn.setProperty("testid", "queue-btn-save")
         save_btn.setToolTip("Salvar fila no JSON do projeto (Ctrl+S)")
         save_btn.setFixedHeight(26)
+        save_btn.setEnabled(False)
         save_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #A1A1AA;"
             "  border: 1px solid #52525B; border-radius: 3px;"
             "  font-size: 11px; padding: 2px 8px; }"
             "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B; border-color: #FBBF24; }"
+            "QPushButton:disabled { background-color: #27272A; color: #52525B; border-color: #3F3F46; }"
         )
         save_btn.clicked.connect(self.save_requested)
         al.addWidget(save_btn)
-
-        list_layout.addWidget(add_bar)
+        self._save_btn = save_btn
 
         # "Próximo" button — shown only when an interactive command awaits advance
         next_bar = QWidget()
@@ -1523,6 +1708,8 @@ class CommandQueueWidget(QWidget):
         content_layout.addWidget(self._empty_widget)
         content_layout.addWidget(self._list_widget)
         self._list_widget.setVisible(False)
+        self._add_bar = add_bar
+        content_layout.addWidget(self._add_bar)
 
     def _connect_signals(self) -> None:
         signal_bus.pipeline_ready.connect(self.load_pipeline)
@@ -2130,6 +2317,48 @@ class CommandQueueWidget(QWidget):
         )
         signal_bus.pipeline_ready.emit(specs)
 
+    @staticmethod
+    def _check_dcp_validation_reports(
+        module_dir: Path,
+        cm_id: str,
+    ) -> tuple[bool, list[str]]:
+        """Read congruence-report.json and temporality-report.json from
+        ``module_dir`` and return (block, messages).
+
+        ``block=True`` when at least one report signals a real violation
+        (incoherent_count > 0 for congruence; violations_count > 0 for
+        temporality). ``messages`` contains one human-readable line per
+        report with a problem. Empty-list messages means no problems.
+
+        Missing or unreadable reports are treated as OK (steps may not
+        have run yet — e.g. bare /dcp:specific-flow path without preflight).
+        """
+        problems: list[str] = []
+        for fname, ok_key, count_key, label in (
+            ("congruence-report.json", "coherent", "incoherent_count", "Congruencia"),
+            ("temporality-report.json", "clean", "violations_count", "Temporalidade"),
+        ):
+            report_path = module_dir / fname
+            if not report_path.exists():
+                continue
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(report, dict):
+                continue
+            if report.get("module_id") and report["module_id"] != cm_id:
+                # Report belongs to a different module — stale; ignore.
+                continue
+            ok = report.get(ok_key, True)
+            count = report.get(count_key, 0)
+            if not ok or (isinstance(count, int) and count > 0):
+                problems.append(
+                    f"  [{label}] {count} violacao(oes) — "
+                    f"veja {fname} em {module_dir.name}/"
+                )
+        return bool(problems), problems
+
     def _handle_dcp_load_specific_flow(self, spec: CommandSpec) -> bool:
         """Local-action callable invoked at queue position 6 of the B-dcp
         pipeline. Consumes `self._pending_dcp_load_ctx` to locate the
@@ -2202,6 +2431,32 @@ class CommandQueueWidget(QWidget):
                 "warning",
             )
             return False
+
+        # Gate: read validation reports produced by steps 2-3.
+        # Congruence or temporality violations must not reach the queue silently.
+        module_dir = flow_path.parent
+        gate_block, gate_msgs = self._check_dcp_validation_reports(module_dir, ctx.cm_id)
+        if gate_block:
+            from PySide6.QtWidgets import QMessageBox
+            body = (
+                f"A pipeline B-dcp encontrou violacoes para {ctx.cm_id}.\n\n"
+                + "\n".join(gate_msgs)
+                + "\n\nCarregar mesmo assim pode colocar comandos incorretos na fila.\n"
+                "Deseja carregar mesmo assim?"
+            )
+            answer = QMessageBox.question(
+                self,
+                "DCP — Violacoes detectadas",
+                body,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                logger.info(
+                    "[DCP] carga bloqueada pelo operador apos violacoes B-dcp (modulo=%s)",
+                    ctx.cm_id,
+                )
+                return False
 
         return self._enqueue_specific_flow(
             flow_path=flow_path,
@@ -2356,6 +2611,24 @@ class CommandQueueWidget(QWidget):
                 "SPECIFIC-FLOW.json invalido: root deve ser um objeto JSON.", "error"
             )
             return False
+
+        # Identity guard: scope_module.module_id must match cm_id when present.
+        # Without this, Level-2 fallback ({wbs_root}/workflow-app/SPECIFIC-FLOW.json)
+        # could silently load a stale flow from a different module.
+        scope_module = data.get("scope_module")
+        if isinstance(scope_module, dict):
+            flow_module_id = scope_module.get("module_id")
+            if flow_module_id and flow_module_id != cm_id:
+                signal_bus.toast_requested.emit(
+                    f"SPECIFIC-FLOW.json pertence a '{flow_module_id}' mas o modulo "
+                    f"ativo e '{cm_id}'. Regenere via [DCP: Build + Load].",
+                    "warning",
+                )
+                logger.warning(
+                    "[DCP] module_id mismatch: flow=%s, cm_id=%s — carga abortada",
+                    flow_module_id, cm_id,
+                )
+                return False
 
         commands_raw = data.get("commands", [])
         if not isinstance(commands_raw, list):
@@ -3218,6 +3491,82 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save(f"Loop {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
+    def _on_rocksmash_clicked(self) -> None:
+        """Expand the active _LOOP-CONFIG.json into the /loop-rocksmash:* queue.
+
+        Requires the metrics-project-pill to point at a daily-loop
+        _LOOP-CONFIG.json. Emits:
+            1x /loop-rocksmash:prepare
+            N pares /loop-rocksmash:do + /loop-rocksmash:review-done
+                (apenas items com kind=iteration; preparo/finalizacao
+                sao ignorados)
+            1x /loop-rocksmash:rename
+
+        Directives /clear, /model, /effort sao auto-injetadas conforme
+        bucket boundaries (espelha build_loop_specs).
+        """
+        from workflow_app.command_queue.loop_rocksmash_expander import (
+            build_loop_rocksmash_specs,
+        )
+        from workflow_app.config.app_state import app_state
+        from workflow_app.daily_loop import DailyLoopConfigError
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Selecione um _LOOP-CONFIG.json na metrics-project-pill "
+                "antes de usar rocksmash.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        raw = config.raw if isinstance(config.raw, dict) else {}
+
+        if raw.get("kind") != "daily-loop" or "daily_loop" not in raw:
+            signal_bus.toast_requested.emit(
+                "Este botao opera apenas sobre _LOOP-CONFIG.json "
+                "(kind=daily-loop). Carregue um gerado por /loop ou "
+                "/daily-loop:enumerate.",
+                "warning",
+            )
+            return
+
+        loop_root = Path(config.config_path).parent
+
+        try:
+            specs = build_loop_rocksmash_specs(raw, loop_root)
+        except DailyLoopConfigError as exc:
+            signal_bus.toast_requested.emit(
+                f"rocksmash invalido: {exc}", "error"
+            )
+            return
+
+        slug = str(raw.get("daily_loop", {}).get("slug", "")) or "rocksmash"
+        pair_count = sum(
+            1 for s in specs if s.name.startswith("/loop-rocksmash:do ")
+        )
+        bucket_ids = sorted(
+            {
+                str(it.get("bucket", ""))
+                for it in (raw.get("daily_loop", {}).get("items_index") or {}).values()
+                if isinstance(it, dict) and str(it.get("kind", "iteration")) == "iteration"
+            }
+        )
+        logger.info(
+            "[rocksmash] loading %s (%d pares, %d specs, buckets=%s)",
+            slug,
+            pair_count,
+            len(specs),
+            ",".join(bucket_ids) or "-",
+        )
+
+        self._template_label.setText(
+            f"  \U0001f4cb  rocksmash: {slug} ({pair_count} pares)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"rocksmash {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+
     def _on_boilerplate_clicked(self) -> None:
         """Carrega o pipeline boilerplate (9 passos).
 
@@ -3343,6 +3692,7 @@ class CommandQueueWidget(QWidget):
         self._empty_widget.setVisible(False)
         self._list_widget.setVisible(True)
         self._emit_progress_metrics()
+        self._update_save_btn_state()
 
     def load_commands(self, commands: list[CommandSpec]) -> None:
         """Alias for load_pipeline() — called via signal pipeline_created."""
@@ -3367,8 +3717,8 @@ class CommandQueueWidget(QWidget):
 
     def _on_inline_add_clicked(self) -> None:
         """[+] Adicionar Comando — abre dialog com 3 inputs (1 obrigatorio +
-        2 opcionais) + radio de posicao (next/last) e injeta cada texto
-        preenchido como item transiente, na ordem dos campos.
+        2 opcionais) + checkbox JSON por linha + radio de posicao (next/last)
+        e injeta cada texto preenchido como item transiente, na ordem dos campos.
 
         Posicao next (default): o primeiro item entra entre a ultima linha
         "sent" e a primeira linha "pending"; os subsequentes empilham apos
@@ -3378,8 +3728,10 @@ class CommandQueueWidget(QWidget):
         load_pipeline() / clear() os apagam.
         """
         from PySide6.QtWidgets import (
+            QCheckBox,
             QDialog,
             QDialogButtonBox,
+            QHBoxLayout,
             QLabel,
             QLineEdit,
             QRadioButton,
@@ -3388,27 +3740,46 @@ class CommandQueueWidget(QWidget):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Adicionar Comando")
-        dialog.setMinimumWidth(440)
-        dialog.setMinimumHeight(340)
+        dialog.setMinimumWidth(520)
+        dialog.setMinimumHeight(360)
+        dialog.setProperty("testid", "dialog-add-command")
 
         layout = QVBoxLayout(dialog)
 
-        layout.addWidget(QLabel("Comando a executar:"))
-        line_edit_1 = QLineEdit(dialog)
-        line_edit_1.setProperty("testid", "queue-add-input-1")
-        layout.addWidget(line_edit_1)
+        header_row = QHBoxLayout()
+        lbl_cmd = QLabel("Comando")
+        lbl_cmd.setStyleSheet("color: #A1A1AA; font-size: 11px; font-weight: 600;")
+        lbl_json = QLabel("JSON")
+        lbl_json.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: 600; padding-left: 4px;")
+        lbl_json.setFixedWidth(40)
+        header_row.addWidget(lbl_cmd)
+        header_row.addWidget(lbl_json)
+        layout.addLayout(header_row)
 
-        layout.addSpacing(4)
-        layout.addWidget(QLabel("Comando adicional (opcional):"))
-        line_edit_2 = QLineEdit(dialog)
-        line_edit_2.setProperty("testid", "queue-add-input-2")
-        layout.addWidget(line_edit_2)
+        inputs_and_checks = []
+        for i, label_text in enumerate([
+            "Comando a executar:",
+            "Comando adicional (opcional):",
+            "Comando adicional (opcional):",
+        ]):
+            layout.addWidget(QLabel(label_text))
+            row = QHBoxLayout()
+            inp = QLineEdit(dialog)
+            inp.setProperty("testid", f"queue-add-input-{i + 1}")
+            chk = QCheckBox(dialog)
+            chk.setProperty("testid", f"queue-add-json-{i + 1}")
+            chk.setToolTip("Anexar caminho do project.json ao comando")
+            chk.setFixedWidth(40)
+            chk.setStyleSheet("QCheckBox { color: #FBBF24; }")
+            row.addWidget(inp)
+            row.addWidget(chk)
+            layout.addLayout(row)
+            layout.addSpacing(4)
+            inputs_and_checks.append((inp, chk))
 
-        layout.addSpacing(4)
-        layout.addWidget(QLabel("Comando adicional (opcional):"))
-        line_edit_3 = QLineEdit(dialog)
-        line_edit_3.setProperty("testid", "queue-add-input-3")
-        layout.addWidget(line_edit_3)
+        line_edit_1, chk_1 = inputs_and_checks[0]
+        line_edit_2, chk_2 = inputs_and_checks[1]
+        line_edit_3, chk_3 = inputs_and_checks[2]
 
         layout.addSpacing(8)
         layout.addWidget(QLabel("Posicao de insercao:"))
@@ -3438,12 +3809,28 @@ class CommandQueueWidget(QWidget):
 
         if dialog.exec() != QDialog.Accepted:
             return
-        texts = [
-            line_edit_1.text().strip(),
-            line_edit_2.text().strip(),
-            line_edit_3.text().strip(),
-        ]
-        filled = [t for t in texts if t]
+
+        from workflow_app.config.app_state import app_state as _app_state
+        import os as _os
+        json_path = ""
+        if _app_state.has_config and _app_state.config:
+            try:
+                json_path = _os.path.relpath(
+                    _app_state.config.config_path,
+                    str(_app_state.config.project_dir),
+                )
+            except ValueError:
+                json_path = str(_app_state.config.config_path)
+
+        filled = []
+        for line_edit, chk in [(line_edit_1, chk_1), (line_edit_2, chk_2), (line_edit_3, chk_3)]:
+            text = line_edit.text().strip()
+            if not text:
+                continue
+            if chk.isChecked() and json_path:
+                text = f"{text} {json_path}"
+            filled.append(text)
+
         if not filled:
             return
         position = "last" if radio_last.isChecked() else "next"
@@ -3489,6 +3876,11 @@ class CommandQueueWidget(QWidget):
         self._empty_widget.setVisible(False)
         self._list_widget.setVisible(True)
         self._emit_progress_metrics()
+        self._update_save_btn_state()
+
+    def _update_save_btn_state(self) -> None:
+        if hasattr(self, '_save_btn'):
+            self._save_btn.setEnabled(len(self._items) > 0)
 
     def clear_queue(self) -> None:
         for item in self._items:
@@ -3499,6 +3891,7 @@ class CommandQueueWidget(QWidget):
         self._empty_widget.setVisible(True)
         self._list_widget.setVisible(False)
         self._emit_progress_metrics()
+        self._update_save_btn_state()
 
     def _item_at(self, position: int) -> CommandItemWidget | None:
         for item in self._items:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 
 class QueueProgressRing(QWidget):
@@ -41,7 +41,63 @@ class QueueProgressRing(QWidget):
         self._done = 0
         self._total = 0
 
+        # Coluna central: percentual (topo) + count label (embutido externamente
+        # via embed_count_label, ex: queue-count-label do MetricsBar).
+        self._pct_label = QLabel("-", self)
+        self._pct_label.setObjectName("QueueProgressRingPct")
+        self._pct_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pct_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._pct_label.setStyleSheet(
+            "background: transparent; color: #D4D4D8;"
+            " font-size: 11px; font-weight: 600;"
+        )
+
+        self._count_label: QLabel | None = None
+
+        self._center_layout = QVBoxLayout(self)
+        self._center_layout.setContentsMargins(0, 0, 0, 0)
+        self._center_layout.setSpacing(0)
+        self._center_layout.addStretch(1)
+        self._center_layout.addWidget(
+            self._pct_label, alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        self._center_layout.addStretch(1)
+
     # ------------------------------------------------------------------ API
+
+    def embed_count_label(self, label: QLabel) -> None:
+        """Reparenteia o QLabel externo de count (queue-count-label) para
+        dentro do ring, posicionado em coluna abaixo do percentual.
+
+        Idempotente: chamadas subsequentes sao no-op se ja embutido.
+        """
+        if self._count_label is label:
+            return
+        if self._count_label is not None:
+            self._center_layout.removeWidget(self._count_label)
+        label.setParent(self)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        # Limpa restricoes externas e aplica fonte menor centralizada.
+        label.setFixedSize(0, 0)
+        label.setMinimumSize(0, 0)
+        label.setMaximumSize(16777215, 16777215)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(
+            "background: transparent; color: #A1A1AA;"
+            " font-size: 10px; font-weight: 600;"
+        )
+        # Reordena: stretch / pct / count / stretch (centralizados como coluna).
+        while self._center_layout.count():
+            self._center_layout.takeAt(0)
+        self._center_layout.addStretch(1)
+        self._center_layout.addWidget(
+            self._pct_label, alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        self._center_layout.addWidget(
+            label, alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        self._center_layout.addStretch(1)
+        self._count_label = label
 
     def set_progress(self, done: int, total: int) -> None:
         done = max(0, int(done))
@@ -52,8 +108,24 @@ class QueueProgressRing(QWidget):
             return
         self._done = done
         self._total = total
+        self._refresh_pct_label()
         self.update()
         self.progress_changed.emit(done, total)
+
+    def _refresh_pct_label(self) -> None:
+        if self._total <= 0:
+            self._pct_label.setText("-")
+            self._pct_label.setStyleSheet(
+                "background: transparent; color: #71717A;"
+                " font-size: 11px; font-weight: 600;"
+            )
+        else:
+            pct = int(round(self.fraction() * 100))
+            self._pct_label.setText(f"{pct}%")
+            self._pct_label.setStyleSheet(
+                "background: transparent; color: #D4D4D8;"
+                " font-size: 11px; font-weight: 600;"
+            )
 
     def done(self) -> int:
         return self._done
@@ -92,16 +164,5 @@ class QueueProgressRing(QWidget):
             # Start at top (90deg in Qt units = 90 * 16) and go clockwise (-span)
             painter.drawArc(rect, 90 * 16, -span)
 
-        # Center text: percentual concluido ou "-" quando vazio
-        if self._total <= 0:
-            text = "-"
-            color = self._COLOR_MUTE
-        else:
-            pct = int(round(self.fraction() * 100))
-            text = f"{pct}%"
-            color = self._COLOR_TEXT
-        painter.setPen(color)
-        font = painter.font()
-        font.setPointSize(max(6, int(self._diameter / 5)))
-        painter.setFont(font)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        # Textos centrais (percentual + queue-count-label) renderizados via
+        # QLabels filhos em _center_layout. Ver __init__ e embed_count_label.
