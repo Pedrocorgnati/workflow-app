@@ -43,13 +43,18 @@ def widget(qapp, qtbot) -> CommandQueueWidget:
 
 class TestCommandQueueWidgetInitialState:
     def test_width_within_bounds(self, widget):
-        """Widget width is within min/max bounds (200–400px).
+        """Widget width is within min/max bounds (200–460px).
 
         Upper bound raised from 360→400 by TASK-050: the new DCP buttons
         (`DCP: Build Module Pipeline` / `DCP: Specific-Flow`) have spec-
         mandated literal labels wider than the previous legacy buttons.
+        Raised 400→440 by TASK-1 layout refactor (2026-05-12): autocast e
+        schedule-autocast btns migraram do metrics_bar para a play bar.
+        Raised 440→460 (2026-05-12): wrapper QWidget `_play_btn_container`
+        em volta de `queue-btn-play-next` adiciona overhead minimo de
+        layout (~7px) somado ao minimo intrinseco do botao.
         """
-        assert 200 <= widget.width() <= 400
+        assert 200 <= widget.width() <= 460
 
     def test_empty_widget_visible(self, widget):
         """Empty state widget is visible initially."""
@@ -519,3 +524,692 @@ class TestKimiBlueArrowDelay:
             )
         finally:
             signal_bus.run_command_in_workspace_terminal.disconnect(legacy.append)
+
+
+class TestForceKimi:
+    """Cobertura do modo `--force Kimi` (data-testid=queue-div-force-kimi).
+
+    Quando ativo: a seta verde despacha para o terminal workspace com
+    prefixo /skill:; /model e /effort viram bolinha amarela sem dispatch;
+    /clear vai SO para workspace; seta azul fica oculta; Use Kimi e
+    desabilitado (modos mutuamente exclusivos). Quando inativo: comportamento
+    legado preservado."""
+
+    @pytest.fixture()
+    def task_specs(self) -> list[CommandSpec]:
+        return [CommandSpec("/create-task", ModelName.SONNET, position=1)]
+
+    @pytest.fixture()
+    def model_effort_specs(self) -> list[CommandSpec]:
+        return [
+            CommandSpec("/model opus", ModelName.OPUS, position=1),
+            CommandSpec("/effort high", ModelName.OPUS, position=2),
+        ]
+
+    @pytest.fixture()
+    def clear_specs(self) -> list[CommandSpec]:
+        return [CommandSpec("/clear", ModelName.SONNET, position=1)]
+
+    @pytest.fixture()
+    def force_kimi_widget(self, widget, monkeypatch):
+        """Widget com `_resolve_skill_target` monkeypatched para retornar True —
+        evita dependencia em arquivos reais de skill dentro dos testes."""
+        monkeypatch.setattr(
+            type(widget), "_resolve_skill_target",
+            classmethod(lambda cls, slug: True),
+        )
+        return widget
+
+    # ---- UI checkbox -----------------------------------------------------
+
+    def test_force_kimi_checkbox_exists_with_testid(self, widget):
+        chk = widget._force_kimi_chk
+        assert chk is not None
+        assert chk.property("testid") == "queue-chk-force-kimi"
+        assert chk.text() == "--force Kimi"
+
+    def test_force_kimi_container_div_has_testid(self, widget):
+        from PySide6.QtWidgets import QWidget
+        # Procurar o QWidget container marcado com queue-div-force-kimi.
+        found = [w for w in widget.findChildren(QWidget)
+                 if w.property("testid") == "queue-div-force-kimi"]
+        assert len(found) == 1, "queue-div-force-kimi container nao encontrado"
+
+    # ---- Legacy path (force-kimi OFF) -----------------------------------
+
+    def test_force_off_per_item_routes_to_interactive(self, widget, task_specs):
+        """Sem --force Kimi, comportamento legado: emite interactive."""
+        emitted_interactive: list[str] = []
+        emitted_workspace: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        try:
+            widget._force_kimi_chk.setChecked(False)
+            widget.load_pipeline(task_specs)
+            widget._items[0]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == ["/create-task"]
+        assert emitted_workspace == []
+
+    # ---- Force-kimi ON: /skill: prefix + workspace ----------------------
+
+    def test_force_on_per_item_injects_skill_prefix_to_workspace(
+        self, force_kimi_widget, task_specs
+    ):
+        emitted_interactive: list[str] = []
+        emitted_workspace: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline(task_specs)
+            force_kimi_widget._items[0]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == [], "force-kimi NAO pode tocar interactive"
+        assert emitted_workspace == ["/skill:create-task"]
+
+    def test_force_on_step_btn_injects_skill_prefix_to_workspace(
+        self, force_kimi_widget, task_specs
+    ):
+        emitted_interactive: list[str] = []
+        emitted_workspace: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline(task_specs)
+            force_kimi_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == []
+        assert emitted_workspace == ["/skill:create-task"]
+
+    # ---- /model e /effort suprimidos -----------------------------------
+
+    def test_force_on_model_effort_no_terminal_emit(
+        self, force_kimi_widget, model_effort_specs
+    ):
+        """/model e /effort viram bolinha amarela SEM enviar para terminal,
+        nem interactive nem workspace."""
+        emitted_interactive: list[str] = []
+        emitted_workspace: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline(model_effort_specs)
+            # Per-item green em /model
+            force_kimi_widget._items[0]._on_run_clicked()
+            # Per-item green em /effort
+            force_kimi_widget._items[1]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == []
+        assert emitted_workspace == []
+        # Bolinha amarela: items marcados como sent
+        assert force_kimi_widget._items[0].is_pending_run() is False
+        assert force_kimi_widget._items[1].is_pending_run() is False
+
+    def test_force_on_model_effort_does_not_update_last_command_label(
+        self, force_kimi_widget, model_effort_specs
+    ):
+        """/model e /effort suprimidos NAO devem aparecer como ultimo comando
+        executado (review MEDIUM 4)."""
+        force_kimi_widget._force_kimi_chk.setChecked(True)
+        force_kimi_widget.load_pipeline(model_effort_specs)
+        # Estado inicial: label invisivel / vazio
+        force_kimi_widget._items[0]._on_run_clicked()
+        # Last command label deve permanecer vazio/invisivel
+        assert not force_kimi_widget._last_cmd_label.isVisible() or \
+            force_kimi_widget._last_cmd_label.text().strip() == ""
+
+    # ---- /clear vai SO para workspace -----------------------------------
+
+    def test_force_on_clear_per_item_goes_only_to_workspace(
+        self, force_kimi_widget, clear_specs
+    ):
+        emitted_interactive: list[str] = []
+        emitted_workspace: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline(clear_specs)
+            force_kimi_widget._items[0]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == [], "/clear nao pode ir para interactive em force-kimi"
+        assert emitted_workspace == ["/clear"]
+
+    def test_force_on_clear_step_btn_goes_only_to_workspace(
+        self, force_kimi_widget, clear_specs
+    ):
+        emitted_interactive: list[str] = []
+        emitted_workspace: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline(clear_specs)
+            force_kimi_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == []
+        assert emitted_workspace == ["/clear"]
+
+    # ---- Skill existence validation -------------------------------------
+
+    def test_force_on_unknown_skill_aborts_with_toast(self, widget, task_specs, monkeypatch):
+        """Comando sem wrapper de skill (.claude/commands/skill ou .agents/skills)
+        deve abortar dispatch com toast (review HIGH 2)."""
+        monkeypatch.setattr(
+            type(widget), "_resolve_skill_target",
+            classmethod(lambda cls, slug: False),
+        )
+        emitted_workspace: list[str] = []
+        toasts: list[tuple] = []
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        try:
+            widget._force_kimi_chk.setChecked(True)
+            widget.load_pipeline(task_specs)
+            widget._items[0]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_workspace == [], "dispatch deve abortar quando skill nao existe"
+        assert any("create-task" in m for m, _ in toasts), \
+            "toast deve mencionar o slug ausente"
+
+    # ---- /skill: prefix idempotente -------------------------------------
+
+    def test_inject_skill_prefix_idempotent(self):
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        f = CommandQueueWidget._inject_skill_prefix
+        assert f("/skill:create-task") == "/skill:create-task"
+        assert f("/create-task") == "/skill:create-task"
+        assert f("/create-task arg") == "/skill:create-task arg"
+        assert f("") == ""
+        assert f("prompt livre sem barra") == "prompt livre sem barra"
+
+    # ---- Mutual exclusivity Use Kimi vs --force Kimi --------------------
+
+    def test_force_kimi_disables_use_kimi(self, widget):
+        widget._use_kimi_chk.setChecked(True)
+        widget._force_kimi_chk.setChecked(True)
+        assert widget._use_kimi_chk.isChecked() is False
+        assert widget._use_kimi_chk.isEnabled() is False
+
+    def test_unchecking_force_kimi_reenables_use_kimi(self, widget):
+        widget._force_kimi_chk.setChecked(True)
+        assert widget._use_kimi_chk.isEnabled() is False
+        widget._force_kimi_chk.setChecked(False)
+        assert widget._use_kimi_chk.isEnabled() is True
+
+    def test_use_kimi_unchecks_force_kimi(self, widget):
+        widget._force_kimi_chk.setChecked(True)
+        # Apos force-kimi ligado, Use Kimi esta disabled — habilitar manualmente
+        # para o teste simular o caso em que o usuario alterna entre modos.
+        widget._use_kimi_chk.setEnabled(True)
+        widget._use_kimi_chk.setChecked(True)
+        assert widget._force_kimi_chk.isChecked() is False
+
+    # ---- Seta azul oculta quando force-kimi ativo -----------------------
+
+    def test_force_kimi_hides_blue_arrow_on_all_items(self, widget):
+        kimi_specs = [
+            CommandSpec("/qa:prep", ModelName.SONNET, position=1),
+            CommandSpec("/create-task", ModelName.SONNET, position=2),
+        ]
+        widget.load_pipeline(kimi_specs)
+        # Pre-condition: pelo menos um item tem seta azul visivel.
+        any_visible_before = any(
+            item._kimi_btn.isVisible() for item in widget._items
+            if getattr(item, "_kimi_btn", None) is not None
+        )
+        widget._force_kimi_chk.setChecked(True)
+        for item in widget._items:
+            btn = getattr(item, "_kimi_btn", None)
+            if btn is not None:
+                assert btn.isVisible() is False, \
+                    "seta azul deve ficar oculta com --force Kimi"
+        widget._force_kimi_chk.setChecked(False)
+        # Apos desligar: visibilidade restaurada pelo menos para um item
+        # whitelisted (sanity — nao todos podem ser whitelisted).
+        if any_visible_before:
+            assert any(
+                item._kimi_btn.isVisible() for item in widget._items
+                if getattr(item, "_kimi_btn", None) is not None
+            ), "seta azul deve ser restaurada apos desligar --force Kimi"
+
+    def test_force_kimi_hides_blue_arrow_on_items_added_later(self, widget):
+        widget._force_kimi_chk.setChecked(True)
+        widget.load_pipeline([CommandSpec("/qa:prep", ModelName.SONNET, position=1)])
+        item = widget._items[0]
+        btn = getattr(item, "_kimi_btn", None)
+        if btn is not None:
+            assert btn.isVisible() is False
+
+    # ---- Highlight usa cmd_text original, nao transformado --------------
+
+    def test_force_on_step_btn_highlight_uses_original_cmd_text(
+        self, force_kimi_widget, task_specs
+    ):
+        """Review HIGH 3: highlight quebrava no play-next porque _on_run_command
+        recebia o cmd_text transformado e nao batia com item.command_text()."""
+        force_kimi_widget._force_kimi_chk.setChecked(True)
+        force_kimi_widget.load_pipeline(task_specs)
+        force_kimi_widget._on_step_btn_clicked()
+        # Item deve estar destacado (highlighted) — comparacao internal usa
+        # cmd_text original `/create-task`, NAO `/skill:create-task`.
+        assert force_kimi_widget._items[0]._highlighted is True
+
+
+# ---------------------------------------------------------------------------
+# Item 001 — Unificar entrypoint dos 3 botoes (daily-loop, loop, cmd-single)
+# ---------------------------------------------------------------------------
+
+class TestUnifiedEntrypointThreeButtons:
+    """Valida que queue-btn-daily-loop, queue-btn-loop e queue-btn-cmd-single
+    abrem a mesma classe DoublePhaseArgumentDialog e que a lista renderizada
+    apos accept() traz /clear, /model, /effort conforme GROUP_MAP.
+    """
+
+    def _find_button_by_testid(self, widget: CommandQueueWidget, testid: str):
+        from PySide6.QtWidgets import QPushButton
+        # Buttons live inside header_widget (sibling of CommandQueueWidget in MainWindow)
+        header = getattr(widget, "header_widget", None)
+        search_root = header if header is not None else widget
+        for btn in search_root.findChildren(QPushButton):
+            if btn.property("testid") == testid:
+                return btn
+        return None
+
+    def test_daily_loop_button_is_double_phase_button(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-daily-loop")
+        assert btn is not None
+        from workflow_app.command_queue.double_phase_button import DoublePhaseButton
+        assert isinstance(btn, DoublePhaseButton)
+
+    def test_loop_button_is_double_phase_button(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-loop")
+        assert btn is not None
+        from workflow_app.command_queue.double_phase_button import DoublePhaseButton
+        assert isinstance(btn, DoublePhaseButton)
+
+    def test_cmd_single_button_is_double_phase_button(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-cmd-single")
+        assert btn is not None
+        from workflow_app.command_queue.double_phase_button import DoublePhaseButton
+        assert isinstance(btn, DoublePhaseButton)
+
+    def test_all_three_buttons_open_same_dialog_class(self, widget, qapp, qtbot, monkeypatch):
+        from workflow_app.command_queue.double_phase_button import DoublePhaseButton
+        from workflow_app.command_queue.double_phase_dialog import DoublePhaseArgumentDialog
+
+        opened: list[DoublePhaseArgumentDialog] = []
+
+        def fake_exec(self):
+            opened.append(self)
+            return 1  # QDialog.Accepted
+
+        monkeypatch.setattr(DoublePhaseArgumentDialog, "exec", fake_exec)
+
+        for testid in ("queue-btn-daily-loop", "queue-btn-loop", "queue-btn-cmd-single"):
+            opened.clear()
+            btn = self._find_button_by_testid(widget, testid)
+            assert btn is not None, f"botao {testid} nao encontrado"
+            from PySide6.QtCore import Qt
+            qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+            assert len(opened) == 1, f"{testid}: esperado 1 dialog, aberto {len(opened)}"
+            dlg = opened[0]
+            assert isinstance(dlg, DoublePhaseArgumentDialog)
+            assert dlg.objectName() == "DoublePhaseArgumentDialog"
+            assert dlg.property("data-testid") in (None, "")
+
+    def test_loop_command_ready_injects_prep_per_group_map(self, widget):
+        from workflow_app.command_queue.command_queue_widget import GROUP_MAP
+        widget.clear_queue()
+        widget._on_loop_command_ready("/loop --task blacksmith/loop/test.md --name test-slug")
+        names = [item.get_spec().name for item in widget._items]
+        assert names[0] == "/clear"
+        assert names[1].startswith("/model ")
+        assert names[2].startswith("/effort ")
+        loop_cfg = GROUP_MAP.get("loop", {})
+        expected_model = loop_cfg.get("model", ModelName.OPUS).value.lower()
+        expected_effort = loop_cfg.get("effort", EffortLevel.HIGH).value
+        assert names[1] == f"/model {expected_model}"
+        assert names[2] == f"/effort {expected_effort}"
+
+    def test_daily_loop_command_ready_injects_prep_per_group_map(self, widget):
+        from workflow_app.command_queue.command_queue_widget import GROUP_MAP
+        widget.clear_queue()
+        widget._on_daily_loop_command_ready("/daily-loop --tasklist path.md")
+        names = [item.get_spec().name for item in widget._items]
+        assert names[0] == "/clear"
+        assert names[1].startswith("/model ")
+        assert names[2].startswith("/effort ")
+        dl_cfg = GROUP_MAP.get("daily_loop", {})
+        expected_model = dl_cfg.get("model", ModelName.SONNET).value.lower()
+        expected_effort = dl_cfg.get("effort", EffortLevel.STANDARD).value
+        assert names[1] == f"/model {expected_model}"
+        assert names[2] == f"/effort {expected_effort}"
+
+    def test_cmd_single_command_ready_injects_prep_per_group_map(self, widget, tmp_path):
+        from workflow_app.command_queue.command_queue_widget import GROUP_MAP
+        md = tmp_path / "cmd.md"
+        md.write_text("# /test:cmd\ncmd_target: /test:cmd\n", encoding="utf-8")
+        widget.clear_queue()
+        widget._on_loop_command_ready(f"/loop --cmd-single {md} --name test-cmd")
+        names = [item.get_spec().name for item in widget._items]
+        assert names[0] == "/clear"
+        assert names[1].startswith("/model ")
+        assert names[2].startswith("/effort ")
+        cs_cfg = GROUP_MAP.get("cmd_single", {})
+        expected_model = cs_cfg.get("model", ModelName.OPUS).value.lower()
+        expected_effort = cs_cfg.get("effort", EffortLevel.HIGH).value
+        assert names[1] == f"/model {expected_model}"
+        assert names[2] == f"/effort {expected_effort}"
+
+
+# ---------------------------------------------------------------------------
+# Item 002 — Corrigir bug do literal <slug> no runtime
+# ---------------------------------------------------------------------------
+
+class TestBugLiteralSlugRegression:
+    """Valida que o dialog estruturado nunca emite <slug> ou <path> literais
+    no comando final e que o handler de loop processa o valor real corretamente.
+    """
+
+    def test_double_phase_dialog_emits_real_slug_not_placeholder(self, qapp):
+        """Marcar --name e digitar meu-slug produz '--name meu-slug', nunca '--name <slug>'."""
+        from PySide6.QtTest import QSignalSpy
+        from workflow_app.command_queue.double_phase_dialog import DoublePhaseArgumentDialog
+        from workflow_app.domain import FlagSpec
+
+        dlg = DoublePhaseArgumentDialog(
+            pipeline_name="/loop",
+            flags_with_value=[FlagSpec(name="name", label="Nome", placeholder="slug")],
+        )
+        spy = QSignalSpy(dlg.submitted)
+
+        # Marcar checkbox --name
+        chk = dlg._flag_checkboxes["name"]
+        chk.setChecked(True)
+
+        # Digitar valor real
+        container, edit = dlg._flag_inputs["name"]
+        edit.setText("meu-slug")
+
+        # Confirmar
+        dlg._on_confirm()
+
+        assert spy.count() == 1
+        command_line = spy.at(0)[0]
+        assert "--name meu-slug" in command_line
+        assert "<slug>" not in command_line
+        dlg.deleteLater()
+
+    def test_loop_command_ready_processes_real_slug(self, widget):
+        """_on_loop_command_ready recebe '--name meu-slug' e propaga slug canonico.
+
+        Apos integracao com normalize_loop_name.py (single source of truth,
+        2026-05-14), `--name meu-slug` sem prefixo mm-dd e normalizado para
+        `{mm}-{dd}-meu-slug`. Todos os sub-comandos da fila recebem o slug
+        canonico FINAL, garantindo que fases 2..N nao apontem para diretorio
+        inexistente.
+        """
+        import re as _re
+        widget.clear_queue()
+        widget._on_loop_command_ready("/loop --task blacksmith/loop/test.md --name meu-slug")
+        names = [item.get_spec().name for item in widget._items]
+        # Slug deve ser canonical-form: ^\d{2}-\d{2}-meu-slug$
+        canonical_re = _re.compile(r"--name (\d{2}-\d{2}-meu-slug)\b")
+        canonical_matches = [canonical_re.search(n) for n in names]
+        assert any(canonical_matches), (
+            f"nenhum comando continha slug canonico mm-dd-meu-slug: {names}"
+        )
+        assert all("<slug>" not in n for n in names), f"placeholder <slug> encontrado: {names}"
+        # Todos os sub-comandos devem ter o MESMO slug final
+        slugs_found = {m.group(1) for m in canonical_matches if m}
+        assert len(slugs_found) == 1, (
+            f"sub-comandos divergiram em slug: {slugs_found} - quebraria cadeia"
+        )
+
+    # ─── Regression: slug derivation from source.md path ────────────────────
+    # Bug 2026-05-14: `slug = Path(path_arg).stem` retornava "source" quando
+    # o source.md vivia em blacksmith/loop-archives/{loop_name}/source.md.
+    # Hardening per /skill:mcp-codex adversarial review 2026-05-14:
+    # widget faz APENAS identity lookup (re-entry detection via JSON canonico);
+    # canonicalizacao (mm-dd prefix, kebab, stopwords) e autoridade exclusiva
+    # do /loop:create-structure markdown spec.
+
+    def test_existing_loop_slug_detects_re_entry(self, tmp_path):
+        """Quando _LOOP-CONFIG.json existe no parent, retorna nome do parent dir."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        loop_dir = tmp_path / "blog-stockpile-publish-overhaul"
+        loop_dir.mkdir()
+        (loop_dir / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        source = loop_dir / "source.md"
+        source.write_text("# source", encoding="utf-8")
+        result = CommandQueueWidget._existing_loop_slug_from_path(str(source))
+        assert result == "blog-stockpile-publish-overhaul"
+
+    def test_existing_loop_slug_returns_none_without_json(self, tmp_path):
+        """Sem _LOOP-CONFIG.json, retorna None (fresh source, nao re-entry)."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        loop_dir = tmp_path / "new-loop"
+        loop_dir.mkdir()
+        source = loop_dir / "source.md"
+        source.write_text("# fresh", encoding="utf-8")
+        result = CommandQueueWidget._existing_loop_slug_from_path(str(source))
+        assert result is None
+
+    def test_existing_loop_slug_returns_none_for_named_source(self, tmp_path):
+        """Source com nome != source.md nunca eh tratado como re-entry."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        (tmp_path / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        named = tmp_path / "refactor-auth.md"
+        named.write_text("# named", encoding="utf-8")
+        result = CommandQueueWidget._existing_loop_slug_from_path(str(named))
+        assert result is None
+
+    def test_existing_loop_slug_handles_dotdot_path(self, tmp_path):
+        """Path com ../ eh resolvido antes de checar ancestrais."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        loop_dir = tmp_path / "my-loop"
+        loop_dir.mkdir()
+        (loop_dir / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        (loop_dir / "source.md").write_text("# x", encoding="utf-8")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        traversal_path = str(sub / ".." / "my-loop" / "source.md")
+        result = CommandQueueWidget._existing_loop_slug_from_path(traversal_path)
+        assert result == "my-loop"
+
+    def test_derive_slug_applies_mm_dd_for_fresh_source(self, tmp_path):
+        """Fresh source (sem _LOOP-CONFIG.json) recebe slug canonical com
+        prefixo mm-dd via shared helper normalize_loop_name.py (single
+        source of truth, 2026-05-14)."""
+        import re as _re
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        source = tmp_path / "refactor-auth.md"
+        source.write_text("# x", encoding="utf-8")
+        result = CommandQueueWidget._derive_loop_slug_from_path(str(source))
+        assert _re.match(r"^\d{2}-\d{2}-refactor-auth$", result), (
+            f"esperado mm-dd-refactor-auth, obtido {result!r}"
+        )
+
+    def test_derive_slug_preserves_legacy_loop_without_mm_dd(self, tmp_path):
+        """Loop legado sem prefixo mm-dd e preservado as-is (forward-only policy)."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        loop_dir = tmp_path / "blog-stockpile-publish-overhaul"
+        loop_dir.mkdir()
+        (loop_dir / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        (loop_dir / "source.md").write_text("# x", encoding="utf-8")
+        result = CommandQueueWidget._derive_loop_slug_from_path(
+            str(loop_dir / "source.md")
+        )
+        # Codex review 2026-05-14: legado sem mm-dd e preservado, nao renomeado.
+        assert result == "blog-stockpile-publish-overhaul"
+        assert not result.startswith("05-")  # zero normalizacao no widget
+
+    def test_loop_command_ready_uses_parent_dir_when_source_md(
+        self, widget, tmp_path, monkeypatch
+    ):
+        """E2E: /loop --both .../{loop}/source.md SEM --name -> usa parent dir."""
+        loop_dir = tmp_path / "blog-stockpile-publish-overhaul"
+        loop_dir.mkdir()
+        (loop_dir / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        source = loop_dir / "source.md"
+        source.write_text("# x", encoding="utf-8")
+        widget.clear_queue()
+        widget._on_loop_command_ready(f"/loop --both {source}")
+        names = [item.get_spec().name for item in widget._items]
+        assert any(
+            "--name blog-stockpile-publish-overhaul" in n for n in names
+        ), f"fila: {names}"
+        assert not any(
+            n.endswith(" --name source") or " --name source " in n for n in names
+        ), f"slug bugado 'source': {names}"
+
+    def test_invoke_loop_normalizer_resolves_relative_path(self, tmp_path, monkeypatch):
+        """Path relativo eh resolvido via candidate_md_roots antes de chamar helper.
+
+        Regression per codex review 2026-05-14: sem isso, paths relativos
+        que so existem fora do cwd do widget escapariam da deteccao de
+        re-entry/colisao.
+        """
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+
+        # Cria estrutura fake de loop sob tmp_path
+        loop_dir = tmp_path / "fake-loop-relative"
+        loop_dir.mkdir()
+        (loop_dir / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        (loop_dir / "source.md").write_text("# x", encoding="utf-8")
+
+        # Muda cwd para parent de tmp_path; path relativo "fake-loop-relative/source.md"
+        # so existe se candidate_md_roots tentar tmp_path.
+        monkeypatch.chdir(tmp_path)
+        result = CommandQueueWidget._invoke_loop_normalizer(
+            path="fake-loop-relative/source.md"
+        )
+        assert result is not None, "helper deveria detectar re-entry com path relativo"
+        assert result["was_re_entry"] is True
+        assert result["slug"] == "fake-loop-relative"
+
+    def test_loop_command_ready_blocks_on_slug_collision(
+        self, widget, tmp_path
+    ):
+        """Collision guard: --name X divergente de loop existente -> aborta com toast."""
+        from PySide6.QtCore import QObject
+
+        loop_dir = tmp_path / "real-loop"
+        loop_dir.mkdir()
+        (loop_dir / "_LOOP-CONFIG.json").write_text("{}", encoding="utf-8")
+        source = loop_dir / "source.md"
+        source.write_text("# x", encoding="utf-8")
+
+        toasts: list[tuple[str, str]] = []
+        from workflow_app.signal_bus import signal_bus
+
+        class _Sink(QObject):
+            def __init__(self):
+                super().__init__()
+                signal_bus.toast_requested.connect(self._on_toast)
+
+            def _on_toast(self, msg, level):
+                toasts.append((msg, level))
+
+        sink = _Sink()
+        widget.clear_queue()
+        widget._on_loop_command_ready(f"/loop --both {source} --name wrong-name")
+        names = [item.get_spec().name for item in widget._items]
+        assert names == [], f"fila deveria estar vazia, contem: {names}"
+        assert any(
+            "Conflito" in m and "wrong-name" in m and "real-loop" in m
+            for m, _ in toasts
+        ), f"toast esperado, obtido: {toasts}"
+        # silenciar warning de unused
+        del sink
+
+    def test_grep_gate_zero_slug_or_path_in_output_paths(self):
+        """Gate de grep: zero ocorrencias de <slug> ou <path> em caminhos de saida ativos.
+
+        Hardening (review-done Item 002, finding #1 Codex senior-adversarial):
+        filtros de palavra-chave (placeholder/label/argument_hint/replace/in inner)
+        sao validos apenas na porcao de CODIGO da linha (antes do `#`). Isso impede
+        bypass como `parts.append("--name <slug>")  # label`.
+
+        Hardening (finding #2): deteccao de docstring agora conta ocorrencias de
+        `\"\"\"` por linha (par mantem estado, impar inverte) — lida com aspas
+        triplas que abrem e fecham na mesma linha.
+        """
+        import re
+        from pathlib import Path
+
+        repo_root = Path("/home/pedro/Repositórios/systemForge")
+        targets = [
+            repo_root / "ai-forge/workflow-app/src/workflow_app/command_queue/command_queue_widget.py",
+            repo_root / "ai-forge/workflow-app/src/workflow_app/command_queue/double_phase_dialog.py",
+            repo_root / "ai-forge/workflow-app/src/workflow_app/templates/quick_templates.py",
+        ]
+
+        suspicious: list[str] = []
+        for p in targets:
+            if not p.exists():
+                continue
+            content = p.read_text(encoding="utf-8")
+            file_lines = content.split("\n")
+            # Primeira passagem: marcar linhas dentro de docstrings (hardened)
+            in_docstring = False
+            docstring_lines: set[int] = set()
+            for idx, raw in enumerate(file_lines, start=1):
+                triple_count = raw.count('"""')
+                if in_docstring:
+                    docstring_lines.add(idx)
+                if triple_count % 2 == 1:
+                    in_docstring = not in_docstring
+                    docstring_lines.add(idx)
+            # Segunda passagem: verificar placeholders apenas na porcao de codigo
+            for idx, raw in enumerate(file_lines, start=1):
+                stripped = raw.strip()
+                if "<slug>" not in raw and "<path>" not in raw:
+                    continue
+                if stripped.startswith("#"):
+                    continue
+                if idx in docstring_lines:
+                    continue
+                # Separar codigo de comentario inline (heuristica conservadora:
+                # corta no primeiro `#` que nao esta dentro de string literal).
+                code_part = raw
+                in_single = False
+                in_double = False
+                cut_at: int | None = None
+                for i, ch in enumerate(raw):
+                    if ch == "'" and not in_double:
+                        in_single = not in_single
+                    elif ch == '"' and not in_single:
+                        in_double = not in_double
+                    elif ch == "#" and not in_single and not in_double:
+                        cut_at = i
+                        break
+                if cut_at is not None:
+                    code_part = raw[:cut_at]
+                # Placeholder no comentario inline e ignorado (nao chega ao output).
+                if "<slug>" not in code_part and "<path>" not in code_part:
+                    continue
+                # Filtros de contexto valem apenas na porcao de codigo.
+                allow_tokens = ("placeholder", "label", "argument_hint", "replace(", "in inner")
+                if any(tok in code_part for tok in allow_tokens):
+                    continue
+                suspicious.append(f"{p.name}:{idx}: {raw.strip()}")
+
+        assert len(suspicious) == 0, f"Linhas suspeitas de output ativo com placeholder: {suspicious}"

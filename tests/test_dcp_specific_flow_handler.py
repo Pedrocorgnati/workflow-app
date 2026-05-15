@@ -936,3 +936,438 @@ def test_dcp_remove_outside_dcp_context_does_not_write_disk(
         assert widget._current_dcp_flow_path is None
     finally:
         widget.deleteLater()
+
+
+# ─── Task 12: _on_dcp_build_pipeline_clicked (B-dcp pipeline emission) ────── #
+
+
+def _setup_dcp_build_pipeline_scenario(
+    tmp_path: Path,
+    *,
+    module_state: str,
+    with_specific_flow: bool,
+) -> tuple[Path, Path]:
+    """Scenario builder for the new B-dcp pipeline handler.
+
+    `module_state="creation"` triggers the --regenerate path (state past
+    pending). `module_state="pending"` keeps the bare emission. The
+    SPECIFIC-FLOW.json is optional on disk (controls destructive guard).
+    """
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+
+    _write_delivery(
+        wbs_root,
+        current_module="module-1-dashboard",
+        modules={
+            "module-1-dashboard": _module(module_state, module_type="dashboard"),
+        },
+    )
+
+    meta_dir = wbs_root / "modules" / "module-1-dashboard"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "MODULE-META.json").write_text(
+        json.dumps({
+            "module_id": "module-1-dashboard",
+            "module_name": "Dashboard",
+            "module_type": "dashboard",
+        }),
+        encoding="utf-8",
+    )
+
+    flow_path = meta_dir / "SPECIFIC-FLOW.json"
+    if with_specific_flow:
+        flow_path.write_text(
+            json.dumps({"version": 1, "commands": [
+                {"name": "/clear"}, {"name": "/dcp:congruence-check"},
+            ]}),
+            encoding="utf-8",
+        )
+    return wbs_root, flow_path
+
+
+def test_pipeline_emits_6_items_with_local_action_at_position_6(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Pending module → 6 specs emitted via pipeline_ready, last one
+    `kind="local-action"` pointing to `dcp-load-specific-flow`."""
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    wbs_root, _ = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="pending", with_specific_flow=False,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    emitted: list[list[CommandSpec]] = []
+    signal_bus.pipeline_ready.connect(emitted.append)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._on_dcp_build_pipeline_clicked()
+    finally:
+        try:
+            signal_bus.pipeline_ready.disconnect(emitted.append)
+        except (RuntimeError, TypeError):
+            pass
+        widget.deleteLater()
+        app_state.clear_config()
+
+    # Filter out emissions that come from CommandQueueWidget construction
+    # (e.g. listener-test wiring). The handler-emitted batch is the only
+    # one whose first spec starts with "/build-module-pipeline".
+    handler_batches = [
+        batch for batch in emitted
+        if batch and batch[0].name.startswith("/build-module-pipeline")
+    ]
+    assert len(handler_batches) == 1, (
+        f"expected exactly 1 B-dcp emission, got {len(handler_batches)} "
+        f"(total emissions: {len(emitted)})"
+    )
+    specs = handler_batches[0]
+    assert len(specs) == 6, f"expected 6 specs, got {len(specs)}"
+
+    # Position 1: /build-module-pipeline (no --regenerate on pending)
+    assert specs[0].name.startswith("/build-module-pipeline ")
+    assert "--regenerate" not in specs[0].name
+    assert "--module 1" in specs[0].name
+
+    # Positions 2..5: /dcp:* slash commands
+    assert specs[1].name.startswith("/dcp:congruence-check")
+    assert specs[2].name.startswith("/dcp:temporality-check")
+    assert specs[3].name.startswith("/dcp:meta-completeness")
+    assert specs[4].name.startswith("/dcp:directive-injector")
+
+    # Position 6: local-action (kind + id) — the visible queue marker
+    assert specs[5].position == 6
+    assert specs[5].kind == "local-action"
+    assert specs[5].local_action_id == "dcp-load-specific-flow"
+
+    # Positions are sequential 1..6
+    assert [s.position for s in specs] == [1, 2, 3, 4, 5, 6]
+
+
+def test_pipeline_includes_regenerate_flag_when_state_past_pending(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Module state past `pending` → first spec carries `--regenerate`
+    and the destructive-guard modal is skipped when no SPECIFIC-FLOW.json
+    exists on disk."""
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    wbs_root, _ = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="creation", with_specific_flow=False,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    emitted: list[list[CommandSpec]] = []
+    signal_bus.pipeline_ready.connect(emitted.append)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._on_dcp_build_pipeline_clicked()
+    finally:
+        try:
+            signal_bus.pipeline_ready.disconnect(emitted.append)
+        except (RuntimeError, TypeError):
+            pass
+        widget.deleteLater()
+        app_state.clear_config()
+
+    handler_batches = [
+        batch for batch in emitted
+        if batch and batch[0].name.startswith("/build-module-pipeline")
+    ]
+    assert len(handler_batches) == 1
+    specs = handler_batches[0]
+    assert len(specs) == 6
+
+    # --regenerate inserted before --module on the first spec
+    first_name = specs[0].name
+    assert first_name.startswith("/build-module-pipeline --regenerate ")
+    assert "--module 1" in first_name
+
+    # Position 6 still wired to the local action
+    assert specs[5].kind == "local-action"
+    assert specs[5].local_action_id == "dcp-load-specific-flow"
+
+
+def test_destructive_guard_blocks_when_user_cancels_modal(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Module past pending + SPECIFIC-FLOW.json exists on disk →
+    ConfirmRegenerateSpecificFlowModal runs; rejecting it blocks the
+    pipeline_ready emission AND leaves `_pending_dcp_load_ctx` cleared."""
+    from unittest.mock import patch
+
+    from PySide6.QtWidgets import QDialog
+
+    from workflow_app import dcp as dcp_pkg
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    wbs_root, _ = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="creation", with_specific_flow=True,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+    monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
+
+    emitted: list[list[CommandSpec]] = []
+    signal_bus.pipeline_ready.connect(emitted.append)
+
+    modal_calls: list[bool] = []
+
+    def fake_exec(self):
+        modal_calls.append(True)
+        return QDialog.DialogCode.Rejected
+
+    with patch(
+        "workflow_app.dialogs.confirm_regenerate_specific_flow_modal."
+        "ConfirmRegenerateSpecificFlowModal.exec",
+        new=fake_exec,
+    ):
+        widget = CommandQueueWidget()
+        try:
+            widget._on_dcp_build_pipeline_clicked()
+            handler_batches = [
+                batch for batch in emitted
+                if batch and batch[0].name.startswith("/build-module-pipeline")
+            ]
+            assert len(modal_calls) == 1, "destructive modal must run"
+            assert handler_batches == [], (
+                "rejected modal must block pipeline_ready emission"
+            )
+            assert widget._pending_dcp_load_ctx is None, (
+                "rejected modal must leave _pending_dcp_load_ctx unset"
+            )
+        finally:
+            try:
+                signal_bus.pipeline_ready.disconnect(emitted.append)
+            except (RuntimeError, TypeError):
+                pass
+            widget.deleteLater()
+            app_state.clear_config()
+
+
+# ─── Task 13: _handle_dcp_load_specific_flow (local-action at position 6) ── #
+
+
+def _build_dcp_ctx(wbs_root: Path, cm_id: str, module_state: str, regenerate: bool):
+    """Build a DcpBuildContext for direct invocation of the local-action.
+
+    The handler under test reads `ctx.wbs_root` and `ctx.cm_id`; `delivery`
+    is forward-referenced and re-loaded internally via DeliveryReader, so we
+    pass a placeholder. `module_state` is not consulted by the load step.
+    """
+    from workflow_app.command_queue.command_queue_widget import DcpBuildContext
+    from workflow_app.services.delivery_reader import DeliveryReader
+
+    result = DeliveryReader().load(wbs_root)
+    # _build_dcp_ctx is only used after _write_delivery — DeliveryFound expected.
+    return DcpBuildContext(
+        cm_id=cm_id,
+        module_state=module_state,
+        regenerate=regenerate,
+        wbs_root=wbs_root,
+        delivery=result.delivery,  # type: ignore[union-attr]
+    )
+
+
+def _make_local_action_spec():
+    """Build the position-6 local-action CommandSpec used at dispatch time."""
+    from workflow_app.domain import (
+        CommandSpec,
+        EffortLevel,
+        InteractionType,
+        ModelName,
+    )
+
+    return CommandSpec(
+        name="DCP: Carregar Specific-Flow",
+        model=ModelName.HAIKU,
+        interaction_type=InteractionType.AUTO,
+        position=6,
+        effort=EffortLevel.LOW,
+        kind="local-action",
+        local_action_id="dcp-load-specific-flow",
+    )
+
+
+def test_handle_dcp_load_resolves_flow_and_calls_enqueue(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Pending context + SPECIFIC-FLOW.json present → handler calls
+    `_enqueue_specific_flow` with the resolved path and propagates its
+    return value."""
+    from workflow_app.command_queue import command_queue_widget as cqw
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root, flow_path = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="creation", with_specific_flow=True,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._pending_dcp_load_ctx = _build_dcp_ctx(
+            wbs_root, "module-1-dashboard", "creation", regenerate=True,
+        )
+
+        captured: dict = {}
+
+        def fake_enqueue(*, flow_path, cm_id, default_project_name, prefix_commands):
+            captured["flow_path"] = flow_path
+            captured["cm_id"] = cm_id
+            captured["default_project_name"] = default_project_name
+            captured["prefix_commands"] = prefix_commands
+            return True
+
+        monkeypatch.setattr(widget, "_enqueue_specific_flow", fake_enqueue)
+        # Force level-1 cascade hit by stubbing resolver to the fixture path.
+        monkeypatch.setattr(
+            "workflow_app.services.delivery_reader.resolve_specific_flow",
+            lambda *a, **kw: flow_path,
+        )
+
+        ok = widget._handle_dcp_load_specific_flow(_make_local_action_spec())
+
+        assert ok is True, "handler must propagate _enqueue_specific_flow return"
+        assert captured["flow_path"] == flow_path
+        assert captured["cm_id"] == "module-1-dashboard"
+        assert captured["default_project_name"] == cfg.project_name
+        assert captured["prefix_commands"] is None
+    finally:
+        widget.deleteLater()
+        app_state.clear_config()
+
+
+def test_handle_dcp_load_warns_when_flow_missing_despite_pipeline_success(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Pending context but SPECIFIC-FLOW.json absent on disk → handler
+    emits a warning toast, returns False, and does NOT call enqueue."""
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    wbs_root, _ = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="creation", with_specific_flow=False,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+
+    toasts: list[tuple[str, str]] = []
+    signal_bus.toast_requested.connect(lambda msg, lvl: toasts.append((msg, lvl)))
+
+    widget = CommandQueueWidget()
+    try:
+        widget._pending_dcp_load_ctx = _build_dcp_ctx(
+            wbs_root, "module-1-dashboard", "creation", regenerate=True,
+        )
+
+        enqueue_calls: list[bool] = []
+
+        def fake_enqueue(**kwargs):
+            enqueue_calls.append(True)
+            return True
+
+        monkeypatch.setattr(widget, "_enqueue_specific_flow", fake_enqueue)
+
+        ok = widget._handle_dcp_load_specific_flow(_make_local_action_spec())
+
+        assert ok is False
+        assert enqueue_calls == [], "enqueue must not run when flow is missing"
+        warnings = [
+            (m, l) for (m, l) in toasts
+            if l == "warning" and "SPECIFIC-FLOW.json nao apareceu" in m
+        ]
+        assert len(warnings) == 1, (
+            f"expected one warning toast about missing flow, got {toasts}"
+        )
+    finally:
+        try:
+            signal_bus.toast_requested.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        widget.deleteLater()
+        app_state.clear_config()
+
+
+def test_handle_dcp_load_clears_pending_context_on_success(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Successful dispatch must clear `_pending_dcp_load_ctx` so a
+    subsequent click can rearm cleanly."""
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root, flow_path = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="creation", with_specific_flow=True,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._pending_dcp_load_ctx = _build_dcp_ctx(
+            wbs_root, "module-1-dashboard", "creation", regenerate=True,
+        )
+        monkeypatch.setattr(widget, "_enqueue_specific_flow", lambda **kw: True)
+        monkeypatch.setattr(
+            "workflow_app.services.delivery_reader.resolve_specific_flow",
+            lambda *a, **kw: flow_path,
+        )
+
+        widget._handle_dcp_load_specific_flow(_make_local_action_spec())
+
+        assert widget._pending_dcp_load_ctx is None
+    finally:
+        widget.deleteLater()
+        app_state.clear_config()
+
+
+def test_handle_dcp_load_clears_pending_context_on_failure(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Failure paths (flow absent, delivery indisponivel) must also clear
+    `_pending_dcp_load_ctx` so the user can re-click without stale state."""
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+
+    wbs_root, _ = _setup_dcp_build_pipeline_scenario(
+        tmp_path, module_state="creation", with_specific_flow=False,
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._pending_dcp_load_ctx = _build_dcp_ctx(
+            wbs_root, "module-1-dashboard", "creation", regenerate=True,
+        )
+
+        def fail_enqueue(**kw):  # pragma: no cover - should not be reached
+            raise AssertionError("enqueue must not be called on failure path")
+
+        monkeypatch.setattr(widget, "_enqueue_specific_flow", fail_enqueue)
+
+        ok = widget._handle_dcp_load_specific_flow(_make_local_action_spec())
+
+        assert ok is False
+        assert widget._pending_dcp_load_ctx is None
+    finally:
+        widget.deleteLater()
+        app_state.clear_config()

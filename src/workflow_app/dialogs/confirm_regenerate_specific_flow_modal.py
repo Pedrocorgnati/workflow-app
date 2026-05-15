@@ -1,13 +1,12 @@
 """
 ConfirmRegenerateSpecificFlowModal — destructive confirmation for /build-module-pipeline --regenerate.
 
-Triggered by `_on_dcp_build_clicked` when the target module already has a
-SPECIFIC-FLOW.json on disk and the canonical command would run with
+Triggered by `_on_dcp_build_pipeline_clicked` when the target module already
+has a SPECIFIC-FLOW.json on disk and the canonical command would run with
 `--regenerate`. Surfaces file metadata (mtime, command count) so the user can
-spot manual edits about to be overwritten before pasting the command into the
-terminal.
+spot manual edits about to be overwritten before the pipeline is enqueued.
 
-The modal does NOT block the CLI — it only blocks the paste. The CLI itself
+The modal does NOT block the CLI — it only blocks enqueueing. The CLI itself
 still writes a `.bak-{ISO_UTC}` next to the file before overwriting (see
 `/build-module-pipeline` step 14).
 """

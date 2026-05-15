@@ -1,37 +1,56 @@
 """
-DoublePhaseArgumentDialog — Modal de argumentos para pipelines com fase dupla.
+DoublePhaseArgumentDialog - Modal de argumentos para pipelines com fase dupla.
 
-Renderiza widgets dinamicos a partir do `argument-hint` de um comando.
-Suporta 4 tipos de token:
-  1. Input simples       — [placeholder] ou texto livre
-  2. Radio com summary   — --opt1|--opt2|--opt3
-  3. Checkbox            — [--flag] ou --flag
-  4. Path .md custom     — [--key <path.md>]
+Renderiza widgets dinamicos a partir do `argument-hint` de um comando
+(legado) ou a partir de `flags_boolean` + `flags_with_value` (novo formato
+estruturado a partir do CommandSpec).
+
+Suporta 6 tipos de token no modo legado:
+  1. Input simples       - [placeholder] curto sem `<...>`
+  2. Radio com summary   - --opt1|--opt2|--opt3 (fora de colchetes)
+  3. Checkbox            - [--flag] ou --flag
+  4. Path .md custom     - [--key <path.md>]
+  5. Enum flag (mutex)   - [--simple|--deep|--heavy] (com QButtonGroup exclusivo)
+  6. Freetext auto-grow  - "<duvida>", <descricao> (QTextEdit com clamp 32-240px)
+
+Modo estruturado (novo):
+  - Input principal multiline (QPlainTextEdit) para path.md ou prompt.
+  - Row unico de QCheckBox (QHBoxLayout, setSpacing(5)) para todas as flags.
+  - Inputs condicionais (QLineEdit) para flags_with_value via setVisible.
+  - Sizing dinamico via adjustSize() + setMinimumSize(self.sizeHint()).
 
 Emite `submitted = Signal(str)` com a linha de comando montada.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QFileDialog,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from workflow_app.domain import FlagSpec
+
+# Auto-grow clamps para tokens freetext (AC-2.3).
+FREETEXT_MIN_HEIGHT = 32
+FREETEXT_MAX_HEIGHT = 240
 
 
 class PathMdFieldWidget(QWidget):
@@ -72,9 +91,20 @@ class PathMdFieldWidget(QWidget):
         layout.addWidget(self._btn)
 
     def _browse(self) -> None:
+        from workflow_app.config.app_state import app_state
+
+        base_dir = Path.cwd()
+        if app_state.has_config and app_state.config is not None:
+            base_dir = app_state.config.project_dir
+
         start_dir = self._default_md_dir
-        if not start_dir or not Path(start_dir).exists():
-            start_dir = str(Path.cwd())
+        candidate = Path(start_dir) if start_dir else None
+        if candidate is not None and not candidate.is_absolute():
+            candidate = base_dir / candidate
+        if candidate is None or not candidate.exists():
+            candidate = base_dir if base_dir.exists() else Path.cwd()
+        start_dir = str(candidate)
+
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Selecionar tasklist",
@@ -111,9 +141,14 @@ class RadioGroupWithSummary(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
+        # QButtonGroup exclusivo garante mutex mesmo se os radios forem
+        # reparented para layouts diferentes (AC-2.1, AC-2.2).
+        self._button_group = QButtonGroup(self)
+        self._button_group.setExclusive(True)
+
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
-        for opt in self._options:
+        for idx, opt in enumerate(self._options):
             rb = QRadioButton(opt)
             rb.setStyleSheet(
                 "QRadioButton { color: #D4D4D8; font-size: 12px; spacing: 4px; }"
@@ -121,6 +156,7 @@ class RadioGroupWithSummary(QWidget):
             )
             rb.toggled.connect(self._on_toggled)
             self._buttons.append(rb)
+            self._button_group.addButton(rb, idx)
             btn_layout.addWidget(rb)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -153,6 +189,56 @@ class RadioGroupWithSummary(QWidget):
                 return rb.text()
         return ""
 
+    def button_group(self) -> QButtonGroup:
+        """Acesso ao QButtonGroup interno (uso em testes de mutex)."""
+        return self._button_group
+
+
+class AutoGrowTextEdit(QTextEdit):
+    """QTextEdit com altura dinamica clampada entre MIN e MAX (AC-2.3).
+
+    Conecta `document().contentsChanged` para recalcular a altura conforme
+    o conteudo cresce. Limites em pixels:
+      - MIN_HEIGHT = 32 (1 linha + padding)
+      - MAX_HEIGHT = 240 (~10 linhas; passa para scroll vertical depois)
+    """
+
+    MIN_HEIGHT = FREETEXT_MIN_HEIGHT
+    MAX_HEIGHT = FREETEXT_MAX_HEIGHT
+
+    def __init__(
+        self,
+        placeholder: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("DoublePhaseFreetext")
+        self.setPlaceholderText(placeholder)
+        self.setAcceptRichText(False)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setStyleSheet(
+            "QTextEdit#DoublePhaseFreetext {"
+            " background-color: #3F3F46; color: #FAFAFA;"
+            " border: 1px solid #52525B; border-radius: 4px;"
+            " padding: 4px 8px; font-size: 12px; font-family: monospace; }"
+            "QTextEdit#DoublePhaseFreetext:focus {"
+            " border: 1px solid #FBBF24; }"
+        )
+        self.setFixedHeight(self.MIN_HEIGHT)
+        # Recalcula no proximo loop de eventos: document().size() so eh
+        # confiavel apos layout do widget.
+        self.document().contentsChanged.connect(self._on_contents_changed)
+
+    def _on_contents_changed(self) -> None:
+        doc_height = self.document().size().height()
+        # Margens do frame (border + padding) somam ~8px verticalmente.
+        target = int(doc_height) + 8
+        clamped = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, target))
+        if clamped != self.height():
+            self.setFixedHeight(clamped)
+
 
 class _Token:
     """Representacao interna de um token do argument-hint."""
@@ -164,21 +250,30 @@ class _Token:
         options: list[str] | None = None,
         key: str = "",
     ) -> None:
-        self.kind = kind  # "input" | "radio" | "checkbox" | "path_md"
+        # "input" | "radio" | "checkbox" | "path_md" | "enum_flag" | "freetext"
+        self.kind = kind
         self.label = label
         self.options = options or []
         self.key = key
 
 
+# Token freetext: identifica `<word>` (com ou sem aspas envolventes).
+# Exemplos cobertos: `<duvida>`, `"<duvida>"`, `<descricao>`.
+_FREETEXT_RE = re.compile(r'^"?\s*<[A-Za-z_][A-Za-z0-9_-]*>\s*"?$')
+
+
 def _parse_argument_hint(hint: str) -> list[_Token]:
     """Parseia o argument-hint em tokens tipados.
 
-    Regras:
-      - Palavras entre colchetes [placeholder] -> input simples.
-      - Palavras entre colchetes com --flag -> checkbox.
-      - Palavras entre colchetes com <path.md> ou <path> -> path_md.
-      - Tokens com pipe --a|--b|--c -> radio (fora de colchetes).
-      - Texto livre fora de colchetes sem pipe -> input simples.
+    Regras (ordem importa - colchetes sao avaliados primeiro):
+      - [conteudo com `|` e `--`] -> enum_flag (radio mutex em QButtonGroup).
+      - [--flag <path.md>] / [--flag <path>] -> path_md.
+      - [--flag] -> checkbox.
+      - [placeholder simples] -> input simples.
+      - --a|--b|--c (fora de colchetes) -> radio.
+      - --flag (fora de colchetes) -> checkbox.
+      - "<word>" / <word> -> freetext (auto-grow QTextEdit).
+      - Qualquer outro texto livre -> input simples.
     """
     if not hint:
         return []
@@ -213,6 +308,14 @@ def _parse_argument_hint(hint: str) -> list[_Token]:
         # Dentro de colchetes
         if part_stripped.startswith("[") and part_stripped.endswith("]"):
             inner = part_stripped[1:-1].strip()
+            # Enum flag: [--a|--b|--c] (mutex). Avaliado ANTES de checkbox
+            # para corrigir o bug do queue-btn-study (AC-2.1).
+            if "|" in inner and inner.startswith("--"):
+                opts = [opt.strip() for opt in inner.split("|") if opt.strip()]
+                tokens.append(
+                    _Token(kind="enum_flag", label=inner, options=opts)
+                )
+                continue
             # Path .md custom: contem <path.md> ou <path>
             if "<path.md>" in inner or "<path>" in inner:
                 # Extrai a chave, ex: --tasklist <path.md>
@@ -238,20 +341,31 @@ def _parse_argument_hint(hint: str) -> list[_Token]:
             tokens.append(_Token(kind="checkbox", label=part_stripped, key=part_stripped))
             continue
 
-        # Input simples (texto livre)
+        # Freetext: "<word>" ou <word> (texto livre prosaico, ex: "<duvida>").
+        if _FREETEXT_RE.match(part_stripped):
+            tokens.append(_Token(kind="freetext", label=part_stripped))
+            continue
+
+        # Input simples (texto livre curto)
         tokens.append(_Token(kind="input", label=part_stripped))
 
     return tokens
 
 
 class DoublePhaseArgumentDialog(QDialog):
-    """Modal que renderiza widgets dinamicos a partir do argument-hint.
+    """Modal que renderiza widgets dinamicos a partir do argument-hint
+    (legado) ou de flags_boolean + flags_with_value (estruturado).
 
     Args:
         pipeline_name: Nome do comando (ex: '/daily-loop').
         argument_hint: String do argument-hint (frontmatter do .md).
         default_md_dir: Diretorio padrao para o QFileDialog de path .md.
         radio_summaries: Dict {opcao_radio: texto_resumo}.
+        flags_boolean: Lista de flags sem valor (novo modo estruturado).
+        flags_with_value: Lista de FlagSpec com valor (novo modo estruturado).
+        fixed_flag: Flag injetada automaticamente sem checkbox (ex: 'cmd-single').
+            Quando definida, o modal exibe apenas o input principal e monta
+            '{pipeline_name} --{fixed_flag} {main_text}' no confirm.
         parent: Widget pai.
     """
 
@@ -260,44 +374,62 @@ class DoublePhaseArgumentDialog(QDialog):
     def __init__(
         self,
         pipeline_name: str,
-        argument_hint: str,
-        default_md_dir: str,
-        radio_summaries: dict[str, str],
+        argument_hint: str = "",
+        default_md_dir: str = "",
+        radio_summaries: dict[str, str] | None = None,
+        flags_boolean: list[str] | None = None,
+        flags_with_value: list[FlagSpec] | None = None,
+        fixed_flag: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._pipeline_name = pipeline_name
         self._argument_hint = argument_hint
         self._default_md_dir = default_md_dir
-        self._radio_summaries = radio_summaries
-        self._tokens = _parse_argument_hint(argument_hint)
+        self._radio_summaries = radio_summaries or {}
+        self._flags_boolean = flags_boolean or []
+        self._flags_with_value = flags_with_value or []
+        self._fixed_flag = fixed_flag
+        self._structured_mode = bool(self._flags_boolean or self._flags_with_value or self._fixed_flag)
+        self._tokens: list[_Token] = []
         self._widgets: list[QWidget] = []
+        if not self._structured_mode:
+            self._tokens = _parse_argument_hint(argument_hint)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setWindowTitle(f"Argumentos — {self._pipeline_name}")
+        self.setObjectName("DoublePhaseArgumentDialog")
+        self.setWindowTitle(f"Argumentos - {self._pipeline_name}")
         self.setModal(True)
         self.setMinimumWidth(420)
-        self.setStyleSheet("background-color: #18181B;")
+        self.setStyleSheet(
+            "QDialog#DoublePhaseArgumentDialog { background-color: #18181B; }"
+        )
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(12)
         main_layout.setContentsMargins(20, 16, 20, 16)
 
-        # Titulo
-        title = QLabel(f"{self._pipeline_name}")
-        title.setStyleSheet(
-            "color: #FAFAFA; font-size: 14px; font-weight: bold;"
-        )
-        main_layout.addWidget(title)
+        if self._structured_mode:
+            self._setup_ui_structured(main_layout)
+        else:
+            self._setup_ui_legacy(main_layout)
 
+        self.adjustSize()
+        self.setMinimumSize(self.sizeHint())
+        self.setMinimumHeight(self.sizeHint().height() + 100)
+        self._setup_tab_order()
+
+    def _setup_ui_legacy(self, main_layout: QVBoxLayout) -> None:
+        """Layout legado baseado em argument_hint / tokens."""
         # Subtitulo com hint bruto
         hint_label = QLabel(f"Hint: {self._argument_hint}")
-        hint_label.setStyleSheet("color: #71717A; font-size: 10px; font-family: monospace;")
+        hint_label.setStyleSheet(
+            "color: #71717A; font-size: 10px; font-family: monospace;"
+        )
         hint_label.setWordWrap(True)
         main_layout.addWidget(hint_label)
 
-        # Area scrollavel para o formulario
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
@@ -318,8 +450,102 @@ class DoublePhaseArgumentDialog(QDialog):
         form_layout.addStretch()
         scroll.setWidget(form_container)
         main_layout.addWidget(scroll, stretch=1)
+        self._build_buttons(main_layout)
 
-        # Botoes
+    def _setup_ui_structured(self, main_layout: QVBoxLayout) -> None:
+        """Layout estruturado: input multiline + row de checkboxes + inputs condicionais."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        form_container = QWidget()
+        form_layout = QVBoxLayout(form_container)
+        form_layout.setSpacing(12)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Bloco superior: input principal multiline
+        if self._fixed_flag:
+            main_label = QLabel(f"path.md  (--{self._fixed_flag})")
+            placeholder = "caminho/para/arquivo.md"
+        else:
+            main_label = QLabel("path.md ou prompt")
+            placeholder = "caminho/para/arquivo.md ou descricao da task"
+        main_label.setStyleSheet(
+            "color: #D4D4D8; font-size: 11px; font-weight: 600;"
+        )
+        form_layout.addWidget(main_label)
+
+        self._main_input = QPlainTextEdit()
+        self._main_input.setPlaceholderText(placeholder)
+        self._main_input.setStyleSheet(
+            "QPlainTextEdit { background-color: #3F3F46; color: #FAFAFA;"
+            " border: 1px solid #52525B; border-radius: 4px;"
+            " padding: 4px 8px; font-size: 12px; font-family: monospace; }"
+            "QPlainTextEdit:focus { border: 1px solid #FBBF24; }"
+        )
+        font_metrics = self._main_input.fontMetrics()
+        line_height = font_metrics.lineSpacing()
+        self._main_input.setFixedHeight(line_height * 4 + 8)
+        form_layout.addWidget(self._main_input)
+
+        # Bloco do meio: row unico de checkboxes (omitido quando fixed_flag esta definido)
+        all_flags = self._flags_boolean + [f.name for f in self._flags_with_value]
+        if all_flags and not self._fixed_flag:
+            flags_row = QWidget()
+            flags_layout = QHBoxLayout(flags_row)
+            flags_layout.setContentsMargins(0, 0, 0, 0)
+            flags_layout.setSpacing(5)
+
+            self._flag_checkboxes: dict[str, QCheckBox] = {}
+            for flag in all_flags:
+                chk = QCheckBox(f"--{flag}")
+                chk.setStyleSheet(
+                    "QCheckBox { color: #D4D4D8; font-size: 12px; spacing: 6px; }"
+                    "QCheckBox::indicator { width: 16px; height: 16px; }"
+                )
+                flags_layout.addWidget(chk)
+                self._flag_checkboxes[flag] = chk
+
+            flags_layout.addStretch()
+            form_layout.addWidget(flags_row)
+
+            # Bloco condicional: inputs para flags_with_value
+            self._flag_inputs: dict[str, tuple[QWidget, QLineEdit]] = {}
+            for flag_spec in self._flags_with_value:
+                container = QWidget()
+                container_layout = QHBoxLayout(container)
+                container_layout.setContentsMargins(0, 0, 0, 0)
+                container_layout.setSpacing(6)
+
+                flag_label = QLabel(f"--{flag_spec.name}")
+                flag_label.setStyleSheet(
+                    "color: #A1A1AA; font-size: 11px; font-weight: 600;"
+                )
+                container_layout.addWidget(flag_label)
+
+                edit = QLineEdit()
+                edit.setPlaceholderText(flag_spec.placeholder or f"valor para --{flag_spec.name}")
+                edit.setStyleSheet(
+                    "background-color: #3F3F46; color: #FAFAFA;"
+                    " border: 1px solid #52525B; border-radius: 4px;"
+                    " padding: 4px 8px; font-size: 12px; font-family: monospace;"
+                )
+                container_layout.addWidget(edit, stretch=1)
+
+                container.setVisible(False)
+                form_layout.addWidget(container)
+                self._flag_inputs[flag_spec.name] = (container, edit)
+
+                # Conectar checkbox para mostrar/ocultar input
+                chk = self._flag_checkboxes.get(flag_spec.name)
+                if chk is not None:
+                    chk.toggled.connect(container.setVisible)
+
+        form_layout.addStretch()
+        scroll.setWidget(form_container)
+        main_layout.addWidget(scroll, stretch=1)
+        self._build_buttons(main_layout)
+
+    def _build_buttons(self, main_layout: QVBoxLayout) -> None:
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         btn_row.addStretch()
@@ -347,6 +573,31 @@ class DoublePhaseArgumentDialog(QDialog):
         btn_row.addWidget(btn_confirm)
 
         main_layout.addLayout(btn_row)
+
+    def _setup_tab_order(self) -> None:
+        """Configura tab order coerente entre widgets do dialog."""
+        from PySide6.QtWidgets import QWidget
+        widgets: list[QWidget] = []
+
+        if self._structured_mode and hasattr(self, "_main_input"):
+            widgets.append(self._main_input)
+            for flag in self._flags_boolean:
+                chk = self._flag_checkboxes.get(flag)
+                if chk is not None:
+                    widgets.append(chk)
+            for flag_spec in self._flags_with_value:
+                chk = self._flag_checkboxes.get(flag_spec.name)
+                if chk is not None:
+                    widgets.append(chk)
+                container, edit = self._flag_inputs.get(flag_spec.name, (None, None))
+                if container is not None and container.isVisible():
+                    widgets.append(edit)
+
+        if len(widgets) < 2:
+            return
+
+        for i in range(len(widgets) - 1):
+            self.setTabOrder(widgets[i], widgets[i + 1])
 
     def _build_token_row(self, token: _Token) -> QWidget:
         """Constroi uma linha do formulario para um token."""
@@ -388,6 +639,25 @@ class DoublePhaseArgumentDialog(QDialog):
             layout.addWidget(rg)
             self._widgets.append(rg)
 
+        elif token.kind == "enum_flag":
+            label = QLabel("Modo (escolha um):")
+            label.setStyleSheet("color: #D4D4D8; font-size: 11px; font-weight: 600;")
+            layout.addWidget(label)
+
+            rg = RadioGroupWithSummary(token.options, self._radio_summaries)
+            rg.setObjectName("DoublePhaseEnumFlag")
+            layout.addWidget(rg)
+            self._widgets.append(rg)
+
+        elif token.kind == "freetext":
+            label = QLabel(token.label)
+            label.setStyleSheet("color: #D4D4D8; font-size: 11px; font-weight: 600;")
+            layout.addWidget(label)
+
+            te = AutoGrowTextEdit(placeholder=token.label)
+            layout.addWidget(te)
+            self._widgets.append(te)
+
         elif token.kind == "path_md":
             label = QLabel(token.label)
             label.setStyleSheet("color: #D4D4D8; font-size: 11px; font-weight: 600;")
@@ -401,27 +671,77 @@ class DoublePhaseArgumentDialog(QDialog):
 
     def _on_confirm(self) -> None:
         parts: list[str] = [self._pipeline_name]
-        for i, tok in enumerate(self._tokens):
-            widget = self._widgets[i]
-            if tok.kind == "input":
-                assert isinstance(widget, QLineEdit)
-                val = widget.text().strip()
-                if val:
-                    parts.append(val)
-            elif tok.kind == "checkbox":
-                assert isinstance(widget, QCheckBox)
-                if widget.isChecked():
-                    parts.append(tok.key)
-            elif tok.kind == "radio":
-                assert isinstance(widget, RadioGroupWithSummary)
-                sel = widget.selected()
-                if sel:
-                    parts.append(sel)
-            elif tok.kind == "path_md":
-                assert isinstance(widget, PathMdFieldWidget)
-                val = widget.text()
-                if val:
-                    parts.append(f"{tok.key} {val}")
+
+        if self._structured_mode:
+            main_text = self._main_input.toPlainText().strip()
+
+            if self._fixed_flag:
+                # Modo fixed_flag: injeta --{flag} {main_text} diretamente, sem checkbox.
+                if main_text:
+                    needs_quote = any(c in main_text for c in (" ", "\t", "\n"))
+                    val = f'"{main_text}"' if needs_quote else main_text
+                    parts.append(f"--{self._fixed_flag} {val}")
+            else:
+                # Input principal
+                if main_text:
+                    needs_quote = any(c in main_text for c in (" ", "\t", "\n"))
+                    parts.append(f'"{main_text}"' if needs_quote else main_text)
+
+                # Flags boolean
+                for flag in self._flags_boolean:
+                    chk = self._flag_checkboxes.get(flag)
+                    if chk is not None and chk.isChecked():
+                        parts.append(f"--{flag}")
+
+                # Flags with value
+                for flag_spec in self._flags_with_value:
+                    chk = self._flag_checkboxes.get(flag_spec.name)
+                    if chk is not None and chk.isChecked():
+                        container, edit = self._flag_inputs[flag_spec.name]
+                        val = edit.text().strip()
+                        if val:
+                            parts.append(f"--{flag_spec.name} {val}")
+
+        else:
+            for i, tok in enumerate(self._tokens):
+                widget = self._widgets[i]
+                if tok.kind == "input":
+                    assert isinstance(widget, QLineEdit)
+                    val = widget.text().strip()
+                    if val:
+                        parts.append(val)
+                elif tok.kind == "checkbox":
+                    assert isinstance(widget, QCheckBox)
+                    if widget.isChecked():
+                        key = tok.key
+                        # Nunca emitir placeholders literais (<slug>, <path>, etc.)
+                        # no comando final. Se o checkbox contem placeholder,
+                        # emite apenas o nome do flag sem o placeholder.
+                        if "<" in key and ">" in key:
+                            key = re.sub(r"<[^>]+>", "", key).strip()
+                        if key:
+                            parts.append(key)
+                elif tok.kind == "radio":
+                    assert isinstance(widget, RadioGroupWithSummary)
+                    sel = widget.selected()
+                    if sel:
+                        parts.append(sel)
+                elif tok.kind == "enum_flag":
+                    assert isinstance(widget, RadioGroupWithSummary)
+                    sel = widget.selected()
+                    if sel:
+                        parts.append(sel)
+                elif tok.kind == "freetext":
+                    assert isinstance(widget, AutoGrowTextEdit)
+                    val = widget.toPlainText().strip()
+                    if val:
+                        needs_quote = any(c in val for c in (" ", "\t", "\n"))
+                        parts.append(f'"{val}"' if needs_quote else val)
+                elif tok.kind == "path_md":
+                    assert isinstance(widget, PathMdFieldWidget)
+                    val = widget.text()
+                    if val:
+                        parts.append(f"{tok.key} {val}")
 
         command_line = " ".join(parts)
         self.submitted.emit(command_line)

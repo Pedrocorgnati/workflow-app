@@ -117,6 +117,7 @@ class CommandItemWidget(QWidget):
     cancel_requested = Signal()             # no arg — cancel whole pipeline
     run_in_terminal_requested = Signal(str) # command name (Claude — interactive terminal)
     run_in_kimi_terminal_requested = Signal(str)  # Kimi-adapted prompt (workspace terminal)
+    sent_state_changed = Signal(bool)       # _is_sent toggled (drives queue-progress-ring)
 
     # Minimum Manhattan distance before drag begins (px)
     _DRAG_THRESHOLD = 10
@@ -135,7 +136,7 @@ class CommandItemWidget(QWidget):
         self._highlighted: bool = False
         self._can_reorder_fn: Callable[[int], bool] = can_reorder_fn or (lambda _pos: True)
         self._drag_start_pos: QPoint | None = None
-        self.setMinimumHeight(44)
+        self.setMinimumHeight(53)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         self._setup_ui()
@@ -193,12 +194,20 @@ class CommandItemWidget(QWidget):
             "QPushButton:disabled { color: transparent; }"
         )
         self._kimi_btn.clicked.connect(self._on_kimi_clicked)
-        _kimi_visible = is_kimi_compatible(self._spec.name)
+        # Visibility: whitelist match OR explicit kimi_eligible flag (usado por
+        # comandos injetados via [+] Adicionar Comando, que devem sempre
+        # mostrar a seta azul independente do whitelist).
+        _is_local_action = getattr(self._spec, "kind", "slash") == "local-action"
+        _kimi_visible = (
+            not _is_local_action
+            and (is_kimi_compatible(self._spec.name) or self._spec.kimi_eligible)
+        )
         sp = self._kimi_btn.sizePolicy()
         sp.setRetainSizeWhenHidden(False)
         self._kimi_btn.setSizePolicy(sp)
         self._kimi_btn.setVisible(_kimi_visible)
-        layout.addWidget(self._kimi_btn)
+        # NOTA: kimi_btn e adicionado ao layout DEPOIS do delete_btn para
+        # respeitar a ordem visual: ▶ verde · copiar · ✕ · ▶ azul.
 
         # Copy button (blue clipboard icon) — copies the full command line
         self._copy_btn = QPushButton("\u29C9")
@@ -211,6 +220,11 @@ class CommandItemWidget(QWidget):
             "QPushButton:hover { color: #7DD3FC; }"
         )
         self._copy_btn.clicked.connect(self._on_copy_clicked)
+        # local-action items have no slash payload to paste, so the copy
+        # button is hidden — the action runs in-process when the queue
+        # reaches the item.
+        if _is_local_action:
+            self._copy_btn.setVisible(False)
         layout.addWidget(self._copy_btn)
 
         # Quick-delete button (red ✕) — next to copy button on the left side
@@ -228,6 +242,7 @@ class CommandItemWidget(QWidget):
             lambda: self.remove_requested.emit(self._spec.position)
         )
         layout.addWidget(self._delete_btn)
+        layout.addWidget(self._kimi_btn)
 
         # Command name (+ optional config path) — capped at 3 visual rows.
         # Tokens beyond the cap are merged into existing rows so very long
@@ -236,6 +251,10 @@ class CommandItemWidget(QWidget):
         label_text = _format_command_label(
             self._spec.name, self._spec.config_path, max_lines=3
         )
+        if _is_local_action:
+            # Make it visually distinct from a slash-command paste; the user
+            # should immediately see this is an in-process action.
+            label_text = f"⚙ {label_text}"
         self._name_label = QLabel(label_text)
         self._name_label.setStyleSheet(
             "color: #FAFAFA; font-family: monospace; font-size: 11px;"
@@ -254,18 +273,13 @@ class CommandItemWidget(QWidget):
         )
         self._interaction_badge.setFixedHeight(18)
 
-        # Model badge — hidden for /model and /clear commands
+        # Model badge — construido para preservar API publica (ex.:
+        # set_model, testes que leem _model_badge.text()), mas nao
+        # renderizado: as badges de model/auto foram removidas dos itens
+        # da queue-command-list a pedido do usuario.
         self._model_badge = ModelBadge(self._spec.model, short=True, parent=self)
-        _hide_badge = (
-            self._spec.name.lower().startswith("/model")
-            or self._spec.name.strip().lower() == "/clear"
-        )
-        if not _hide_badge:
-            layout.addWidget(self._model_badge)
-            layout.addWidget(self._interaction_badge)
-        else:
-            self._model_badge.setVisible(False)
-            self._interaction_badge.setVisible(False)
+        self._model_badge.setVisible(False)
+        self._interaction_badge.setVisible(False)
         root.addWidget(main_row_widget)
 
         # Dashed separator line
@@ -372,15 +386,9 @@ class CommandItemWidget(QWidget):
         )
         self._model_badge.deleteLater()
         self._model_badge = ModelBadge(model, short=True, parent=self)
-        _hide_badge = (
-            self._spec.name.lower().startswith("/model")
-            or self._spec.name.strip().lower() == "/clear"
-        )
-        if not _hide_badge:
-            # Re-insert badge in layout (index 2)
-            self.layout().insertWidget(2, self._model_badge)
-        else:
-            self._model_badge.setVisible(False)
+        # Badge nunca eh renderizada (vide __init__): mantida apenas para
+        # preservar API publica/testes que leem _model_badge.text().
+        self._model_badge.setVisible(False)
 
     def _on_copy_clicked(self) -> None:
         """Copy the full command line to the clipboard."""
@@ -414,6 +422,7 @@ class CommandItemWidget(QWidget):
 
     def _mark_as_sent(self) -> None:
         """Visually mark this row as already sent to terminal."""
+        was_sent = self._is_sent
         self._is_sent = True
         self._run_btn.setText("●")
         self._run_btn.setToolTip("Resetar para pendente")
@@ -430,6 +439,8 @@ class CommandItemWidget(QWidget):
             style.unpolish(self._run_btn)
             style.polish(self._run_btn)
         self._run_btn.update()
+        if not was_sent:
+            self.sent_state_changed.emit(True)
 
     def is_pending_run(self) -> bool:
         """True if this row has not yet been sent to the terminal."""
@@ -437,6 +448,7 @@ class CommandItemWidget(QWidget):
 
     def reset_to_pending(self) -> None:
         """Reset this row back to pending state (for loop restart)."""
+        was_sent = self._is_sent
         self._is_sent = False
         self._run_btn.setText("▶")
         self._run_btn.setToolTip("Executar no terminal")
@@ -453,6 +465,8 @@ class CommandItemWidget(QWidget):
             style.polish(self._run_btn)
         self._run_btn.update()
         self.set_status(CommandStatus.PENDENTE)
+        if was_sent:
+            self.sent_state_changed.emit(False)
 
     # ─────────────────────────────────────────── Drag-and-drop source ─── #
 

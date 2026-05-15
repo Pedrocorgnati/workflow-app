@@ -13,9 +13,12 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
+import sys
+from typing import Any, Optional
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
@@ -37,18 +40,17 @@ from workflow_app import dcp as dcp_pkg
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
-from workflow_app.dcp.specific_flow_handler import build_paste_command_only
 from workflow_app.services.delivery_invalid_formatter import (
     format_delivery_invalid_popup,
 )
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
-from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, InteractionType, ModelName
+from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, FlagSpec, InteractionType, ModelName
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
+    COMMAND_FLAG_SPECS,
     TEMPLATE_BLOG,
     TEMPLATE_BLOG_STOCKPILE,
     TEMPLATE_BOILERPLATE,
-    TEMPLATE_BRIEF_FEATURE,
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
     TEMPLATE_DAILY,
@@ -56,6 +58,7 @@ from workflow_app.templates.quick_templates import (
     TEMPLATE_INTAKE_REVIEW,
     TEMPLATE_INTAKE_SEED,
     TEMPLATE_JSON,
+    TEMPLATE_MICRO_ARCHITECTURE,
     TEMPLATE_MIGRATION,
     TEMPLATE_MKT,
     TEMPLATE_MODULES,
@@ -107,6 +110,53 @@ _EFFORT_MAP = {
     "high": EffortLevel.HIGH,
     "max": EffortLevel.MAX,
 }
+
+# GROUP_MAP — regras de injecao de /clear, /model, /effort por grupo de comando.
+# Centralizado aqui para eliminar hardcode por botao (WORKFLOW-APP-RULES.md).
+GROUP_MAP: dict[str, dict[str, Any]] = {
+    "loop": {
+        "model": ModelName.OPUS,
+        "effort": EffortLevel.HIGH,
+    },
+    "daily_loop": {
+        "model": ModelName.SONNET,
+        "effort": EffortLevel.STANDARD,
+    },
+    "cmd_single": {
+        "model": ModelName.OPUS,
+        "effort": EffortLevel.HIGH,
+    },
+}
+
+
+def _build_prep_specs(group: str, start_position: int = 1) -> list[CommandSpec]:
+    """Retorna /clear, /model, /effort como CommandSpecs conforme GROUP_MAP."""
+    cfg = GROUP_MAP.get(group, {})
+    model = cfg.get("model", ModelName.OPUS)
+    effort = cfg.get("effort", EffortLevel.HIGH)
+    model_str = model.value.lower()
+    effort_str = effort.value
+    return [
+        CommandSpec(name="/clear", model=model, interaction_type=InteractionType.AUTO, position=start_position),
+        CommandSpec(name=f"/model {model_str}", model=model, interaction_type=InteractionType.AUTO, position=start_position + 1),
+        CommandSpec(name=f"/effort {effort_str}", model=model, interaction_type=InteractionType.AUTO, position=start_position + 2),
+    ]
+
+
+@dataclass(frozen=True)
+class DcpBuildContext:
+    """Result of `_dcp_build_preflight` when all 6 gates pass.
+
+    `delivery` is forward-referenced (file has `from __future__ import
+    annotations`) to keep `workflow_app.models.delivery.Delivery` import
+    lazy, matching how `_on_dcp_build_pipeline_clicked` resolves it.
+    """
+
+    cm_id: str
+    module_state: str
+    regenerate: bool
+    wbs_root: Path
+    delivery: "Delivery"  # noqa: F821 — resolved lazily via __future__ annotations
 
 
 class _CollapsibleSection(QWidget):
@@ -253,8 +303,27 @@ class CommandQueueWidget(QWidget):
         # legacy templates.
         self._current_dcp_flow_path: Path | None = None
 
+        # DCP B-dcp pipeline context awaiting the final local-action
+        # (`dcp-load-specific-flow`) at queue position 6. Armed by
+        # `_on_dcp_build_pipeline_clicked` after preflight succeeds and the
+        # 5-slash + 1-local-action specs are enqueued. Consumed by
+        # `_handle_dcp_load_specific_flow` (Task 13) to locate the freshly
+        # regenerated SPECIFIC-FLOW.json and emit it as the next pipeline.
+        self._pending_dcp_load_ctx: Optional[DcpBuildContext] = None
+
         self._setup_ui()
         self._connect_signals()
+
+        # Register the in-process local action consumed at queue position 6
+        # of the B-dcp pipeline. The callable is the bound method
+        # `_handle_dcp_load_specific_flow` (implemented by Task 13).
+        # `register_local_action` overwrites any prior registration, so
+        # re-instantiating the widget is safe.
+        from workflow_app.command_queue.local_actions import register_local_action
+        register_local_action(
+            "dcp-load-specific-flow",
+            self._handle_dcp_load_specific_flow,
+        )
 
     # ─────────────────────────────────────────────── Attachment proxy ─── #
 
@@ -285,16 +354,300 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save("Daily")
 
     def _on_daily_loop_command_ready(self, command_line: str) -> None:
-        spec = CommandSpec(
-            name=command_line,
-            model=ModelName.OPUS,
-            interaction_type=InteractionType.INTERACTIVE,
-            position=len(self._items) + 1,
+        dl_cfg = GROUP_MAP.get("daily_loop", {})
+        dl_model = dl_cfg.get("model", ModelName.SONNET)
+        dl_effort = dl_cfg.get("effort", EffortLevel.STANDARD)
+        specs = _build_prep_specs("daily_loop", start_position=1)
+        specs.append(
+            CommandSpec(
+                name=command_line,
+                model=dl_model,
+                interaction_type=InteractionType.INTERACTIVE,
+                config_path="",
+                effort=dl_effort,
+                position=len(specs) + 1,
+            )
         )
-        self.add_command(spec)
+        self.load_pipeline(specs)
         self._template_label.setText("  \U0001f4cb  Daily Loop")
         self._template_label.setVisible(True)
         self._maybe_auto_save("Daily Loop")
+
+    def _candidate_md_roots(self, path_arg: str) -> list[Path]:
+        """Candidatos de base_dir para resolver path_arg relativo de um .md.
+
+        Ordem: project_dir carregado -> cwd -> raiz do SystemForge detectada
+        a partir de __file__ (mesmo ancora usada pela terminal subprocess
+        do output_panel, onde Claude Code de fato executa).
+        Cobre o caso onde workflow-app foi lancado de /home/pedro mas o spec
+        vive em /home/pedro/Repositorios/<repo>/blacksmith/...
+        """
+        from workflow_app.config.app_state import app_state
+
+        p = Path(path_arg)
+        if p.is_absolute():
+            return [p]
+
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+
+        def add(base: Path | None) -> None:
+            if base is None:
+                return
+            try:
+                resolved = (base / p).resolve()
+            except OSError:
+                return
+            if resolved not in seen:
+                seen.add(resolved)
+                candidates.append(resolved)
+
+        if app_state.has_config and app_state.config is not None:
+            add(app_state.config.project_dir)
+
+        add(Path.cwd())
+
+        sf_root = self._find_systemforge_root()
+        add(sf_root)
+
+        return candidates
+
+    @staticmethod
+    def _find_systemforge_root() -> Path | None:
+        """Anda para cima a partir de __file__ ate achar marcador SystemForge
+        (.claude/commands/ + ai-forge/ + CLAUDE.md). Mesma heuristica de
+        output_panel._find_systemforge_root."""
+        candidate = Path(__file__).resolve().parent
+        while candidate != candidate.parent:
+            if (
+                (candidate / ".claude" / "commands").is_dir()
+                and (candidate / "ai-forge").is_dir()
+                and (candidate / "CLAUDE.md").is_file()
+            ):
+                return candidate
+            candidate = candidate.parent
+        return None
+
+    def _resolve_relative_md(self, path_arg: str) -> Path | None:
+        """Primeiro candidato existente em _candidate_md_roots; None se nenhum."""
+        for c in self._candidate_md_roots(path_arg):
+            if c.exists():
+                return c
+        return None
+
+    @classmethod
+    def _existing_loop_slug_from_path(cls, path_arg: str) -> str | None:
+        """Detecta IDENTIDADE de loop ja persistido em disco.
+
+        Delega para `ai-forge/scripts/normalize_loop_name.py` (single
+        source of truth). Retorna o slug preservado quando o helper
+        canonico classifica o path como re-entry; retorna None caso
+        contrario.
+
+        Usado pelo collision guard em `_on_loop_command_ready` ANTES de
+        invocar o normalizador completo, para detectar conflito entre
+        `--name` explicito do usuario e loop existente em disco.
+        """
+        try:
+            result = cls._invoke_loop_normalizer(path=path_arg)
+        except Exception:
+            return None
+        if result is None or not result.get("was_re_entry"):
+            return None
+        return result.get("slug")
+
+    @classmethod
+    def _derive_loop_slug_from_path(cls, path_arg: str) -> str:
+        """Fallback determinista quando NAO ha `--name` explicito.
+
+        Delega para `ai-forge/scripts/normalize_loop_name.py`, que
+        implementa as 4 regras canonicas em sintonia com o markdown
+        spec `/loop:create-structure`:
+          1. Re-entry (source.md + _LOOP-CONFIG.json em disco): preserva
+             slug do parent dir AS-IS (forward-only policy).
+          2. Fresh path: aplica mm-dd + kebab + strip stopwords pt-BR
+             + cap 46 chars conforme regex `^\\d{2}-\\d{2}-[a-z0-9]...$`.
+
+        Single source of truth ELIMINA drift entre widget e markdown
+        spec (per adversarial review com /skill:mcp-codex 2026-05-14).
+
+        Fallback de seguranca: se subprocess falhar (script ausente,
+        erro inesperado), cai em `Path.stem` para evitar travamento da
+        fila. Mesmo nesse caso pior, `/loop:create-structure` aplica sua
+        propria normalizacao em runtime.
+        """
+        try:
+            result = cls._invoke_loop_normalizer(path=path_arg)
+        except Exception:
+            return Path(path_arg).stem
+        if result is None or "slug" not in result:
+            return Path(path_arg).stem
+        return result["slug"]
+
+    @classmethod
+    def _canonical_loop_slug(
+        cls,
+        name_arg: str | None,
+        path_arg: str,
+    ) -> str | None:
+        """Computa slug FINAL canonico para enfileirar todas as fases do /loop.
+
+        Garante que `/loop:create-structure`, `/loop:individual-analysis`,
+        `/loop:integration`, `/loop:review`, `/loop:workflow-app` (e
+        `/loop:mark-type`, `/loop:check-tasks-and-cmd` em --both) recebam
+        EXATAMENTE o mesmo `--name` final que `/loop:create-structure`
+        materializara em disco. Sem isso, fases 2..N apontariam para
+        diretorio inexistente quando o helper normaliza `foo` -> `05-14-foo`.
+
+        Retorna None se o helper falhar — caller deve abortar com toast.
+        """
+        try:
+            result = cls._invoke_loop_normalizer(name=name_arg, path=path_arg)
+        except Exception:
+            return None
+        if result is None or "slug" not in result:
+            return None
+        return result["slug"]
+
+    @classmethod
+    def _invoke_loop_normalizer(
+        cls,
+        name: str | None = None,
+        path: str | None = None,
+    ) -> dict | None:
+        """Wrapper sobre `ai-forge/scripts/normalize_loop_name.py`.
+
+        Subprocess intencional (em vez de import direto) por 3 razoes:
+          - workflow-app vive em submodulo separado de ai-forge/scripts;
+          - mantem interface uniforme entre widget (Python) e markdown
+            spec (Bash) — ambos chamam via CLI;
+          - latencia ~100ms aceitavel para flow de click no botao.
+
+        Path resolution: paths relativos sao tentados primeiro contra
+        candidate_md_roots (cwd, project_dir, repo root) do widget. Sem
+        essa pre-resolucao, o helper enxergaria apenas cwd e poderia
+        falhar em detectar re-entry/colisao quando o usuario digita
+        path relativo a outro working dir (per codex review 2026-05-14).
+
+        Retorna dict do JSON parseado em sucesso; None em qualquer falha
+        (script ausente, exit non-zero, JSON mal-formado, timeout).
+        """
+        import json as _json
+        import subprocess as _subprocess
+
+        repo_root = cls._find_systemforge_root_for_class()
+        if repo_root is None:
+            return None
+        script = repo_root / "ai-forge" / "scripts" / "normalize_loop_name.py"
+        if not script.exists():
+            return None
+
+        resolved_path: str | None = path
+        if path:
+            try:
+                p = Path(path).expanduser()
+                if not p.is_absolute():
+                    for candidate in cls._candidate_md_roots_static(path, repo_root):
+                        if candidate.exists():
+                            resolved_path = str(candidate)
+                            break
+            except (OSError, RuntimeError):
+                resolved_path = path
+
+        argv = [sys.executable, str(script), "--json"]
+        if name:
+            argv.extend(["--name", name])
+        if resolved_path:
+            argv.extend(["--path", resolved_path])
+
+        try:
+            proc = _subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+                cwd=str(repo_root),
+            )
+        except (OSError, _subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            return _json.loads(proc.stdout)
+        except _json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _candidate_md_roots_static(path_arg: str, repo_root: Path) -> list[Path]:
+        """Versao classmethod-friendly de `_candidate_md_roots`.
+
+        Tenta resolver `path_arg` relativo contra: cwd, project_dir (se
+        config carregada), e repo_root. Permite que `_invoke_loop_normalizer`
+        funcione sem instancia de widget (chamada em classmethod).
+        """
+        try:
+            from workflow_app.config.app_state import app_state
+        except ImportError:
+            app_state = None  # type: ignore[assignment]
+
+        raw = Path(path_arg).expanduser()
+        if raw.is_absolute():
+            return [raw]
+
+        roots: list[Path] = []
+        try:
+            roots.append(Path.cwd() / raw)
+        except (OSError, RuntimeError):
+            pass
+        if app_state is not None and getattr(app_state, "has_config", False):
+            cfg = getattr(app_state, "config", None)
+            if cfg is not None and getattr(cfg, "project_dir", None):
+                roots.append(Path(cfg.project_dir) / raw)
+        roots.append(repo_root / raw)
+        return roots
+
+    @staticmethod
+    def _find_systemforge_root_for_class() -> Path | None:
+        """Versao class-level de _find_systemforge_root (sem self)."""
+        candidate = Path(__file__).resolve().parent
+        while candidate != candidate.parent:
+            if (
+                (candidate / ".claude" / "commands").is_dir()
+                and (candidate / "ai-forge").is_dir()
+                and (candidate / "CLAUDE.md").is_file()
+            ):
+                return candidate
+            candidate = candidate.parent
+        return None
+
+    def _on_unified_command_ready(self, command_line: str) -> None:
+        """Handler unico para queue-btn-loop, queue-btn-daily-loop e queue-btn-cmd-single.
+
+        Delega para o processamento especifico de cada comando, garantindo
+        que todos usem o mesmo DoublePhaseArgumentDialog refatorado.
+        """
+        tokens = command_line.strip().split()
+        if not tokens:
+            return
+
+        base_cmd = tokens[0]
+        if base_cmd == "/loop":
+            self._on_loop_command_ready(command_line)
+        elif base_cmd == "/daily-loop":
+            self._on_daily_loop_command_ready(command_line)
+        else:
+            # Fallback generico: adiciona como comando simples
+            spec = CommandSpec(
+                name=command_line,
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.INTERACTIVE,
+                position=len(self._items) + 1,
+            )
+            self.add_command(spec)
+            self._template_label.setText(f"  \U0001f4cb  {base_cmd}")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save(base_cmd)
 
     def _on_loop_command_ready(self, command_line: str) -> None:
         """Expand `/loop --{mode} <path.md> [--name <slug>]` into its
@@ -344,12 +697,54 @@ class CommandQueueWidget(QWidget):
             self._maybe_auto_save("Loop")
             return
 
-        slug = name_arg or Path(path_arg).stem
+        # Collision guard (per codex adversarial review 2026-05-14):
+        # quando o usuario fornece --name explicito MAS o path aponta para
+        # um loop ja persistido em disco com slug DIFERENTE, abortar com
+        # toast claro. Criar diretorio paralelo nessa situacao orfanaria
+        # o loop existente silenciosamente.
+        existing_slug = self._existing_loop_slug_from_path(path_arg)
+        if name_arg and existing_slug and name_arg != existing_slug:
+            signal_bus.toast_requested.emit(
+                f"Conflito: --name '{name_arg}' divergente do loop existente "
+                f"'{existing_slug}' em {path_arg}. Para reutilizar, omita "
+                f"--name ou use --name {existing_slug}. Para criar loop "
+                f"novo, aponte para um source.md fora desse diretorio.",
+                "error",
+            )
+            return
+
+        # Slug FINAL canonico (post-normalizacao mm-dd + kebab + stopwords).
+        # Delega para ai-forge/scripts/normalize_loop_name.py — single source
+        # of truth compartilhada com `/loop:create-structure` markdown spec.
+        # Sem isso, fases 2..N enfileiradas com slug pre-normalizacao
+        # apontariam para diretorio inexistente em runtime (bug e2e
+        # identificado pelo codex review).
+        slug = self._canonical_loop_slug(name_arg or None, path_arg)
+        if slug is None:
+            signal_bus.toast_requested.emit(
+                f"Erro ao normalizar nome do loop. Verifique "
+                f"ai-forge/scripts/normalize_loop_name.py e tente novamente "
+                f"com --name explicito.",
+                "error",
+            )
+            return
+
+        loop_cfg = GROUP_MAP.get("loop", {})
+        loop_model = loop_cfg.get("model", ModelName.OPUS)
+        loop_effort = loop_cfg.get("effort", EffortLevel.HIGH)
 
         if mode == "--cmd-single":
-            md_path = Path(path_arg)
-            if not md_path.is_absolute():
-                md_path = (Path.cwd() / md_path).resolve()
+            from workflow_app.config.app_state import app_state
+
+            md_path = self._resolve_relative_md(path_arg)
+            if md_path is None or not md_path.exists():
+                tried = self._candidate_md_roots(path_arg)
+                tried_str = "\n  - ".join(str(p) for p in tried) or path_arg
+                signal_bus.toast_requested.emit(
+                    f"Erro ao ler {path_arg}: arquivo nao encontrado em:\n  - {tried_str}",
+                    "error",
+                )
+                return
             try:
                 content = md_path.read_text(encoding="utf-8")
             except OSError as exc:
@@ -357,6 +752,14 @@ class CommandQueueWidget(QWidget):
                     f"Erro ao ler {md_path}: {exc}", "error"
                 )
                 return
+
+            base_dir = md_path.parent
+            for parent in (md_path.parent, *md_path.parent.parents):
+                if (parent / ".claude").is_dir():
+                    base_dir = parent
+                    break
+            if app_state.has_config and app_state.config is not None:
+                base_dir = app_state.config.project_dir
 
             cmd_target_slash = ""
             fm_match = re.search(r"^cmd_target:\s*([^\r\n]+)", content, re.MULTILINE)
@@ -375,23 +778,66 @@ class CommandQueueWidget(QWidget):
                 return
 
             target_disk = cmd_target_slash.lstrip("/").replace(":", "/")
-            cmd_file_path = Path.cwd() / ".claude" / "commands" / f"{target_disk}.md"
+            cmd_file_path = base_dir / ".claude" / "commands" / f"{target_disk}.md"
             cmd_action = "update" if cmd_file_path.exists() else "create"
 
             md_path_str = str(md_path)
-            commands = [
-                "/clear",
-                "/model opus",
-                "/effort high",
-                f"/cmd:{cmd_action} {md_path_str}",
-                f"/cmd:review {cmd_target_slash} {md_path_str}",
-            ]
-            if self._use_kimi_chk.isChecked():
-                commands.extend([
-                    "/clear",
-                    f"/cmd:kimi-pair-analyse --approved {md_path_str}",
-                    f"/kimi:pair-execute --approved {md_path_str}",
-                ])
+            kimi_slug = cmd_target_slash.lstrip("/")
+            report_path = f"blacksmith/{kimi_slug}-kimi-pair-report.md"
+            specs = _build_prep_specs("cmd_single", start_position=1)
+            specs.append(
+                CommandSpec(
+                    name=f"/cmd:{cmd_action} {md_path_str}",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
+            specs.append(
+                CommandSpec(
+                    name=f"/cmd:kimi-pair-analyse {cmd_target_slash}",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.append(
+                CommandSpec(
+                    name=f"/cmd:kimi-pair-execute {report_path}",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
+            specs.append(
+                CommandSpec(
+                    name=f"/cmd:review {cmd_target_slash} {md_path_str}",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
+            specs.append(
+                CommandSpec(
+                    name="/cmd:readme-upd",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
             label = f"  \U0001f4cb  Loop --cmd-single: {cmd_target_slash} ({cmd_action})"
             auto_save_label = f"Loop --cmd-single {cmd_target_slash}"
         else:
@@ -423,26 +869,33 @@ class CommandQueueWidget(QWidget):
                     f"/loop:workflow-app {mode_flag} --name {slug}",
                 ]
 
-            commands = ["/clear", "/model opus", "/effort high", sub_names[0]]
+            specs: list[CommandSpec] = []
+            specs.extend(_build_prep_specs("loop", start_position=1))
+            specs.append(
+                CommandSpec(
+                    name=sub_names[0],
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
             for sub in sub_names[1:]:
-                commands.append("/clear")
-                commands.append(sub)
+                specs.extend(_build_prep_specs("loop", start_position=len(specs) + 1))
+                specs.append(
+                    CommandSpec(
+                        name=sub,
+                        model=loop_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=loop_effort,
+                        position=len(specs) + 1,
+                    )
+                )
 
             label = f"  \U0001f4cb  Loop {mode}: {slug} ({len(sub_names)} fases)"
             auto_save_label = f"Loop {mode} {slug}"
-
-        specs: list[CommandSpec] = []
-        for i, cmd in enumerate(commands, start=1):
-            specs.append(
-                CommandSpec(
-                    name=cmd,
-                    model=ModelName.OPUS,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=EffortLevel.HIGH,
-                    position=i,
-                )
-            )
 
         self._template_label.setText(label)
         self._template_label.setVisible(True)
@@ -468,7 +921,8 @@ class CommandQueueWidget(QWidget):
 
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        # Task 2 (loop 05-13-workflow-app-layout-2): margin-top 10 no container main-command-queue.
+        main_layout.setContentsMargins(0, 10, 0, 0)
         main_layout.setSpacing(0)
 
         # Header — tab row (Daily | Workflow | Auxiliar) + accordion content
@@ -481,7 +935,8 @@ class CommandQueueWidget(QWidget):
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(4, 4, 4, 4)
+        # Task 1 (loop 05-13-workflow-app-layout-2): margin-top 10 no container output-toolbar-left.
+        header_layout.setContentsMargins(4, 14, 4, 4)
         header_layout.setSpacing(0)
 
         # ── Tab bar (3 buttons in a row) ─────────────────────────────────
@@ -527,14 +982,17 @@ class CommandQueueWidget(QWidget):
         daily_loop_pill = self._AttachmentProxy(
             self, self._on_daily_loop_clicked
         )
+        daily_loop_spec = COMMAND_FLAG_SPECS.get("/daily-loop")
         daily_loop_btn = DoublePhaseButton(
             label="daily-loop",
             pipeline_name="/daily-loop",
             argument_hint="[descricao da task] [config.json] [--tasklist <path.md>]",
             default_md_dir="blacksmith/daily-loop/",
             radio_summaries={},
+            flags_boolean=daily_loop_spec.flags_boolean if daily_loop_spec else None,
+            flags_with_value=daily_loop_spec.flags_with_value if daily_loop_spec else None,
             pill=daily_loop_pill,
-            on_command_ready=self._on_daily_loop_command_ready,
+            on_command_ready=self._on_unified_command_ready,
             parent=self,
         )
         daily_loop_btn.setProperty("testid", "queue-btn-daily-loop")
@@ -553,6 +1011,7 @@ class CommandQueueWidget(QWidget):
         loop_pill = self._AttachmentProxy(
             self, self._on_loop_clicked
         )
+        loop_spec = COMMAND_FLAG_SPECS.get("/loop")
         loop_btn = DoublePhaseButton(
             label="loop",
             pipeline_name="/loop",
@@ -564,8 +1023,10 @@ class CommandQueueWidget(QWidget):
                 "--cmd-single": "para criar ou atualizar um unico slash-command via sub-pipeline reduzida direta",
                 "--both": "para fluxos que vao conter tasks variadas e criacao de comandos",
             },
+            flags_boolean=loop_spec.flags_boolean if loop_spec else None,
+            flags_with_value=loop_spec.flags_with_value if loop_spec else None,
             pill=loop_pill,
-            on_command_ready=self._on_loop_command_ready,
+            on_command_ready=self._on_unified_command_ready,
             parent=self,
         )
         loop_btn.setProperty("testid", "queue-btn-loop")
@@ -614,12 +1075,13 @@ class CommandQueueWidget(QWidget):
              lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
              "queue-btn-blog"),
             ("blog stockpile",
-             "Blog Stockpile — gera + promove + publica no GitHub. "
+             "Blog Stockpile — gera + push remoto do stockpile. "
              "Fase 1 (geracao): expand-keywords → cluster-keywords → prioritize-topics → "
              "deduplicate-topics → generate-briefs → write-articles (stockpile) → "
              "review-seo → quality-gate (--mode stockpile). "
-             "Fase 2 (deploy): stockpile-promote (--skip-commit) → hreflang-map → "
-             "commit:multilanguage (commit + push GitHub).",
+             "Fase 2 (push): stockpile-push (commit + push idempotente). "
+             "Promote para content/{locale}/blog/ e hreflang sao responsabilidade "
+             "do workflow GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
              lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
              "queue-btn-blog-stockpile"),
         ])
@@ -634,25 +1096,35 @@ class CommandQueueWidget(QWidget):
             ("brief new", "/first-brief-create → intake → PRD (novo projeto)",
              lambda: self._load_quick_template(TEMPLATE_BRIEF_NEW, name="Brief \u2014 Novo Projeto"),
              "queue-btn-brief-new"),
-            ("brief feat", "/feature-brief-create → intake → PRD (nova feature)",
-             lambda: self._load_quick_template(TEMPLATE_BRIEF_FEATURE, name="Brief \u2014 Feature"),
-             "queue-btn-brief-feat"),
+            ("micro-arch",
+             "Pipeline DCP-lite /micro:* \u2014 5 comandos que produzem PRD + USER-STORIES + "
+             "ARCHITECTURE + _micro-flow-hints + modules consumiveis diretamente por "
+             "queue-btn-dcp-build (sem passo intermediario): "
+             "/micro:brief \u2192 /micro:architecture \u2192 /micro:specific-flow-prep \u2192 "
+             "/micro:modularize \u2192 /micro:review (com /clear + /model + /effort por boundary).",
+             lambda: self._load_quick_template(TEMPLATE_MICRO_ARCHITECTURE, name="Micro-Arch"),
+             "queue-btn-micro-arch"),
             ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
              self._on_modules_clicked,
              "queue-btn-modules"),
-            ("DCP: Gerar Pipeline (regen)",
-             "DESTRUTIVO quando SPECIFIC-FLOW.json ja existe.\n"
-             "Cola /build-module-pipeline no terminal — decide automaticamente entre novo "
-             "pipeline (state=pending) ou --regenerate (sobrescreve, salva .bak-{ISO}). "
-             "Edicoes manuais no SPECIFIC-FLOW.json sao perdidas. "
-             "Modal de confirmacao aparece antes do paste quando o arquivo ja existe.",
-             self._on_dcp_build_clicked, "queue-btn-dcp-build"),
+            ("DCP: Build + Load (pipeline)",
+             "Enfileira pipeline B-dcp completo (5 cmds /dcp:* + carga local de SPECIFIC-FLOW) "
+             "em queue-command-list para o modulo atual.\n"
+             "Apos o pipeline rodar com sucesso, a fila e substituida pelos comandos do "
+             "SPECIFIC-FLOW.json gerado. Compativel com producer canonico e producer micro.\n"
+             "DESTRUTIVO quando SPECIFIC-FLOW.json ja existe (passa --regenerate, salva .bak-{ISO}). "
+             "Modal de confirmacao antes da pipeline rodar.",
+             self._on_dcp_build_pipeline_clicked, "queue-btn-dcp-build"),
             ("DCP: Specific-Flow (load)",
+             "FALLBACK MANUAL: usar apenas quando o operador editou SPECIFIC-FLOW.json a mao "
+             "apos um build anterior. O caminho default agora e [DCP: Build + Load (pipeline)] "
+             "(queue-btn-dcp-build), que enfileira a pipeline B-dcp completa e ja carrega o "
+             "flow gerado no 6o item.\n"
              "Le o SPECIFIC-FLOW.json do modulo atual e carrega os comandos na fila para "
              "execucao manual.\n"
              "ATENCAO: deletes/reorder na fila visual sao TRANSIENT — re-clicar este botao "
              "recarrega do disco e os itens removidos voltam. Para fix permanente, edite "
-             "MODULE-META.json e regenere via [DCP: Gerar Pipeline].",
+             "MODULE-META.json e regenere via [DCP: Build + Load (pipeline)].",
              self._on_dcp_specific_flow_clicked, "queue-btn-dcp-specific-flow"),
         ])
         self._apply_dcp_reader_gating(workflow_content)
@@ -669,12 +1141,31 @@ class CommandQueueWidget(QWidget):
              "queue-btn-mkt"),
             ("boilerplate", "Boilerplate: scan → convert-nextjs → cleanup → persona → mockify → persona-assets → enhance-fe → gen-sql → finalize. Abre modal para path do repo (NAO le project.json).",
              self._on_boilerplate_clicked, "queue-btn-boilerplate"),
-            ("Cmd Single",
-             "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
-             "avulso sem preparo terminal. Selecione um .md com heading canonico "
-             "(# /grupo:nome) e o workflow-app expande a sub-sequencia inline.",
-             self._on_cmd_single_clicked,
-             "queue-btn-cmd-single"),
+            # Cmd Single: modal simplificado com fixed_flag="cmd-single".
+            # Mostra apenas o input de path — sem checkbox, sem campo condicional.
+            # Monta automaticamente: /loop --cmd-single <path.md>
+            (lambda btn=None: (
+                btn := DoublePhaseButton(
+                    label="Cmd Single",
+                    pipeline_name="/loop",
+                    argument_hint="",
+                    default_md_dir="blacksmith/loop/",
+                    radio_summaries={},
+                    flags_boolean=[],
+                    flags_with_value=[],
+                    fixed_flag="cmd-single",
+                    pill=None,
+                    on_command_ready=self._on_unified_command_ready,
+                    parent=self,
+                ),
+                btn.setProperty("testid", "queue-btn-cmd-single"),
+                btn.setToolTip(
+                    "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
+                    "avulso. Informe o path do .md da spec do comando."
+                ),
+                btn.setStyleSheet(_SECTION_BTN_STYLE),
+                btn,
+            )[-1])(),
             ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
              lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
              "queue-btn-intake-seed"),
@@ -803,6 +1294,13 @@ class CommandQueueWidget(QWidget):
         self._btn_schedule_autocast.clicked.connect(
             lambda: signal_bus.schedule_autocast_requested.emit()
         )
+
+        def _on_schedule_visual_changed(label: str, qss: str, tooltip: str) -> None:
+            self._btn_schedule_autocast.setText(label)
+            self._btn_schedule_autocast.setStyleSheet(qss)
+            self._btn_schedule_autocast.setToolTip(tooltip)
+
+        signal_bus.schedule_autocast_visual_changed.connect(_on_schedule_visual_changed)
         play_row_bottom.addWidget(self._btn_schedule_autocast, stretch=1)
         # schedule-autocast-btn e queue-div-use-kimi compartilham o mesmo
         # stretch para se redimensionarem identicamente conforme a janela.
@@ -965,6 +1463,7 @@ class CommandQueueWidget(QWidget):
 
         # Add button footer
         add_bar = QWidget()
+        add_bar.setProperty("testid", "queue-add-bar")
         add_bar.setStyleSheet(
             "background-color: #27272A; border-top: 1px solid #3F3F46;"
         )
@@ -972,6 +1471,7 @@ class CommandQueueWidget(QWidget):
         al = QHBoxLayout(add_bar)
         al.setContentsMargins(8, 4, 8, 4)
         add_btn = QPushButton("[+] Adicionar Comando")
+        add_btn.setProperty("testid", "queue-btn-add-command")
         add_btn.setStyleSheet(
             "QPushButton { background-color: transparent; color: #FBBF24;"
             "  border: none; font-size: 12px; }"
@@ -1272,20 +1772,24 @@ class CommandQueueWidget(QWidget):
         )
         return self._load_quick_template(TEMPLATE_MODULES, name="Modules")
 
-    def _on_dcp_build_clicked(self) -> None:
-        """Paste canonical `/build-module-pipeline` command — Phase A pre-req gate.
+    def _dcp_build_preflight(self) -> Optional[DcpBuildContext]:
+        """Run the 6 MVP gates for `queue-btn-dcp-build` and return context.
 
-        MVP gate (per Codex review T-013/T-052):
+        Gates (per Codex review T-013/T-052):
           1. has_config (project loaded)
           2. delivery.json exists + DeliveryFound (CLI requires it; no bootstrap)
           3. execution_mode != parallel-independent (or block ambiguous case)
           4. current_module exists, module exists, state != done
           5. MODULE-META.json exists, parses, has minimal canonical fields
+          6. dependency readiness for pending → creation transitions
 
-        Choses ``--regenerate`` when module is past pending (state in
-        creation/execution/etc) so the SPECIFIC-FLOW is re-emitted without
-        re-transitioning state. Falls back to bare command only when the reader
-        is genuinely unavailable.
+        On failure: emits the appropriate ``QMessageBox`` and returns ``None``
+        (caller must abort). On success: returns ``DcpBuildContext`` with
+        ``regenerate=True`` when module state is past pending so the
+        SPECIFIC-FLOW is re-emitted without re-transitioning state.
+
+        Reader-unavailable fallback (bare paste) is handled by the caller and
+        is NOT a gate failure — preflight only runs when reader is available.
         """
         from PySide6.QtWidgets import QMessageBox
 
@@ -1299,16 +1803,8 @@ class CommandQueueWidget(QWidget):
                 "DCP",
                 "Carregue um projeto (pill superior) antes de gerar pipeline DCP.",
             )
-            return
+            return None
         config = app_state.config
-
-        # Reader unavailable — emit bare command and let CLI surface errors
-        if not dcp_pkg.READER_AVAILABLE:
-            cmd = build_paste_command_only(config=config)
-            logger.warning("[DCP] reader ausente — colando comando bare")
-            signal_bus.paste_text_in_terminal.emit(cmd)
-            signal_bus.focus_interactive_terminal.emit()
-            return
 
         from workflow_app.dcp.specific_flow_handler import _resolve_wbs_root
         from workflow_app.services.delivery_reader import (
@@ -1331,7 +1827,7 @@ class CommandQueueWidget(QWidget):
                 "  2. Modules (Creation) (queue-btn-modules)\n"
                 "Depois volte ao DCP: Gerar Pipeline.",
             )
-            return
+            return None
         if isinstance(result, DeliveryInvalid):
             body, clipboard_text = format_delivery_invalid_popup(
                 result.path, result.error, result.details,
@@ -1376,10 +1872,10 @@ class CommandQueueWidget(QWidget):
                 signal_bus.toast_requested.emit(
                     "Erros copiados para o clipboard.", "info"
                 )
-            return
+            return None
         if isinstance(result, DeliveryFutureVersion):
             QMessageBox.information(self, "DCP", result.message)
-            return
+            return None
 
         assert isinstance(result, DeliveryFound)
         delivery = result.delivery
@@ -1391,7 +1887,7 @@ class CommandQueueWidget(QWidget):
                 "execution_mode=parallel-independent requer selecao explicita "
                 "do modulo. Use o botao DCP no card do modulo desejado.",
             )
-            return
+            return None
 
         # Gate 4 — current_module is set, exists in modules, not done
         cm_id = delivery.current_module
@@ -1401,14 +1897,14 @@ class CommandQueueWidget(QWidget):
                 "current_module nao definido em delivery.json. "
                 "Rode /modules:create-structure ou /delivery:validate.",
             )
-            return
+            return None
         if delivery.modules and all(
             m.state == "done" for m in delivery.modules.values()
         ):
             QMessageBox.information(
                 self, "DCP", "Todos os modulos estao concluidos."
             )
-            return
+            return None
         module = delivery.modules.get(cm_id)
         if module is None:
             QMessageBox.information(
@@ -1416,14 +1912,14 @@ class CommandQueueWidget(QWidget):
                 f"current_module={cm_id!r} nao existe em modules. "
                 "Rode /delivery:validate.",
             )
-            return
+            return None
         if module.state == "done":
             QMessageBox.information(
                 self, "DCP",
                 f"Modulo {cm_id!r} ja concluido. "
                 "Use /delivery:sign-off ou inicie o proximo modulo.",
             )
-            return
+            return None
 
         # Gate 5 — MODULE-META.json exists, parses, has minimal canonical fields
         meta_path = wbs_root / "modules" / cm_id / "MODULE-META.json"
@@ -1433,7 +1929,7 @@ class CommandQueueWidget(QWidget):
                 f"MODULE-META.json ausente em {meta_path.name}. Phase A nao "
                 "foi completada. Rode Modules (queue-btn-modules).",
             )
-            return
+            return None
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
@@ -1442,7 +1938,7 @@ class CommandQueueWidget(QWidget):
                 f"MODULE-META.json corrupto: {exc}. "
                 "Re-rode Modules (queue-btn-modules).",
             )
-            return
+            return None
         required_keys = {"module_id", "module_name", "module_type"}
         missing = required_keys - set(meta.keys())
         if missing:
@@ -1451,7 +1947,7 @@ class CommandQueueWidget(QWidget):
                 f"MODULE-META.json incompleto. Faltam: {sorted(missing)}. "
                 "Re-rode Modules (queue-btn-modules).",
             )
-            return
+            return None
         # Identity check — meta.module_id MUST match delivery.json[modules] key,
         # otherwise we'd run pipeline against the wrong module's spec.
         if meta.get("module_id") != cm_id:
@@ -1461,7 +1957,7 @@ class CommandQueueWidget(QWidget):
                 f"mas delivery.json aponta current_module={cm_id!r}. "
                 "Resolva o desalinhamento antes de prosseguir.",
             )
-            return
+            return None
 
         # Gate 6 — dependency readiness (mirrors CLI invariant I-10, step 11).
         # Only for pending → creation; modules past pending were already gated at
@@ -1487,51 +1983,232 @@ class CommandQueueWidget(QWidget):
                     "Dependências pendentes:\n" + "\n".join(dep_lines) + "\n\n"
                     "Complete o loop de cada dependência até state=done primeiro.",
                 )
-                return
+                return None
 
         # All gates passed — choose --regenerate when module is past pending
         regenerate = module.state != "pending"
+        return DcpBuildContext(
+            cm_id=cm_id,
+            module_state=module.state,
+            regenerate=regenerate,
+            wbs_root=wbs_root,
+            delivery=delivery,
+        )
 
-        # Destructive guard — when --regenerate AND SPECIFIC-FLOW.json already
-        # exists on disk, surface metadata + warn about manual-edit loss before
-        # pasting. CLI still backs up to .bak-{ISO_UTC} but the queue UI will
-        # re-mirror the regenerated file, so any manual deletes are wiped.
-        if regenerate:
-            flow_path = wbs_root / "modules" / cm_id / "SPECIFIC-FLOW.json"
+    @staticmethod
+    def _read_flow_cmd_count(flow_path: Path) -> int | None:
+        """Return the length of `commands[]` in SPECIFIC-FLOW.json, or None
+        when the file cannot be parsed. Shared by the legacy paste handler
+        and the new B-dcp pipeline handler so both surface the same
+        metadata in the destructive-guard modal.
+        """
+        try:
+            flow_data = json.loads(flow_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(flow_data, dict):
+            return None
+        commands_raw = flow_data.get("commands")
+        if not isinstance(commands_raw, list):
+            return None
+        return len(commands_raw)
+
+    def _on_dcp_build_pipeline_clicked(self) -> None:
+        """Enqueue the B-dcp pipeline with 6 visible items in queue-command-list.
+
+        Pipeline shape (positions 1..6):
+            1. /build-module-pipeline [--regenerate] --module {N} {rel_cfg}
+            2. /dcp:congruence-check --module {N}
+            3. /dcp:temporality-check --module {N}
+            4. /dcp:meta-completeness --module {N}
+            5. /dcp:directive-injector --module {N} --in-place
+            6. (local-action) dcp-load-specific-flow
+
+        Uses `_dcp_build_preflight` for gate evaluation, including the
+        destructive guard (ConfirmRegenerateSpecificFlowModal) when
+        `--regenerate` would overwrite an existing SPECIFIC-FLOW.json.
+
+        Arms `self._pending_dcp_load_ctx` so the local action at position 6
+        (`_handle_dcp_load_specific_flow`) can pick up the same module
+        context after the 5 slash commands have regenerated the flow file.
+        """
+        from workflow_app.config.app_state import app_state
+
+        ctx = self._dcp_build_preflight()
+        if ctx is None:
+            return
+
+        # Defensive: preflight requires has_config==True, so config is non-None.
+        config = app_state.config
+        assert config is not None
+
+        # Destructive guard — when --regenerate AND SPECIFIC-FLOW.json
+        # already exists on disk, surface metadata + warn about manual-edit
+        # loss before enqueueing. Mirrors the legacy paste handler.
+        if ctx.regenerate:
+            flow_path = ctx.wbs_root / "modules" / ctx.cm_id / "SPECIFIC-FLOW.json"
             if flow_path.exists():
-                command_count: int | None = None
-                try:
-                    flow_data = json.loads(flow_path.read_text(encoding="utf-8"))
-                    if isinstance(flow_data, dict):
-                        commands_raw = flow_data.get("commands")
-                        if isinstance(commands_raw, list):
-                            command_count = len(commands_raw)
-                except (json.JSONDecodeError, OSError):
-                    command_count = None
-
                 from workflow_app.dialogs.confirm_regenerate_specific_flow_modal import (
                     ConfirmRegenerateSpecificFlowModal,
                 )
-
+                command_count = self._read_flow_cmd_count(flow_path)
                 modal = ConfirmRegenerateSpecificFlowModal(
                     flow_path=flow_path,
                     command_count=command_count,
-                    cm_id=cm_id,
+                    cm_id=ctx.cm_id,
                     parent=self,
                 )
                 if modal.exec() != QDialog.DialogCode.Accepted:
                     logger.info(
-                        "[DCP] regen cancelado pelo usuario (modulo=%s, cmds=%s)",
-                        cm_id, command_count,
+                        "[DCP] pipeline regen cancelado pelo usuario "
+                        "(modulo=%s, cmds=%s)",
+                        ctx.cm_id, command_count,
                     )
                     return
 
-        cmd = build_paste_command_only(
-            config=config, current_module=cm_id, regenerate=regenerate,
+        # Resolve helpers (kept lazy to avoid a heavy import at module load).
+        from workflow_app.dcp.specific_flow_handler import (
+            _module_number,
+            _relative_config_path,
         )
-        logger.info("[DCP] pasting %r (regenerate=%s)", cmd, regenerate)
-        signal_bus.paste_text_in_terminal.emit(cmd)
-        signal_bus.focus_interactive_terminal.emit()
+
+        rel_cfg = _relative_config_path(config.config_path)
+        module_num = _module_number(ctx.cm_id)
+        regen_flag = " --regenerate" if ctx.regenerate else ""
+
+        specs: list[CommandSpec] = [
+            CommandSpec(
+                name=f"/build-module-pipeline{regen_flag} --module {module_num} {rel_cfg}",
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.AUTO,
+                position=1,
+                effort=EffortLevel.HIGH,
+            ),
+            CommandSpec(
+                name=f"/dcp:congruence-check --module {module_num}",
+                model=ModelName.HAIKU,
+                interaction_type=InteractionType.AUTO,
+                position=2,
+                effort=EffortLevel.HIGH,
+            ),
+            CommandSpec(
+                name=f"/dcp:temporality-check --module {module_num}",
+                model=ModelName.HAIKU,
+                interaction_type=InteractionType.AUTO,
+                position=3,
+                effort=EffortLevel.STANDARD,
+            ),
+            CommandSpec(
+                name=f"/dcp:meta-completeness --module {module_num}",
+                model=ModelName.HAIKU,
+                interaction_type=InteractionType.AUTO,
+                position=4,
+                effort=EffortLevel.STANDARD,
+            ),
+            CommandSpec(
+                name=f"/dcp:directive-injector --module {module_num} --in-place",
+                model=ModelName.HAIKU,
+                interaction_type=InteractionType.AUTO,
+                position=5,
+                effort=EffortLevel.STANDARD,
+            ),
+            CommandSpec(
+                name="DCP: Carregar Specific-Flow",
+                model=ModelName.HAIKU,
+                interaction_type=InteractionType.AUTO,
+                position=6,
+                effort=EffortLevel.LOW,
+                kind="local-action",
+                local_action_id="dcp-load-specific-flow",
+            ),
+        ]
+
+        self._pending_dcp_load_ctx = ctx
+        logger.info(
+            "[DCP] enqueueing B-dcp pipeline (modulo=%s, regenerate=%s, items=%d)",
+            ctx.cm_id, ctx.regenerate, len(specs),
+        )
+        signal_bus.pipeline_ready.emit(specs)
+
+    def _handle_dcp_load_specific_flow(self, spec: CommandSpec) -> bool:
+        """Local-action callable invoked at queue position 6 of the B-dcp
+        pipeline. Consumes `self._pending_dcp_load_ctx` to locate the
+        freshly regenerated SPECIFIC-FLOW.json and emit it via
+        `_enqueue_specific_flow`.
+
+        Steps:
+          1. Pop `_pending_dcp_load_ctx`; refuse with a toast if absent.
+          2. Re-read delivery.json (mutated by the 5 previous pipeline steps).
+          3. Resolve SPECIFIC-FLOW.json for the same module via DCP-9.2 cascade.
+          4. Delegate to `_enqueue_specific_flow` (shared with the manual
+             [DCP: Specific-Flow] button and `/dcp:build-and-load`).
+
+        Returns True only when the enqueue succeeds; False on any guard
+        miss (no context, delivery indisponivel, flow ausente, enqueue
+        rejeitado). Always clears `_pending_dcp_load_ctx` before returning
+        so a subsequent click rearms cleanly.
+        """
+        from workflow_app.config.app_state import app_state
+        from workflow_app.services.delivery_reader import (
+            DeliveryFound,
+            DeliveryReader,
+            resolve_specific_flow,
+        )
+
+        ctx = self._pending_dcp_load_ctx
+        if ctx is None:
+            signal_bus.toast_requested.emit(
+                "DCP load chamado sem contexto pending. "
+                "Re-clique [DCP: Build Module Pipeline].",
+                "error",
+            )
+            logger.warning(
+                "[DCP] dcp-load-specific-flow disparado sem contexto pendente "
+                "(spec=%s); ignorando.", spec.name,
+            )
+            return False
+
+        self._pending_dcp_load_ctx = None
+
+        result = DeliveryReader().load(ctx.wbs_root)
+        if not isinstance(result, DeliveryFound):
+            signal_bus.toast_requested.emit(
+                f"delivery.json indisponivel apos pipeline DCP: "
+                f"{type(result).__name__}",
+                "error",
+            )
+            return False
+
+        config = app_state.config
+        if config is None:
+            signal_bus.toast_requested.emit(
+                "Projeto descarregado entre build e load. "
+                "Recarregue o projeto e re-clique [DCP: Build Module Pipeline].",
+                "error",
+            )
+            return False
+
+        flow_path = resolve_specific_flow(
+            result.delivery,
+            ctx.cm_id,
+            config.project_dir,
+            custom_workflow_root=config.custom_workflow_root or None,
+        )
+        if flow_path is None or not flow_path.exists():
+            signal_bus.toast_requested.emit(
+                f"Pipeline rodou mas SPECIFIC-FLOW.json nao apareceu para "
+                f"{ctx.cm_id}. Verifique logs de /build-module-pipeline na "
+                f"sessao Claude.",
+                "warning",
+            )
+            return False
+
+        return self._enqueue_specific_flow(
+            flow_path=flow_path,
+            cm_id=ctx.cm_id,
+            default_project_name=config.project_name,
+            prefix_commands=None,
+        )
 
     def _on_dcp_specific_flow_clicked(self) -> None:
         """Load SPECIFIC-FLOW.json for the active module into the command queue.
@@ -1830,12 +2507,13 @@ class CommandQueueWidget(QWidget):
             f"/cmd:{cmd_action} {md_path_str}",
             f"/cmd:review {cmd_target_slash} {md_path_str}",
         ]
-        if self._use_kimi_chk.isChecked():
-            commands.extend([
-                "/clear",
-                f"/cmd:kimi-pair-analyse --approved {md_path_str}",
-                f"/kimi:pair-execute --approved {md_path_str}",
-            ])
+        commands.extend([
+            "/clear",
+            f"/cmd:kimi-pair-analyse --approved {md_path_str}",
+            f"/cmd:kimi-pair-execute --approved {md_path_str}",
+            "/clear",
+            "/cmd:readme-upd",
+        ])
 
         specs: list[CommandSpec] = []
         for i, cmd in enumerate(commands, start=1):
@@ -2688,32 +3366,95 @@ class CommandQueueWidget(QWidget):
         self._emit_progress_metrics()
 
     def _on_inline_add_clicked(self) -> None:
-        """[+] Adicionar Comando — abre dialog simples (input + submit) e
-        injeta o texto como proximo comando a executar.
+        """[+] Adicionar Comando — abre dialog com 3 inputs (1 obrigatorio +
+        2 opcionais) + radio de posicao (next/last) e injeta cada texto
+        preenchido como item transiente, na ordem dos campos.
 
-        Comportamento: o item entra entre a ultima linha "sent" (ponto
-        ambar) e a primeira linha "pending" (seta verde). Chamadas
-        sucessivas empilham apos o ultimo injetado. Item e transiente —
-        nao persiste em template/JSON/memoria; load_pipeline() / clear()
-        o apagam.
+        Posicao next (default): o primeiro item entra entre a ultima linha
+        "sent" e a primeira linha "pending"; os subsequentes empilham apos
+        o ultimo injetado (preserva a ordem dos inputs).
+        Posicao last: cada item entra no final da fila, na ordem dos inputs.
+        Itens sao transientes — nao persistem em template/JSON/memoria;
+        load_pipeline() / clear() os apagam.
         """
-        from PySide6.QtWidgets import QInputDialog
-
-        text, ok = QInputDialog.getText(
-            self,
-            "Adicionar Comando",
-            "Comando a executar como proximo:",
+        from PySide6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QLabel,
+            QLineEdit,
+            QRadioButton,
+            QVBoxLayout,
         )
-        if not ok:
-            return
-        cleaned = text.strip() if text else ""
-        if not cleaned:
-            return
-        self._inject_next_command(cleaned)
 
-    def _inject_next_command(self, text: str) -> None:
-        """Cria CommandSpec transiente e insere apos sent/injected items.
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Adicionar Comando")
+        dialog.setMinimumWidth(440)
+        dialog.setMinimumHeight(340)
 
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel("Comando a executar:"))
+        line_edit_1 = QLineEdit(dialog)
+        line_edit_1.setProperty("testid", "queue-add-input-1")
+        layout.addWidget(line_edit_1)
+
+        layout.addSpacing(4)
+        layout.addWidget(QLabel("Comando adicional (opcional):"))
+        line_edit_2 = QLineEdit(dialog)
+        line_edit_2.setProperty("testid", "queue-add-input-2")
+        layout.addWidget(line_edit_2)
+
+        layout.addSpacing(4)
+        layout.addWidget(QLabel("Comando adicional (opcional):"))
+        line_edit_3 = QLineEdit(dialog)
+        line_edit_3.setProperty("testid", "queue-add-input-3")
+        layout.addWidget(line_edit_3)
+
+        layout.addSpacing(8)
+        layout.addWidget(QLabel("Posicao de insercao:"))
+        radio_next = QRadioButton(
+            "next — proximo (entre o ultimo enviado e o proximo pendente)",
+            dialog,
+        )
+        radio_last = QRadioButton(
+            "last — ultimo (apos todos os items da fila)",
+            dialog,
+        )
+        radio_next.setChecked(True)
+        layout.addWidget(radio_next)
+        layout.addWidget(radio_last)
+
+        layout.addStretch()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        line_edit_1.setFocus()
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        texts = [
+            line_edit_1.text().strip(),
+            line_edit_2.text().strip(),
+            line_edit_3.text().strip(),
+        ]
+        filled = [t for t in texts if t]
+        if not filled:
+            return
+        position = "last" if radio_last.isChecked() else "next"
+        for text in filled:
+            self._inject_next_command(text, position=position)
+
+    def _inject_next_command(self, text: str, position: str = "next") -> None:
+        """Cria CommandSpec transiente e insere conforme a posicao.
+
+        position="next" (default): apos sent/injected items (proximo a rodar).
+        position="last": no final da fila (apos todos os items existentes).
         kimi_eligible=True forca a seta azul visivel independente do
         whitelist (ver CommandItemWidget._setup_ui).
         """
@@ -2726,11 +3467,14 @@ class CommandQueueWidget(QWidget):
         item = self._make_item(spec)
         item._is_injected = True
 
-        # Insertion index: depois do ultimo item sent OU injected.
-        insert_idx = 0
-        for i, existing in enumerate(self._items):
-            if existing._is_sent or getattr(existing, "_is_injected", False):
-                insert_idx = i + 1
+        if position == "last":
+            insert_idx = len(self._items)
+        else:
+            # Insertion index: depois do ultimo item sent OU injected.
+            insert_idx = 0
+            for i, existing in enumerate(self._items):
+                if existing._is_sent or getattr(existing, "_is_injected", False):
+                    insert_idx = i + 1
 
         # _items_layout = [items..., stretch]. insertWidget(K, w) coloca
         # w antes do K-esimo filho, entao insert_idx == len(self._items)
@@ -3031,7 +3775,7 @@ class CommandQueueWidget(QWidget):
 
     # ──────────────────────────────────────── Queue state persistence ─ #
 
-    def get_queue_state(self) -> list[dict]:
+    def get_queue_snapshot(self) -> list[dict]:
         """Return serializable snapshot of the current queue (commands + statuses)."""
         result = []
         for item in self._items:
@@ -3049,7 +3793,7 @@ class CommandQueueWidget(QWidget):
             })
         return result
 
-    def restore_queue_state(self, state: list[dict]) -> None:
+    def restore_queue_snapshot(self, state: list[dict]) -> None:
         """Restore queue from a saved state list, preserving statuses and sent flags."""
         from workflow_app.domain import CommandStatus, InteractionType, ModelName
 
@@ -3154,7 +3898,7 @@ class CommandQueueWidget(QWidget):
         if item:
             item.set_status(CommandStatus.EXECUTANDO)
 
-    def _on_command_completed(self, index: int) -> None:
+    def _on_command_completed(self, index: int, success: bool = True) -> None:
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.CONCLUIDO)
