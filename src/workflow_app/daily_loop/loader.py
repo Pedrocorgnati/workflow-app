@@ -249,6 +249,57 @@ def _resolve_bucket_index(daily_loop: dict[str, Any]) -> dict[str, dict[str, Any
     return out
 
 
+def _resolve_item_commands(
+    daily_loop: dict[str, Any], item_id: str
+) -> list[str] | None:
+    """Resolve canonical per-item commands declared in `buckets[*].items[*]`.
+
+    Schema aceito em `buckets[*].items[*]`:
+      - str  -> legacy; sempre retorna None (caller cai no wrapper).
+      - dict -> {"id": "001", "commands": ["/cmd:update --foo", ...]}
+        * commands ausente -> retorna [] (fallback explicito).
+        * commands == []   -> retorna [] (fallback explicito).
+        * commands populada -> retorna list[str] preservada (literal).
+
+    Raises:
+        DailyLoopConfigError: se `commands` existe e nao e list, ou se algum
+        elemento normalizado for /daily-loop:do (token proibido — o caller
+        legacy ja injeta esse wrapper; itens canonicos devem carregar o
+        comando-alvo real, nao o wrapper).
+    """
+    for bucket in daily_loop.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        for entry in bucket.get("items", []) or []:
+            if isinstance(entry, str):
+                if entry.strip() == item_id:
+                    return None
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("id", "")).strip() != item_id:
+                continue
+            if "commands" not in entry:
+                return []
+            cmds = entry.get("commands")
+            if cmds is None:
+                return []
+            if not isinstance(cmds, list):
+                raise DailyLoopConfigError(
+                    f"item {item_id}: 'commands' deve ser list[str]; "
+                    f"recebido {type(cmds).__name__}"
+                )
+            normalized = [str(c).strip() for c in cmds if str(c).strip()]
+            for cmd in normalized:
+                if cmd.split(" ", 1)[0] == "/daily-loop:do":
+                    raise DailyLoopConfigError(
+                        f"item {item_id}: 'commands' nao pode conter "
+                        f"/daily-loop:do (token wrapper reservado ao fallback)"
+                    )
+            return normalized
+    return None
+
+
 # /daily-loop:do tem piso obrigatorio de modelo/effort. Persona forte protege
 # contra: PROGRESS.md corrompido, criterio de aceite aprovado erroneamente,
 # falhas silenciadas. haiku/low produziu regressoes no historico — coercoes
@@ -293,6 +344,78 @@ def _bucket_to_model_effort(b: dict[str, Any]) -> tuple[ModelName, EffortLevel]:
         )
         effort = _DAILY_LOOP_FLOOR_EFFORT
     return model, effort
+
+
+def _raise_if_ambiguous(daily_loop: dict[str, Any], item_id: str) -> None:
+    """Block expansion when an item is still labelled ``task_type=ambiguous``.
+
+    Items left as ``ambiguous`` after ``/loop:mark-type`` exigem decisao humana
+    (escolher entre ``task`` ou ``cmd``) antes de qualquer importacao para a
+    fila do workflow-app. Sem o bloqueio explicito, o loader caia silenciosamente
+    no wrapper ``/daily-loop:do`` ou despachava ``commands`` materializadas como
+    se a classificacao estivesse pronta — ver `_HARDENING-REPORT.md` §3.6.
+
+    Retro-compat preservada:
+      - ``daily_loop.task_types`` ausente -> noop.
+      - ``task_types`` presente mas sem entry para ``item_id`` -> noop.
+      - ``task_types[item_id]`` != ``"ambiguous"`` -> noop.
+
+    Quando dispara, a mensagem informa exatamente o que corrigir (path do
+    arquivo, iid e razao registrada em ``items_index[item_id].blocked_reason``).
+    """
+    task_types = daily_loop.get("task_types")
+    if not isinstance(task_types, dict):
+        return
+    if task_types.get(item_id) != "ambiguous":
+        return
+    items_index = daily_loop.get("items_index")
+    if isinstance(items_index, dict) and isinstance(items_index.get(item_id), dict):
+        blocked_reason = items_index[item_id].get(
+            "blocked_reason", "sem motivo registrado"
+        )
+    else:
+        blocked_reason = "sem motivo registrado"
+    raise DailyLoopConfigError(
+        f"item {item_id} esta marcado task_type=ambiguous. "
+        f"Resolver manualmente (escolher cmd ou task) em _LOOP-CONFIG.json antes de importar. "
+        f"Razao: {blocked_reason}"
+    )
+
+
+def _warn_silent_fallback_if_items_index_populated(
+    daily_loop: dict[str, Any], item_id: str, do_command: str
+) -> None:
+    """Emit a stderr WARN when the loader takes the legacy fallback wrapper
+    despite `daily_loop.items_index[iid].commands` being populated.
+
+    The silent fallback trap (see _HARDENING-REPORT.md §3.5) happens when
+    `/loop:integration` materialized the per-item commands into
+    `items_index`, but `buckets[*].items[*]` was written as a bare string.
+    The loader cannot use the materialized commands in that shape, so it
+    emits the legacy `/daily-loop:do --slug X --item NNN` wrapper — silently
+    discarding the canonical commands. This warn names the bug and points
+    at the fix, without raising (retro-compat preserved).
+    """
+    items_index = daily_loop.get("items_index")
+    if not isinstance(items_index, dict):
+        return
+    entry = items_index.get(item_id)
+    if not isinstance(entry, dict):
+        return
+    cmds = entry.get("commands")
+    if not isinstance(cmds, list) or not cmds:
+        return
+
+    import sys
+
+    print(
+        f"[daily-loop] WARN: item {item_id} caiu no fallback {do_command}, "
+        f"mas items_index tem {len(cmds)} commands materializadas. "
+        f"Provavel bug: daily_loop.buckets[*].items[*] esta como string. "
+        f"Rodar /loop:integration novamente OU promover manualmente para "
+        f'dict {{"id":"{item_id}","commands":[...]}}.',
+        file=sys.stderr,
+    )
 
 
 def build_daily_loop_specs(
@@ -441,17 +564,40 @@ def build_daily_loop_specs(
             )
             current_effort = effort
 
-        specs.append(
-            CommandSpec(
-                name=f"{do_command} --slug {slug} --item {item.item_id}",
-                model=model,
-                interaction_type=InteractionType.AUTO,
-                config_path="",  # do command resolves loop_root via slug
-                position=0,
-                effort=effort,
-                phase="daily-loop",
+        _raise_if_ambiguous(daily_loop, item.item_id)
+        canonical_cmds = _resolve_item_commands(daily_loop, item.item_id)
+        if canonical_cmds:
+            # Precedencia canonica: items[k].commands populado -> emitir cada
+            # entrada literal como CommandSpec proprio (sem wrapper /slug/--item).
+            for cmd_str in canonical_cmds:
+                specs.append(
+                    CommandSpec(
+                        name=cmd_str,
+                        model=model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=0,
+                        effort=effort,
+                        phase="daily-loop",
+                    )
+                )
+        else:
+            # Fallback wrapper (retro-compat /daily-loop): items legacy como
+            # string pura OU dict sem `commands` populada caem aqui.
+            _warn_silent_fallback_if_items_index_populated(
+                daily_loop, item.item_id, do_command
             )
-        )
+            specs.append(
+                CommandSpec(
+                    name=f"{do_command} --slug {slug} --item {item.item_id}",
+                    model=model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",  # do command resolves loop_root via slug
+                    position=0,
+                    effort=effort,
+                    phase="daily-loop",
+                )
+            )
 
         # Per-item adversarial audit. Roda IMEDIATAMENTE apos o :do — espelha
         # /review-executed-task. Forca opus/standard via emissao explicita
@@ -783,17 +929,40 @@ def build_loop_specs(
             )
             current_effort = effort
 
-        specs.append(
-            CommandSpec(
-                name=f"{do_command} --slug {slug} --item {item.item_id}",
-                model=model,
-                interaction_type=InteractionType.AUTO,
-                config_path="",
-                position=0,
-                effort=effort,
-                phase="loop",
+        _raise_if_ambiguous(daily_loop, item.item_id)
+        canonical_cmds = _resolve_item_commands(daily_loop, item.item_id)
+        if canonical_cmds:
+            # Precedencia canonica /loop --task|--cmd|--cmd-single|--both:
+            # items[k].commands populada por /loop:integration -> emitir cada
+            # entrada literal como CommandSpec (sem wrapper).
+            for cmd_str in canonical_cmds:
+                specs.append(
+                    CommandSpec(
+                        name=cmd_str,
+                        model=model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=0,
+                        effort=effort,
+                        phase="loop",
+                    )
+                )
+        else:
+            # Fallback wrapper para items legacy ou sem commands materializada.
+            _warn_silent_fallback_if_items_index_populated(
+                daily_loop, item.item_id, do_command
             )
-        )
+            specs.append(
+                CommandSpec(
+                    name=f"{do_command} --slug {slug} --item {item.item_id}",
+                    model=model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                    effort=effort,
+                    phase="loop",
+                )
+            )
 
         if _REVIEW_DONE_MODEL != current_model:
             specs.append(
