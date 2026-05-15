@@ -1,0 +1,112 @@
+/*
+ * tokens.qss - Workflow App design tokens (namespace --wf-*).
+ *
+ * Carregado em main_window via QApplication.setStyleSheet. Centraliza cores,
+ * spacings, raios e tipografia usados pelos widgets do workflow-app.
+ *
+ * Qt nao suporta variaveis CSS reais. Este arquivo serve como fonte canonica
+ * de tokens (consultar para evitar literais espalhados pelo codigo) e como
+ * folha de estilo global aplicada por classe/objectName.
+ *
+ * Convencao: --wf-color-*, --wf-space-*, --wf-radius-*, --wf-font-*.
+ *   --wf-color-bg-base:        #18181B
+ *   --wf-color-bg-elev-1:      #1C1C1F
+ *   --wf-color-bg-elev-2:      #27272A
+ *   --wf-color-border-base:    #27272A
+ *   --wf-color-border-strong:  #3F3F46
+ *   --wf-color-border-hover:   #52525B
+ *   --wf-color-fg-mute:        #71717A
+ *   --wf-color-fg-base:        #D4D4D8
+ *   --wf-color-fg-strong:      #FAFAFA
+ *   --wf-color-accent:         #FBBF24
+ *   --wf-color-accent-fg:      #18181B
+ *   --wf-color-danger:         #EF4444
+ *   --wf-color-success:        #22C55E
+ *   --wf-color-info:           #60A5FA
+ *   --wf-color-violet:         #A78BFA
+ *   --wf-color-teal:           #2DD4BF
+ *   --wf-color-violet-bg:      #1E1B4B
+ *   --wf-radius-sm:            4px
+ *   --wf-radius-md:            6px
+ *   --wf-radius-lg:            10px
+ *   --wf-space-1:              4px
+ *   --wf-space-2:              8px
+ *   --wf-space-3:              12px
+ *   --wf-font-mono-sm:         11px monospace
+ *   --wf-font-ui-sm:           12px
+ *   --wf-font-ui-md:           13px
+ */
+
+/* Root central widget background. */
+QWidget#CentralWidget {
+    background-color: #18181B;
+}
+
+/* Splitters used in main window + terminal stack. */
+QSplitter#MainSplitter::handle,
+QSplitter::handle {
+    background-color: #3F3F46;
+}
+QSplitter#MainSplitter::handle:hover,
+QSplitter::handle:hover {
+    background-color: #FBBF24;
+}
+
+/* Generic toggle/utility buttons. */
+QPushButton[wfRole="toggle"] {
+    background-color: #27272A;
+    color: #D4D4D8;
+    border: 1px solid #52525B;
+    border-radius: 4px;
+    font-size: 15px;
+    padding: 2px 0;
+}
+QPushButton[wfRole="toggle"]:hover {
+    background-color: #3F3F46;
+    color: #FAFAFA;
+    border-color: #71717A;
+}
+QPushButton[wfRole="toggle"]:pressed {
+    background-color: #FBBF24;
+    color: #18181B;
+    border-color: #FBBF24;
+}
+
+/* Listeners frame (dots + autocast controls) - generic styling. */
+QFrame#ListenersFrame {
+    background-color: transparent;
+    border: 1px solid #3F3F46;
+    border-radius: 6px;
+}
+
+/* Queue progress ring host. */
+QWidget#QueueProgressRing {
+    background-color: transparent;
+}
+QLabel#QueueProgressRingLabel {
+    color: #D4D4D8;
+    font-size: 11px;
+    font-family: monospace;
+}
+
+/*
+ * Double-phase argument dialog.
+ * Centraliza background, foreground e focus-ring para inputs do dialog
+ * compartilhado por queue-btn-study, queue-btn-loop, etc.
+ */
+QDialog#DoublePhaseArgumentDialog {
+    background-color: #18181B; /* --wf-color-bg-base */
+}
+QDialog#DoublePhaseArgumentDialog QLabel {
+    color: #D4D4D8; /* --wf-color-fg-base */
+}
+QDialog#DoublePhaseArgumentDialog QLineEdit:focus,
+QDialog#DoublePhaseArgumentDialog QTextEdit:focus,
+QTextEdit#DoublePhaseFreetext:focus {
+    border: 1px solid #FBBF24; /* --wf-color-accent */
+}
+QWidget#DoublePhaseEnumFlag QRadioButton {
+    color: #D4D4D8;
+    font-size: 12px;
+    spacing: 4px;
+}
