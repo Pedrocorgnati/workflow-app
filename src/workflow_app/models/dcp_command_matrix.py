@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "ModelLiteral",
     "EffortLiteral",
     "InteractionLiteral",
+    "TrailGateLiteral",
     "CommandIndexEntry",
     "CommandRef",
     "FilterTrailEntry",
@@ -107,12 +108,63 @@ class FilterTrailEntry(BaseModel):
     reason: str
 
 
-class TrailEntry(BaseModel):
-    model_config = _BASE_CONFIG
+TrailGateLiteral = Literal[
+    "congruence",
+    "temporality",
+    "meta-completeness",
+    "directive-injector",
+    "replicate",
+    "filter-modules",
+    "mark-loops",
+]
 
-    at: datetime
-    gate: str
-    details: Dict[str, str] = Field(default_factory=dict)
+
+class TrailEntry(BaseModel):
+    """Granular trail entry. Two shapes coexist in this single model:
+
+    - **Summary event** (1 per gate-run): ``bits_evaluated``, ``bits_flipped_*``,
+      ``run_duration_ms``, ``input_sha256`` populated; flip fields ``None``.
+    - **Flip event** (N per gate-run, N = real flips): ``command_index``,
+      ``from_value`` (alias ``from``), ``to_value`` (alias ``to``), ``reason``,
+      ``predicate`` populated; summary fields ``None``.
+
+    Generic action events (replicate, mark-loops) use ``action``. The ``ts``
+    field accepts the legacy alias ``at`` on read so in-flight matrices keep
+    validating; new writers MUST emit ``ts``.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=False,
+        validate_assignment=True,
+        populate_by_name=True,
+    )
+
+    ts: datetime = Field(validation_alias=AliasChoices("ts", "at"))
+    gate: TrailGateLiteral
+    run_id: str
+
+    bits_evaluated: Optional[int] = None
+    bits_flipped_1_to_0: Optional[int] = None
+    bits_flipped_0_to_1: Optional[int] = None
+    run_duration_ms: Optional[int] = None
+    input_sha256: Optional[str] = None
+
+    command_index: Optional[int] = None
+    from_value: Optional[BitLiteral] = Field(
+        default=None,
+        validation_alias=AliasChoices("from_value", "from"),
+        serialization_alias="from",
+    )
+    to_value: Optional[BitLiteral] = Field(
+        default=None,
+        validation_alias=AliasChoices("to_value", "to"),
+        serialization_alias="to",
+    )
+    reason: Optional[str] = None
+    predicate: Optional[str] = None
+
+    action: Optional[str] = None
 
 
 class TrailSnapshot(BaseModel):
@@ -135,6 +187,15 @@ class ArtifactsState(BaseModel):
 
     last_specific_flow: Optional[str] = None
     last_specific_flow_sha256: Optional[str] = None
+    congruence_last_input_sha256: Optional[str] = None
+    congruence_last_run_at: Optional[datetime] = None
+    temporality_last_input_sha256: Optional[str] = None
+    temporality_last_run_at: Optional[datetime] = None
+    meta_completeness_last_input_sha256: Optional[str] = None
+    meta_completeness_last_run_at: Optional[datetime] = None
+    directive_injector_last_input_sha256: Optional[str] = None
+    directive_injector_last_run_at: Optional[datetime] = None
+    directive_injector_run_at: Optional[datetime] = None
 
 
 class ModuleEntry(BaseModel):
@@ -161,9 +222,18 @@ class FoldInRules(BaseModel):
 class DcpCommandMatrix(BaseModel):
     model_config = _BASE_CONFIG
 
-    schema_version: Literal["1.0.0"] = Field(
-        default="1.0.0",
+    schema_version: Literal["1.0.1"] = Field(
+        default="1.0.1",
         description="SchemaVer interno (ADDITION 1.0.x, REVISION 1.x.0, MODEL x.0.0).",
+    )
+    trail_max_entries: int = Field(
+        default=200,
+        ge=10,
+        le=10000,
+        description=(
+            "Cap canonico do trail per modulo antes de archive. "
+            "Mudancas exigem REVISION SchemaVer (acima de 10000 ou abaixo de 10 sao rejeitadas)."
+        ),
     )
     command_index: List[CommandIndexEntry] = Field(default_factory=list)
     phase_buckets: Dict[str, List[int]] = Field(default_factory=dict)

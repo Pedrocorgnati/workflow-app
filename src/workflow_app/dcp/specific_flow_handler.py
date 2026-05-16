@@ -269,9 +269,23 @@ def resolve(
     )
 
 
+# Re-exports from queue_derivation so callers that have historically imported
+# the matrix-helpers from this module keep working after task-027 / st-05
+# split. `_next_non_done_module_id` already lives here for delivery-driven
+# auto-advance; `_last_module_id` operates on the matrix and is sourced from
+# the queue derivation module.
+try:
+    from workflow_app.dcp.queue_derivation import (  # noqa: E402
+        _last_module_id,
+    )
+except ImportError:  # pragma: no cover — defensive (Pydantic/model dep missing)
+    _last_module_id = None  # type: ignore[assignment]
+
+
 __all__ = [
     "SpecificFlowAction",
     "build_paste_command_only",
     "resolve",
     "_next_non_done_module_id",
+    "_last_module_id",
 ]

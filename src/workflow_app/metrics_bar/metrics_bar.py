@@ -1153,8 +1153,9 @@ class MetricsBar(QWidget):
         Opens a getOpenFileName dialog starting at the dir of the currently
         loaded config (when present); otherwise walks up to find the
         `fallback_segments` directory; otherwise uses cwd. Performs loop-
-        schema validation on `*-loop.json` filenames. Emits
-        `config_change_requested(path)` on success.
+        schema validation by JSON content (not filename suffix) so that
+        `_LOOP-CONFIG.json` and other non `-loop.json` names still get
+        checked. Emits `config_change_requested(path)` on success.
         """
         from workflow_app.config.app_state import app_state
         start_dir = str(Path.cwd())
@@ -1171,32 +1172,58 @@ class MetricsBar(QWidget):
         if not path:
             return
         p = Path(path)
-        if p.name.endswith("-loop.json"):
-            try:
-                raw = json.loads(p.read_text(encoding="utf-8"))
-                required = ["schema_version", "name", "iteration_template", "items", "finalization"]
-                if p.name.endswith("-cmd-loop.json") or p.name.endswith("-both-loop.json"):
+        # Validacao por conteudo (nao por sufixo do filename): qualquer JSON
+        # que pareca loop config (`-loop.json`, `_LOOP-CONFIG.json`, ou
+        # totalmente arbitrario) e validado quando carrega campos canonicos
+        # de loop OU declara `kind: daily-loop` + bloco `daily_loop`.
+        try:
+            raw_probe = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self._signal_bus.toast_requested.emit(
+                f"Erro ao ler {p.name}: {exc}", "error"
+            )
+            return
+        if isinstance(raw_probe, dict):
+            has_loop_fields = (
+                "iteration_template" in raw_probe
+                and "items" in raw_probe
+                and "finalization" in raw_probe
+            )
+            is_daily_loop_kind = (
+                raw_probe.get("kind") == "daily-loop"
+                and "daily_loop" in raw_probe
+            )
+            if has_loop_fields or is_daily_loop_kind:
+                required = ["schema_version", "name"]
+                if has_loop_fields:
+                    required.extend(["iteration_template", "items", "finalization"])
+                if is_daily_loop_kind:
+                    required.append("daily_loop")
+                # `mode` exigido em cmd/both (legacy `-cmd-loop.json` /
+                # `-both-loop.json` por nome) e sempre que o proprio JSON
+                # declarar `mode` (validamos o valor abaixo).
+                if (
+                    p.name.endswith("-cmd-loop.json")
+                    or p.name.endswith("-both-loop.json")
+                ):
                     required.append("mode")
-                missing = [f for f in required if f not in raw]
+                missing = [f for f in required if f not in raw_probe]
                 if missing:
                     self._signal_bus.toast_requested.emit(
-                        f"Schema invalido em {p.name}: campos ausentes {', '.join(missing)}. "
-                        "Verifique se o JSON segue o LOOP_CANONICAL_TEMPLATE.",
+                        f"Schema invalido em {p.name}: campos ausentes "
+                        f"{', '.join(missing)}. Verifique se o JSON segue o "
+                        "LOOP_CANONICAL_TEMPLATE.",
                         "error",
                     )
                     return
-                if "mode" in raw and raw["mode"] not in ("task", "cmd", "both"):
+                if "mode" in raw_probe and raw_probe["mode"] not in ("task", "cmd", "both"):
                     self._signal_bus.toast_requested.emit(
-                        f"Schema invalido em {p.name}: modo '{raw.get('mode')}' nao reconhecido. "
+                        f"Schema invalido em {p.name}: modo "
+                        f"'{raw_probe.get('mode')}' nao reconhecido. "
                         "Valores validos: task, cmd, both.",
                         "error",
                     )
                     return
-            except Exception as exc:
-                self._signal_bus.toast_requested.emit(
-                    f"Erro ao ler {p.name}: {exc}", "error"
-                )
-                return
         self.config_change_requested.emit(path)
 
     def _on_proj_select(self) -> None:
@@ -1270,25 +1297,107 @@ class MetricsBar(QWidget):
         from workflow_app.config.app_state import app_state
         if app_state.has_config:
             raw = app_state.config.raw if app_state.config else {}
-            # Discriminar tipo de JSON pelo schema
+            # Discriminar tipo de JSON pelo schema. `kind` e `loop_mode` sao
+            # eixos ortogonais — extraimos `mode` sempre que o JSON tiver
+            # campos canonicos de loop OU declarar `mode` no root, mesmo
+            # quando `kind == "daily-loop"` (os dois convivem em archives
+            # gerados por /loop+/daily-loop a partir de 2026-05).
             kind = "unknown"
-            loop_mode = None
+            loop_mode: str | None = None
+            has_loop_fields = False
+            is_daily_loop_kind = False
             if isinstance(raw, dict):
-                if raw.get("kind") == "daily-loop" and "daily_loop" in raw:
-                    kind = "daily-loop"
-                elif (
+                has_loop_fields = (
                     "iteration_template" in raw
                     and "items" in raw
                     and "finalization" in raw
-                ):
+                )
+                is_daily_loop_kind = (
+                    raw.get("kind") == "daily-loop" and "daily_loop" in raw
+                )
+                if is_daily_loop_kind:
+                    kind = "daily-loop"
+                elif has_loop_fields:
                     kind = "loop-json"
-                    loop_mode = raw.get("mode")
-                    if loop_mode not in ("task", "cmd", "both"):
-                        loop_mode = "task"
+                # mode extraido independente do branch
+                if has_loop_fields or is_daily_loop_kind:
+                    candidate = raw.get("mode")
+                    if candidate in ("task", "cmd", "both"):
+                        loop_mode = candidate
+                    elif has_loop_fields:
+                        loop_mode = "task"  # default historico
             app_state.set_loop_mode(loop_mode)
             commercial = raw.get("commercial_name", "") or app_state.project_name
             feature = raw.get("feature_name", "")
             self._apply_project_loaded(commercial, feature)
+            # Toast acionavel quando o JSON e um loop config — aponta o
+            # botao certo da queue-strip e mostra contagem de pendencias
+            # lida de PROGRESS.md (fallback: total declarado).
+            if kind in ("daily-loop", "loop-json"):
+                self._emit_loop_loaded_toast(raw, kind)
+
+    def _emit_loop_loaded_toast(self, raw: dict, kind: str) -> None:
+        """Toast pos-load para loop config: contagem de pendentes + CTA do botao certo."""
+        from workflow_app.config.app_state import app_state
+        loop_root: Path | None = None
+        if app_state.has_config and app_state.config:
+            loop_root = Path(app_state.config.config_path).parent
+        # Contagem de pendentes: tenta PROGRESS.md (verdade) -> fallback
+        # `daily_loop.total_items` -> fallback `len(items)`.
+        pending: int | None = None
+        if loop_root is not None:
+            progress_path = loop_root / "PROGRESS.md"
+            if progress_path.is_file():
+                try:
+                    from workflow_app.daily_loop.loader import (
+                        parse_progress_items_loop,
+                    )
+                    items = parse_progress_items_loop(
+                        progress_path.read_text(encoding="utf-8")
+                    )
+                    pending = sum(1 for it in items if it.status == "pending")
+                except Exception:
+                    pending = None
+        if pending is None:
+            total_items = raw.get("daily_loop", {}).get("total_items")
+            if isinstance(total_items, int):
+                pending = total_items
+            else:
+                pending = len(raw.get("items", []) or [])
+        # CTA: daily-loop legacy aponta queue-btn-daily-loop; loop-json
+        # (mode task/cmd/both) aponta queue-btn-loop. JSONs que carregam
+        # AMBOS os shapes (kind=daily-loop + iteration_template) sao
+        # despachaveis pelos dois botoes — preferimos queue-btn-loop
+        # (familia /loop nova) quando `mode` esta presente no root.
+        has_loop_fields = (
+            "iteration_template" in raw and "items" in raw and "finalization" in raw
+        )
+        if has_loop_fields and raw.get("mode") in ("task", "cmd", "both"):
+            cta_btn = "queue-btn-loop"
+            cta_label = "Loop"
+        elif kind == "daily-loop":
+            cta_btn = "queue-btn-daily-loop"
+            cta_label = "Daily loop"
+        else:
+            cta_btn = "queue-btn-loop"
+            cta_label = "Loop"
+        slug = (
+            raw.get("daily_loop", {}).get("slug")
+            or raw.get("name")
+            or "loop"
+        )
+        toast_type = "info" if pending else "warning"
+        msg = (
+            f"{cta_label} carregado ({slug}): {pending} pendente(s). "
+            f"Clique `{cta_btn}` na barra de queue para enfileirar."
+        )
+        if pending == 0:
+            msg = (
+                f"{cta_label} carregado ({slug}): nenhum item pendente em "
+                "PROGRESS.md. Loop ja concluido — rode review/clear conforme "
+                "o fluxo."
+            )
+        self._signal_bus.toast_requested.emit(msg, toast_type)
 
     def _apply_project_loaded(self, name: str, feature_name: str = "") -> None:
         self._project_name_lbl.setText(name)

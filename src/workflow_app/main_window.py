@@ -379,7 +379,6 @@ _DATATEST_FILTERED_IDS = frozenset({
     "autocast-btn",
     "output-toolbar-col1-bottom",
     "output-toolbar-left",
-    "output-toolbar-center",
     "terminal-route-toggles",
     "output-toolbar-col1-top",
     "listeners-frame",
@@ -596,21 +595,21 @@ class MainWindow(QMainWindow):
         self._terminal_is_vertical = False
         self._workspace_collapsed = False
 
-        # Row: [queue-header (left)] [actions+controls (center)] [queue-toggles] [test-mode]
-        # output-toolbar-col1-top (`_toolbar_bar`) foi migrado para a coluna 1
+        # Row: [queue-header (left, com Prompts/Actions tabs absorvidas)] [queue-toggles] [test-mode]
+        # Refactor 2026-05-15 output-toolbar-left consolidation: output-toolbar-center
+        # foi deletada inteira. Seus botoes migraram para as tabs Prompts/Actions
+        # do CommandQueueHeader (via populate_prompts_tab/populate_actions_tab).
+        # output-toolbar-col1-top (`_toolbar_bar`) continua na coluna 1
         # (entre main-window-label e main-command-queue-pill-row).
-        _toolbar_bar, _toolbar_center, _toolbar_left_top = self._build_output_toolbar()
+        _toolbar_bar, _toolbar_left_top = self._build_output_toolbar()
         _toolbar_row = QWidget()
         _toolbar_row_layout = QHBoxLayout(_toolbar_row)
         _toolbar_row_layout.setContentsMargins(0, 10, 0, 0)
         _toolbar_row_layout.setSpacing(10)
 
-        # output-toolbar-left (CommandQueue header_widget) ocupa toda a
-        # altura da coluna esquerda, igualando output-toolbar-center.
-        # output-toolbar-col1-bottom foi migrado para a coluna 1 (abaixo de
-        # output-toolbar-col1-top) — ver insertWidget mais abaixo.
+        # output-toolbar-left (CommandQueue header_widget) agora ocupa toda
+        # a largura disponivel a esquerda — output-toolbar-center deletada.
         _toolbar_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
-        _toolbar_row_layout.addWidget(_toolbar_center, stretch=1)                    # center
         # Nova coluna irma a esquerda de test-mode: aloja terminal-engine-toggle
         # (topo) + queue-count-toggles-row (abaixo). Reparenteia _engine_toggle_btn
         # de _build_workspace_label_bar e _queue_count_toggles_row de
@@ -762,19 +761,22 @@ class MainWindow(QMainWindow):
         self._modal_check_timer.timeout.connect(self._check_for_active_modal)
         self._modal_check_timer.start()
 
-    def _build_output_toolbar(self) -> tuple[QWidget, QWidget, QWidget]:
-        """Single horizontal toolbar acima do dual-terminal splitter.
+    def _build_output_toolbar(self) -> tuple[QWidget, QWidget]:
+        """Toolbar acima do dual-terminal splitter, agora reduzido a 2 widgets.
 
-        Left side: reparenteia `MetricsBar._listeners_frame` (testid=
-        listeners-frame), preservando ownership pelo MetricsBar para que a
-        state machine continue alimentando os dots e o queue-progress-ring
-        via signal_bus.
+        Refactor 2026-05-15 output-toolbar-left consolidation:
+        - output-toolbar-center (right_container) DELETADA inteira.
+        - toolbar-prompts-row, output-toolbar-actions-row, output-toolbar-controls-row DELETADAS.
+        - Brief/Docs descartados (apenas JSON e WS sobrevivem em actions-tab).
+        - Os botoes vivos (4 prompt slots + JSON/WS/mcp-codex/mcp-kimi/double-mcp/asq-user)
+          migraram para as tabs Prompts/Actions do CommandQueueHeader via
+          populate_prompts_tab() / populate_actions_tab().
+        - terminal-route-toggles e toolbar-prompts-config-gear viraram extras
+          do tab_bar (attach_tab_bar_extras), posicionados como abas extras.
 
-        Right side: container vertical com duas linhas. Linha de cima:
-        os 6 botoes de acao rapida (JSON, WS, mcp-codex, mcp-kimi,
-        double-mcp, asq-user) populados via `_populate_header_actions()`.
-        Linha de baixo: alternador de layout (vertical/horizontal) e
-        chevron de colapso do terminal-workspace.
+        Retorna apenas:
+        - `bar` (output-toolbar-col1-top): hospeda listeners-frame na coluna 1.
+        - `left_top` (output-toolbar-col1-bottom): hospeda instance-group abaixo.
         """
         from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
 
@@ -800,17 +802,6 @@ class MainWindow(QMainWindow):
         # automatically when addWidget() is called on a different layout.
         lay.addWidget(self._metrics_bar._listeners_frame)
 
-        # Refactor 2026-05-14 layout-3: output-toolbar-center-top movido para
-        # output-toolbar-col1-bottom (coluna esquerda). output-toolbar-center-bottom
-        # renomeado para output-toolbar-center e ocupa toda a altura do row.
-        # right_container = wrapper da coluna CENTER (mantido como retorno
-        # para preservar a assinatura consumida por _setup_ui).
-        right_container = QWidget()
-        right_container.setObjectName("OutputToolbarRight")
-        right_col = QVBoxLayout(right_container)
-        right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.setSpacing(0)
-
         # left_top: reparenteia instance-group para a coluna esquerda.
         # Posicionado pelo _setup_ui acima de output-toolbar-left.
         left_top = QWidget()
@@ -825,45 +816,9 @@ class MainWindow(QMainWindow):
         left_top_layout.setSpacing(0)
         left_top_layout.addWidget(self._metrics_bar._instance_group)
 
-        center_bottom = QWidget()
-        center_bottom.setObjectName("OutputToolbarCenter")
-        center_bottom.setProperty("testid", "output-toolbar-center")
-        center_bottom.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        center_bottom.setStyleSheet(
-            "QWidget#OutputToolbarCenter { border: 1px solid #3F3F46; border-radius: 6px; }"
-        )
-        center_bottom_layout = QVBoxLayout(center_bottom)
-        center_bottom_layout.setContentsMargins(6, 6, 6, 6)
-        center_bottom_layout.setSpacing(6)
-
-        actions_row = QWidget()
-        actions_row.setProperty("testid", "output-toolbar-actions-row")
-        actions_layout = QHBoxLayout(actions_row)
-        actions_layout.setContentsMargins(0, 0, 0, 0)
-        actions_layout.setSpacing(6)
-
-        controls_row = QWidget()
-        controls_row.setProperty("testid", "output-toolbar-controls-row")
-        controls_layout = QHBoxLayout(controls_row)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(6)
-        controls_layout.addStretch(1)
-
-        # Refactor 2026-05-15 toolbar-prompts-row: row entre controls_row e
-        # actions_row hospedando botoes que PUBLICAM PROMPTS LONGOS no terminal
-        # alvo (roteamento T1/T2 via terminal-route-toggles). Antes hospedava
-        # botoes "nav" de datatest (div-play/cmd-list/nav-*) — removidos.
-        prompts_row = QWidget()
-        prompts_row.setProperty("testid", "toolbar-prompts-row")
-        prompts_layout = QHBoxLayout(prompts_row)
-        prompts_layout.setContentsMargins(0, 0, 0, 0)
-        prompts_layout.setSpacing(6)
-
-        # Task 6 (loop 05-13-workflow-app-layout-2): div T1/T2 ocupa o lugar
-        # fisico liberado pela Task 5. Roteamento ESTRITO: aplica-se apenas
-        # aos botoes das rows output-toolbar-actions-row e
-        # output-toolbar-controls-row via self._publish_to_terminal(). Estilo
-        # espelha queue-div-use-kimi (background, border, radius, indicator).
+        # terminal-route-toggles: roteamento T1/T2. Antes em controls_row;
+        # agora vira "aba extra" do tab_bar via attach_tab_bar_extras().
+        # Estilo espelha queue-div-use-kimi (background, border, radius, indicator).
         _TERMINAL_ROUTE_CHK_STYLE = (
             "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
             "  background: transparent; border: none; padding: 0; }"
@@ -968,7 +923,6 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
         )
         gear_btn.clicked.connect(self._open_prompts_config_dialog)
-        prompts_layout.addWidget(gear_btn)
 
         self._prompt_btn_widgets = []
         for _i in range(4):
@@ -981,10 +935,6 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, idx=_i: self._on_prompt_slot_clicked(idx)
             )
             self._prompt_btn_widgets.append(b)
-            prompts_layout.addWidget(b)
-        prompts_layout.addStretch(1)
-
-        controls_layout.addWidget(_terminal_route_box)
 
         _TOGGLE_BTN_STYLE = (
             "QPushButton { background-color: #27272A; color: #D4D4D8;"
@@ -1065,23 +1015,15 @@ class MainWindow(QMainWindow):
         # Task 3 (loop 05-13-workflow-app-layout-2): _btn_datatest movido para a nova
         # coluna `output-toolbar-test-mode` (4o sibling de _toolbar_row).
 
-        # 3 fileiras dentro de output-toolbar-center (controls_row,
-        # toolbar-prompts-row, actions_row). prompts_row substitui a
-        # legacy output-toolbar-datatest-row.
-        center_bottom_layout.addWidget(controls_row)
-        center_bottom_layout.addWidget(prompts_row)
-        center_bottom_layout.addWidget(actions_row)
+        # Refactor 2026-05-15 output-toolbar-left consolidation:
+        # output-toolbar-center deletada. Os botoes vivos sao roteados para
+        # as novas tabs Prompts/Actions do CommandQueueHeader.
+        action_widgets = self._populate_header_actions()
+        self._command_queue.populate_prompts_tab(self._prompt_btn_widgets)
+        self._command_queue.populate_actions_tab(action_widgets)
+        self._command_queue.attach_tab_bar_extras(_terminal_route_box, gear_btn)
 
-        right_col.addWidget(center_bottom)
-        # right_container NOT added to bar — returned separately so _setup_ui
-        # can place it as a sibling (center) in _toolbar_row.
-
-        self._populate_header_actions(
-            target=actions_layout,
-            controls_left_target=controls_layout,
-        )
-
-        return bar, right_container, left_top
+        return bar, left_top
 
     # Task 3 (loop 05-13-workflow-app-layout-2): nova coluna test-mode com toggle radio-like.
     _TEST_MODE_BTN_STYLE = (
@@ -1325,35 +1267,19 @@ class MainWindow(QMainWindow):
             except AttributeError:
                 pass
 
-    def _populate_header_actions(self, target=None, controls_left_target=None) -> None:
-        """Add JSON/WS/mcp-codex/mcp-kimi/double-mcp/asq-user buttons.
+    def _populate_header_actions(self) -> list[QPushButton]:
+        """Constroi os 6 botoes da actions-tab: JSON, WS, mcp-codex, mcp-kimi,
+        double-mcp, asq-user.
 
-        Quando `target` (QHBoxLayout) e fornecido, popula nesse layout —
-        usado pelo `_build_output_toolbar` para colocar os botoes na
-        linha superior do container direito (acima dos controles de
-        terminal). Quando ausente, fallback para o slot legado da 4a div
-        do MetricsBar.
+        Refactor 2026-05-15 output-toolbar-left consolidation:
+        Brief/Docs descartados. Removido o fallback para `_header_actions_layout`
+        do MetricsBar; unico consumer agora e CommandQueueHeader.populate_actions_tab().
+        Retorna a lista de widgets em ordem; quem instala decide o layout.
 
-        Idempotente: limpa o layout antes de inserir, em caso de re-build.
-        Os handlers replicam o comportamento original do output-toolbar:
-        JSON/WS resolvem via `app_state.config`; demais emitem o comando
-        cru via `signal_bus.paste_text_in_terminal` + focus.
+        Handlers: JSON/WS resolvem via `app_state.config` + clipboard +
+        `_publish_to_terminal`; demais emitem o comando cru via
+        `_publish_to_terminal` (roteamento T1/T2).
         """
-        from PySide6.QtWidgets import QHBoxLayout  # noqa: F401 — referenced in type only
-
-        slot = target if target is not None else getattr(
-            self._metrics_bar, "_header_actions_layout", None,
-        )
-        if slot is None:
-            return
-
-        # Idempotency: drop any previously-added widgets.
-        while slot.count():
-            item = slot.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-
         def _make_action_btn(
             label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str,
         ) -> QPushButton:
@@ -1403,34 +1329,6 @@ class MainWindow(QMainWindow):
                 "workspace_root copiado e digitado no terminal.", "info",
             )
 
-        # Task 4c (loop 05-13-workflow-app-layout-2): Brief/Docs espelham WS,
-        # porem com basic_flow.brief_root / basic_flow.docs_root.
-        def _on_brief_path() -> None:
-            if not app_state.has_config or not app_state.config:
-                signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
-                return
-            brief = app_state.config.brief_root
-            QApplication.clipboard().setText(brief)
-            # Task 6 (loop 05-13-workflow-app-layout-2): roteamento T1/T2.
-            self._publish_to_terminal(brief)
-            signal_bus.toast_requested.emit(
-                "brief_root copiado e digitado no terminal.", "info",
-            )
-
-        def _on_docs_path() -> None:
-            if not app_state.has_config or not app_state.config:
-                signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
-                return
-            docs = app_state.config.docs_root
-            QApplication.clipboard().setText(docs)
-            # Task 6 (loop 05-13-workflow-app-layout-2): roteamento T1/T2.
-            self._publish_to_terminal(docs)
-            signal_bus.toast_requested.emit(
-                "docs_root copiado e digitado no terminal.", "info",
-            )
-
-        # Task 6 (loop 05-13-workflow-app-layout-2): roteamento T1/T2 nos
-        # botoes mcp-codex / mcp-kimi / double-mcp / asq-user (actions_row).
         def _paste_cmd(cmd: str):
             def _h() -> None:
                 self._publish_to_terminal(cmd)
@@ -1450,37 +1348,8 @@ class MainWindow(QMainWindow):
         )
         ws_btn.clicked.connect(_on_ws_path)
 
-        # Task 4c (loop 05-13-workflow-app-layout-2): Brief/Docs apos json/ws.
-        brief_btn = _make_action_btn(
-            "Brief", "queue-btn-brief-path",
-            "#0EA5E9", "#0284C7", "#0369A1",
-            "Copia o brief_root do projeto\ne digita no terminal automaticamente",
-        )
-        brief_btn.clicked.connect(_on_brief_path)
-
-        docs_btn = _make_action_btn(
-            "Docs", "queue-btn-docs-path",
-            "#9333EA", "#7E22CE", "#6B21A8",
-            "Copia o docs_root do projeto\ne digita no terminal automaticamente",
-        )
-        docs_btn.clicked.connect(_on_docs_path)
-
-        # JSON/WS/Brief/Docs vao para o lado esquerdo da linha de controles
-        # quando o target dedicado for fornecido (space-between com toggle/chevron).
-        # Fallback: anexar ao slot principal junto aos demais botoes.
-        if controls_left_target is not None:
-            controls_left_target.insertWidget(0, json_btn)
-            controls_left_target.insertWidget(1, ws_btn)
-            controls_left_target.insertWidget(2, brief_btn)
-            controls_left_target.insertWidget(3, docs_btn)
-        else:
-            slot.addWidget(json_btn)
-            slot.addWidget(ws_btn)
-            slot.addWidget(brief_btn)
-            slot.addWidget(docs_btn)
-
-        # Botoes do output-toolbar-actions-row: largura reduzida 30% (64 -> 45)
-        # versus os botoes de controls_left_target (JSON/WS/Brief/Docs).
+        # Botoes adversarial/MCP: largura reduzida 30% (64 -> 45) versus
+        # JSON/WS, por convencao herdada do antigo output-toolbar-actions-row.
         _ACTIONS_ROW_MIN_WIDTH = 45
 
         mcp_codex_btn = _make_action_btn(
@@ -1490,7 +1359,6 @@ class MainWindow(QMainWindow):
         )
         mcp_codex_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
         mcp_codex_btn.clicked.connect(_paste_cmd("/skill:mcp-codex"))
-        slot.addWidget(mcp_codex_btn)
 
         mcp_kimi_btn = _make_action_btn(
             "mcp-kimi", "output-btn-mcp-kimi",
@@ -1499,7 +1367,6 @@ class MainWindow(QMainWindow):
         )
         mcp_kimi_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
         mcp_kimi_btn.clicked.connect(_paste_cmd("/skill:mcp-kimi"))
-        slot.addWidget(mcp_kimi_btn)
 
         double_mcp_btn = _make_action_btn(
             "double-mcp", "output-btn-double-mcp",
@@ -1508,7 +1375,6 @@ class MainWindow(QMainWindow):
         )
         double_mcp_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
         double_mcp_btn.clicked.connect(_paste_cmd("/skill:double-mcp"))
-        slot.addWidget(double_mcp_btn)
 
         asq_user_btn = _make_action_btn(
             "asq-user", "output-btn-asq-user",
@@ -1517,11 +1383,8 @@ class MainWindow(QMainWindow):
         )
         asq_user_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
         asq_user_btn.clicked.connect(_paste_cmd("/skill:auq-interview"))
-        slot.addWidget(asq_user_btn)
 
-        # Progress + MCP-test vivem em toolbar-prompts-row (criados em
-        # _build_output_toolbar) junto ao novo botao Online Review. Os 5
-        # botoes "nav" datatest (div-play/cmd-list/nav-*) foram removidos.
+        return [json_btn, ws_btn, mcp_codex_btn, mcp_kimi_btn, double_mcp_btn, asq_user_btn]
 
     def _build_terminal_notes_footer(self, testid: str) -> QWidget:
         """Footer de anotacoes livre por terminal — sem comunicacao com o resto
@@ -2365,6 +2228,13 @@ class MainWindow(QMainWindow):
 
         Emite signal_bus.config_loaded em caso de sucesso.
         Exibe toast de erro em caso de falha.
+
+        Side-effects de "projeto" (restore de queue + load de Kanban) sao
+        suprimidos quando o JSON e um loop config (`kind=daily-loop` +
+        `daily_loop`, ou `iteration_template`+`items`+`finalization`).
+        Loop configs sao artefatos de pipeline, nao tem queue persistente
+        nem modulos para o Kanban — restaurar dispara reads silenciosos
+        de paths invalidos e polui a UI com estado de outro projeto.
         """
         try:
             config = parse_config(path)
@@ -2382,8 +2252,32 @@ class MainWindow(QMainWindow):
         signal_bus.config_loaded.emit(path)
         logger.info("Config carregado: projeto=%s", config.project_name)
         self._check_template_versions()  # RESOLVED: G002
+
+        raw = config.raw if isinstance(config.raw, dict) else {}
+        is_loop_config = (
+            (raw.get("kind") == "daily-loop" and "daily_loop" in raw)
+            or (
+                "iteration_template" in raw
+                and "items" in raw
+                and "finalization" in raw
+            )
+        )
+        if is_loop_config:
+            logger.info(
+                "Config '%s' identificada como loop config — skip "
+                "_restore_queue_from_storage + _load_kanban_from_config.",
+                path,
+            )
+            return
+
         self._restore_queue_from_storage(path)
-        self._load_kanban_from_config(config)
+        if config.wbs_root:
+            self._load_kanban_from_config(config)
+        else:
+            logger.info(
+                "wbs_root vazio em '%s' — skip _load_kanban_from_config.",
+                path,
+            )
 
     def _check_template_versions(self) -> None:
         """Check if factory templates are aligned with the current CLAUDE.md.  # RESOLVED: G002"""

@@ -14,6 +14,7 @@ Funções principais:
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +35,7 @@ class PipelineConfig:
     docs_root: str                 # onde ficam PRD.md, HLD.md, etc.
     wbs_root: str                  # onde ficam os modules/TASKs
     workspace_root: str            # root do código gerado
+    dcp_root: str = ""             # ORCH: pasta da matrix DCP, delivery.json, specific flows
     custom_workflow_root: str = "" # onde fica o SPECIFIC-FLOW.json
     language: str = "pt-BR"        # idioma da interface do projeto
     queue_root: str = ""           # path do storage dedicado do queue_state
@@ -95,6 +97,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root = bf.get("docs_root", "")
         wbs_root = bf.get("wbs_root", "")
         workspace_root = bf.get("workspace_root", "")
+        dcp_root = bf.get("dcp_root", "")
         custom_workflow_root = bf.get(
             "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
         )
@@ -105,6 +108,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root = raw.get("docs_root", "")
         wbs_root = raw.get("wbs_root", "")
         workspace_root = raw.get("workspace_root", raw.get("output_root", ""))
+        dcp_root = raw.get("dcp_root", "")
         custom_workflow_root = raw.get(
             "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
         )
@@ -116,6 +120,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root = f"{output_root}/docs"
         wbs_root = f"{output_root}/wbs"
         workspace_root = f"{output_root}/workspace"
+        dcp_root = ""
         custom_workflow_root = f"{wbs_root}/specific-flow"
         queue_root = raw.get("queue_root", "")
     elif is_loop_json:
@@ -124,6 +129,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root = ""
         wbs_root = ""
         workspace_root = ""
+        dcp_root = ""
         queue_root = raw.get("queue_root", "")
         custom_workflow_root = ""
     else:
@@ -138,12 +144,16 @@ def parse_config(path: str) -> PipelineConfig:
             f"Campo 'docs_root' ausente ou vazio em {resolved}."
         )
 
-    # Extrai idioma do project_details se disponível
+    # Extrai idioma do project_details se disponível.
+    # Aceita dois shapes: dict (project.json canonico, ex `{"pt-BR": true, "en": false}`)
+    # OU string direta (loop configs canonicos a partir de 2026-05, ex `"pt-BR"`).
     language = "pt-BR"
     pd = raw.get("project_details", {})
-    lang_map = pd.get("language", {})
-    if lang_map:
-        for lang_key, enabled in lang_map.items():
+    lang_value = pd.get("language", {}) if isinstance(pd, dict) else {}
+    if isinstance(lang_value, str) and lang_value:
+        language = lang_value
+    elif isinstance(lang_value, dict) and lang_value:
+        for lang_key, enabled in lang_value.items():
             if enabled:
                 language = lang_key
                 break
@@ -152,6 +162,16 @@ def parse_config(path: str) -> PipelineConfig:
     if not queue_root and not is_loop_json:
         queue_root = f"output/wbs/pipeline-position/{resolved.stem}.json"
 
+    # Fallback dcp_root: ADDITION compativel para V3 pre-migracao + V2 + V1.
+    # Mantem path operacional (ORCH) sob output/workspace/dcp/{slug}, irmao
+    # de workspace_root. Loop JSON nao tem dcp_root.
+    if not dcp_root and not is_loop_json:
+        dcp_root = f"output/workspace/dcp/{project_name}"
+        print(
+            f"[config_parser] dcp_root ausente em basic_flow, usando default {dcp_root}",
+            file=sys.stderr,
+        )
+
     return PipelineConfig(
         config_path=str(resolved),
         project_name=project_name,
@@ -159,6 +179,7 @@ def parse_config(path: str) -> PipelineConfig:
         docs_root=docs_root,
         wbs_root=wbs_root,
         workspace_root=workspace_root,
+        dcp_root=dcp_root,
         custom_workflow_root=custom_workflow_root,
         language=language,
         queue_root=queue_root,

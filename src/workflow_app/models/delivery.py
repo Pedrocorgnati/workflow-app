@@ -1,4 +1,4 @@
-"""Pydantic v2 model of `delivery.json` v1 (DCP state plane).
+"""Pydantic v2 model of `delivery.json` v2 (DCP state plane).
 
 Canonical source: `scheduled-updates/refactor-workflow-sytemforge/schemas/delivery.schema.json`
 (T-001). This module replicates the schema structure exactly (D1-D9 resolutions
@@ -225,10 +225,6 @@ class ModuleArtifacts(BaseModel):
 
     module_meta_path: Optional[str] = None
     overview_path: Optional[str] = None
-    last_specific_flow: Optional[str] = None
-    last_specific_flow_sha256: Optional[str] = Field(
-        default=None, pattern=r"^[a-f0-9]{64}$"
-    )
     last_review_report: Optional[str] = None
     last_commit_sha: Optional[str] = None
     last_deploy_url: Optional[str] = None
@@ -383,24 +379,31 @@ class Metadata(BaseModel):
     created_by: str
     last_modified_by: str
     last_modified_at: Optional[Iso8601Utc] = None
+    history: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # ─── Top-level ───────────────────────────────────────────────────────────── #
 
 
 class Delivery(BaseModel):
-    """Top-level `delivery.json` v1 document.
+    """Top-level `delivery.json` v2 document.
 
     Loading via `Delivery.model_validate_json(content)` performs structural
     validation (fields, types, enums, per-module I-06..I-12 hard checks).
     Cross-module invariants I-01..I-03, I-10 are evaluated as warnings via
     `_collect_cross_invariants()` so the reader can present them as a UI
     warning list without blocking read-only access.
+
+    v2 drops `modules[i].artifacts.last_specific_flow` and
+    `last_specific_flow_sha256` (DCP-COMMAND-MATRIX rollout: SPECIFIC-FLOW.json
+    is no longer persisted). v1 documents are migrated in-memory by
+    `ai-forge/scripts/validate-delivery-json.py:_migrate_v1_to_v2` before
+    `model_validate`; on-disk persistence happens on the next canonical write.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1]
+    version: Literal[2]
     project: Project
     current_module: Optional[ModuleKey] = None
     current_modules: List[ModuleKey] = Field(default_factory=list)

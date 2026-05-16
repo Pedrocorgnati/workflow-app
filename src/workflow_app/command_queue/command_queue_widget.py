@@ -1128,14 +1128,24 @@ class CommandQueueWidget(QWidget):
         tab_bar_layout.setSpacing(3)
 
         self._sec_tabs: list[QPushButton] = []
-        _tab_testids = ("queue-tab-pipelines", "queue-tab-workflow", "queue-tab-auxiliar")
-        for i, label in enumerate(("Pipelines", "Workflow", "Auxiliar")):
+        _tab_testids = (
+            "queue-tab-pipelines",
+            "queue-tab-workflow",
+            "queue-tab-auxiliar",
+            "queue-tab-prompts",
+            "queue-tab-actions",
+        )
+        for i, label in enumerate(("Pipelines", "Workflow", "Auxiliar", "Prompts", "Actions")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
             tab_bar_layout.addWidget(btn, stretch=1)
             self._sec_tabs.append(btn)
+
+        # Exposed so MainWindow can append extras (terminal-route-toggles + gear)
+        # after the 5 section tabs via attach_tab_bar_extras().
+        self._tab_bar_layout = tab_bar_layout
 
         header_layout.addWidget(tab_bar)
 
@@ -1359,6 +1369,32 @@ class CommandQueueWidget(QWidget):
         ])
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
+
+        # Prompts tab (refactor 2026-05-15 output-toolbar-left consolidation):
+        # buttons antes alocados em toolbar-prompts-row (deletada). Populado por
+        # MainWindow via populate_prompts_tab() porque os handlers dependem de
+        # estado vivo no MainWindow (signal_bus, _publish_to_terminal, etc).
+        prompts_content = QWidget()
+        prompts_content.setStyleSheet("background-color: #27272A;")
+        self._prompts_content_layout = QHBoxLayout(prompts_content)
+        self._prompts_content_layout.setContentsMargins(5, 4, 5, 5)
+        self._prompts_content_layout.setSpacing(4)
+        self._prompts_content_layout.addStretch(1)
+        header_layout.addWidget(prompts_content)
+        self._sec_contents.append(prompts_content)
+
+        # Actions tab (refactor 2026-05-15): JSON/WS + mcp-codex/mcp-kimi/
+        # double-mcp/asq-user antes alocados em output-toolbar-actions-row
+        # (deletada). Brief/Docs descartados. Populado por MainWindow via
+        # populate_actions_tab().
+        actions_content = QWidget()
+        actions_content.setStyleSheet("background-color: #27272A;")
+        self._actions_content_layout = QHBoxLayout(actions_content)
+        self._actions_content_layout.setContentsMargins(5, 4, 5, 5)
+        self._actions_content_layout.setSpacing(4)
+        self._actions_content_layout.addStretch(1)
+        header_layout.addWidget(actions_content)
+        self._sec_contents.append(actions_content)
 
         # Default: Workflow active (index 1)
         self._active_section = 1
@@ -1777,6 +1813,48 @@ class CommandQueueWidget(QWidget):
     def set_pipeline_manager(self, pipeline_manager) -> None:
         """Inject the PipelineManager to enable can_reorder guards."""
         self._pipeline_manager = pipeline_manager
+
+    def populate_prompts_tab(self, widgets: list[QWidget]) -> None:
+        """Anexa os botoes de prompt-slot (MCP-test, Online Review, Progress, slot livre).
+
+        Chamado por MainWindow apos build porque os handlers (clipboard,
+        toast, _publish_to_terminal) dependem de estado vivo do MainWindow.
+        Idempotente: limpa o layout antes de inserir.
+        """
+        layout = self._prompts_content_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for w in widgets:
+            layout.addWidget(w)
+        layout.addStretch(1)
+
+    def populate_actions_tab(self, widgets: list[QWidget]) -> None:
+        """Anexa botoes da actions-tab (JSON, WS, mcp-codex, mcp-kimi, double-mcp, asq-user).
+
+        Idempotente. Ver populate_prompts_tab para racional.
+        """
+        layout = self._actions_content_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for w in widgets:
+            layout.addWidget(w)
+        layout.addStretch(1)
+
+    def attach_tab_bar_extras(self, *extras: QWidget) -> None:
+        """Anexa widgets ao tab_bar apos as 5 section tabs.
+
+        Usado para terminal-route-toggles + toolbar-prompts-config-gear,
+        que vivem visualmente como "abas extras" mas nao tem section
+        content associado.
+        """
+        for w in extras:
+            self._tab_bar_layout.addWidget(w)
 
     def _load_single_command(
         self,
@@ -2318,25 +2396,89 @@ class CommandQueueWidget(QWidget):
         signal_bus.pipeline_ready.emit(specs)
 
     @staticmethod
-    def _check_dcp_validation_reports(
-        module_dir: Path,
-        cm_id: str,
-    ) -> tuple[bool, list[str]]:
-        """Read congruence-report.json and temporality-report.json from
-        ``module_dir`` and return (block, messages).
+    def _emit_dcp_meta_toast(module_dir: Path, *, verbose: bool = False) -> None:
+        """Read ``meta-gaps-report.json`` from ``module_dir`` and emit a
+        non-blocking toast via ``signal_bus.toast_requested``.
 
-        ``block=True`` when at least one report signals a real violation
-        (incoherent_count > 0 for congruence; violations_count > 0 for
-        temporality). ``messages`` contains one human-readable line per
-        report with a problem. Empty-list messages means no problems.
+        Mapping (anti Zero Silencio):
+          - ``total_gaps == 0`` AND ``verbose``  -> "success" (5s).
+          - ``total_gaps == 0`` AND NOT verbose  -> suppressed (avoid noise).
+          - ``total_gaps > 0`` AND any gap has ``confidence == "low"`` ->
+            "warning" (6s) — pushes operator to act.
+          - ``total_gaps > 0`` AND all gaps ``high``/``medium`` -> "info" (5s).
 
-        Missing or unreadable reports are treated as OK (steps may not
-        have run yet — e.g. bare /dcp:specific-flow path without preflight).
+        The B-dcp gate 4 (``/dcp:meta-completeness``) is advisory: it
+        writes ``meta-gaps-report.json`` with ``total_gaps`` and
+        ``by_confidence`` aggregates. This handler runs at position 6 of
+        the pipeline (after gate 4), reads the report and surfaces it as
+        a toast so the operator never has to grep the audit dir.
+
+        Silent no-op when the report is missing or malformed — gate 4
+        may have skipped if MODULE-META was already validated within the
+        300s idempotency TTL (and even in that case it does NOT bump
+        the report). In NO_OP mode the report still exists; only true
+        absence (gate 4 never ran for this module) yields silence here,
+        which is acceptable because earlier validation gates already
+        surfaced their own toasts.
         """
-        problems: list[str] = []
-        for fname, ok_key, count_key, label in (
-            ("congruence-report.json", "coherent", "incoherent_count", "Congruencia"),
-            ("temporality-report.json", "clean", "violations_count", "Temporalidade"),
+        report_path = module_dir / "meta-gaps-report.json"
+        if not report_path.exists():
+            return
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(report, dict):
+            return
+
+        total_gaps = report.get("total_gaps")
+        if not isinstance(total_gaps, int):
+            return
+        by_confidence = report.get("by_confidence") or {}
+        low_count = int(by_confidence.get("low", 0) or 0)
+
+        if total_gaps == 0:
+            if verbose:
+                signal_bus.toast_requested.emit("Meta: completo (0 gaps)", "success")
+            return
+
+        if low_count > 0:
+            signal_bus.toast_requested.emit(
+                f"Meta: {total_gaps} gaps ({low_count} low confidence) "
+                f"-- ver meta-gaps-report.json",
+                "warning",
+            )
+        else:
+            signal_bus.toast_requested.emit(
+                f"Meta: {total_gaps} gaps (advisory) "
+                f"-- ver meta-gaps-report.json",
+                "info",
+            )
+
+    @staticmethod
+    def _audit_display_dcp_reports(module_dir: Path, cm_id: str) -> None:
+        """Surface congruence-report.json / temporality-report.json as a
+        non-blocking informational toast.
+
+        Replaces the legacy ``_check_dcp_validation_reports`` gate
+        (task-028). Post-matrix architecture: the matrix already carries
+        ``filter[]`` with bits flipped by the B-dcp gates, so the queue
+        derived from it cannot contain commands that violated congruence
+        or temporality. There is no "load anyway with violations" path
+        because violations already zeroed the corresponding bits.
+
+        The reports are kept as audit-only mirror: this method reads
+        their flip counts and emits a single info toast so the operator
+        has a one-glance summary without grepping the audit dir.
+
+        Silent no-op when both reports are missing or unreadable
+        (e.g. bare /dcp:specific-flow path without preflight).
+        """
+        flips_congruence = 0
+        flips_temporality = 0
+        for fname, count_key, target in (
+            ("congruence-report.json", "incoherent_count", "congruence"),
+            ("temporality-report.json", "violations_count", "temporality"),
         ):
             report_path = module_dir / fname
             if not report_path.exists():
@@ -2348,16 +2490,22 @@ class CommandQueueWidget(QWidget):
             if not isinstance(report, dict):
                 continue
             if report.get("module_id") and report["module_id"] != cm_id:
-                # Report belongs to a different module — stale; ignore.
                 continue
-            ok = report.get(ok_key, True)
             count = report.get(count_key, 0)
-            if not ok or (isinstance(count, int) and count > 0):
-                problems.append(
-                    f"  [{label}] {count} violacao(oes) — "
-                    f"veja {fname} em {module_dir.name}/"
-                )
-        return bool(problems), problems
+            if isinstance(count, int) and count > 0:
+                if target == "congruence":
+                    flips_congruence = count
+                else:
+                    flips_temporality = count
+
+        if flips_congruence == 0 and flips_temporality == 0:
+            return
+
+        signal_bus.toast_requested.emit(
+            f"DCP: congruence flippou {flips_congruence} bits, "
+            f"temporality {flips_temporality} bits",
+            "info",
+        )
 
     def _handle_dcp_load_specific_flow(self, spec: CommandSpec) -> bool:
         """Local-action callable invoked at queue position 6 of the B-dcp
@@ -2432,31 +2580,33 @@ class CommandQueueWidget(QWidget):
             )
             return False
 
-        # Gate: read validation reports produced by steps 2-3.
-        # Congruence or temporality violations must not reach the queue silently.
         module_dir = flow_path.parent
-        gate_block, gate_msgs = self._check_dcp_validation_reports(module_dir, ctx.cm_id)
-        if gate_block:
-            from PySide6.QtWidgets import QMessageBox
-            body = (
-                f"A pipeline B-dcp encontrou violacoes para {ctx.cm_id}.\n\n"
-                + "\n".join(gate_msgs)
-                + "\n\nCarregar mesmo assim pode colocar comandos incorretos na fila.\n"
-                "Deseja carregar mesmo assim?"
+
+        # Surface advisory output of gate 4 (/dcp:meta-completeness) as a
+        # non-blocking toast. Does not block the load — meta-completeness is
+        # advisory by contract (NUNCA flippa filter[], NUNCA bloqueia paste).
+        self._emit_dcp_meta_toast(module_dir, verbose=False)
+
+        # task-028 (st-05): congruence/temporality reports are audit-only
+        # now. Violations have already flipped filter[] bits in the matrix;
+        # the queue derived from it cannot contain commands tied to flipped
+        # bits, so there is no "load anyway" path. We surface flip counts
+        # as a single info toast for operator awareness.
+        self._audit_display_dcp_reports(module_dir, ctx.cm_id)
+
+        # task-027 (st-05): matrix-driven in-memory derivation supersedes the
+        # SPECIFIC-FLOW.json read path. We try the matrix first; on
+        # FileNotFoundError / ValidationError the legacy disk-based path is
+        # used so the widget keeps working in environments where
+        # DCP-COMMAND-MATRIX.json has not yet been generated.
+        matrix_queue = self._derive_queue_from_matrix_inmemory(ctx, config)
+        if matrix_queue is not None:
+            signal_bus.pipeline_ready.emit(matrix_queue)
+            logger.info(
+                "[DCP] queue derivada in-memory (matrix) | modulo=%s count=%d",
+                ctx.cm_id, len(matrix_queue),
             )
-            answer = QMessageBox.question(
-                self,
-                "DCP — Violacoes detectadas",
-                body,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                logger.info(
-                    "[DCP] carga bloqueada pelo operador apos violacoes B-dcp (modulo=%s)",
-                    ctx.cm_id,
-                )
-                return False
+            return True
 
         return self._enqueue_specific_flow(
             flow_path=flow_path,
@@ -2464,6 +2614,171 @@ class CommandQueueWidget(QWidget):
             default_project_name=config.project_name,
             prefix_commands=None,
         )
+
+    def _derive_queue_from_matrix_inmemory(
+        self,
+        ctx: "DcpBuildContext",
+        config: "PipelineConfig",
+    ) -> Optional[list[CommandSpec]]:
+        """Try to derive the queue in-memory from DCP-COMMAND-MATRIX.json.
+
+        Returns the rendered `list[CommandSpec]` when the matrix is present
+        and validates against the Pydantic model (task-027 / st-05 algorithm
+        9-17). Returns None when the matrix is absent OR cannot be validated;
+        the caller falls back to the legacy SPECIFIC-FLOW.json read path.
+
+        Side effects on success:
+          - Appends a `load-queue` entry to the in-memory matrix module trail.
+            Persistence is left to the next gate that writes the matrix back
+            (write-on-mutate gates already cover this; we never write back
+            from here to keep the load read-only at I/O level).
+        """
+        from workflow_app.dcp.queue_derivation import (
+            build_load_queue_trail_entry,
+            derive_queue_from_matrix,
+            load_matrix,
+        )
+        from workflow_app.models.dcp_command_matrix import TrailEntry
+
+        dcp_root_raw = getattr(config, "dcp_root", "") or ""
+        if not dcp_root_raw:
+            return None
+        dcp_root = Path(dcp_root_raw)
+        if not dcp_root.is_absolute():
+            dcp_root = (Path(config.project_dir) / dcp_root_raw).resolve()
+
+        try:
+            matrix = load_matrix(dcp_root)
+        except FileNotFoundError:
+            return None
+        except Exception as exc:  # ValidationError + JSON errors
+            signal_bus.toast_requested.emit(
+                f"DCP-COMMAND-MATRIX.json invalido ({type(exc).__name__}): "
+                f"caindo para SPECIFIC-FLOW.json.",
+                "warning",
+            )
+            logger.warning(
+                "[DCP] matrix invalida em %s: %s — fallback para SPECIFIC-FLOW.json",
+                dcp_root, exc,
+            )
+            return None
+
+        # task-028 (st-05): matrix-driven identity guard.
+        # Replaces the legacy scope_module check (still kept in
+        # _enqueue_specific_flow for the legacy fallback path). When the
+        # operator-active module is absent from the matrix, we cannot
+        # safely derive a queue in-memory — fall back to legacy with an
+        # explicit operator toast pointing at the regeneration entrypoint.
+        matrix_module = matrix.modules.get(ctx.cm_id)
+        if matrix_module is None:
+            signal_bus.toast_requested.emit(
+                f"modulo {ctx.cm_id} ausente da matrix - "
+                f"regenerar via [DCP: Build Module Pipeline]",
+                "warning",
+            )
+            logger.warning(
+                "[DCP] cm_id=%s ausente em matrix.modules — fallback para SPECIFIC-FLOW.json",
+                ctx.cm_id,
+            )
+            return None
+
+        # Soft warning: current_module pode estar stale entre build-matrix
+        # e load (sequencial da pipeline e quem garante coerencia). Nao
+        # bloqueia, apenas sinaliza.
+        if matrix.current_module and matrix.current_module != ctx.cm_id:
+            signal_bus.toast_requested.emit(
+                f"matrix.current_module={matrix.current_module} difere do "
+                f"modulo ativo {ctx.cm_id} (warning soft)",
+                "info",
+            )
+            logger.info(
+                "[DCP] current_module stale: matrix=%s ativo=%s",
+                matrix.current_module, ctx.cm_id,
+            )
+
+        # Defense-in-depth: schema_version range + filter length cross-check.
+        # Pydantic ja valida ambos via Literal["1.0.1"] e validators internos,
+        # mas mantemos a checagem explicita para detectar drift caso o
+        # contrato relaxe no futuro.
+        supported_schemas = {"1.0.1"}
+        if matrix.schema_version not in supported_schemas:
+            signal_bus.toast_requested.emit(
+                f"matrix.schema_version={matrix.schema_version} fora da "
+                f"faixa suportada ({sorted(supported_schemas)}). "
+                f"Caindo para SPECIFIC-FLOW.json.",
+                "warning",
+            )
+            return None
+        if len(matrix_module.filter) != len(matrix.command_index):
+            signal_bus.toast_requested.emit(
+                f"matrix modules[{ctx.cm_id}].filter length "
+                f"({len(matrix_module.filter)}) != command_index length "
+                f"({len(matrix.command_index)}). Regenere via "
+                f"[DCP: Build Module Pipeline].",
+                "warning",
+            )
+            return None
+
+        # Soft warning: foundations-pure modules legitimamente tem
+        # A-creation == 0 (sem loop A). Para todos os outros casos,
+        # loop_multiplier["A-creation"] < 1 e sinal de drift.
+        a_creation = matrix_module.loop_multiplier.get("A-creation", 0)
+        is_foundations_pure = bool(getattr(matrix_module, "foundations_pure", False))
+        if a_creation < 1 and not is_foundations_pure:
+            signal_bus.toast_requested.emit(
+                f"matrix modules[{ctx.cm_id}].loop_multiplier.A-creation"
+                f"={a_creation} < 1 e modulo nao e foundations-pure "
+                f"(warning soft)",
+                "info",
+            )
+
+        commit_variant = getattr(config, "commit_type", "") or "simple"
+        wbs_root = ctx.wbs_root
+
+        try:
+            queue = derive_queue_from_matrix(
+                matrix,
+                ctx.cm_id,
+                wbs_root=wbs_root,
+                config_path=getattr(config, "config_path", "") or "",
+                commit_variant=commit_variant,
+            )
+        except Exception as exc:
+            signal_bus.toast_requested.emit(
+                f"Erro ao derivar fila in-memory: {exc}. "
+                f"Caindo para SPECIFIC-FLOW.json.",
+                "warning",
+            )
+            logger.warning(
+                "[DCP] derive_queue_from_matrix falhou para %s: %s",
+                ctx.cm_id, exc, exc_info=True,
+            )
+            return None
+
+        if not queue:
+            logger.warning(
+                "[DCP] queue derivada vazia para modulo=%s — fallback para SPECIFIC-FLOW.json",
+                ctx.cm_id,
+            )
+            return None
+
+        is_last = (
+            matrix.execution_order[-1] == ctx.cm_id
+            if matrix.execution_order
+            else False
+        )
+        try:
+            trail_dict = build_load_queue_trail_entry(
+                ctx.cm_id, len(queue), is_last,
+            )
+            entry = TrailEntry.model_validate(trail_dict)
+            matrix.modules[ctx.cm_id].trail.append(entry)
+        except Exception as exc:  # pragma: no cover — trail append is non-blocking
+            logger.warning(
+                "[DCP] trail load-queue append falhou (nao bloqueante): %s", exc,
+            )
+
+        return queue
 
     def _on_dcp_specific_flow_clicked(self) -> None:
         """Load SPECIFIC-FLOW.json for the active module into the command queue.
