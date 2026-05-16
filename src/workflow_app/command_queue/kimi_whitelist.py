@@ -130,6 +130,7 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/dcp:matrix-refine",           # 73
     "/dcp:matrix-replicate",        # 92 (KIMI_PREFERRED)
     "/dcp:matrix-mark-loops",       # 95 (KIMI_PREFERRED)
+    "/dcp:matrix-filter-modules",   # 72
 })
 
 
