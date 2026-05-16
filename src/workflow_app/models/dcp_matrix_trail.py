@@ -72,27 +72,67 @@ def _archive_trail_if_needed(matrix: DcpCommandMatrix, module_id: str) -> None:
         module.trail = []
 
 
+def _archive_trail_if_needed_dict(matrix: dict, module_id: str) -> None:
+    """Dict-shaped variant of ``_archive_trail_if_needed`` for callers that load
+    the matrix as plain ``json`` (e.g. ``dcp_*_check.py`` consumers)."""
+
+    module = matrix["modules"][module_id]
+    cap = matrix.get("trail_max_entries", 200)
+    trail = module.setdefault("trail", [])
+    if len(trail) >= cap:
+        snapshot = {
+            "archived_at": _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "entries": list(trail),
+        }
+        module.setdefault("trail_archive", []).append(snapshot)
+        module["trail"] = []
+
+
 def append_trail_entry(
-    matrix: DcpCommandMatrix,
+    matrix: Any,
     module_id: str,
     entry: Mapping[str, Any],
 ) -> None:
-    """Append a single trail entry. Archive-on-cap is checked BEFORE append."""
+    """Append a single trail entry. Archive-on-cap is checked BEFORE append.
 
-    _archive_trail_if_needed(matrix, module_id)
-    module = matrix.modules[module_id]
-    module.trail.append(TrailEntry.model_validate(dict(entry)))
-    matrix.last_mutated_at = _now_utc()
+    Polymorphic dispatch: accepts both ``DcpCommandMatrix`` (pydantic, used by
+    ``workflow-app``) and ``dict`` (used by ``.claude/commands/_lib/dcp_*.py``
+    consumers that load the matrix via ``json.load``). In both branches, the
+    entry is validated through ``TrailEntry.model_validate`` so schema
+    invariants are enforced centrally regardless of caller shape.
+    """
+
+    validated = TrailEntry.model_validate(dict(entry))
+
+    if isinstance(matrix, DcpCommandMatrix):
+        _archive_trail_if_needed(matrix, module_id)
+        matrix.modules[module_id].trail.append(validated)
+        matrix.last_mutated_at = _now_utc()
+        return
+
+    if isinstance(matrix, dict):
+        _archive_trail_if_needed_dict(matrix, module_id)
+        matrix["modules"][module_id]["trail"].append(
+            validated.model_dump(by_alias=True, mode="json", exclude_none=True)
+        )
+        matrix["last_mutated_at"] = _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+        return
+
+    raise TypeError(
+        f"append_trail_entry: matrix must be DcpCommandMatrix or dict, got "
+        f"{type(matrix).__name__}"
+    )
 
 
 def record_summary(
-    matrix: DcpCommandMatrix,
+    matrix: Any,
     module_id: str,
     gate: str,
     run_id: str,
     stats: Mapping[str, Any],
 ) -> None:
-    """Write the per-run summary entry (1 per gate-run)."""
+    """Write the per-run summary entry (1 per gate-run). Accepts both
+    ``DcpCommandMatrix`` and ``dict`` via :func:`append_trail_entry` dispatch."""
 
     summary: dict[str, Any] = {
         "ts": _now_utc(),

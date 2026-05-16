@@ -1,7 +1,7 @@
 """
 Kimi compatibility — whitelist + Claude→Kimi prompt adapter.
 
-Source of truth: scheduled-updates/claude-to-kimi/progress.md (37 commands
+Source of truth: blacksmith/claude-to-kimi/progress.md (37 commands
 classified as KIMI_OK or KIMI_PREFERRED). Commands listed here are eligible
 for execution in the Kimi CLI running on the workspace terminal, instead of
 the Claude Code interactive terminal.
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import shlex
 
-# Commands with %Kimi >= KIMI_THRESHOLD in scheduled-updates/claude-to-kimi/progress.md.
+# Commands with %Kimi >= KIMI_THRESHOLD in blacksmith/claude-to-kimi/progress.md.
 # Threshold lowered to 54 to accommodate forced whitelisting of
 # /blog:deploy (score 54, --force) and /blog:build-programmatic-pages (score 57, --force).
 #
@@ -27,7 +27,7 @@ import shlex
 # fails if any command listed here drops below KIMI_THRESHOLD or disappears
 # from the source-of-truth file.
 KIMI_THRESHOLD: int = 54
-KIMI_PROGRESS_PATH: str = "scheduled-updates/claude-to-kimi/progress.md"
+KIMI_PROGRESS_PATH: str = "blacksmith/claude-to-kimi/progress.md"
 
 KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     # A-creation
@@ -127,6 +127,9 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/cmd:autocast-hardening",      # 94 (KIMI_PREFERRED)
     # DCP — matrix
     "/dcp:matrix-init",             # 86
+    "/dcp:matrix-refine",           # 73
+    "/dcp:matrix-replicate",        # 92 (KIMI_PREFERRED)
+    "/dcp:matrix-mark-loops",       # 95 (KIMI_PREFERRED)
 })
 
 

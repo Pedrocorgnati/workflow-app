@@ -193,3 +193,194 @@ def test_ttl_map_is_immutable() -> None:
 
     with pytest.raises(TypeError):
         TTL_PER_GATE["congruence"] = 999  # type: ignore[index]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Polymorphic dispatch — dict-shaped matrix (consumers em .claude/commands/_lib)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _empty_matrix_dict(trail_max_entries: int = 200) -> dict:
+    """Dict-shape compativel com os consumers que carregam matrix via json.load."""
+
+    return {
+        "schema_version": "1.0.1",
+        "trail_max_entries": trail_max_entries,
+        "command_index": [],
+        "modules": {
+            "m1": {
+                "filter": [],
+                "loop_multiplier": {},
+                "trail": [],
+                "trail_archive": [],
+                "artifacts": {},
+                "directive_boundaries": [],
+            }
+        },
+        "created_at": "2026-05-16T00:00:00Z",
+        "created_by": "test",
+        "last_mutated_at": "2026-05-16T00:00:00Z",
+    }
+
+
+def test_append_trail_entry_dict_summary_shape() -> None:
+    """Summary entry escrito via dict path mantem shape JSON estavel
+    (sem null-fields, datetime serializado como string ISO)."""
+
+    matrix = _empty_matrix_dict()
+    append_trail_entry(
+        matrix,
+        "m1",
+        {
+            "ts": datetime(2026, 5, 16, 14, 0, 0, tzinfo=timezone.utc),
+            "gate": "congruence",
+            "run_id": "run-A",
+            "bits_evaluated": 100,
+            "bits_flipped_1_to_0": 2,
+            "bits_flipped_0_to_1": 0,
+            "run_duration_ms": 123,
+            "input_sha256": "deadbeef",
+        },
+    )
+    assert len(matrix["modules"]["m1"]["trail"]) == 1
+    entry = matrix["modules"]["m1"]["trail"][0]
+    # exclude_none=True garante que campos flip-only (command_index, from, to)
+    # nao aparecem em summary entries.
+    assert "command_index" not in entry
+    assert "from" not in entry
+    assert "to" not in entry
+    assert entry["gate"] == "congruence"
+    assert entry["bits_evaluated"] == 100
+    assert entry["input_sha256"] == "deadbeef"
+    # last_mutated_at bumped no top-level.
+    assert matrix["last_mutated_at"].endswith("Z")
+
+
+def test_append_trail_entry_dict_flip_shape() -> None:
+    """Flip entry escrito via dict path preserva from/to (aliases pydantic)
+    e nao polui com summary-only fields."""
+
+    matrix = _empty_matrix_dict()
+    append_trail_entry(
+        matrix,
+        "m1",
+        {
+            "ts": datetime(2026, 5, 16, 14, 0, 0, tzinfo=timezone.utc),
+            "gate": "temporality",
+            "run_id": "run-B",
+            "command_index": 42,
+            "from": 1,
+            "to": 0,
+            "reason": "rule_violated:R3 [cmd=/mkt:portfolio-add]",
+            "predicate": "R3",
+        },
+    )
+    entry = matrix["modules"]["m1"]["trail"][0]
+    assert entry["from"] == 1
+    assert entry["to"] == 0
+    assert entry["command_index"] == 42
+    assert entry["predicate"] == "R3"
+    # Summary-only fields ausentes em flip.
+    assert "bits_evaluated" not in entry
+    assert "run_duration_ms" not in entry
+
+
+def test_append_trail_entry_dict_cap_archives() -> None:
+    """Cap-and-archive funciona via dict path: ao atingir trail_max_entries
+    o trail e movido para trail_archive como snapshot."""
+
+    matrix = _empty_matrix_dict(trail_max_entries=5)
+    for i in range(5):
+        append_trail_entry(
+            matrix,
+            "m1",
+            {
+                "ts": datetime(2026, 5, 16, 14, 0, i, tzinfo=timezone.utc),
+                "gate": "congruence",
+                "run_id": f"r-{i}",
+            },
+        )
+    assert len(matrix["modules"]["m1"]["trail"]) == 5
+    assert matrix["modules"]["m1"]["trail_archive"] == []
+
+    # 6th append triggers archive (check happens BEFORE append).
+    append_trail_entry(
+        matrix,
+        "m1",
+        {
+            "ts": datetime(2026, 5, 16, 14, 0, 5, tzinfo=timezone.utc),
+            "gate": "congruence",
+            "run_id": "r-overflow",
+        },
+    )
+    assert len(matrix["modules"]["m1"]["trail_archive"]) == 1
+    assert len(matrix["modules"]["m1"]["trail_archive"][0]["entries"]) == 5
+    assert matrix["modules"]["m1"]["trail_archive"][0]["archived_at"].endswith("Z")
+    assert len(matrix["modules"]["m1"]["trail"]) == 1
+    assert matrix["modules"]["m1"]["trail"][0]["run_id"] == "r-overflow"
+
+
+def test_append_trail_entry_dict_uses_default_cap_when_missing() -> None:
+    """Quando trail_max_entries esta ausente do dict, default canonico (200)
+    e aplicado pelo helper _archive_trail_if_needed_dict."""
+
+    matrix = _empty_matrix_dict()
+    matrix.pop("trail_max_entries")  # simula matriz legacy sem campo
+    # Pre-popula 199 — proximo append NAO deve arquivar ainda (199 < 200).
+    matrix["modules"]["m1"]["trail"] = [
+        {"ts": "2026-05-16T14:00:00Z", "gate": "congruence", "run_id": f"r-{i}"}
+        for i in range(199)
+    ]
+    append_trail_entry(
+        matrix,
+        "m1",
+        {
+            "ts": datetime(2026, 5, 16, 14, 0, 0, tzinfo=timezone.utc),
+            "gate": "congruence",
+            "run_id": "r-200",
+        },
+    )
+    assert len(matrix["modules"]["m1"]["trail"]) == 200
+    assert matrix["modules"]["m1"]["trail_archive"] == []
+
+
+def test_append_trail_entry_rejects_invalid_matrix_type() -> None:
+    """API levanta TypeError para shapes nao suportados (lista, tuple, etc).
+
+    Schema validation roda antes da dispatch — entry precisa ser canonica
+    para que o erro seja sobre o matrix shape, nao sobre o payload.
+    """
+
+    valid_entry = {
+        "ts": datetime(2026, 5, 16, 14, 0, 0, tzinfo=timezone.utc),
+        "gate": "congruence",
+        "run_id": "r-1",
+    }
+    with pytest.raises(TypeError, match="must be DcpCommandMatrix or dict"):
+        append_trail_entry(["not", "a", "matrix"], "m1", valid_entry)
+
+
+def test_record_summary_dict_dispatch() -> None:
+    """record_summary delega para append_trail_entry e suporta dict
+    polimorficamente."""
+
+    matrix = _empty_matrix_dict()
+    record_summary(
+        matrix,
+        "m1",
+        "meta-completeness",
+        run_id="run-meta-1",
+        stats={
+            "bits_evaluated": 50,
+            "bits_flipped_1_to_0": 0,
+            "bits_flipped_0_to_1": 0,
+            "run_duration_ms": 42,
+            "input_sha256": "cafebabe",
+        },
+    )
+    assert len(matrix["modules"]["m1"]["trail"]) == 1
+    entry = matrix["modules"]["m1"]["trail"][0]
+    assert entry["gate"] == "meta-completeness"
+    assert entry["run_id"] == "run-meta-1"
+    assert entry["bits_evaluated"] == 50
+    assert entry["input_sha256"] == "cafebabe"
