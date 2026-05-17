@@ -210,6 +210,10 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "model": ModelName.OPUS,
         "effort": EffortLevel.HIGH,
     },
+    "legacy_to_dcp": {
+        "model": ModelName.SONNET,
+        "effort": EffortLevel.STANDARD,
+    },
 }
 
 
@@ -1219,7 +1223,7 @@ class CommandQueueWidget(QWidget):
         tab_bar.setFixedHeight(38)
         tab_bar.setStyleSheet("background-color: #1E1E21;")
         tab_bar_layout = QHBoxLayout(tab_bar)
-        tab_bar_layout.setContentsMargins(4, 3, 4, 3)
+        tab_bar_layout.setContentsMargins(4, 1, 4, 1)
         tab_bar_layout.setSpacing(3)
 
         self._sec_tabs: list[QPushButton] = []
@@ -1368,6 +1372,15 @@ class CommandQueueWidget(QWidget):
              "Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
              lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
              "queue-btn-blog-stockpile"),
+            ("legacy-to-dcp",
+             "Legacy-to-DCP — adequa project.json legado (V1/V2 ou boilerplate convertido) ao canonical loop A..I. "
+             "Pipeline: /legacy:detect -> /project-json --migrate-v3 (se necessario) -> /delivery:init|migrate -> "
+             "/legacy:modules-from-features -> /dcp:meta-completeness (auto-fix P0, P1+ -> pending-actions) -> "
+             "/legacy:enqueue-all-modules (expande /build-module-pipeline por modulo). "
+             "Le project.json do metrics-project-pill. Idempotente: re-rodar nao quebra modulos ja convertidos. "
+             "Gaps P0 auto-fix, P1+ registrados em pending-actions/{slug}.md.",
+             self._on_legacy_to_dcp_clicked,
+             "queue-btn-legacy-to-dcp"),
         ])
         header_layout.addWidget(pipelines_content)
         self._sec_contents.append(pipelines_content)
@@ -4209,6 +4222,117 @@ class CommandQueueWidget(QWidget):
         )
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"rocksmash {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+
+    def _on_legacy_to_dcp_clicked(self) -> None:
+        """Enfileira pipeline legacy-to-dcp para o project.json carregado.
+
+        Le `metrics-project-pill` (project.json, qualquer schema V1/V2/V3).
+        Gate 2 verboso pt-BR quando `has_config` ausente: sugere botao
+        `queue-btn-json` (/project-json) para carregar/criar project.json.
+
+        Sequencia enfileirada (source.md):
+          1. /clear + /model sonnet + /effort medium
+          2. /legacy:detect <path>
+          3. /clear + /model sonnet + /effort medium
+          4. /project-json --migrate-v3 --if-not-v3 <path>
+          5. /clear + /model sonnet + /effort medium
+          6. /delivery:init <path> --from-modules-index (skip if v1 existe)
+          7. /clear + /model sonnet + /effort medium
+          8. /legacy:modules-from-features <path>
+          9. /clear + /model sonnet + /effort medium
+          10. /dcp:meta-completeness --all --auto-fix-p0 <path>
+          11. /clear + /model sonnet + /effort high
+          12. /legacy:enqueue-all-modules <path>
+
+        O ultimo item expande dinamicamente em runtime para uma sequencia
+        /build-module-pipeline --module {id} por modulo detectado
+        (analogo ao /loop-rocksmash:prepare expandir do rocksmash).
+        Idempotente: re-rodar nao quebra modulos ja convertidos.
+        """
+        from workflow_app.config.app_state import app_state
+
+        # Gate 1: has_config — verbose pt-BR (feedback_workflow_app_gate_verbose)
+        if not app_state.has_config or app_state.config is None:
+            signal_bus.toast_requested.emit(
+                "legacy-to-dcp requer project.json carregado na pill superior. "
+                "Use o botao [json] (queue-btn-json) para criar ou carregar um "
+                "project.json antes de rodar este pipeline.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        path = str(config.config_path)
+        if not path:
+            signal_bus.toast_requested.emit(
+                "project.json carregado nao expoe config_path. Recarregue o "
+                "projeto via botao [json] (queue-btn-json) e tente novamente.",
+                "error",
+            )
+            return
+
+        group = "legacy_to_dcp"
+        cfg = GROUP_MAP[group]
+        model = cfg["model"]
+        effort_standard = cfg["effort"]
+
+        def _prep(start: int, effort: EffortLevel = effort_standard) -> list[CommandSpec]:
+            model_str = model.value.lower()
+            effort_str = effort.value
+            return [
+                CommandSpec(
+                    name="/clear", model=model,
+                    interaction_type=InteractionType.AUTO, position=start,
+                ),
+                CommandSpec(
+                    name=f"/model {model_str}", model=model,
+                    interaction_type=InteractionType.AUTO, position=start + 1,
+                ),
+                CommandSpec(
+                    name=f"/effort {effort_str}", model=model,
+                    interaction_type=InteractionType.AUTO, position=start + 2,
+                ),
+            ]
+
+        def _cmd(name: str, start: int, effort: EffortLevel = effort_standard) -> CommandSpec:
+            return CommandSpec(
+                name=name, model=model, effort=effort,
+                interaction_type=InteractionType.AUTO, position=start,
+            )
+
+        specs: list[CommandSpec] = []
+        pos = 1
+        # Step 1-2: detect
+        specs.extend(_prep(pos)); pos += 3
+        specs.append(_cmd(f"/legacy:detect {path}", pos)); pos += 1
+        # Step 3-4: migrate-v3 (idempotente, no-op se ja V3)
+        specs.extend(_prep(pos)); pos += 3
+        specs.append(_cmd(f"/project-json --migrate-v3 --if-not-v3 {path}", pos)); pos += 1
+        # Step 5-6: delivery init/migrate (idempotente)
+        specs.extend(_prep(pos)); pos += 3
+        specs.append(_cmd(f"/delivery:init --if-missing {path}", pos)); pos += 1
+        # Step 7-8: modules-from-features
+        specs.extend(_prep(pos)); pos += 3
+        specs.append(_cmd(f"/legacy:modules-from-features {path}", pos)); pos += 1
+        # Step 9-10: meta-completeness com auto-fix-p0 em todos modulos
+        specs.extend(_prep(pos)); pos += 3
+        specs.append(_cmd(f"/dcp:meta-completeness --all --auto-fix-p0 {path}", pos))
+        pos += 1
+        # Step 11-12: enqueue-all-modules (expande dinamicamente em runtime)
+        specs.extend(_prep(pos, EffortLevel.HIGH)); pos += 3
+        specs.append(_cmd(f"/legacy:enqueue-all-modules {path}", pos, EffortLevel.HIGH))
+
+        slug = Path(path).stem
+        logger.info(
+            "[legacy-to-dcp] enqueued %d specs for project=%s",
+            len(specs), slug,
+        )
+        self._template_label.setText(
+            f"  \U0001f4cb  legacy-to-dcp: {slug} ({len(specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"legacy-to-dcp {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
     def _on_boilerplate_clicked(self) -> None:
