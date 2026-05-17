@@ -74,8 +74,8 @@ _WORKFLOW_APP_DIR = Path(__file__).resolve().parents[3]  # .../ai-forge/workflow
 class _VisibilitySignalLabel(QLabel):
     """QLabel que emite `visibility_changed(bool)` em todo `setVisible`.
 
-    Usado pelo `_template_label` para manter a `_template_row` (label + botao
-    de copiar) sincronizada sem precisar trocar as ~20 chamadas existentes a
+    Usado pelo `_template_label` para manter a `_template_row` sincronizada
+    sem precisar trocar as ~20 chamadas existentes a
     `self._template_label.setVisible(True/False)` espalhadas pelo widget."""
 
     visibility_changed = Signal(bool)
@@ -83,6 +83,36 @@ class _VisibilitySignalLabel(QLabel):
     def setVisible(self, visible: bool) -> None:  # noqa: N802
         super().setVisible(visible)
         self.visibility_changed.emit(bool(visible))
+
+
+class _TemplateLabel(_VisibilitySignalLabel):
+    """Label do queue-template-label com prefixo fixo `Last template: `.
+
+    Mudanca 2026-05-17: a label e sempre visivel e a parte variavel passa a
+    ser o testid do ultimo botao clicado em pipelines/workflow/auxiliar (ver
+    `_install_tab_click_tracker` no CommandQueueWidget). Chamadas legadas a
+    `setText("  📋  X")` continuam funcionando (o texto vira valor da label
+    ate o proximo click em tab tracker sobrescrever)."""
+
+    _PREFIX = "Last template: "
+    _PLACEHOLDER = "—"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(self._PREFIX + self._PLACEHOLDER, parent)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        if text.startswith(self._PREFIX):
+            super().setText(text)
+            return
+        cleaned = text.strip() or self._PLACEHOLDER
+        super().setText(self._PREFIX + cleaned)
+
+    def set_value(self, value: str) -> None:
+        super().setText(self._PREFIX + (value.strip() or self._PLACEHOLDER))
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt API
+        # Sempre visivel: ignora pedidos para esconder, mantem signal compat.
+        super().setVisible(True)
 
 
 def _load_tinted_svg_icon(path: Path, color_hex: str) -> QIcon | None:
@@ -167,6 +197,10 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
     "daily_loop": {
         "model": ModelName.SONNET,
         "effort": EffortLevel.STANDARD,
+    },
+    "daily": {
+        "model": ModelName.SONNET,
+        "effort": EffortLevel.HIGH,
     },
     "cmd_single": {
         "model": ModelName.OPUS,
@@ -392,16 +426,29 @@ class CommandQueueWidget(QWidget):
             self._loader()
 
     def _on_daily_command_ready(self, command_line: str) -> None:
-        spec = CommandSpec(
-            name=command_line,
-            model=ModelName.OPUS,
-            interaction_type=InteractionType.INTERACTIVE,
-            position=len(self._items) + 1,
-        )
-        self.add_command(spec)
+        """Expand /daily <args> into individual sub-commands with /clear /model /effort header."""
+        prefix = "/daily"
+        args = command_line[len(prefix):].strip() if command_line.startswith(prefix) else ""
+
+        scan_name = f"/daily:scan {args}".rstrip() if args else "/daily:scan"
+        plan_name = f"/daily:plan {args}".rstrip() if args else "/daily:plan"
+
+        prep = _build_prep_specs("daily")
+        cmds = [
+            CommandSpec(scan_name,          model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=0),
+            CommandSpec(plan_name,          model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=1),
+            CommandSpec("/daily:do",        model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=2),
+            CommandSpec("/daily:validate",  model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=3),
+            CommandSpec("/daily:review",    model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=4),
+        ]
+        specs = prep + cmds
+        for i, spec in enumerate(specs, start=1):
+            spec.position = i
+
         self._template_label.setText("  \U0001f4cb  Daily")
         self._template_label.setVisible(True)
         self._maybe_auto_save("Daily")
+        signal_bus.pipeline_ready.emit(specs)
 
     def _on_daily_loop_command_ready(self, command_line: str) -> None:
         dl_cfg = GROUP_MAP.get("daily_loop", {})
@@ -1438,6 +1485,19 @@ class CommandQueueWidget(QWidget):
         self._prompts_content_layout.addStretch(1)
         _ti_layout.addWidget(_prompts_row)
 
+        # terminal-insertions-row-workflow-app (2026-05-17): atalhos de path
+        # para os documentos canonicos do workflow-app (Workflow App, Dcp-list-rules,
+        # Cmd-list-rules, Terminal-rules). Posicionado ENTRE prompts e actions
+        # (segue ai-forge/rules/workflow-app-terminal.md - publicacao via
+        # _publish_to_terminal -> respeita terminal-route-toggles + focus).
+        _workflow_app_row = QWidget()
+        _workflow_app_row.setProperty("testid", "terminal-insertions-row-workflow-app")
+        self._workflow_app_content_layout = QHBoxLayout(_workflow_app_row)
+        self._workflow_app_content_layout.setContentsMargins(0, 0, 0, 0)
+        self._workflow_app_content_layout.setSpacing(4)
+        self._workflow_app_content_layout.addStretch(1)
+        _ti_layout.addWidget(_workflow_app_row)
+
         _actions_row = QWidget()
         _actions_row.setProperty("testid", "terminal-insertions-row-actions")
         self._actions_content_layout = QHBoxLayout(_actions_row)
@@ -1651,35 +1711,9 @@ class CommandQueueWidget(QWidget):
         _fkbl.addWidget(self._force_kimi_chk)
         play_row_bottom.addWidget(_force_kimi_box, stretch=1)
 
-        # Mutual exclusivity entre Use Kimi e --force Kimi (review MEDIUM 5).
-        # Tambem esconde a seta azul per-item quando --force Kimi esta ativo
-        # (review HIGH 1: spec "seta azul nao usada" interpretada como prescritiva).
-        self._force_kimi_chk.toggled.connect(self._on_force_kimi_toggled)
-        self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
-
-        main_layout.addWidget(play_bar)
-
-        # Template indicator label — shows which template/button was clicked.
-        # Vive numa row com um botao de copiar no final da linha (reaproveita
-        # o copy.svg usado em terminal-workspace-notes).
-        self._template_row = QWidget()
-        self._template_row.setFixedHeight(28)
-        self._template_row.setStyleSheet(
-            "QWidget { background-color: #1C1C1F;"
-            " border-bottom: 1px solid #3F3F46; }"
-        )
-        _trl = QHBoxLayout(self._template_row)
-        _trl.setContentsMargins(0, 0, 6, 0)
-        _trl.setSpacing(4)
-
-        self._template_label = _VisibilitySignalLabel("")
-        self._template_label.setProperty("testid", "queue-template-label")
-        self._template_label.setStyleSheet(
-            "background: transparent; color: #A1A1AA;"
-            " border: none; padding: 4px 10px; font-size: 11px;"
-        )
-        _trl.addWidget(self._template_label, stretch=1)
-
+        # Botao de copiar todos os comandos renderizados em queue-command-list.
+        # Posicionado ao lado de queue-div-force-kimi (sibling em play_row_bottom)
+        # a pedido do usuario; reaproveita o copy.svg usado em terminal-workspace-notes.
         self._copy_commands_btn = QPushButton()
         self._copy_commands_btn.setProperty(
             "testid", "queue-btn-copy-commands"
@@ -1705,29 +1739,107 @@ class CommandQueueWidget(QWidget):
             "  border-color: #FBBF24; }"
         )
         self._copy_commands_btn.clicked.connect(self._on_copy_rendered_commands)
-        _trl.addWidget(
+        play_row_bottom.addWidget(
             self._copy_commands_btn, alignment=Qt.AlignmentFlag.AlignVCenter
         )
 
-        self._template_row.setVisible(False)
-        # Sincroniza visibilidade da row com a do label, mantendo a API
-        # existente (self._template_label.setVisible(True/False)) intacta.
+        # Mutual exclusivity entre Use Kimi e --force Kimi (review MEDIUM 5).
+        # Tambem esconde a seta azul per-item quando --force Kimi esta ativo
+        # (review HIGH 1: spec "seta azul nao usada" interpretada como prescritiva).
+        self._force_kimi_chk.toggled.connect(self._on_force_kimi_toggled)
+        self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
+
+        main_layout.addWidget(play_bar)
+
+        # Template indicator label — shows which template/button was clicked.
+        self._template_row = QWidget()
+        self._template_row.setFixedHeight(28)
+        self._template_row.setStyleSheet(
+            "QWidget { background-color: #1C1C1F;"
+            " border-bottom: 1px solid #3F3F46; }"
+        )
+        _trl = QHBoxLayout(self._template_row)
+        _trl.setContentsMargins(0, 0, 6, 0)
+        _trl.setSpacing(4)
+
+        self._template_label = _TemplateLabel()
+        self._template_label.setProperty("testid", "queue-template-label")
+        self._template_label.setStyleSheet(
+            "background: transparent; color: #A1A1AA;"
+            " border: none; padding: 4px 10px; font-size: 11px;"
+        )
+        _trl.addWidget(self._template_label, stretch=1)
+
+        # Sempre visivel (mudanca 2026-05-17 P4) — row sincroniza via signal
+        # mas _TemplateLabel.setVisible(False) e no-op, entao a row tambem.
+        self._template_row.setVisible(True)
         self._template_label.visibility_changed.connect(
             self._template_row.setVisible
         )
         main_layout.addWidget(self._template_row)
 
-        # Last command played — shows the last ▶ command, one token per line
-        self._last_cmd_label = QLabel("")
-        self._last_cmd_label.setProperty("testid", "queue-last-command")
-        self._last_cmd_label.setStyleSheet(
-            "background-color: #1C1C1F; color: #D4D4D8;"
-            " border-bottom: 1px solid #3F3F46;"
-            " padding: 4px 10px; font-size: 11px; font-family: monospace;"
+        # Last command played — row horizontal (mudanca 2026-05-17 P1/P3):
+        # 'Last command:' (sempre visivel) + nn/nn (count, reparenteado de
+        # metrics_bar via attach_count_label) + comando-sem-args + eye-icon
+        # (hover toast com comando completo).
+        self._last_cmd_row = QWidget()
+        self._last_cmd_row.setProperty("testid", "queue-last-command")
+        self._last_cmd_row.setStyleSheet(
+            "QWidget { background-color: #1C1C1F;"
+            " border-bottom: 1px solid #3F3F46; }"
         )
-        self._last_cmd_label.setWordWrap(True)
+        _lcl = QHBoxLayout(self._last_cmd_row)
+        _lcl.setContentsMargins(10, 4, 10, 4)
+        _lcl.setSpacing(6)
+
+        _LBL_BASE = (
+            "background: transparent; border: none;"
+            " color: #D4D4D8; font-size: 11px; font-family: monospace;"
+        )
+
+        self._last_cmd_prefix_label = QLabel("Last command:")
+        self._last_cmd_prefix_label.setStyleSheet(_LBL_BASE)
+        _lcl.addWidget(self._last_cmd_prefix_label)
+
+        # Placeholder slot pro count label (queue-count-label) — preenchido
+        # via attach_count_label() chamado pelo main_window apos o assembly.
+        self._last_cmd_count_slot = QWidget()
+        self._last_cmd_count_slot.setStyleSheet("background: transparent;")
+        _count_slot_layout = QHBoxLayout(self._last_cmd_count_slot)
+        _count_slot_layout.setContentsMargins(0, 0, 0, 0)
+        _count_slot_layout.setSpacing(0)
+        self._last_cmd_count_slot_layout = _count_slot_layout
+        _lcl.addWidget(self._last_cmd_count_slot)
+
+        # Label com comando sem argumentos (ex: "/create-task").
+        self._last_cmd_label = QLabel("")
+        self._last_cmd_label.setProperty("testid", "queue-last-command-cmd")
+        self._last_cmd_label.setStyleSheet(_LBL_BASE)
+        _lcl.addWidget(self._last_cmd_label)
+
+        # Eye-icon: QLabel clicavel/hover com QToolTip mostrando o comando
+        # completo (com args). Usa caractere unicode pra evitar dependencia
+        # de SVG aqui.
+        self._last_cmd_eye = QLabel("\U0001F441")  # eye emoji
+        self._last_cmd_eye.setProperty("testid", "queue-last-command-eye")
+        self._last_cmd_eye.setStyleSheet(
+            "background: transparent; border: none; color: #A1A1AA;"
+            " font-size: 12px;"
+        )
+        self._last_cmd_eye.setToolTip("")
+        _lcl.addWidget(self._last_cmd_eye)
+        _lcl.addStretch(1)
+
+        # Estado inicial (P3): so o prefixo visivel; count/cmd/eye hidden.
+        self._last_cmd_count_slot.setVisible(False)
         self._last_cmd_label.setVisible(False)
-        main_layout.addWidget(self._last_cmd_label)
+        self._last_cmd_eye.setVisible(False)
+
+        # Texto completo do ultimo comando (com args) — usado por
+        # get_last_command_text() para restore_queue_snapshot.
+        self._last_cmd_full: str = ""
+
+        main_layout.addWidget(self._last_cmd_row)
 
         # Stacked content (empty state vs list)
         # Notepad foi removido em Iter 12 — _content_stack agora ocupa toda a
@@ -1856,6 +1968,7 @@ class CommandQueueWidget(QWidget):
         signal_bus.interactive_advance_ready.connect(self._on_interactive_advance_ready)
         signal_bus.instance_selected.connect(self._on_instance_selected)
         signal_bus.autocast_step_requested.connect(self._on_autocast_step_requested)
+        signal_bus.interactive_input_requested.connect(self._cancel_pending_modal_enter)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
 
     def _on_autocast_step_requested(self) -> None:
@@ -1945,6 +2058,23 @@ class CommandQueueWidget(QWidget):
             layout.addWidget(w)
         layout.addStretch(1)
 
+    def populate_workflow_app_tab(self, widgets: list[QWidget]) -> None:
+        """Anexa botoes da row terminal-insertions-row-workflow-app (Workflow App,
+        Dcp-list-rules, Cmd-list-rules, Terminal-rules).
+
+        Adicionado 2026-05-17 (Parte 3 do request de melhorias do workflow-app).
+        Idempotente. Ver populate_prompts_tab para racional.
+        """
+        layout = self._workflow_app_content_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for w in widgets:
+            layout.addWidget(w)
+        layout.addStretch(1)
+
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
         """Anexa widgets ao tab_bar apos as 4 section tabs.
 
@@ -1954,6 +2084,78 @@ class CommandQueueWidget(QWidget):
         """
         for w in extras:
             self._tab_bar_layout.addWidget(w)
+
+    def attach_count_label(self, count_label: QLabel) -> None:
+        """Reparenteia o queue-count-label (owned por MetricsBar) para o
+        slot dentro do queue-last-command. Idempotente.
+
+        O label continua sendo atualizado por MetricsBar via signal
+        `metrics_updated` -> `_on_metrics_updated_for_ring` (so muda o
+        parent visual, nao o pipeline de signals).
+        """
+        count_label.setParent(self._last_cmd_count_slot)
+        count_label.setStyleSheet(
+            "background: transparent; border: none; color: #FBBF24;"
+            " font-size: 11px; font-weight: 700; font-family: monospace;"
+        )
+        count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Limpa state legacy de embed_count_label.
+        count_label.setFixedSize(0, 0)
+        count_label.setMinimumSize(0, 0)
+        count_label.setMaximumSize(16777215, 16777215)
+        # Limpa o slot e adiciona o label.
+        while self._last_cmd_count_slot_layout.count():
+            self._last_cmd_count_slot_layout.takeAt(0)
+        self._last_cmd_count_slot_layout.addWidget(count_label)
+        # Garante visibilidade: a row-mae nao muda, mas o slot e mostrado/escondido
+        # via _on_run_command/clear_queue (P3).
+
+    def install_template_tracker(self) -> None:
+        """Instala um event filter nas 3 tabs (pipelines/workflow/auxiliar)
+        que captura clicks em QPushButton e atualiza queue-template-label
+        com o testid do botao clicado.
+
+        Chamado pelo main_window apos populate_* terminar. A tab
+        terminal-insertions (indice 3) NAO e rastreada (regra P4).
+        """
+        if not hasattr(self, "_sec_contents"):
+            return
+        if not hasattr(self, "_tracked_section_indices"):
+            self._tracked_section_indices = (0, 1, 2)
+        tracked = self._tracked_section_indices
+        for idx in tracked:
+            if idx < len(self._sec_contents):
+                self._sec_contents[idx].installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt API
+        # P4: detecta MouseButtonRelease em QPushButton dentro das 3 tabs
+        # rastreadas, e atualiza queue-template-label com o testid do botao
+        # via QTimer.singleShot(0, ...) — defer garante que executa apos os
+        # slots `clicked` que esses botoes ja conectam (incluindo
+        # _template_label.setText calls existentes).
+        try:
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                tracked = getattr(self, "_tracked_section_indices", ())
+                if any(
+                    idx < len(self._sec_contents) and obj is self._sec_contents[idx]
+                    for idx in tracked
+                ):
+                    pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                    child = obj.childAt(pos)
+                    while child is not None and not isinstance(child, QPushButton):
+                        child = child.parentWidget()
+                        if child is obj:
+                            child = None
+                            break
+                    if isinstance(child, QPushButton):
+                        testid = child.property("testid")
+                        if isinstance(testid, str) and testid:
+                            QTimer.singleShot(
+                                0, lambda tid=testid: self._template_label.set_value(tid)
+                            )
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def _load_single_command(
         self,
@@ -2278,10 +2480,31 @@ class CommandQueueWidget(QWidget):
             )
             return None
         if module.state == "done":
+            # Suggest the next pending module (sequential ordering by module_id)
+            # so the operator nao precisa abrir delivery.json a mao. Owner
+            # canonico do advance e /delivery:sign-off (ver rule
+            # workflow-app-command-lists.md secao "Lifecycle hand-off entre
+            # modulos").
+            next_pending = next(
+                (
+                    mid for mid in sorted(delivery.modules.keys())
+                    if delivery.modules[mid].state == "pending"
+                ),
+                None,
+            )
+            logger.info(
+                "DCP G4 fail: current_module=%s state=done; next_pending=%s",
+                cm_id, next_pending,
+            )
+            hint = (
+                f" Proximo modulo pending sugerido: {next_pending!r}."
+                if next_pending else " Nenhum modulo pending restante."
+            )
             QMessageBox.information(
                 self, "DCP",
                 f"Modulo {cm_id!r} ja concluido. "
-                "Use /delivery:sign-off ou inicie o proximo modulo.",
+                "Use /delivery:sign-off (advance automatico de current_module) "
+                f"ou edite delivery.json manualmente.{hint}",
             )
             return None
 
@@ -4074,11 +4297,22 @@ class CommandQueueWidget(QWidget):
         )
 
     def _on_run_command(self, cmd_text: str) -> None:
-        """Update last-command label and highlight the matching queue row."""
-        parts = cmd_text.strip().split()
-        self._last_cmd_label.setText("\n".join(parts))
+        """Update last-command row e highlight a queue row correspondente.
+
+        A row do queue-last-command renderiza: prefixo (sempre) + count
+        (queue-count-label, vive sincronizado via metrics_updated) + comando
+        sem args + eye-icon com hover-tooltip do comando completo.
+        """
+        cleaned = cmd_text.strip()
+        self._last_cmd_full = cleaned
+        parts = cleaned.split()
+        cmd_token = parts[0] if parts else ""
+        self._last_cmd_label.setText(cmd_token)
         self._last_cmd_label.setVisible(True)
-        self._highlight_current_command(cmd_text.strip())
+        self._last_cmd_count_slot.setVisible(True)
+        self._last_cmd_eye.setVisible(True)
+        self._last_cmd_eye.setToolTip(cleaned)
+        self._highlight_current_command(cleaned)
         self._maybe_auto_save(cmd_text)
 
     def _highlight_current_command(self, cmd_text: str) -> None:
@@ -4307,8 +4541,14 @@ class CommandQueueWidget(QWidget):
         for item in self._items:
             item.deleteLater()
         self._items.clear()
-        self._template_label.setVisible(False)
+        # P3 (2026-05-17): a row do queue-last-command nao some mais — so o
+        # prefixo "Last command:" permanece visivel; count/cmd/eye recolhem.
         self._last_cmd_label.setVisible(False)
+        self._last_cmd_count_slot.setVisible(False)
+        self._last_cmd_eye.setVisible(False)
+        self._last_cmd_eye.setToolTip("")
+        self._last_cmd_full = ""
+        # P4: queue-template-label e sempre visivel; nao escondemos mais.
         self._empty_widget.setVisible(True)
         self._list_widget.setVisible(False)
         self._emit_progress_metrics()
@@ -4563,17 +4803,22 @@ class CommandQueueWidget(QWidget):
         self.save_requested.emit()
 
     def get_template_label_text(self) -> str:
-        """Return the current template label text (strip leading icon/space)."""
+        """Return the current template label value (strip 'Last template: '
+        prefix + leading icon/space). Devolve string vazia quando o valor
+        e o placeholder '—'."""
         text = self._template_label.text().strip()
-        # Remove leading emoji + space (e.g. "  📋  Brief — Novo Projeto")
+        if text.startswith(_TemplateLabel._PREFIX):
+            text = text[len(_TemplateLabel._PREFIX):].strip()
+        if text == _TemplateLabel._PLACEHOLDER:
+            return ""
         for prefix in ("📋", "🔎"):
             if prefix in text:
                 text = text.split(prefix, 1)[-1].strip()
         return text
 
     def get_last_command_text(self) -> str:
-        """Return the current last-command label text."""
-        return self._last_cmd_label.text().strip()
+        """Return the current last-command full text (cmd + args)."""
+        return self._last_cmd_full.strip()
 
     def _on_copy_rendered_commands(self) -> None:
         """Copia todos os comandos renderizados em queue-command-list para o

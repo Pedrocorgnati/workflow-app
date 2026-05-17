@@ -382,17 +382,18 @@ TEMPLATE_DEPLOY: list[CommandSpec] = _inject_clears([
     _spec("/marketing-readiness-check", _S, _A, 11),
 ])
 
-# ─── Daily (from z-templates/daily.md) ────────────────────────────────────────── #
-# NOTE: NO /clear injected — daily commands flow context between steps by design.
+# ─── Daily (from .claude/commands/daily/) ──────────────────────────────────────
+# Pipeline leve: scan -> plan -> do -> validate -> review.
+# Todos Sonnet/HIGH. Sem /clear entre steps (compartilham contexto via _DAILY-*.md).
+# _inject_clears emite apenas o header inicial (/clear /model sonnet /effort high).
 
-TEMPLATE_DAILY: list[CommandSpec] = [
-    _spec("/clear",          _S, _A, 0),
-    _spec("/daily:scan",     _S, _A, 1),
-    _spec("/daily:plan",     _S, _A, 2),
-    _spec("/daily:do",       _S, _A, 3),
-    _spec("/daily:validate", _S, _A, 4),
-    _spec("/daily:review",   _S, _A, 5),
-]
+TEMPLATE_DAILY: list[CommandSpec] = _inject_clears([
+    _spec("/daily:scan",     _S, _A, 0, effort=EffortLevel.HIGH),
+    _spec("/daily:plan",     _S, _A, 1, effort=EffortLevel.HIGH),
+    _spec("/daily:do",       _S, _A, 2, effort=EffortLevel.HIGH),
+    _spec("/daily:validate", _S, _A, 3, effort=EffortLevel.HIGH),
+    _spec("/daily:review",   _S, _A, 4, effort=EffortLevel.HIGH),
+])
 
 # ─── Study (from .claude/commands/study.md) ────────────────────────────────────
 # Pesquisa estruturada com output dual (user-friendly + tecnico).
