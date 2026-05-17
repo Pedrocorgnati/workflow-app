@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QFileSystemWatcher,
     QMimeData,
     QSettings,
+    QSize,
     Qt,
     QTimer,
     Signal,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -280,13 +282,19 @@ class TerminalStatusDot(QWidget):
 
     Green  (#22C55E) — terminal silent for 2+ seconds (idle at prompt).
     Yellow (#F59E0B) — PTY output flowing (command executing).
+
+    Responsive (2026-05-17): size is the "preferred" diameter used as sizeHint
+    so the parent layout can shrink/grow the dot. resizeEvent recomputes the
+    border-radius from the current min(width, height) so the dot stays a
+    perfect circle at any size.
     """
 
     busy_changed = Signal(str, bool)  # channel, is_busy — fired on every transition
 
     _SIZE = 28
-    _IDLE_STYLE = f"QWidget {{ background-color: #22C55E; border-radius: {_SIZE // 2}px; }}"
-    _BUSY_STYLE = f"QWidget {{ background-color: #F59E0B; border-radius: {_SIZE // 2}px; }}"
+    _MIN_SIZE = 16
+    _IDLE_COLOR = "#22C55E"
+    _BUSY_COLOR = "#F59E0B"
 
     def __init__(
         self,
@@ -301,17 +309,35 @@ class TerminalStatusDot(QWidget):
         self._label = label
         self._busy = False
         self._size = int(size)
-        self._idle_style = (
-            f"QWidget {{ background-color: #22C55E; border-radius: {self._size // 2}px; }}"
-        )
-        self._busy_style = (
-            f"QWidget {{ background-color: #F59E0B; border-radius: {self._size // 2}px; }}"
-        )
         self.setProperty("testid", f"listener-{channel}")
-        self.setFixedSize(self._size, self._size)
+        # Responsive sizing: parent layout drives actual width/height; widget
+        # keeps preferred `size` via sizeHint while accepting shrink to _MIN_SIZE.
+        self.setMinimumSize(self._MIN_SIZE, self._MIN_SIZE)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(self._idle_style)
+        self._apply_style()
         self.setToolTip(f"{label}: parado")
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._size, self._size)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self._MIN_SIZE, self._MIN_SIZE)
+
+    def _current_diameter(self) -> int:
+        return max(self._MIN_SIZE, min(self.width(), self.height()))
+
+    def _apply_style(self) -> None:
+        color = self._BUSY_COLOR if self._busy else self._IDLE_COLOR
+        radius = self._current_diameter() // 2
+        border = "border: 2px solid #FFFFFF;" if color == self._IDLE_COLOR else ""
+        self.setStyleSheet(
+            f"QWidget {{ background-color: {color}; border-radius: {radius}px; {border} }}"
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._apply_style()
 
     @property
     def is_busy(self) -> bool:
@@ -325,7 +351,7 @@ class TerminalStatusDot(QWidget):
         if busy == self._busy:
             return
         self._busy = busy
-        self.setStyleSheet(self._busy_style if busy else self._idle_style)
+        self._apply_style()
         self.setToolTip(f"{self._label}: {'executando' if busy else 'parado'}")
         self.busy_changed.emit(self._channel, busy)
 
@@ -356,6 +382,7 @@ class MetricsBar(QWidget):
         self._active_view: int = 0
         self._selected_instance: int = 0
         self._autocast_phase: str = "off"  # off | awaiting-busy | running
+        self._awaiting_user_input: bool = False
 
         # MARKER_SCHEDULE_AUTOCAST_STATE - schedule-autocast countdown state
         self._schedule_end_at: QDateTime | None = None
@@ -578,6 +605,11 @@ class MetricsBar(QWidget):
         self._listeners_frame.setStyleSheet(
             "QFrame#ListenersFrame { background-color: transparent; }"
         )
+        # Listeners-frame agora expande horizontalmente; os dots compartilham
+        # o espaco igualmente via stretch=1 (Task 4 do refactor power-bi).
+        self._listeners_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred,
+        )
         lf = QHBoxLayout(self._listeners_frame)
         lf.setContentsMargins(12, 8, 12, 8)
         lf.setSpacing(16)
@@ -588,25 +620,26 @@ class MetricsBar(QWidget):
         self._dot_workspace = TerminalStatusDot(
             "workspace", "Kimi CLI", self._listeners_frame, size=88,
         )
-        lf.addWidget(self._dot_interactive)
-        lf.addWidget(self._dot_workspace)
+        lf.addWidget(self._dot_interactive, 1)
+        lf.addWidget(self._dot_workspace, 1)
 
-        # queue-progress-ring posicionado lado a lado com os dots
-        # (Iter 11 > GAP 4.4). Discreto: conta entradas de queue-command-list,
-        # nao mede tempo. Atualizado via signal_bus.metrics_updated.
+        # queue-progress-ring agora vive como IRMAO do listeners-frame dentro
+        # do power-bi-section (montado em main_window._build_output_toolbar).
+        # Permanece owned por MetricsBar para preservar signal pipelines, mas
+        # sem parent ate ser reparenteado pelo PowerBiSection.
         from workflow_app.widgets.queue_progress_ring import QueueProgressRing
-        self._queue_progress_ring = QueueProgressRing(self._listeners_frame, diameter=88)
-        lf.addWidget(self._queue_progress_ring)
+        self._queue_progress_ring = QueueProgressRing(None, diameter=88)
 
-        # Contador textual "executados/faltantes" — embutido dentro do
-        # queue-progress-ring (via QueueProgressRing.embed_count_label), em
-        # coluna com o percentual. Estilo final aplicado pelo proprio ring.
+        # Contador textual "executados/faltantes" — migrado em 2026-05-17 do
+        # centro do queue-progress-ring para a row queue-last-command (vive
+        # como filho reparenteado pelo CommandQueueWidget). Aqui o label segue
+        # owned por MetricsBar pra preservar o pipeline de signal
+        # (`metrics_updated` -> `_on_metrics_updated_for_ring` -> setText).
         self._lbl_queue_count = QLabel("0/0")
         self._lbl_queue_count.setObjectName("QueueCountLabel")
         self._lbl_queue_count.setProperty("testid", "queue-count-label")
         self._lbl_queue_count.setToolTip("Comandos executados / total")
         self._lbl_queue_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._queue_progress_ring.embed_count_label(self._lbl_queue_count)
 
         # queue-count-toggles-row continua existindo (terminal-layout-toggle +
         # terminal-workspace-collapse populados via MainWindow), mas agora vive
@@ -1031,6 +1064,8 @@ class MetricsBar(QWidget):
         """Request CommandQueueWidget to click `queue-btn-play-next` and arm the window."""
         if not self._btn_autocast.isChecked():
             return
+        if self._awaiting_user_input:
+            return
         self._autocast_phase = "awaiting-busy"
         self._signal_bus.autocast_step_requested.emit()
         self._autocast_arm_timer.start()
@@ -1043,6 +1078,18 @@ class MetricsBar(QWidget):
             return
         # Toggle the button OFF programmatically; toggled signal handles UI reset.
         self._btn_autocast.setChecked(False)
+
+    def _on_interactive_input_requested(self) -> None:
+        """AskUserQuestion is active — pause the autocast loop until the user replies."""
+        self._awaiting_user_input = True
+
+    def _on_user_input_submitted(self, _text: str) -> None:
+        """User answered AskUserQuestion — release the autocast loop."""
+        self._awaiting_user_input = False
+
+    def _on_pipeline_completed_reset_input_guard(self) -> None:
+        """Safety reset: clear the guard if the pipeline completes/cancels while active."""
+        self._awaiting_user_input = False
 
     def _on_dot_busy_changed(self, _channel: str, busy: bool) -> None:
         if not self._btn_autocast.isChecked():
@@ -1060,6 +1107,10 @@ class MetricsBar(QWidget):
             return
         # Debounce a touch so paired green-transitions arriving in the same tick
         # don't double-fire and so any late PTY chunk has a chance to flip yellow.
+        # Guard: AskUserQuestion is pending — dots go green while CLI awaits human
+        # input, which is semantically the opposite of "command completed".
+        if self._awaiting_user_input:
+            return
         self._autocast_fire_timer.start()
 
     # ─────────────────────────────────────────────────────── Signals ─── #
@@ -1081,6 +1132,12 @@ class MetricsBar(QWidget):
         # toggle/click via signal_bus and proxy to the existing state machine.
         bus.autocast_toggle_requested.connect(self._on_autocast_proxy_toggle)
         bus.schedule_autocast_requested.connect(self._on_schedule_clicked)
+
+        # Autocast guard: pause the loop while AskUserQuestion awaits human input.
+        bus.interactive_input_requested.connect(self._on_interactive_input_requested)
+        bus.user_input_submitted.connect(self._on_user_input_submitted)
+        bus.pipeline_completed.connect(self._on_pipeline_completed_reset_input_guard)
+        bus.pipeline_cancelled.connect(self._on_pipeline_completed_reset_input_guard)
 
         # queue-progress-ring: tracking discreto via metrics_updated(done, total).
         bus.metrics_updated.connect(self._on_metrics_updated_for_ring)
