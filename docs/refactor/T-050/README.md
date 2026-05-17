@@ -1,7 +1,7 @@
 # T-050 — Workflow-app DCP cleanup
 
 Refactor que adequa o workflow-app (PySide6) ao DCP, implementado por TASK-050
-de `scheduled-updates/refactor-workflow-sytemforge/TASK-050-workflow-app-dcp-cleanup.md`.
+(refactor concluido — historico consolidado em `WORKFLOW-DETAILED.md`).
 
 ## Resumo
 
@@ -51,7 +51,6 @@ docs/refactor/T-050/screenshots/
 
 ## Fonte da verdade
 
-- Spec: `../../../../scheduled-updates/refactor-workflow-sytemforge/TASK-050-workflow-app-dcp-cleanup.md`
+- Spec original e execution readiness (T-050): refactor concluido — historico consolidado em `WORKFLOW-DETAILED.md`
 - Canonical loop A..I: `../../../../WORKFLOW-DETAILED.md#2-arquitetura-dcp-canonical-loop-ai`
-- Detailed §6.4: `../../../../scheduled-updates/refactor-workflow-sytemforge/detailed.md`
-- Execution readiness: `../../../../scheduled-updates/refactor-workflow-sytemforge/EXECUTION-READINESS-T-050.md`
+- Detailed §6.4: `WORKFLOW-DETAILED.md`

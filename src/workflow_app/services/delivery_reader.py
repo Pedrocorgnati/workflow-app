@@ -121,7 +121,7 @@ class DeliveryReader:
             )
 
         raw_version = raw.get("version") if isinstance(raw, dict) else None
-        if isinstance(raw_version, int) and raw_version > 1:
+        if isinstance(raw_version, int) and raw_version > 2:
             return DeliveryFutureVersion(
                 path=path,
                 version=raw_version,
@@ -217,8 +217,24 @@ def resolve_specific_flow(
     wbs = Path(delivery.project.wbs_root)
     wbs_abs = wbs if wbs.is_absolute() else (project_root / wbs)
 
+    # Level 0 (v2 canonical): {wbs_root}/modules/{module_id}/SPECIFIC-FLOW.json.
+    # This is where /build-module-pipeline writes the flow in DCP v2. Added
+    # 2026-05-16 — without this, the v2 schema (which dropped
+    # ModuleArtifacts.last_specific_flow) had no working resolution path,
+    # so [DCP: Specific-Flow] silently failed for every freshly-built module.
+    per_module_candidate = wbs_abs / "modules" / module_id / SPECIFIC_FLOW_FILENAME
+    if per_module_candidate.exists():
+        return per_module_candidate
+    logger.debug(
+        "resolve_specific_flow: level-0 miss for %s (candidate=%s)",
+        module_id,
+        per_module_candidate,
+    )
+
     # Level 1: artifacts.last_specific_flow (relative to wbs_root).
-    last = module.artifacts.last_specific_flow
+    # v1 legacy — v2 schema dropped this field. Kept as fallback for
+    # delivery.json files still on v1 mid-migration.
+    last = getattr(module.artifacts, "last_specific_flow", None)
     if last:
         candidate = Path(last)
         if not candidate.is_absolute():

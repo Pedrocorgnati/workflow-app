@@ -385,6 +385,7 @@ _DATATEST_FILTERED_IDS = frozenset({
     "queue-progress-ring",
     "queue-count-toggles-row",
     "output-toolbar-queue-toggles",
+    "output-toolbar-progress-boxes",
     "output-toolbar-test-mode",
     "queue-command-list",
     "terminal-interactive",
@@ -610,6 +611,11 @@ class MainWindow(QMainWindow):
         # output-toolbar-left (CommandQueue header_widget) agora ocupa toda
         # a largura disponivel a esquerda — output-toolbar-center deletada.
         _toolbar_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
+        # Coluna progress-boxes (entre output-toolbar-left e output-toolbar-queue-toggles):
+        # 5 botoes coloridos com checkbox-label que apenas alternam a cor do botao
+        # para cinza (estado "checado") sem efeitos colaterais.
+        _progress_boxes_column = self._build_progress_boxes_column()
+        _toolbar_row_layout.addWidget(_progress_boxes_column)                        # progress-boxes
         # Nova coluna irma a esquerda de test-mode: aloja terminal-engine-toggle
         # (topo) + queue-count-toggles-row (abaixo). Reparenteia _engine_toggle_btn
         # de _build_workspace_label_bar e _queue_count_toggles_row de
@@ -1127,6 +1133,121 @@ class MainWindow(QMainWindow):
         for b in self._test_mode_buttons.values():
             b.toggled.connect(self._on_test_mode_button_toggled)
 
+        return column
+
+    _PROGRESS_BOX_BTN_STYLE_TPL = (
+        "QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+        "  border: 1px solid {border}; border-radius: 5px;"
+        "  font-size: 11px; font-weight: 700; padding: 0 10px; text-align: left; }}"
+        "QPushButton:hover {{ background-color: {hover}; }}"
+    )
+    _PROGRESS_BOX_BTN_STYLE_GRAY = (
+        "QPushButton { background-color: #52525B; color: #A1A1AA;"
+        "  border: 1px solid #3F3F46; border-radius: 5px;"
+        "  font-size: 11px; font-weight: 600; padding: 0 10px; text-align: left; }"
+        "QPushButton:hover { background-color: #5E5E66; }"
+    )
+    # Tri-state checkbox: Unchecked (sem fill) -> PartiallyChecked (amarelo)
+    # -> Checked (verde) -> Unchecked. Ciclo nativo do QCheckBox tristate.
+    _PROGRESS_BOX_CHK_STYLE = (
+        "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
+        "  background: transparent; border: none; padding: 0; spacing: 0; }"
+        "QCheckBox::indicator { width: 14px; height: 14px; }"
+        "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
+        "  border: 1px solid #52525B; border-radius: 3px; }"
+        "QCheckBox::indicator:indeterminate { background-color: #FACC15;"
+        "  border: 1px solid #FACC15; border-radius: 3px; }"
+        "QCheckBox::indicator:checked { background-color: #16A34A;"
+        "  border: 1px solid #16A34A; border-radius: 3px; }"
+    )
+
+    _PROGRESS_BOX_DEFS = (
+        # (slug, label, bg, hover, border, paste_text)
+        ("prompt-to-md",      "Prompt to md",      "#7C3AED", "#6D28D9", "#6D28D9",
+            "/tools:prompt-to-md"),
+        ("study-that-prompt", "Study",             "#2563EB", "#1D4ED8", "#1D4ED8",
+            "limpe as importações, copie o path.md, clique no botão study"),
+        ("loop-the-study",    "Prepare loop",      "#16A34A", "#15803D", "#15803D",
+            "Instrução: apague o import, copie o link e clique no botão loop"),
+        ("rocksmash-the-loop","Rocksmash",         "#EA580C", "#C2410C", "#C2410C",
+            "abra o json e clique em rocksmash"),
+        ("execute-loop",      "Execute loop",      "#DB2777", "#BE185D", "#BE185D",
+            "abra o json e clique em loop"),
+    )
+
+    def _build_progress_boxes_column(self) -> QWidget:
+        """Coluna irma entre output-toolbar-left e output-toolbar-queue-toggles.
+
+        5 linhas, cada uma com `[checkbox] [botao colorido com label]`.
+        Checkbox tri-state: Unchecked (sem fill) -> PartiallyChecked (amarelo)
+        -> Checked (verde) -> Unchecked. O botao irmao fica cinza em qualquer
+        estado != Unchecked, voltando a colorido so quando o ciclo zera.
+        Nenhum side effect adicional (sem signals, sem persistencia).
+        """
+        from PySide6.QtWidgets import (
+            QCheckBox,
+            QHBoxLayout,
+            QPushButton,
+            QVBoxLayout,
+        )
+
+        column = QWidget()
+        column.setObjectName("OutputToolbarProgressBoxes")
+        column.setProperty("testid", "output-toolbar-progress-boxes")
+        column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        column.setStyleSheet(
+            "QWidget#OutputToolbarProgressBoxes { background-color: #1C1C1F;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        col_layout = QVBoxLayout(column)
+        col_layout.setContentsMargins(8, 4, 8, 4)
+        col_layout.setSpacing(3)
+
+        self._progress_box_buttons: dict[str, QPushButton] = {}
+        self._progress_box_checks: dict[str, QCheckBox] = {}
+
+        for slug, label, bg, hover, border, paste_text in self._PROGRESS_BOX_DEFS:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+            chk = QCheckBox()
+            chk.setProperty("testid", f"progress-box-{slug}-chk")
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.setTristate(True)
+            chk.setStyleSheet(self._PROGRESS_BOX_CHK_STYLE)
+
+            btn = QPushButton(label)
+            btn.setProperty("testid", f"progress-box-{slug}-btn")
+            btn.setFixedHeight(22)
+            btn.setMinimumWidth(160)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            colored_style = self._PROGRESS_BOX_BTN_STYLE_TPL.format(
+                bg=bg, hover=hover, border=border,
+            )
+            btn.setProperty("_colored_style", colored_style)
+            btn.setStyleSheet(colored_style)
+
+            # Tri-state: botao fica gray em qualquer estado != Unchecked (0).
+            chk.stateChanged.connect(
+                lambda state, b=btn: b.setStyleSheet(
+                    b.property("_colored_style") if state == 0
+                    else self._PROGRESS_BOX_BTN_STYLE_GRAY
+                )
+            )
+            btn.clicked.connect(
+                lambda _checked=False, t=paste_text: self._publish_to_terminal(t)
+            )
+
+            row_layout.addWidget(chk)
+            row_layout.addWidget(btn, stretch=1)
+            col_layout.addWidget(row)
+
+            self._progress_box_buttons[slug] = btn
+            self._progress_box_checks[slug] = chk
+
+        col_layout.addStretch(1)
         return column
 
     def _build_queue_toggles_column(self) -> QWidget:

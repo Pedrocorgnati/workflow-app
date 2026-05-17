@@ -6,8 +6,8 @@ Covers:
 - `workflow_app.dcp.specific_flow_handler.build_paste_command_only()` literal.
 - CommandQueueWidget init-time gating when `READER_AVAILABLE` is false.
 
-Spec: `scheduled-updates/refactor-workflow-sytemforge/TASK-050-workflow-app-dcp-cleanup.md`
-lines 89, 107-119 (literal messages, disabled-at-init requirement).
+Spec T-050 (refactor concluido) — comportamento consolidado em
+ai-forge/workflow-app/docs/refactor/T-050/README.md.
 """
 
 from __future__ import annotations

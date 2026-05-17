@@ -1,6 +1,6 @@
 """Pydantic v2 model of `delivery.json` v2 (DCP state plane).
 
-Canonical source: `scheduled-updates/refactor-workflow-sytemforge/schemas/delivery.schema.json`
+Canonical source: `.claude/commands/delivery/_lib/delivery.schema.json`
 (T-001). This module replicates the schema structure exactly (D1-D9 resolutions
 documented in EXECUTION-READINESS-T-035.md).
 

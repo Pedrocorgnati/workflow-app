@@ -135,7 +135,6 @@ def _module(
         or {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": None,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
@@ -160,7 +159,7 @@ def fixture_sequential(tmp_path: Path) -> Path:
     wbs_root = tmp_path / "wbs"
     wbs_root.mkdir()
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": "module-1-dashboard",
         "execution_mode": "sequential",
@@ -188,7 +187,7 @@ def fixture_parallel(tmp_path: Path) -> Path:
     wbs_root = tmp_path / "wbs"
     wbs_root.mkdir()
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_modules": [
             "module-1-crud",
@@ -253,7 +252,7 @@ def fixture_blocked(tmp_path: Path) -> Path:
         },
     ]
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": "module-3-billing",
         "execution_mode": "sequential",
@@ -285,7 +284,7 @@ def test_load_happy_sequential(fixture_sequential: Path) -> None:
     result = reader.load(fixture_sequential.parent)
 
     assert isinstance(result, DeliveryFound)
-    assert result.delivery.version == 1
+    assert result.delivery.version == 2
     assert result.delivery.execution_mode == "sequential"
     assert result.delivery.current_module == "module-1-dashboard"
     assert set(result.delivery.modules) == {
@@ -324,14 +323,14 @@ def test_load_canonical_example_fixture() -> None:
     """Roundtrip the T-001 canonical example to guard against schema drift."""
     canonical = (
         Path(__file__).resolve().parents[3]
-        / "scheduled-updates/refactor-workflow-sytemforge/schemas/delivery.example.json"
+        / "ai-forge/schemas/delivery.example.json"
     )
     if not canonical.exists():
         pytest.skip(f"canonical fixture not found at {canonical}")
 
     content = canonical.read_text(encoding="utf-8")
     delivery = Delivery.model_validate_json(content)
-    assert delivery.version == 1
+    assert delivery.version == 2
     assert "module-0-foundations" in delivery.modules
     assert delivery.execution_mode in ("sequential", "parallel-independent")
 
@@ -347,13 +346,13 @@ def test_missing_delivery_json(tmp_path: Path) -> None:
 
 
 def test_future_version(tmp_path: Path) -> None:
-    payload = {"version": 2, "unsupported": True}
+    payload = {"version": 3, "unsupported": True}
     _write_delivery(tmp_path / DELIVERY_FILENAME, payload)
     reader = DeliveryReader()
     result = reader.load(tmp_path)
     assert isinstance(result, DeliveryFutureVersion)
-    assert result.version == 2
-    assert "version=2" in result.message
+    assert result.version == 3
+    assert "version=3" in result.message
 
 
 def test_invalid_json(tmp_path: Path) -> None:
@@ -365,7 +364,7 @@ def test_invalid_json(tmp_path: Path) -> None:
 
 
 def test_schema_violation_missing_required(tmp_path: Path) -> None:
-    payload = {"version": 1, "project": {"name": "x"}}  # missing required fields
+    payload = {"version": 2, "project": {"name": "x"}}  # missing required fields
     _write_delivery(tmp_path / DELIVERY_FILENAME, payload)
     reader = DeliveryReader()
     result = reader.load(tmp_path)
@@ -451,7 +450,7 @@ def test_warning_i10_dependency_not_done(fixture_sequential: Path) -> None:
 
 def test_warning_i01_parallel_empty_current(tmp_path: Path) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(tmp_path / "wbs"),
         "current_modules": [],  # will trigger schema error first? nope minItems=1
         "execution_mode": "parallel-independent",
@@ -479,18 +478,18 @@ def test_warning_i01_parallel_empty_current(tmp_path: Path) -> None:
 # ─── resolve_specific_flow cascade ──────────────────────────────────────── #
 
 
-def test_resolve_specific_flow_level1(fixture_sequential: Path) -> None:
+def test_resolve_specific_flow_level0_per_module(fixture_sequential: Path) -> None:
+    """Level 0 (v2 canonical): {wbs_root}/modules/{module_id}/SPECIFIC-FLOW.json.
+
+    This is where /build-module-pipeline writes the flow in DCP v2. Replaces
+    the obsolete Level 1 test (ModuleArtifacts.last_specific_flow), dropped
+    from the v2 schema.
+    """
     wbs_root = fixture_sequential.parent
     module_flow_dir = wbs_root / "modules/module-1-dashboard"
     module_flow_dir.mkdir(parents=True)
     flow_path = module_flow_dir / "SPECIFIC-FLOW.json"
     flow_path.write_text("{}", encoding="utf-8")
-
-    raw = json.loads(fixture_sequential.read_text())
-    raw["modules"]["module-1-dashboard"]["artifacts"][
-        "last_specific_flow"
-    ] = "modules/module-1-dashboard/SPECIFIC-FLOW.json"
-    fixture_sequential.write_text(json.dumps(raw))
 
     reader = DeliveryReader()
     result = reader.load(wbs_root)
@@ -503,6 +502,40 @@ def test_resolve_specific_flow_level1(fixture_sequential: Path) -> None:
         delivery_mtime=result.mtime,
     )
     assert got == flow_path
+
+
+def test_resolve_specific_flow_level0_precedence_over_level2(
+    fixture_sequential: Path,
+) -> None:
+    """When both Level 0 and Level 2 candidates exist, Level 0 (per-module) wins.
+
+    Guards against regressions of the cascade ordering after Level 0 was
+    introduced (2026-05-16).
+    """
+    wbs_root = fixture_sequential.parent
+
+    # Level 0 candidate (per-module canonical, v2)
+    module_flow_dir = wbs_root / "modules/module-1-dashboard"
+    module_flow_dir.mkdir(parents=True)
+    level0_flow = module_flow_dir / "SPECIFIC-FLOW.json"
+    level0_flow.write_text("{}", encoding="utf-8")
+
+    # Level 2 candidate (legacy custom_workflow_root default)
+    legacy_dir = wbs_root / DEFAULT_CUSTOM_WORKFLOW_SUBDIR
+    legacy_dir.mkdir()
+    (legacy_dir / SPECIFIC_FLOW_FILENAME).write_text("{}", encoding="utf-8")
+
+    reader = DeliveryReader()
+    result = reader.load(wbs_root)
+    assert isinstance(result, DeliveryFound)
+
+    got = reader.resolve_specific_flow(
+        result.delivery,
+        "module-1-dashboard",
+        project_root=wbs_root.parent,
+        delivery_mtime=result.mtime,
+    )
+    assert got == level0_flow
 
 
 def test_resolve_specific_flow_level2(fixture_sequential: Path) -> None:
@@ -722,7 +755,7 @@ def test_read_module_meta_invalid_json(fixture_sequential: Path) -> None:
 
 def test_module_invariant_i07_history_mismatch(tmp_path: Path) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(tmp_path / "wbs"),
         "current_module": "module-1-crud",
         "execution_mode": "sequential",
@@ -755,7 +788,7 @@ def test_module_invariant_i07_history_mismatch(tmp_path: Path) -> None:
 
 def test_locks_i04_partial_raises(tmp_path: Path) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(tmp_path / "wbs"),
         "current_module": "module-1-crud",
         "execution_mode": "sequential",
@@ -803,7 +836,7 @@ def test_signed_off_block_loads_on_done_module(tmp_path: Path) -> None:
         "note": None,
     }
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs),
         "current_module": "module-1-crud",
         "execution_mode": "sequential",
@@ -837,7 +870,7 @@ def test_signed_off_rejected_when_state_not_done(tmp_path: Path) -> None:
         "note": None,
     }
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs),
         "current_module": "module-1-crud",
         "execution_mode": "sequential",
@@ -878,7 +911,7 @@ def test_signed_off_rejects_legacy_ts_field_in_history(tmp_path: Path) -> None:
         ],
     )
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs),
         "current_module": "module-1-crud",
         "execution_mode": "sequential",
@@ -895,7 +928,7 @@ def test_signed_off_rejects_legacy_ts_field_in_history(tmp_path: Path) -> None:
 
 def test_rework_without_target_raises(tmp_path: Path) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(tmp_path / "wbs"),
         "current_module": "module-1-crud",
         "execution_mode": "sequential",
