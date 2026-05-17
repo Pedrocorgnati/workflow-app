@@ -213,7 +213,17 @@ def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
             interaction_type=spec.interaction_type,
             position=pos,
             is_optional=spec.is_optional,
+            estimated_seconds=spec.estimated_seconds,
+            phase=spec.phase,
+            config_path=spec.config_path,
             effort=effective_effort,
+            testid=spec.testid,
+            blocked_reason=spec.blocked_reason,
+            kimi_eligible=spec.kimi_eligible,
+            kind=spec.kind,
+            local_action_id=spec.local_action_id,
+            flags_boolean=list(spec.flags_boolean),
+            flags_with_value=list(spec.flags_with_value),
         ))
         pos += 1
         prev_name = spec.name
@@ -932,23 +942,42 @@ TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
     _spec("/blog:hreflang-map",           _H, _A, 18),
 ])
 
-# ─── Blog Stockpile (gera + push remoto; sem promote, sem hreflang, sem commit:multilanguage) ─ #
-# Fase 1 (steps 1-8): gera pacotes em .claude/blog/data/stockpile/ (auto-flow stockpile).
-# Fase 2 (step 9): commit + push do stockpile/ via /blog:stockpile-push (idempotente).
-# Promote para content/{locale}/blog/ e hreflang sao responsabilidade do workflow GitHub
-# Actions cron 13h UTC (promote-from-stockpile.yml), NAO desta pipeline local.
+# ─── Blog Stockpile (gera 1 pacote quad-locale + push; sem promote, sem hreflang) ──────────── #
+# Fase 1 (steps 1-4):   keywords pipeline — todos os locales via config.
+# Fase 2 (steps 5-8):   generate-briefs por locale (pt-BR escreve CURRENT-PACKAGE.json com UUID;
+#                        it-IT/en/es-ES reutilizam mesmo UUID se idade <= 1h).
+# Fase 3 (steps 9-12):  write-articles --output-dir stockpile por locale (le CURRENT-PACKAGE.json).
+# Fase 4 (steps 13-16): review-seo --mode stockpile por locale.
+# Fase 5 (step 17):     quality-gate --mode stockpile (todos locales).
+# Fase 6 (step 18):     stockpile-push — commit + push idempotente para main remoto.
+# Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC
+# (promote-from-stockpile.yml), NAO desta pipeline local.
 
 TEMPLATE_BLOG_STOCKPILE: list[CommandSpec] = _inject_clears([
-    _spec("/clear",                                        _S, _A,  0),
-    _spec("/blog:expand-keywords",                         _S, _A,  1),
-    _spec("/blog:cluster-keywords",                        _O, _A,  2),
-    _spec("/blog:prioritize-topics",                       _S, _A,  3),
-    _spec("/blog:deduplicate-topics",                      _S, _A,  4),
-    _spec("/blog:generate-briefs",                         _O, _A,  5),
-    _spec("/blog:write-articles --output-dir stockpile",   _O, _A,  6),
-    _spec("/blog:review-seo --mode stockpile",             _S, _A,  7),
-    _spec("/blog:quality-gate --mode stockpile",           _S, _A,  8),
-    _spec("/blog:stockpile-push",                          _S, _A,  9),
+    _spec("/clear",                                              _S, _A,  0),
+    # Fase 1 — keywords / topics (locale-agnostic ou itera internamente)
+    _spec("/blog:expand-keywords",                               _S, _A,  1),
+    _spec("/blog:cluster-keywords",                              _O, _A,  2),
+    _spec("/blog:prioritize-topics",                             _S, _A,  3),
+    _spec("/blog:deduplicate-topics",                            _S, _A,  4),
+    # Fase 2 — briefs por locale (1o locale cria CURRENT-PACKAGE.json; demais reutilizam UUID)
+    _spec("/blog:generate-briefs pt-BR",                         _O, _A,  5),
+    _spec("/blog:generate-briefs it-IT",                         _O, _A,  6),
+    _spec("/blog:generate-briefs en",                            _O, _A,  7),
+    _spec("/blog:generate-briefs es-ES",                         _O, _A,  8),
+    # Fase 3 — artigos por locale (le equivalence_id de CURRENT-PACKAGE.json)
+    _spec("/blog:write-articles --output-dir stockpile pt-BR",   _O, _A,  9),
+    _spec("/blog:write-articles --output-dir stockpile it-IT",   _O, _A, 10),
+    _spec("/blog:write-articles --output-dir stockpile en",      _O, _A, 11),
+    _spec("/blog:write-articles --output-dir stockpile es-ES",   _O, _A, 12),
+    # Fase 4 — review-seo por locale
+    _spec("/blog:review-seo --mode stockpile pt-BR",             _S, _A, 13),
+    _spec("/blog:review-seo --mode stockpile it-IT",             _S, _A, 14),
+    _spec("/blog:review-seo --mode stockpile en",                _S, _A, 15),
+    _spec("/blog:review-seo --mode stockpile es-ES",             _S, _A, 16),
+    # Fase 5 — quality-gate (todos locales) + push
+    _spec("/blog:quality-gate --mode stockpile",                 _S, _A, 17),
+    _spec("/blog:stockpile-push",                                _S, _A, 18),
 ])
 
 

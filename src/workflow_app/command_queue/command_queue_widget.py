@@ -21,8 +21,8 @@ import re
 import sys
 from typing import Any, Optional
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -67,6 +67,52 @@ from workflow_app.templates.quick_templates import (
 
 _DROP_INDICATOR_COLOR = QColor("#F59E0B")  # Amber-400
 _DROP_INDICATOR_WIDTH = 2
+
+_WORKFLOW_APP_DIR = Path(__file__).resolve().parents[3]  # .../ai-forge/workflow-app
+
+
+class _VisibilitySignalLabel(QLabel):
+    """QLabel que emite `visibility_changed(bool)` em todo `setVisible`.
+
+    Usado pelo `_template_label` para manter a `_template_row` (label + botao
+    de copiar) sincronizada sem precisar trocar as ~20 chamadas existentes a
+    `self._template_label.setVisible(True/False)` espalhadas pelo widget."""
+
+    visibility_changed = Signal(bool)
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802
+        super().setVisible(visible)
+        self.visibility_changed.emit(bool(visible))
+
+
+def _load_tinted_svg_icon(path: Path, color_hex: str) -> QIcon | None:
+    """Le um SVG com `currentColor` e renderiza em `color_hex`.
+
+    Espelha `MainWindow._load_tinted_svg_icon` (main_window.py) para evitar
+    dependencia circular ao reaproveitar o icone de `copy.svg` aqui.
+    """
+    if not path.is_file():
+        return None
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+    except ImportError:
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    tinted = raw.replace("currentColor", color_hex)
+    renderer = QSvgRenderer(QByteArray(tinted.encode("utf-8")))
+    if not renderer.isValid():
+        return None
+    pixmap = QPixmap(QSize(32, 32))
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        renderer.render(painter)
+    finally:
+        painter.end()
+    return QIcon(pixmap)
 
 _SECTION_HEADER_STYLE = (
     "QPushButton { background-color: #1E1E21; color: #A1A1AA;"
@@ -1119,9 +1165,11 @@ class CommandQueueWidget(QWidget):
         header_layout.setContentsMargins(4, 14, 4, 4)
         header_layout.setSpacing(0)
 
-        # ── Tab bar (3 buttons in a row) ─────────────────────────────────
+        # ── Tab bar (4 buttons in a row) ─────────────────────────────────
+        # Height 38 = 32 (altura dos extras terminal-route-toggles + gear) + 3+3 margins.
+        # Antes era 28 e cortava os extras pelo bottom.
         tab_bar = QWidget()
-        tab_bar.setFixedHeight(28)
+        tab_bar.setFixedHeight(38)
         tab_bar.setStyleSheet("background-color: #1E1E21;")
         tab_bar_layout = QHBoxLayout(tab_bar)
         tab_bar_layout.setContentsMargins(4, 3, 4, 3)
@@ -1132,10 +1180,9 @@ class CommandQueueWidget(QWidget):
             "queue-tab-pipelines",
             "queue-tab-workflow",
             "queue-tab-auxiliar",
-            "queue-tab-prompts",
-            "queue-tab-actions",
+            "queue-tab-terminal-insertions",
         )
-        for i, label in enumerate(("Pipelines", "Workflow", "Auxiliar", "Prompts", "Actions")):
+        for i, label in enumerate(("Pipelines", "Workflow", "Auxiliar", "Inserções")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
@@ -1144,7 +1191,7 @@ class CommandQueueWidget(QWidget):
             self._sec_tabs.append(btn)
 
         # Exposed so MainWindow can append extras (terminal-route-toggles + gear)
-        # after the 5 section tabs via attach_tab_bar_extras().
+        # after the 4 section tabs via attach_tab_bar_extras().
         self._tab_bar_layout = tab_bar_layout
 
         header_layout.addWidget(tab_bar)
@@ -1265,13 +1312,13 @@ class CommandQueueWidget(QWidget):
              lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
              "queue-btn-blog"),
             ("blog stockpile",
-             "Blog Stockpile — gera + push remoto do stockpile. "
-             "Fase 1 (geracao): expand-keywords → cluster-keywords → prioritize-topics → "
-             "deduplicate-topics → generate-briefs → write-articles (stockpile) → "
-             "review-seo → quality-gate (--mode stockpile). "
-             "Fase 2 (push): stockpile-push (commit + push idempotente). "
-             "Promote para content/{locale}/blog/ e hreflang sao responsabilidade "
-             "do workflow GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
+             "Blog Stockpile — gera 1 pacote quad-locale (pt-BR/it-IT/en/es-ES) e faz push para o repositorio remoto. "
+             "Fase 1: expand-keywords → cluster → prioritize → deduplicate. "
+             "Fase 2: generate-briefs x4 locales (pt-BR cria CURRENT-PACKAGE.json com UUID; demais reutilizam). "
+             "Fase 3: write-articles --output-dir stockpile x4 locales (le UUID de CURRENT-PACKAGE.json). "
+             "Fase 4: review-seo --mode stockpile x4 locales. "
+             "Fase 5: quality-gate --mode stockpile → stockpile-push (commit + push idempotente para main). "
+             "Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
              lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
              "queue-btn-blog-stockpile"),
         ])
@@ -1370,31 +1417,37 @@ class CommandQueueWidget(QWidget):
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
 
-        # Prompts tab (refactor 2026-05-15 output-toolbar-left consolidation):
-        # buttons antes alocados em toolbar-prompts-row (deletada). Populado por
-        # MainWindow via populate_prompts_tab() porque os handlers dependem de
-        # estado vivo no MainWindow (signal_bus, _publish_to_terminal, etc).
-        prompts_content = QWidget()
-        prompts_content.setStyleSheet("background-color: #27272A;")
-        self._prompts_content_layout = QHBoxLayout(prompts_content)
-        self._prompts_content_layout.setContentsMargins(5, 4, 5, 5)
+        # Terminal Insertions tab (refactor 2026-05-16): merge das antigas tabs
+        # `queue-tab-prompts` e `queue-tab-actions` em uma so aba congruente
+        # (itens digitados/inseridos no terminal). Layout em duas linhas:
+        # - row top: prompts (MCP-test, Online Review, Progress, slot livre)
+        # - row bottom: actions (JSON, WS, mcp-codex, mcp-kimi, double-mcp, asq-user)
+        # Populadas via populate_prompts_tab() / populate_actions_tab() pelo
+        # MainWindow (handlers dependem de estado vivo: signal_bus, _publish_to_terminal).
+        terminal_insertions_content = QWidget()
+        terminal_insertions_content.setStyleSheet("background-color: #27272A;")
+        _ti_layout = QVBoxLayout(terminal_insertions_content)
+        _ti_layout.setContentsMargins(5, 4, 5, 5)
+        _ti_layout.setSpacing(4)
+
+        _prompts_row = QWidget()
+        _prompts_row.setProperty("testid", "terminal-insertions-row-prompts")
+        self._prompts_content_layout = QHBoxLayout(_prompts_row)
+        self._prompts_content_layout.setContentsMargins(0, 0, 0, 0)
         self._prompts_content_layout.setSpacing(4)
         self._prompts_content_layout.addStretch(1)
-        header_layout.addWidget(prompts_content)
-        self._sec_contents.append(prompts_content)
+        _ti_layout.addWidget(_prompts_row)
 
-        # Actions tab (refactor 2026-05-15): JSON/WS + mcp-codex/mcp-kimi/
-        # double-mcp/asq-user antes alocados em output-toolbar-actions-row
-        # (deletada). Brief/Docs descartados. Populado por MainWindow via
-        # populate_actions_tab().
-        actions_content = QWidget()
-        actions_content.setStyleSheet("background-color: #27272A;")
-        self._actions_content_layout = QHBoxLayout(actions_content)
-        self._actions_content_layout.setContentsMargins(5, 4, 5, 5)
+        _actions_row = QWidget()
+        _actions_row.setProperty("testid", "terminal-insertions-row-actions")
+        self._actions_content_layout = QHBoxLayout(_actions_row)
+        self._actions_content_layout.setContentsMargins(0, 0, 0, 0)
         self._actions_content_layout.setSpacing(4)
         self._actions_content_layout.addStretch(1)
-        header_layout.addWidget(actions_content)
-        self._sec_contents.append(actions_content)
+        _ti_layout.addWidget(_actions_row)
+
+        header_layout.addWidget(terminal_insertions_content)
+        self._sec_contents.append(terminal_insertions_content)
 
         # Default: Workflow active (index 1)
         self._active_section = 1
@@ -1606,17 +1659,63 @@ class CommandQueueWidget(QWidget):
 
         main_layout.addWidget(play_bar)
 
-        # Template indicator label — shows which template/button was clicked
-        self._template_label = QLabel("")
-        self._template_label.setProperty("testid", "queue-template-label")
-        self._template_label.setFixedHeight(28)
-        self._template_label.setStyleSheet(
-            "background-color: #1C1C1F; color: #A1A1AA;"
-            " border-bottom: 1px solid #3F3F46;"
-            " padding: 4px 10px; font-size: 11px;"
+        # Template indicator label — shows which template/button was clicked.
+        # Vive numa row com um botao de copiar no final da linha (reaproveita
+        # o copy.svg usado em terminal-workspace-notes).
+        self._template_row = QWidget()
+        self._template_row.setFixedHeight(28)
+        self._template_row.setStyleSheet(
+            "QWidget { background-color: #1C1C1F;"
+            " border-bottom: 1px solid #3F3F46; }"
         )
-        self._template_label.setVisible(False)
-        main_layout.addWidget(self._template_label)
+        _trl = QHBoxLayout(self._template_row)
+        _trl.setContentsMargins(0, 0, 6, 0)
+        _trl.setSpacing(4)
+
+        self._template_label = _VisibilitySignalLabel("")
+        self._template_label.setProperty("testid", "queue-template-label")
+        self._template_label.setStyleSheet(
+            "background: transparent; color: #A1A1AA;"
+            " border: none; padding: 4px 10px; font-size: 11px;"
+        )
+        _trl.addWidget(self._template_label, stretch=1)
+
+        self._copy_commands_btn = QPushButton()
+        self._copy_commands_btn.setProperty(
+            "testid", "queue-btn-copy-commands"
+        )
+        _copy_icon = _load_tinted_svg_icon(
+            _WORKFLOW_APP_DIR / "assets" / "copy.svg", "#FAFAFA"
+        )
+        if _copy_icon is not None:
+            self._copy_commands_btn.setIcon(_copy_icon)
+            self._copy_commands_btn.setIconSize(QSize(12, 12))
+        else:
+            self._copy_commands_btn.setText("⎘")
+        self._copy_commands_btn.setFixedSize(22, 22)
+        self._copy_commands_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_commands_btn.setToolTip(
+            "Copiar todos os comandos renderizados, uma linha por comando"
+        )
+        self._copy_commands_btn.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
+            "  border: 1px solid #52525B; border-radius: 3px; padding: 2px; }"
+            "QPushButton:hover { background-color: #52525B; color: #FFFFFF; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
+            "  border-color: #FBBF24; }"
+        )
+        self._copy_commands_btn.clicked.connect(self._on_copy_rendered_commands)
+        _trl.addWidget(
+            self._copy_commands_btn, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
+
+        self._template_row.setVisible(False)
+        # Sincroniza visibilidade da row com a do label, mantendo a API
+        # existente (self._template_label.setVisible(True/False)) intacta.
+        self._template_label.visibility_changed.connect(
+            self._template_row.setVisible
+        )
+        main_layout.addWidget(self._template_row)
 
         # Last command played — shows the last ▶ command, one token per line
         self._last_cmd_label = QLabel("")
@@ -1847,7 +1946,7 @@ class CommandQueueWidget(QWidget):
         layout.addStretch(1)
 
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
-        """Anexa widgets ao tab_bar apos as 5 section tabs.
+        """Anexa widgets ao tab_bar apos as 4 section tabs.
 
         Usado para terminal-route-toggles + toolbar-prompts-config-gear,
         que vivem visualmente como "abas extras" mas nao tem section
@@ -2388,12 +2487,19 @@ class CommandQueueWidget(QWidget):
             ),
         ]
 
+        # Inject canonical /clear + /model + /effort block headers between
+        # commands (same pattern as quick_templates). Without this the pipeline
+        # is enqueued as a single sequential block without directives, which
+        # contradicts WORKFLOW-APP-RULES GROUP_MAP for B-dcp items.
+        from workflow_app.templates.quick_templates import _inject_clears
+        expanded_specs = _inject_clears(specs)
+
         self._pending_dcp_load_ctx = ctx
         logger.info(
-            "[DCP] enqueueing B-dcp pipeline (modulo=%s, regenerate=%s, items=%d)",
-            ctx.cm_id, ctx.regenerate, len(specs),
+            "[DCP] enqueueing B-dcp pipeline (modulo=%s, regenerate=%s, items=%d, expanded=%d)",
+            ctx.cm_id, ctx.regenerate, len(specs), len(expanded_specs),
         )
-        signal_bus.pipeline_ready.emit(specs)
+        signal_bus.pipeline_ready.emit(expanded_specs)
 
     @staticmethod
     def _emit_dcp_meta_toast(module_dir: Path, *, verbose: bool = False) -> None:
@@ -4468,6 +4574,18 @@ class CommandQueueWidget(QWidget):
     def get_last_command_text(self) -> str:
         """Return the current last-command label text."""
         return self._last_cmd_label.text().strip()
+
+    def _on_copy_rendered_commands(self) -> None:
+        """Copia todos os comandos renderizados em queue-command-list para o
+        clipboard, um por linha, na ordem visual atual (inclui /clear, /model,
+        /effort e demais directivas — reflete exatamente o que esta na tela)."""
+        lines: list[str] = []
+        for item in self._items:
+            spec = item.get_spec()
+            name = (spec.name or "").strip()
+            if name:
+                lines.append(name)
+        QApplication.clipboard().setText("\n".join(lines))
 
     def find_last_valid_command(self) -> str:
         """Walk the queue backwards from the last executed item to find
