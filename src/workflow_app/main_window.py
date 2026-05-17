@@ -316,6 +316,225 @@ Principais riscos remanescentes
 """
 
 
+# NEXT MODULE — Gerador Determinístico de SPECIFIC-FLOW.json
+# Prompt que ensina como criar SPECIFIC-FLOW.json correto para qualquer módulo,
+# seguindo exatamente o padrão de module-0. Inclui decisões de presence flags,
+# models (opus/sonnet/haiku), effort levels, e mapeamento de comandos por fase DCP.
+NEXT_MODULE_PROMPT = """\
+🚀 NEXT MODULE — Gerador Determinístico de SPECIFIC-FLOW.json
+
+OBJETIVO
+Criar o SPECIFIC-FLOW.json correto para o próximo módulo CRUD com TDD, seguindo
+exatamente o padrão de module-0. O documento completo está em:
+.claude/terminal-insertions/NEXT-MODULE-SPECIFIC-FLOW.md
+
+RESUMO EXECUTIVO (5 PASSOS)
+1. IDENTIFICAR: Qual é o próximo módulo pendente? (delivery.json > modules[...].state == "pending")
+2. ANALISAR: Leia MODULE-META.json para presence flags (frontend, backend, database), tdd.required, criticality
+3. ESTRUTURA: Abra module-0-foundations/SPECIFIC-FLOW.json como referência exata
+4. ADAPTAR: Copie de module-0, substituindo apenas module-id e paths; respeite presence conditions
+5. VALIDAR: JSON syntax, contagens de /clear, gates obrigatórios
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FASE 1 — PREPARAÇÃO
+
+1.1 Identifique o próximo módulo
+   # Qual está em estado "pending"?
+   jq '.modules[] | select(.state=="pending") | .module_id' delivery.json
+
+   # Anote: module_id, module_type, current_module
+
+1.2 Abra MODULE-META.json e anote ESTES CAMPOS:
+   - module_id, module_type, criticality
+   - presence.frontend (true/false) → incluir /front-end-build?
+   - presence.backend (true/false) → incluir /back-end-build?
+   - presence.database (true/false) → incluir /db-migration-create + /seed-data-create?
+   - presence.mobile (true/false)
+   - tdd.required (true/false) → TODA FASE_B_TDD obrigatória se true
+   - tdd.required_suites: ["unit", "contract", "integration", "acceptance"]
+   - deploy.target: "none" | "nextjs-vercel" | "pyside6" | ...
+   - qa.security_review_required (true/false) → incluir /scope-drift-detect?
+   - commit_type: "simple" | "nextjs-hostinger" | ...
+
+1.3 Conte as tasks
+   # Quantas existem?
+   ls -1 modules/{module_id}/TASK-*.md | wc -l
+   # Anote: N tasks → /create-task e /execute-task aparecerão N× cada
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FASE 2 — ESTRUTURA UNIVERSAL (PADRÃO)
+
+CADA GRUPO DE COMANDO SEGUE:
+{
+  "name": "/model {opus|sonnet|haiku}",
+  "model": "{opus|sonnet|haiku}",
+  "effort": "none",
+  "interaction": "auto",
+  "phase": "FASE_X_NAME"
+},
+{
+  "name": "/effort {low|medium|high}",
+  "model": "none",
+  "effort": "{low|medium|high}",
+  "interaction": "auto",
+  "phase": "FASE_X_NAME"
+},
+{
+  "name": "{COMANDO-REAL-COM-ARGS}",
+  "model": "{opus|sonnet|haiku}",
+  "effort": "{low|medium|high}",
+  "interaction": "auto",
+  "phase": "FASE_X_NAME",
+  "per_task": true,                    // SOMENTE em /create-task, /execute-task
+  "mandatory": true,                   // SOMENTE em gates críticos
+  "condition": "{expressão}",          // SOMENTE se condicional (tdd.required, presence.*)
+  "source_ref": "§6.4 L1147",          // SEMPRE
+  "gate_policy": {                     // SOMENTE em gates
+    "on_failure": "block",
+    "source": "canonical"
+  }
+},
+{
+  "name": "/clear",
+  "model": "none",
+  "effort": "none",
+  "interaction": "auto",
+  "phase": "FASE_X_NAME"
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FASE 3 — DECISÃO POR PRESENCE FLAG
+
+SE presence.frontend == true:
+  Incluir em FASE_B2_BUILD:
+    /front-end-build
+    /front-end-review
+
+SE presence.backend == true:
+  Incluir em FASE_B2_BUILD:
+    /back-end-build (se houver)
+
+SE presence.database == true:
+  Incluir em FASE_B2_BUILD:
+    /db-migration-create
+  Incluir em FASE_D_F8:
+    /seed-data-create
+
+SE tdd.required == true:
+  TODA FASE_B_TDD (obrigatória):
+    /tdd:test-plan
+    /tdd:behavior-from-specs
+    /tdd:unit-skeletons
+    /tdd:create-suite
+    /tdd:lock (transita creation→execution)
+
+  Em FASE_B3_EXECUTION:
+    /build-verify --tdd-gate
+
+  Em FASE_D5_MODULE_REVIEW:
+    /tdd:coverage-gate
+    /tdd:mutation-gate (SE criticality == "high" ou "critical")
+
+SE criticality in ["high", "critical"] E qa.security_review_required == true:
+  Em FASE_C_LINKAGE:
+    /scope-drift-detect --module {module_id}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FASE 4 — MAPEAMENTO DE MODELS
+
+Comando Complexo (reasoning)    → opus    effort=high
+  /create-task, /tdd:create-suite, /review-executed-module
+
+Comando Implementação           → sonnet  effort=medium
+  /execute-task, /front-end-build, /qa:prep, /qa:trace, /qa:report
+
+Comando Simples/Determinístico → sonnet/haiku  effort=low
+  /tdd:lock, /commit:simple, /documentation-update, /github-linking
+
+➡️ COPIE EXATAMENTE DE module-0 — o padrão já está validado lá!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FASE 5 — FASES DO DCP LOOP A..I
+
+FASE_A_CREATION (Sempre)
+  /create-task × N (uma por TASK-{N}.md)
+  /create-overview
+  /update-task-user-stories
+
+FASE_B_TDD (Se tdd.required == true)
+  /tdd:test-plan
+  /tdd:behavior-from-specs
+  /tdd:unit-skeletons
+  /tdd:create-suite
+  /tdd:lock
+
+FASE_B2_BUILD (Sempre, respeitando presence)
+  /front-end-build (se presence.frontend)
+  /front-end-review (se presence.frontend)
+  /db-migration-create (se presence.database)
+
+FASE_B3_EXECUTION (Sempre)
+  /execute-task × N (uma por TASK-{N}.md)
+  /build-verify --tdd-gate (se tdd.required)
+
+FASE_C_LINKAGE (Sempre)
+  /github-linking
+  /sync:github
+  /sync:mcp
+
+FASE_D_F8 (Se houver infra)
+  /env-creation
+
+FASE_D5_MODULE_REVIEW (Sempre)
+  /review-executed-module
+
+FASE_E_QA (Sempre)
+  /qa:prep, /qa:trace, /qa:report
+  /validate-front-end (se presence.frontend)
+  /validation-summary
+
+FASE_F_STACK_REVIEW_PLAN (Sempre)
+  /validate-stack
+
+FASE_F2_STACK_REVIEW_CHECK (Sempre)
+  /documentation-update
+
+FASE_G_DEPLOY_PARCIAL (Opcional)
+  /staging-validate
+
+FASE_H_COMMIT (Sempre)
+  /commit:{simple|nextjs-hostinger|...} --module {module_id}
+
+FASE_I_HUMAN_REVIEW (Sempre)
+  /build-module-pipeline --module {N+1}  (auto-chain)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+METODOLOGIA
+
+1. Comece com o HEADER exato de module-0, adapte module_id/module_name/stacks_detected
+2. Copie FASE_A de module-0, repita /create-task × N tasks
+3. Copie FASE_B_TDD de module-0 (Se tdd.required == true)
+4. Copie FASE_B2/B3/C/D5/E/F/F2/H de module-0, apenas substitua module_id
+5. Respeite SEMPRE as conditions (presence.frontend, tdd.required, etc)
+6. Valide: python3 -m json.tool < SPECIFIC-FLOW.json
+
+═══════════════════════════════════════════════════════════════════════════════
+
+REFERÊNCIA COMPLETA
+Abra: .claude/terminal-insertions/NEXT-MODULE-SPECIFIC-FLOW.md
+  - Decisões por presence flag (détalhé)
+  - Armadilhas comuns
+  - Comandos de validação
+  - Exemplos de estrutura JSON completa
+"""
+
+
 # Online Review — auditoria do remoto/producao do workspace_root do projeto
 # ativo (consultar metrics-project-pill / app_state.config). Publica um
 # prompt que orienta o agente a acessar repositorio remoto, infra de
@@ -899,13 +1118,14 @@ class MainWindow(QMainWindow):
              "testid": "output-btn-online-review", "bg": "#EA580C", "hover": "#C2410C",
              "tooltip": "Online Review — audita remoto/producao do workspace_root usando\n"
                         "MCPs/SSH/tokens, testa, corrige e gera relatorio."},
+            {"label": "Next Module", "prompt": NEXT_MODULE_PROMPT,
+             "testid": "output-btn-next-module", "bg": "#7C3AED", "hover": "#6D28D9",
+             "tooltip": "Next Module — cria SPECIFIC-FLOW.json determinístico para o próximo\n"
+                        "módulo. Ensina passo a passo: presence flags, models, phases DCP, validação."},
             {"label": "Progress", "prompt": PROGRESS_PROMPT,
              "testid": "output-btn-progress", "bg": "#10B981", "hover": "#059669",
              "tooltip": "Progress — publica prompt longo de execucao adversarial\n"
                         "(double-mcp + codex review) no terminal alvo (T1/T2)."},
-            {"label": "", "prompt": "",
-             "testid": "output-btn-prompt-4", "bg": "#52525B", "hover": "#71717A",
-             "tooltip": "Slot livre — configurar via engrenagem"},
         ]
         _pset = QSettings("systemForge", "workflow-app")
         for _i in range(4):
