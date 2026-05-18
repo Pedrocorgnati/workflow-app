@@ -368,7 +368,7 @@ class CommandQueueWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("CommandQueueWidget")
-        self.setMinimumWidth(200)
+        self.setMinimumWidth(456)  # 2×listeners-frame(224) + DualStatusSection spacing(8)
         self.setStyleSheet(
             "background-color: #18181B; border-left: 1px solid #3F3F46;"
         )
@@ -1532,7 +1532,7 @@ class CommandQueueWidget(QWidget):
             "QTabWidget::pane { border: none; background: transparent; }"
             "QTabBar::tab { background: #3F3F46; color: #A1A1AA;"
             "  border: none; border-radius: 4px 4px 0 0;"
-            "  padding: 2px 8px; font-size: 9px; font-weight: 600; }"
+            "  padding: 2px 8px; font-size: 9px; font-weight: 600; margin-right: 5px; }"
             "QTabBar::tab:selected { background: #52525B; color: #FAFAFA; }"
             "QTabBar::tab:hover { background: #52525B; color: #FAFAFA; }"
         )
@@ -2650,7 +2650,8 @@ class CommandQueueWidget(QWidget):
         """Enqueue the B-dcp pipeline with 6 visible items in queue-command-list.
 
         Pipeline shape (positions 1..6):
-            1. /build-module-pipeline [--regenerate] --module {N} {rel_cfg}
+            1. /build-module-pipeline [--regenerate] --module {N}
+               (config_path injetado por main_window._on_pipeline_ready)
             2. /dcp:congruence-check --module {N}
             3. /dcp:temporality-check --module {N}
             4. /dcp:meta-completeness --module {N}
@@ -2700,18 +2701,23 @@ class CommandQueueWidget(QWidget):
                     return
 
         # Resolve helpers (kept lazy to avoid a heavy import at module load).
-        from workflow_app.dcp.specific_flow_handler import (
-            _module_number,
-            _relative_config_path,
-        )
+        from workflow_app.dcp.specific_flow_handler import _module_number
 
-        rel_cfg = _relative_config_path(config.config_path)
         module_num = _module_number(ctx.cm_id)
         regen_flag = " --regenerate" if ctx.regenerate else ""
 
+        # NOTA: NAO concatenar {rel_cfg} no name aqui. main_window._on_pipeline_ready
+        # injeta `spec.config_path = rel` (line ~2864) para specs sem prefixo
+        # imune ([/boilerplate:, /auto-improove:, /blog:, /cmd:]), e o pty_runner.start()
+        # faz append(config_path) ao argv. Se o name ja contiver o config, o resultado
+        # final fica `/build-module-pipeline --module N <cfg> <cfg>` (config DUPLICADO),
+        # argparse aborta com exit=2 silenciosamente e o gap de history vazio passa
+        # batido pelo widget (bug capturado em 2026-05-18; post-check em
+        # build_module_pipeline.py agora emite listener vermelho — ver
+        # ai-forge/rules/workflow-app-listeners.md §2.2 VERIFY_FAILED).
         specs: list[CommandSpec] = [
             CommandSpec(
-                name=f"/build-module-pipeline{regen_flag} --module {module_num} {rel_cfg}",
+                name=f"/build-module-pipeline{regen_flag} --module {module_num}",
                 model=ModelName.OPUS,
                 interaction_type=InteractionType.AUTO,
                 position=1,

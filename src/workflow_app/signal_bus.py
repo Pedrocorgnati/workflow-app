@@ -191,6 +191,25 @@ class SignalBus(QObject):
     # directly via QFileSystemWatcher and set the dot green immediately.
     terminal_force_idle = Signal(str) # channel ("interactive" | "workspace")
 
+    # --- Listener failed/awaiting_user (ai-forge/rules/workflow-app-listeners.md) ---
+    # Canonical signals for the 4-state dot (idle/busy/awaiting_user/failed).
+    # Emitted by:
+    #   - QFileSystemWatcher reading ~/.workflow-app/terminal-notify-{channel}.json
+    #     (payload state=failed -> terminal_force_failed; state=awaiting_user ->
+    #     terminal_awaiting_user)
+    #   - autocast_marker_watcher (daily-loop) reading .autocast/*.failed.json
+    #   - Tripwire de timeout (90s sem PTY chunk + autocast ON)
+    # Backbone (TerminalStatusDot.set_failed/set_awaiting_user + MetricsBar
+    # handlers) is the next commit; these signals exist now so producers
+    # (wf-notify.sh v2, post-write self-checks, tripwires) can wire up
+    # against a stable contract.
+    terminal_force_failed = Signal(str, str)   # (channel, reason)
+    terminal_awaiting_user = Signal(str)       # (channel)
+    # Emitted by MetricsBar handler AFTER set_failed; consumed by
+    # CommandQueueWidget to abort the autocast loop (autocast button -> unchecked).
+    # Args: (cause, channel). cause examples: "listener-failure", "tripwire-timeout".
+    autocast_abort_requested = Signal(str, str)
+
     # --- Autocast (header toggle) ---
     # Emitted by MetricsBar when the autocast loop wants to fire the next queue item.
     # CommandQueueWidget connects this to a programmatic click on `queue-btn-play-next`.
