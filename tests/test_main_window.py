@@ -23,9 +23,19 @@ def test_layout_has_splitter(qapp):
 
     window = MainWindow()
     assert window._splitter is not None
-    # CommandQueueWidget foi reparenteado para dentro do output-toolbar,
-    # entao o splitter principal hospeda apenas o output_container.
-    assert window._splitter.count() == 1
+    # Splitter horizontal principal hospeda dois filhos:
+    # (0) CommandQueueWidget e (1) output_container (terminal_splitter + extras).
+    # Assert identidade, nao apenas contagem, para detectar reparent acidental.
+    assert window._splitter.count() == 2
+    assert window._splitter.widget(0) is window._command_queue
+    output_widget = window._splitter.widget(1)
+    assert output_widget is not None
+    # terminal_splitter está dentro do output_container (direto ou descendente):
+    # findChildren cobre ambos os casos e é a unica branca necessaria.
+    terminal_descendants = output_widget.findChildren(type(window._terminal_splitter))
+    assert window._terminal_splitter in terminal_descendants, (
+        "terminal_splitter deveria viver dentro do output_container"
+    )
 
 
 def test_command_queue_width_constraints(qapp):
@@ -42,7 +52,7 @@ def test_metrics_bar_height(qapp):
     from workflow_app.main_window import MainWindow
 
     window = MainWindow()
-    assert window._metrics_bar.height() == 48
+    assert window._metrics_bar.height() == 38
 
 
 def test_theme_applied(qapp):

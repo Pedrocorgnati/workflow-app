@@ -29,8 +29,8 @@ def test_errors_badge_hidden_on_init(bar):
     assert bar._lbl_errors.isHidden()
 
 
-def test_height_is_48px(bar):
-    assert bar.height() == 48
+def test_height_is_38px(bar):
+    assert bar.height() == 38
 
 
 # ── set_progress_text (backward-compat stub) ─────────────────────────────── #
@@ -250,11 +250,6 @@ class TestMetricsBarNavButtons:
         assert hasattr(bar, "_btn_comandos")
         assert bar._btn_comandos.isEnabled()
 
-    def test_btn_toolbox_exists(self, bar):
-        assert hasattr(bar, "_btn_toolbox")
-        assert bar._btn_toolbox.isEnabled()
-
-
 # ──────────────────────── tool_use handlers (GAP-007) ─── #
 
 
@@ -291,60 +286,62 @@ class TestMetricsBarSignalWiring:
         assert bar._signal_bus is not None
 
 
-# ──────────────────── Remote feedback: copy/badge (module-5 audit) ─── #
+# ──────────────────── Remote signals decoupled (regression — 2026-05-12) ─── #
 
 
-class TestMetricsBarRemoteFeedback:
-    """Copy IP, connection badge and remote server handlers (module-5 audit)."""
+class TestMetricsBarRemoteSignalsDecoupled:
+    """Regression guard: MetricsBar must NOT subscribe to remote_* signals.
 
-    def test_on_remote_server_started_shows_addr_and_button(self, bar):
-        bar._on_remote_server_started("100.64.1.2:8765")
-        assert bar._lbl_remote_addr.text() == "100.64.1.2:8765"
-        assert not bar._lbl_remote_addr.isHidden()
-        assert not bar._btn_copy_ip.isHidden()
-        assert bar._btn_remote.isChecked()
+    Modo Remoto foi removido em 2026-05-12 (commit 6756483). RemoteServer
+    e SignalBus.remote_* permanecem como contrato backend, mas MetricsBar
+    nao deve ter affordances nem conexoes para esses sinais. Este teste
+    impede reintroducao acidental do acoplamento UI<->remote.
+    """
 
-    def test_on_remote_server_stopped_hides_all(self, bar):
-        bar._on_remote_server_started("100.64.1.2:8765")
-        bar._on_remote_client_connected()
-        bar._on_remote_server_stopped()
-        assert not bar._lbl_remote_addr.isVisible()
-        assert not bar._btn_copy_ip.isVisible()
-        assert not bar._lbl_connection_badge.isVisible()
-        assert not bar._btn_remote.isChecked()
+    REMOTE_SIGNALS = (
+        "remote_server_started",
+        "remote_server_stopped",
+        "remote_client_connected",
+        "remote_client_disconnected",
+    )
 
-    def test_on_remote_client_connected_shows_badge(self, bar):
-        bar._on_remote_client_connected()
-        assert not bar._lbl_connection_badge.isHidden()
+    def test_no_connect_on_remote_signals(self, bar):
+        """_connect_signals() must not call .connect() on any remote_* signal."""
+        for sig_name in self.REMOTE_SIGNALS:
+            sig = getattr(bar._signal_bus, sig_name)
+            assert sig.connect.call_count == 0, (
+                f"Regression: MetricsBar reconnected SignalBus.{sig_name} — "
+                f"Modo Remoto foi removido em 2026-05-12 e nao deve voltar."
+            )
 
-    def test_on_remote_client_disconnected_hides_badge(self, bar):
-        bar._on_remote_client_connected()
-        bar._on_remote_client_disconnected()
-        assert not bar._lbl_connection_badge.isVisible()
+    def test_no_remote_ui_affordances(self, bar):
+        """MetricsBar must not expose the removed remote UI widgets."""
+        for attr in (
+            "_btn_remote",
+            "_btn_copy_ip",
+            "_lbl_remote_addr",
+            "_lbl_connection_badge",
+            "_btn_toolbox",
+        ):
+            assert not hasattr(bar, attr), (
+                f"Regression: MetricsBar voltou a expor {attr} — "
+                f"affordance removida em 2026-05-12."
+            )
 
-    def test_on_copy_ip_copies_to_clipboard(self, bar, qapp):
-        bar._on_remote_server_started("100.64.1.2:8765")
-        bar._on_copy_ip()
-        assert QApplication.clipboard().text() == "100.64.1.2:8765"
-
-    def test_on_copy_ip_shows_feedback(self, bar):
-        bar._on_remote_server_started("100.64.1.2:8765")
-        bar._on_copy_ip()
-        assert bar._btn_copy_ip.text() == "✓"
-        assert bar._btn_copy_ip.toolTip() == "Copiado!"
-
-    def test_on_remote_toggled_off_hides_widgets(self, bar):
-        bar._on_remote_server_started("100.64.1.2:8765")
-        bar._on_remote_toggled(False)
-        assert not bar._lbl_remote_addr.isVisible()
-        assert not bar._btn_copy_ip.isVisible()
-        assert not bar._lbl_connection_badge.isVisible()
-
-    def test_copy_ip_noop_when_empty(self, bar, qapp):
-        """Copy does nothing when address label is empty."""
-        QApplication.clipboard().setText("previous")
-        bar._on_copy_ip()
-        assert QApplication.clipboard().text() == "previous"
+    def test_no_remote_handlers(self, bar):
+        """MetricsBar must not expose the removed remote slot handlers."""
+        for attr in (
+            "_on_remote_server_started",
+            "_on_remote_server_stopped",
+            "_on_remote_client_connected",
+            "_on_remote_client_disconnected",
+            "_on_remote_toggled",
+            "_on_copy_ip",
+        ):
+            assert not hasattr(bar, attr), (
+                f"Regression: MetricsBar voltou a expor {attr} — "
+                f"handler removido em 2026-05-12."
+            )
 
 # ──────────────────────── Authoritative idle lock (GAP-fix) ─── #
 

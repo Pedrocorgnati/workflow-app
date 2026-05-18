@@ -1,5 +1,5 @@
 """
-MetricsBar — 80px top toolbar for project, instance selection, navigation and metrics.
+MetricsBar — 38px top toolbar for project, instance selection, navigation and metrics.
 
 Layout:
   Row 1 (top):    [project pill / Selecionar] │ (metrics) │ (stretch)
@@ -7,7 +7,7 @@ Layout:
 Git info: overlay label, bottom-right corner, updated via git_info_updated signal.
 
 Specs:
-  Height: 80px fixed (single row)
+  Height: 38px fixed (single row)
   Background: #27272A
   Border-bottom: none
 """
@@ -356,7 +356,7 @@ class TerminalStatusDot(QWidget):
 
 
 class MetricsBar(QWidget):
-    """48px project selector, instance selection, and navigation toolbar."""
+    """38px project selector, instance selection, and navigation toolbar."""
 
     view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Kanban
     config_change_requested = Signal(str)   # path of selected .json
@@ -560,6 +560,7 @@ class MetricsBar(QWidget):
         self._btn_workflow.setFixedHeight(28)
         self._btn_workflow.setFont(font_nav)
         self._btn_workflow.setMinimumWidth(80)
+        self._btn_workflow.setToolTip("Abrir visão Workflow (fila + terminais)")
         self._btn_workflow.clicked.connect(lambda: self._on_nav_clicked(0))
 
         self._btn_comandos = QPushButton("Comandos")
@@ -567,6 +568,7 @@ class MetricsBar(QWidget):
         self._btn_comandos.setFixedHeight(28)
         self._btn_comandos.setFont(font_nav)
         self._btn_comandos.setMinimumWidth(80)
+        self._btn_comandos.setToolTip("Abrir editor de comandos (Template Builder)")
         self._btn_comandos.clicked.connect(lambda: self._on_nav_clicked(1))
 
         self._nav_btns = [
@@ -596,6 +598,7 @@ class MetricsBar(QWidget):
         self._listeners_frame.setObjectName("ListenersFrame")
         self._listeners_frame.setProperty("testid", "listeners-frame")
         self._listeners_frame.setMinimumHeight(108)
+        self._listeners_frame.setMinimumWidth(224)  # 2×92 + margins(12+12) + spacing(16)
         # Task 9 (loop 05-13-workflow-app-layout-2): border interna removida
         # para eliminar duplicacao com a border externa do OutputToolbar
         # (output-toolbar-col1-top), que envelopa este frame apos a migracao

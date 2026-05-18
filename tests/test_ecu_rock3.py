@@ -29,15 +29,43 @@ def _make_metrics_bar_bus():
 
 
 def test_ecu_metrics_bar_all_buttons_have_tooltips(qapp):
-    """ECU Rule 1: MetricsBar — botões de ação têm tooltip definido."""
+    """ECU Rule 1: MetricsBar — botões de ação têm tooltip definido.
+
+    Enumera dinamicamente todos os QPushButton filhos visíveis (robust a
+    rename/refactor — antes hardcoded `_btn_remote`/`_btn_copy_ip`, removidos
+    em 2026-05-12). Botões puramente decorativos (texto vazio E sem ícone E
+    sem accessibleName) são ignorados.
+    """
+    from PySide6.QtWidgets import QPushButton
     from workflow_app.metrics_bar.metrics_bar import MetricsBar
 
     bus = _make_metrics_bar_bus()
     bar = MetricsBar(bus)
 
-    for btn_name in ["_btn_remote", "_btn_copy_ip"]:
-        btn = getattr(bar, btn_name)
-        assert btn.toolTip() != "", f"ECU FAIL: {btn_name} sem tooltip"
+    bar.show()  # garante isVisible()/sizeHint válidos
+    actionable_buttons = []
+    for btn in bar.findChildren(QPushButton):
+        if not btn.isVisible():
+            continue
+        has_text = bool(btn.text().strip())
+        has_icon = not btn.icon().isNull()
+        # accessibleName conta como affordance; objectName isolado é demarcação
+        # de teste/CSS (decoração), então não promove a actionable sozinho.
+        has_a11y_name = bool(btn.accessibleName().strip())
+        if has_text or has_icon or has_a11y_name:
+            actionable_buttons.append(btn)
+
+    assert actionable_buttons, "ECU FAIL: MetricsBar sem botões acionáveis"
+
+    missing_tooltip = [
+        (btn.objectName() or btn.text() or repr(btn))
+        for btn in actionable_buttons
+        if not btn.toolTip().strip()
+    ]
+    assert not missing_tooltip, (
+        f"ECU FAIL: {len(missing_tooltip)} botão(ões) acionável(is) sem tooltip: "
+        f"{missing_tooltip}"
+    )
 
 
 def test_ecu_metrics_bar_status_feedback(qapp):
