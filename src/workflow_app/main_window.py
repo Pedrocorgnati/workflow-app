@@ -1320,6 +1320,8 @@ class MainWindow(QMainWindow):
              "description": "Audita módulo ativo contra regras Zero (Orfãos/Silêncio/etc)"},
             {"label": "DCP Triage",      "path": "ai-forge/custom-prompts/prompts-subtab/dcp-coherence-triage.md",
              "description": "Triagem DCP: congruence-check, temporality e meta-completeness"},
+            {"label": "Codex Hardening", "path": "ai-forge/custom-prompts/prompts-subtab/codex-hardening.md",
+             "description": "Review adversarial via Codex + aplica hardenings nao-destrutivos"},
         ]
 
         _pset = QSettings("systemForge", "workflow-app")
