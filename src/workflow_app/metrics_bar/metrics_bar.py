@@ -330,9 +330,8 @@ class TerminalStatusDot(QWidget):
     def _apply_style(self) -> None:
         color = self._BUSY_COLOR if self._busy else self._IDLE_COLOR
         radius = self._current_diameter() // 2
-        border = "border: 2px solid #FFFFFF;" if color == self._IDLE_COLOR else ""
         self.setStyleSheet(
-            f"QWidget {{ background-color: {color}; border-radius: {radius}px; {border} }}"
+            f"QWidget {{ background-color: {color}; border-radius: {radius}px; }}"
         )
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -623,18 +622,16 @@ class MetricsBar(QWidget):
         lf.addWidget(self._dot_interactive, 1)
         lf.addWidget(self._dot_workspace, 1)
 
-        # queue-progress-ring agora vive como IRMAO do listeners-frame dentro
-        # do power-bi-section (montado em main_window._build_output_toolbar).
-        # Permanece owned por MetricsBar para preservar signal pipelines, mas
-        # sem parent ate ser reparenteado pelo PowerBiSection.
+        # queue-progress-ring vive em ProgressSection dentro do DualStatusSection
+        # (montado em main_window._build_output_toolbar). Owned por MetricsBar
+        # para preservar signal pipelines; reparenteado por ProgressSection.
         from workflow_app.widgets.queue_progress_ring import QueueProgressRing
         self._queue_progress_ring = QueueProgressRing(None, diameter=88)
 
-        # Contador textual "executados/faltantes" — migrado em 2026-05-17 do
-        # centro do queue-progress-ring para a row queue-last-command (vive
-        # como filho reparenteado pelo CommandQueueWidget). Aqui o label segue
-        # owned por MetricsBar pra preservar o pipeline de signal
-        # (`metrics_updated` -> `_on_metrics_updated_for_ring` -> setText).
+        # Contador textual "executados/faltantes" — refactor 2026-05-18:
+        # vive em progress-section ao lado do queue-progress-ring (ambos
+        # com stretch=1). Owned por MetricsBar para preservar o pipeline de
+        # signal (`metrics_updated` -> `_on_metrics_updated_for_ring` -> setText).
         self._lbl_queue_count = QLabel("0/0")
         self._lbl_queue_count.setObjectName("QueueCountLabel")
         self._lbl_queue_count.setProperty("testid", "queue-count-label")

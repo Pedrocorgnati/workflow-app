@@ -817,7 +817,8 @@ class DualStatusSection(QWidget):
         self._apply_layout(row=True)
 
     def _apply_layout(self, *, row: bool) -> None:
-        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget as _QW
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from PySide6.QtWidgets import QWidget as _QW
         if self._is_row == row:
             return
         old = self.layout()
@@ -1522,9 +1523,9 @@ class MainWindow(QMainWindow):
         (preserva default original do `_btn_datatest`).
         """
         from PySide6.QtWidgets import (
+            QButtonGroup,
             QHBoxLayout,  # noqa: F401 — referenced only in _build_output_toolbar
             QVBoxLayout,
-            QButtonGroup,
         )
 
         column = QWidget()
@@ -1621,7 +1622,7 @@ class MainWindow(QMainWindow):
         "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
         "  border: 1px solid #52525B; border-radius: 3px; }"
         "QCheckBox::indicator:indeterminate { background-color: #16A34A;"
-        "  border: 1px solid #15803D; border-radius: 3px; }"
+        "  border: 2px solid #FFFFFF; border-radius: 3px; }"
         "QCheckBox::indicator:checked { background-color: #000000;"
         "  border: 1px solid #18181B; border-radius: 3px; }"
     )
@@ -1804,7 +1805,7 @@ class MainWindow(QMainWindow):
         path = (entry.get("path") or "").strip()
         if not path:
             signal_bus.toast_requested.emit(
-                f"Entrada de prompt sem path. Configure via engrenagem.", "warning",
+                "Entrada de prompt sem path. Configure via engrenagem.", "warning",
             )
             return
         import os as _os
@@ -1859,6 +1860,7 @@ class MainWindow(QMainWindow):
         em QSettings, reconstroi sub-aba prompts.
         """
         import json as _json
+
         from PySide6.QtWidgets import QDialog
         dlg = PromptsConfigDialog(self._prompt_entries, self._prompt_base, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -2368,7 +2370,8 @@ class MainWindow(QMainWindow):
         if not path.is_file():
             return None
         try:
-            from PySide6.QtCore import QByteArray, QSize as _QSize
+            from PySide6.QtCore import QByteArray
+            from PySide6.QtCore import QSize as _QSize
             from PySide6.QtGui import QPainter, QPixmap
             from PySide6.QtSvg import QSvgRenderer
         except ImportError:
@@ -2400,7 +2403,7 @@ class MainWindow(QMainWindow):
         + Enter; the rightmost pastes the relative path `ai-forge/workflow-app`
         without Enter.
         """
-        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from PySide6.QtWidgets import QHBoxLayout
 
         bar = QWidget()
         bar.setFixedHeight(20)
@@ -2829,7 +2832,8 @@ class MainWindow(QMainWindow):
         """
         self._hide_testid_overlays()
         from PySide6.QtCore import QPoint, QTimer
-        from PySide6.QtWidgets import QApplication as _QApp, QLabel as _Lbl
+        from PySide6.QtWidgets import QApplication as _QApp
+        from PySide6.QtWidgets import QLabel as _Lbl
 
         central = self.centralWidget()
         used_positions: list[tuple[int, int, int, int]] = []  # x, y, w, h
@@ -2935,7 +2939,8 @@ class MainWindow(QMainWindow):
         if not self._active_modal_dialog:
             return
         from PySide6.QtCore import QPoint, QTimer
-        from PySide6.QtWidgets import QApplication as _QApp, QLabel as _Lbl
+        from PySide6.QtWidgets import QApplication as _QApp
+        from PySide6.QtWidgets import QLabel as _Lbl
 
         central = self.centralWidget()
         used_positions: list[tuple[int, int, int, int]] = []
