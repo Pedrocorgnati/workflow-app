@@ -28,7 +28,7 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QStackedWidget,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -1299,13 +1300,26 @@ class MainWindow(QMainWindow):
             import re as _re
             return _re.sub(r"[^a-z0-9]+", "-", lbl.lower()).strip("-") or "prompt"
 
-        # Entradas padrão (5 legados). Usadas se QSettings nao tiver entries.
+        # Entradas padrão (9 prompts). Usadas se QSettings nao tiver entries.
         _DEFAULT_ENTRIES = [
-            {"label": "MCP-test",       "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md"},
-            {"label": "Online Review",  "path": "ai-forge/custom-prompts/prompts-subtab/online-review.md"},
-            {"label": "Next Module",    "path": "ai-forge/custom-prompts/prompts-subtab/next-module.md"},
-            {"label": "Workflow Rules", "path": "ai-forge/custom-prompts/prompts-subtab/workflow-rules.md"},
-            {"label": "Progress",       "path": "ai-forge/custom-prompts/prompts-subtab/progress.md"},
+            {"label": "MCP-test",        "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md",
+             "description": "Pinga MCP Codex e Kimi para verificar conexão"},
+            {"label": "Online Review",   "path": "ai-forge/custom-prompts/prompts-subtab/online-review.md",
+             "description": "Auditoria completa do remoto e produção do projeto ativo"},
+            {"label": "Next Module",     "path": "ai-forge/custom-prompts/prompts-subtab/next-module.md",
+             "description": "Lê regras DCP antes de implantar o próximo módulo"},
+            {"label": "Workflow Rules",  "path": "ai-forge/custom-prompts/prompts-subtab/workflow-rules.md",
+             "description": "Ensina /clear, /model e /effort no SPECIFIC-FLOW.json"},
+            {"label": "Progress",        "path": "ai-forge/custom-prompts/prompts-subtab/progress.md",
+             "description": "Loop adversarial: planejamento, execução e revisão via Codex"},
+            {"label": "Pending Sweep",   "path": "ai-forge/custom-prompts/prompts-subtab/pending-actions-sweep.md",
+             "description": "Varre e resolve pendências do projeto ativo"},
+            {"label": "Memory Refresh",  "path": "ai-forge/custom-prompts/prompts-subtab/memory-decay-refresh.md",
+             "description": "Manutenção de memória: poda de stale, duplicatas e riscos"},
+            {"label": "Zero Audit",      "path": "ai-forge/custom-prompts/prompts-subtab/zero-rules-module-audit.md",
+             "description": "Audita módulo ativo contra regras Zero (Orfãos/Silêncio/etc)"},
+            {"label": "DCP Triage",      "path": "ai-forge/custom-prompts/prompts-subtab/dcp-coherence-triage.md",
+             "description": "Triagem DCP: congruence-check, temporality e meta-completeness"},
         ]
 
         _pset = QSettings("systemForge", "workflow-app")
@@ -1346,6 +1360,7 @@ class MainWindow(QMainWindow):
             self._prompt_entries.append({
                 "label": _lbl,
                 "path": _e.get("path", ""),
+                "description": _e.get("description", ""),
                 "testid": f"output-btn-prompt-{_slug_label(_lbl)}",
                 "bg": _bg,
                 "hover": _hv,
@@ -1374,6 +1389,20 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
         )
         gear_btn.clicked.connect(self._open_prompts_config_dialog)
+
+        # Watcher para auto-detectar novos .md criados em prompts-subtab
+        import os as _os_w
+
+        from PySide6.QtCore import QFileSystemWatcher as _FSWatcher
+        _watcher_rel = "ai-forge/custom-prompts/prompts-subtab"
+        _watcher_abs = (
+            _watcher_rel if _os_w.path.isabs(_watcher_rel)
+            else _os_w.path.join(_os_w.getcwd(), _watcher_rel)
+        )
+        self._prompts_file_watcher = _FSWatcher(
+            [_watcher_abs] if _os_w.path.isdir(_watcher_abs) else [], self
+        )
+        self._prompts_file_watcher.directoryChanged.connect(self._on_prompts_dir_changed)
 
         _TOGGLE_BTN_STYLE = (
             "QPushButton { background-color: #27272A; color: #D4D4D8;"
@@ -1824,7 +1853,9 @@ class MainWindow(QMainWindow):
 
     def _populate_header_prompts_subtab(self) -> list[QPushButton]:
         """Constroi os botoes da sub-aba 'prompts' a partir de self._prompt_entries."""
-        def _prompt_btn(label: str, testid: str, bg: str, hover: str) -> QPushButton:
+        def _prompt_btn(
+            label: str, testid: str, bg: str, hover: str, description: str
+        ) -> QPushButton:
             b = QPushButton(label)
             b.setProperty("testid", testid)
             b.setFixedHeight(32)
@@ -1837,6 +1868,8 @@ class MainWindow(QMainWindow):
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {hover}; }}"
             )
+            if description:
+                _PromptTooltipFilter(b, description, b)
             return b
 
         btns = []
@@ -1846,11 +1879,35 @@ class MainWindow(QMainWindow):
                 entry["testid"],
                 entry["bg"],
                 entry["hover"],
+                entry.get("description", ""),
             )
             b.clicked.connect(
                 lambda _c=False, idx=_i: self._on_prompt_btn_clicked(idx)
             )
             btns.append(b)
+
+        # Botao especial para criar novos prompts seguindo as regras
+        _add_btn = QPushButton("+ Add prompt")
+        _add_btn.setProperty("testid", "queue-btn-add-prompt")
+        _add_btn.setFixedHeight(32)
+        _add_btn.setMinimumWidth(90)
+        _add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _add_btn.setToolTip(
+            "Envia meta-prompt ao terminal guiando a criacao de um novo prompt\n"
+            "seguindo ai-forge/rules/prompt-creation-rules.md.\n"
+            "Ao criar o .md na pasta, o botao aparece automaticamente."
+        )
+        _add_btn.setStyleSheet(
+            "QPushButton { background-color: #18181B; color: #A1A1AA;"
+            "  border: 1px dashed #52525B; border-radius: 5px;"
+            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "QPushButton:hover { background-color: #27272A; border-color: #71717A;"
+            "  color: #FAFAFA; }"
+            "QPushButton:pressed { background-color: #3F3F46; }"
+        )
+        _add_btn.clicked.connect(self._on_add_prompt_btn_clicked)
+        btns.append(_add_btn)
+
         return btns
 
     def _open_prompts_config_dialog(self) -> None:
@@ -1880,11 +1937,12 @@ class MainWindow(QMainWindow):
 
         self._prompt_base = base_prompt
         self._prompt_entries = []
-        for _i, (lbl, path) in enumerate(new_entries):
+        for _i, (lbl, path, desc) in enumerate(new_entries):
             _bg, _hv = _PALETTE[_i % len(_PALETTE)]
             self._prompt_entries.append({
                 "label": lbl,
                 "path": path,
+                "description": desc,
                 "testid": f"output-btn-prompt-{_slug(lbl)}",
                 "bg": _bg,
                 "hover": _hv,
@@ -1892,13 +1950,98 @@ class MainWindow(QMainWindow):
 
         _pset = QSettings("systemForge", "workflow-app")
         _pset.setValue("prompts_row/base_prompt", self._prompt_base)
-        _entries_simple = [{"label": e["label"], "path": e["path"]} for e in self._prompt_entries]
+        _entries_simple = [
+            {"label": e["label"], "path": e["path"], "description": e.get("description", "")}
+            for e in self._prompt_entries
+        ]
         _pset.setValue("prompts_row/entries", _json.dumps(_entries_simple))
 
         # Reconstruir sub-aba prompts
         _new_btns = self._populate_header_prompts_subtab()
         self._command_queue.populate_prompts_subtab(_new_btns)
         signal_bus.toast_requested.emit("Prompts atualizados.", "info")
+
+    def _on_add_prompt_btn_clicked(self) -> None:
+        """Envia meta-prompt ao terminal guiando criacao de novo prompt.
+
+        O prompt instrui o Claude a: ler as regras de criacao, entender o que
+        o usuario quer e criar um .md em ai-forge/custom-prompts/prompts-subtab/.
+        O QFileSystemWatcher detecta o novo arquivo e adiciona o botao automaticamente.
+        """
+        _rules_path = "ai-forge/rules/prompt-creation-rules.md"
+        _prompts_dir = "ai-forge/custom-prompts/prompts-subtab"
+        _meta_prompt = (
+            f"Leia o arquivo {_rules_path} e siga rigorosamente as regras de criacao "
+            f"de prompts descritas nele. Com base no que vou descrever a seguir, crie "
+            f"um novo arquivo de prompt em {_prompts_dir}/<slug>.md — o slug deve ser "
+            f"kebab-case descritivo. O workflow-app detectara automaticamente o novo "
+            f"arquivo e adicionara o botao na sub-aba prompts. "
+            f"Me diga agora o que voce quer que o prompt faca:"
+        )
+        self._publish_to_terminal(_meta_prompt)
+        signal_bus.toast_requested.emit(
+            "Meta-prompt 'Add prompt' enviado ao terminal.", "info"
+        )
+
+    def _on_prompts_dir_changed(self, path: str) -> None:
+        """Auto-detecta novos .md criados em prompts-subtab e adiciona como botoes."""
+        import json as _json
+        import os as _os
+        import re as _re
+
+        _existing_paths = {e.get("path", "") for e in self._prompt_entries}
+        _new = []
+        if _os.path.isdir(path):
+            for _fname in sorted(_os.listdir(path)):
+                if not _fname.endswith(".md") or _fname in ("README.md",):
+                    continue
+                _rel = f"ai-forge/custom-prompts/prompts-subtab/{_fname}"
+                if _rel not in _existing_paths:
+                    _label = (
+                        _fname.replace("-", " ").replace(".md", "").title()
+                    )
+                    _new.append({"label": _label, "path": _rel, "description": ""})
+
+        if not _new:
+            return
+
+        _PALETTE = [
+            ("#0D9488", "#0F766E"), ("#EA580C", "#C2410C"),
+            ("#7C3AED", "#6D28D9"), ("#0891B2", "#0E7490"),
+            ("#10B981", "#059669"), ("#F59E0B", "#D97706"),
+            ("#EF4444", "#DC2626"), ("#8B5CF6", "#7C3AED"),
+        ]
+
+        def _slug(lbl: str) -> str:
+            return _re.sub(r"[^a-z0-9]+", "-", lbl.lower()).strip("-") or "prompt"
+
+        _start = len(self._prompt_entries)
+        for _i, _ne in enumerate(_new):
+            _lbl = _ne["label"]
+            _bg, _hv = _PALETTE[(_start + _i) % len(_PALETTE)]
+            self._prompt_entries.append({
+                "label": _lbl,
+                "path": _ne["path"],
+                "description": "",
+                "testid": f"output-btn-prompt-{_slug(_lbl)}",
+                "bg": _bg,
+                "hover": _hv,
+            })
+
+        _pset = QSettings("systemForge", "workflow-app")
+        _pset.setValue(
+            "prompts_row/entries",
+            _json.dumps([
+                {"label": e["label"], "path": e["path"], "description": e.get("description", "")}
+                for e in self._prompt_entries
+            ]),
+        )
+
+        _new_btns = self._populate_header_prompts_subtab()
+        self._command_queue.populate_prompts_subtab(_new_btns)
+        signal_bus.toast_requested.emit(
+            f"{len(_new)} novo(s) prompt(s) detectado(s) e adicionado(s).", "info"
+        )
 
     def _publish_to_terminal(self, text: str) -> None:
         """Task 6 (loop 05-13-workflow-app-layout-2): roteia `text` para
@@ -2138,6 +2281,14 @@ class MainWindow(QMainWindow):
         )
         indicators_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-indicators.md"))
 
+        prompt_rules_btn = _make_btn(
+            "Prompt-rules", "queue-btn-prompt-creation-rules-path",
+            "#6366F1", "#4F46E5", "#4338CA",
+            "Cola o path ai-forge/rules/prompt-creation-rules.md no terminal\n"
+            "(regras de criacao de prompts para a sub-aba prompts)",
+        )
+        prompt_rules_btn.clicked.connect(_paste_path("ai-forge/rules/prompt-creation-rules.md"))
+
         add_rules_prompt = (
             "crie no ai-forge/rules um novo arquivo de regras referente a "
             "este contexto que pedi para estudar agora. Crie estes arquivos "
@@ -2167,7 +2318,7 @@ class MainWindow(QMainWindow):
         return [
             workflow_app_btn, dcp_rules_btn, cmd_rules_btn,
             terminal_rules_btn, listeners_rules_btn, indicators_rules_btn,
-            add_rules_btn,
+            prompt_rules_btn, add_rules_btn,
         ]
 
     def _populate_header_paths_extras(self) -> list[QPushButton]:
@@ -3435,19 +3586,52 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────── Prompts config dialog ─── #
 
 
+class _PromptTooltipFilter(QObject):
+    """Event filter que exibe tooltip com 1 segundo de atraso ao passar o mouse."""
+
+    def __init__(self, widget: QWidget, text: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        from PySide6.QtCore import QTimer
+        self._w = widget
+        self._text = text
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._show)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self._w:
+            t = event.type()
+            if t == QEvent.Type.Enter:
+                self._timer.start()
+            elif t in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress):
+                self._timer.stop()
+                QToolTip.hideText()
+        return False
+
+    def _show(self) -> None:
+        if self._w.underMouse():
+            QToolTip.showText(
+                self._w.mapToGlobal(self._w.rect().center()),
+                self._text,
+                self._w,
+            )
+
+
 class PromptsConfigDialog(QDialog):
     """Modal de configuracao de prompts da sub-aba prompts.
 
-    Recebe a lista de entries (label+path) e o prompt base.
+    Recebe a lista de entries (label+path+description) e o prompt base.
     Layout: topo = QPlainTextEdit do prompt base; abaixo = lista variavel de
-    linhas (label 25% / path 70% / X 5%); rodape = botao '+ adicionar prompt'.
-    collect() retorna (base_prompt, [(label, path), ...]).
+    linhas (label 20% / path 50% / description 25% / X 5%); rodape = '+ adicionar'.
+    collect() retorna (base_prompt, [(label, path, description), ...]).
     """
 
     def __init__(self, entries: list[dict], base_prompt: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Configurar prompts")
-        self.setMinimumSize(720, 560)
+        self.setMinimumSize(1000, 580)
         self.setProperty("testid", "prompts-config-dialog")
 
         outer = QVBoxLayout(self)
@@ -3467,7 +3651,19 @@ class PromptsConfigDialog(QDialog):
         )
         outer.addWidget(self._base_edit)
 
-        # Lista variavel de entradas (label / path / X)
+        # Cabecalho das colunas
+        _header = QWidget()
+        _hdr_layout = QHBoxLayout(_header)
+        _hdr_layout.setContentsMargins(0, 0, 0, 0)
+        _hdr_layout.setSpacing(4)
+        for _txt, _stretch in [("Label", 20), ("Path", 50), ("Description", 25)]:
+            _lbl = QLabel(_txt)
+            _lbl.setStyleSheet("font-size: 10px; color: #71717A; font-weight: 600;")
+            _hdr_layout.addWidget(_lbl, _stretch)
+        _hdr_layout.addWidget(QLabel(""), 5)
+        outer.addWidget(_header)
+
+        # Lista variavel de entradas (label / path / description / X)
         _list_scroll = QScrollArea()
         _list_scroll.setWidgetResizable(True)
         _list_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -3476,9 +3672,14 @@ class PromptsConfigDialog(QDialog):
         self._list_layout.setContentsMargins(0, 0, 0, 0)
         self._list_layout.setSpacing(4)
 
-        self._rows: list[tuple[QLineEdit, QLineEdit]] = []
+        self._rows: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
         for i, entry in enumerate(entries):
-            self._add_row(entry.get("label", ""), entry.get("path", ""), i)
+            self._add_row(
+                entry.get("label", ""),
+                entry.get("path", ""),
+                entry.get("description", ""),
+                i,
+            )
 
         self._list_layout.addStretch(1)
         _list_scroll.setWidget(_list_container)
@@ -3516,8 +3717,14 @@ class PromptsConfigDialog(QDialog):
         bb.rejected.connect(self.reject)
         outer.addWidget(bb)
 
-    def _add_row(self, label: str = "", path: str = "", idx: int | None = None) -> None:
-        """Adiciona uma linha (label | path | X) ao layout da lista."""
+    def _add_row(
+        self,
+        label: str = "",
+        path: str = "",
+        description: str = "",
+        idx: int | None = None,
+    ) -> None:
+        """Adiciona uma linha (label | path | description | X) ao layout."""
         i = len(self._rows) if idx is None else idx
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
@@ -3532,18 +3739,27 @@ class PromptsConfigDialog(QDialog):
         le_path.setProperty("testid", f"prompts-config-path-{i}")
         le_path.setPlaceholderText("ai-forge/custom-prompts/prompts-subtab/<arquivo>.md")
 
-        del_btn = QPushButton("X")
+        le_desc = QLineEdit(description)
+        le_desc.setProperty("testid", f"prompts-config-description-{i}")
+        le_desc.setPlaceholderText("Descricao curta (exibida como tooltip)")
+
+        del_btn = QPushButton("✕")
+        del_btn.setObjectName("PromptDelBtn")
         del_btn.setProperty("testid", f"prompts-config-delete-{i}")
-        del_btn.setFixedSize(26, 26)
+        del_btn.setFixedSize(22, 22)
         del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setToolTip("Remover entrada")
         del_btn.setStyleSheet(
-            "QPushButton { background-color: #DC2626; color: #FAFAFA;"
-            "  border: none; border-radius: 4px; font-size: 10px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #B91C1C; }"
+            "QPushButton#PromptDelBtn { background: transparent; border: none;"
+            "  color: #EF4444; font-size: 14px; font-weight: 700;"
+            "  min-width: 22px; min-height: 22px; padding: 0; margin: 0; }"
+            "QPushButton#PromptDelBtn:hover { color: #FCA5A5;"
+            "  background: rgba(239,68,68,0.15); border-radius: 3px; }"
         )
 
-        row_layout.addWidget(le_label, 25)
-        row_layout.addWidget(le_path, 70)
+        row_layout.addWidget(le_label, 20)
+        row_layout.addWidget(le_path, 50)
+        row_layout.addWidget(le_desc, 25)
         row_layout.addWidget(del_btn, 5)
 
         # Remover antes do stretch (indice count-1 e o stretch)
@@ -3553,12 +3769,12 @@ class PromptsConfigDialog(QDialog):
         else:
             self._list_layout.addWidget(row_widget)
 
-        pair = (le_label, le_path)
-        self._rows.append(pair)
+        triple = (le_label, le_path, le_desc)
+        self._rows.append(triple)
 
         def _on_delete():
-            if pair in self._rows:
-                self._rows.remove(pair)
+            if triple in self._rows:
+                self._rows.remove(triple)
             row_widget.setParent(None)  # type: ignore[arg-type]
             signal_bus.toast_requested.emit("Entrada removida.", "info")
 
@@ -3567,9 +3783,12 @@ class PromptsConfigDialog(QDialog):
     def _on_add_row(self) -> None:
         self._add_row()
 
-    def collect(self) -> tuple[str, list[tuple[str, str]]]:
+    def collect(self) -> tuple[str, list[tuple[str, str, str]]]:
         base = self._base_edit.toPlainText()
-        entries = [(le.text().strip(), lp.text().strip()) for le, lp in self._rows]
+        entries = [
+            (le.text().strip(), lp.text().strip(), ld.text().strip())
+            for le, lp, ld in self._rows
+        ]
         return base, entries
 
 
