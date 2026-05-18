@@ -316,223 +316,17 @@ Principais riscos remanescentes
 """
 
 
-# NEXT MODULE — Gerador Determinístico de SPECIFIC-FLOW.json
-# Prompt que ensina como criar SPECIFIC-FLOW.json correto para qualquer módulo,
-# seguindo exatamente o padrão de module-0. Inclui decisões de presence flags,
-# models (opus/sonnet/haiku), effort levels, e mapeamento de comandos por fase DCP.
-NEXT_MODULE_PROMPT = """\
-🚀 NEXT MODULE — Gerador Determinístico de SPECIFIC-FLOW.json
-
-OBJETIVO
-Criar o SPECIFIC-FLOW.json correto para o próximo módulo CRUD com TDD, seguindo
-exatamente o padrão de module-0. O documento completo está em:
-.claude/terminal-insertions/NEXT-MODULE-SPECIFIC-FLOW.md
-
-RESUMO EXECUTIVO (5 PASSOS)
-1. IDENTIFICAR: Qual é o próximo módulo pendente? (delivery.json > modules[...].state == "pending")
-2. ANALISAR: Leia MODULE-META.json para presence flags (frontend, backend, database), tdd.required, criticality
-3. ESTRUTURA: Abra module-0-foundations/SPECIFIC-FLOW.json como referência exata
-4. ADAPTAR: Copie de module-0, substituindo apenas module-id e paths; respeite presence conditions
-5. VALIDAR: JSON syntax, contagens de /clear, gates obrigatórios
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FASE 1 — PREPARAÇÃO
-
-1.1 Identifique o próximo módulo
-   # Qual está em estado "pending"?
-   jq '.modules[] | select(.state=="pending") | .module_id' delivery.json
-
-   # Anote: module_id, module_type, current_module
-
-1.2 Abra MODULE-META.json e anote ESTES CAMPOS:
-   - module_id, module_type, criticality
-   - presence.frontend (true/false) → incluir /front-end-build?
-   - presence.backend (true/false) → incluir /back-end-build?
-   - presence.database (true/false) → incluir /db-migration-create + /seed-data-create?
-   - presence.mobile (true/false)
-   - tdd.required (true/false) → TODA FASE_B_TDD obrigatória se true
-   - tdd.required_suites: ["unit", "contract", "integration", "acceptance"]
-   - deploy.target: "none" | "nextjs-vercel" | "pyside6" | ...
-   - qa.security_review_required (true/false) → incluir /scope-drift-detect?
-   - commit_type: "simple" | "nextjs-hostinger" | ...
-
-1.3 Conte as tasks
-   # Quantas existem?
-   ls -1 modules/{module_id}/TASK-*.md | wc -l
-   # Anote: N tasks → /create-task e /execute-task aparecerão N× cada
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FASE 2 — ESTRUTURA UNIVERSAL (PADRÃO)
-
-CADA GRUPO DE COMANDO SEGUE:
-{
-  "name": "/model {opus|sonnet|haiku}",
-  "model": "{opus|sonnet|haiku}",
-  "effort": "none",
-  "interaction": "auto",
-  "phase": "FASE_X_NAME"
-},
-{
-  "name": "/effort {low|medium|high}",
-  "model": "none",
-  "effort": "{low|medium|high}",
-  "interaction": "auto",
-  "phase": "FASE_X_NAME"
-},
-{
-  "name": "{COMANDO-REAL-COM-ARGS}",
-  "model": "{opus|sonnet|haiku}",
-  "effort": "{low|medium|high}",
-  "interaction": "auto",
-  "phase": "FASE_X_NAME",
-  "per_task": true,                    // SOMENTE em /create-task, /execute-task
-  "mandatory": true,                   // SOMENTE em gates críticos
-  "condition": "{expressão}",          // SOMENTE se condicional (tdd.required, presence.*)
-  "source_ref": "§6.4 L1147",          // SEMPRE
-  "gate_policy": {                     // SOMENTE em gates
-    "on_failure": "block",
-    "source": "canonical"
-  }
-},
-{
-  "name": "/clear",
-  "model": "none",
-  "effort": "none",
-  "interaction": "auto",
-  "phase": "FASE_X_NAME"
-}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FASE 3 — DECISÃO POR PRESENCE FLAG
-
-SE presence.frontend == true:
-  Incluir em FASE_B2_BUILD:
-    /front-end-build
-    /front-end-review
-
-SE presence.backend == true:
-  Incluir em FASE_B2_BUILD:
-    /back-end-build (se houver)
-
-SE presence.database == true:
-  Incluir em FASE_B2_BUILD:
-    /db-migration-create
-  Incluir em FASE_D_F8:
-    /seed-data-create
-
-SE tdd.required == true:
-  TODA FASE_B_TDD (obrigatória):
-    /tdd:test-plan
-    /tdd:behavior-from-specs
-    /tdd:unit-skeletons
-    /tdd:create-suite
-    /tdd:lock (transita creation→execution)
-
-  Em FASE_B3_EXECUTION:
-    /build-verify --tdd-gate
-
-  Em FASE_D5_MODULE_REVIEW:
-    /tdd:coverage-gate
-    /tdd:mutation-gate (SE criticality == "high" ou "critical")
-
-SE criticality in ["high", "critical"] E qa.security_review_required == true:
-  Em FASE_C_LINKAGE:
-    /scope-drift-detect --module {module_id}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FASE 4 — MAPEAMENTO DE MODELS
-
-Comando Complexo (reasoning)    → opus    effort=high
-  /create-task, /tdd:create-suite, /review-executed-module
-
-Comando Implementação           → sonnet  effort=medium
-  /execute-task, /front-end-build, /qa:prep, /qa:trace, /qa:report
-
-Comando Simples/Determinístico → sonnet/haiku  effort=low
-  /tdd:lock, /commit:simple, /documentation-update, /github-linking
-
-➡️ COPIE EXATAMENTE DE module-0 — o padrão já está validado lá!
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FASE 5 — FASES DO DCP LOOP A..I
-
-FASE_A_CREATION (Sempre)
-  /create-task × N (uma por TASK-{N}.md)
-  /create-overview
-  /update-task-user-stories
-
-FASE_B_TDD (Se tdd.required == true)
-  /tdd:test-plan
-  /tdd:behavior-from-specs
-  /tdd:unit-skeletons
-  /tdd:create-suite
-  /tdd:lock
-
-FASE_B2_BUILD (Sempre, respeitando presence)
-  /front-end-build (se presence.frontend)
-  /front-end-review (se presence.frontend)
-  /db-migration-create (se presence.database)
-
-FASE_B3_EXECUTION (Sempre)
-  /execute-task × N (uma por TASK-{N}.md)
-  /build-verify --tdd-gate (se tdd.required)
-
-FASE_C_LINKAGE (Sempre)
-  /github-linking
-  /sync:github
-  /sync:mcp
-
-FASE_D_F8 (Se houver infra)
-  /env-creation
-
-FASE_D5_MODULE_REVIEW (Sempre)
-  /review-executed-module
-
-FASE_E_QA (Sempre)
-  /qa:prep, /qa:trace, /qa:report
-  /validate-front-end (se presence.frontend)
-  /validation-summary
-
-FASE_F_STACK_REVIEW_PLAN (Sempre)
-  /validate-stack
-
-FASE_F2_STACK_REVIEW_CHECK (Sempre)
-  /documentation-update
-
-FASE_G_DEPLOY_PARCIAL (Opcional)
-  /staging-validate
-
-FASE_H_COMMIT (Sempre)
-  /commit:{simple|nextjs-hostinger|...} --module {module_id}
-
-FASE_I_HUMAN_REVIEW (Sempre)
-  /build-module-pipeline --module {N+1}  (auto-chain)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-METODOLOGIA
-
-1. Comece com o HEADER exato de module-0, adapte module_id/module_name/stacks_detected
-2. Copie FASE_A de module-0, repita /create-task × N tasks
-3. Copie FASE_B_TDD de module-0 (Se tdd.required == true)
-4. Copie FASE_B2/B3/C/D5/E/F/F2/H de module-0, apenas substitua module_id
-5. Respeite SEMPRE as conditions (presence.frontend, tdd.required, etc)
-6. Valide: python3 -m json.tool < SPECIFIC-FLOW.json
-
-═══════════════════════════════════════════════════════════════════════════════
-
-REFERÊNCIA COMPLETA
-Abra: .claude/terminal-insertions/NEXT-MODULE-SPECIFIC-FLOW.md
-  - Decisões por presence flag (détalhé)
-  - Armadilhas comuns
-  - Comandos de validação
-  - Exemplos de estrutura JSON completa
-"""
+# NEXT MODULE — referencia curta para o agente.
+# Toda a documentacao detalhada (estrutura do SPECIFIC-FLOW.json, presence flags,
+# fases, armadilhas, condicoes) foi extraida para ai-forge/rules/dcp-cmd-list-build.md
+# em 2026-05-17. O slot publica apenas a instrucao de leitura — o agente segue dali.
+NEXT_MODULE_PROMPT = (
+    "leia o ai-forge/rules/dcp-cmd-list-build.md para entender as regras antes "
+    "de fazer a implantacao do proximo module DCP. O documento referenciado cobre "
+    "identificacao do proximo module, presence flags, fases A..I, gates obrigatorios, "
+    "armadilhas conhecidas e checklist de validacao. Regras de /clear, /model e "
+    "/effort vivem em ai-forge/rules/workflow-app-command-lists.md."
+)
 
 
 # Online Review — auditoria do remoto/producao do workspace_root do projeto
@@ -591,6 +385,302 @@ REGRAS (INVIOLAVEIS)
 """
 
 
+# Task 8 (workflow-rules — DCP mechanics): guia detalhado das regras que governam
+# SPECIFIC-FLOW.json: como /clear, /model, /effort funcionam, persistencia de estado,
+# quando mudar de modelo (Opus/Sonnet/Haiku) sem resetar desnecessariamente, e padroes
+# de grupos de comandos. Tratado como literal — nao parsear, nao interpolar.
+WORKFLOW_RULES_PROMPT = """\
+🎯 REGRAS PADRÃO DE SPECIFIC-FLOW.json — Sistema de Diretivas DCP
+
+OBJETIVO
+Entender exatamente como /clear, /model e /effort funcionam em SPECIFIC-FLOW.json,
+como o estado persiste entre comandos, quando resetar com /clear, e por que a
+estrutura de grupos é crítica para evitar vazamento de configuração.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+FUNDAÇÃO: TRINITY OF DIRECTIVES
+
+Todo SPECIFIC-FLOW.json é construído sobre 3 directives especiais que nao sao
+comandos reais, mas SIM CONFIGURADORES DE ESTADO:
+
+1. **/model {opus|sonnet|haiku}**
+   - Define qual Claude vai executar o PROXIMO comando
+   - PERSISTE para comandos seguintes até novo /model encontrado
+   - Influencia: tempo de execucao, custo, qualidade de reasoning
+   - DEFAULT (se nao especificado): sonnet (recomendado, equilibrio custo-qualidade)
+
+2. **/effort {low|medium|high}**
+   - Define quantos tokens e quantas tentativas o Claude usa
+   - PERSISTE para comandos seguintes até novo /effort encontrado
+   - low: rapido, menos raciocinio, bom para tarefas triviais
+   - medium: padrao, equilibrio entre qualidade e velocidade
+   - high: raciocinio profundo, melhor qualidade, mais caro
+   - DEFAULT (se nao especificado): medium
+
+3. **/clear**
+   - RESETA ambos /model e /effort para defaults (sonnet, medium)
+   - NAO e opcional — obrigatorio no fim de cada grupo de comandos
+   - Previne vazamento de configuracao para comandos indesejados
+   - CONSEQUENCIA DE OMISSAO: o proximo comando herda model/effort do anterior
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PADRÃO DE GRUPO CANÔNICO
+
+Toda sequencia de comandos DEVE seguir este padrao:
+
+```json
+[
+  {
+    "name": "/model opus",
+    "model": "opus",
+    "effort": "none",
+    "interaction": "auto",
+    "phase": "FASE_X_NAME"
+  },
+  {
+    "name": "/effort high",
+    "model": "none",
+    "effort": "high",
+    "interaction": "auto",
+    "phase": "FASE_X_NAME"
+  },
+  {
+    "name": "{COMANDO-REAL}",
+    "model": "opus",         // Herda do /model anterior
+    "effort": "high",        // Herda do /effort anterior
+    "interaction": "auto",
+    "phase": "FASE_X_NAME"
+    // campos opcionais: per_task, mandatory, condition, source_ref, gate_policy
+  },
+  {
+    "name": "/clear",
+    "model": "none",
+    "effort": "none",
+    "interaction": "auto",
+    "phase": "FASE_X_NAME"   // Mesma fase do grupo
+  }
+]
+```
+
+REGRA INVIOLÁVEL: /clear SEMPRE no final. Nunca omita.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+QUANDO CADA MODELO?
+
+### Opus (reasoning complexo, decisoes estruturais)
+  Uso: criacao de arquitetura, design decisions, analise profunda, argumentacao
+  Exemplos:
+    - /create-task (cria estrutura completa da tarefa)
+    - /tdd:create-suite (desenha suite de testes)
+    - /review-executed-module (analisa qualidade, decision gate)
+  effort: high (exigem raciocinio profundo)
+  Custo: ~3x mais caro que sonnet
+
+### Sonnet (implementacao, execucao, tarefas padroes)
+  Uso: DEFAULT — implement features, build, tests, refactor operacionais
+  Exemplos:
+    - /execute-task (codificar)
+    - /front-end-build (componentizar)
+    - /qa:trace (executar testes)
+  effort: medium (padroes conhecidos, nao precisa raciocinio pesado)
+  Custo: ~1x (baseline)
+
+### Haiku (tarefas triviais, determinísticas)
+  Uso: RARAMENTE — so para operacoes 100% determinísticas
+  Exemplos:
+    - /github-linking (validar URLs, sem logica)
+    - /documentation-update (refactor mecanico)
+  effort: low
+  Custo: ~0.1x (muito barato)
+
+⚠️ HEURISTICAS:
+- Nunca use Haiku para decisoes (pode falhar em ambiguidade)
+- Sonnet e suficiente para 90% dos casos
+- Opus APENAS quando reasoning/creativity sao critticos
+- Quando em duvida: use Sonnet + effort=medium
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PERSISTÊNCIA DE ESTADO: EXEMPLOS
+
+### Exemplo 1 — Mudança de modelo SEM /clear (ERRADO)
+
+```json
+[
+  {"name": "/model opus", "model": "opus", "effort": "none", ...},
+  {"name": "/effort high", "model": "none", "effort": "high", ...},
+  {"name": "/create-task", "model": "opus", "effort": "high", ...},
+  // FALTOU /clear aqui!
+  {"name": "/execute-task", "model": "sonnet", "effort": "medium", ...}
+  // ⚠️ /execute-task HERDA opus + high do grupo anterior!
+  // Resultado: executada por Opus em high — muito mais caro e lento do que necessario
+]
+```
+
+### Exemplo 2 — Mudança de modelo COM /clear (CORRETO)
+
+```json
+[
+  {"name": "/model opus", "model": "opus", ...},
+  {"name": "/effort high", "model": "none", "effort": "high", ...},
+  {"name": "/create-task", "model": "opus", "effort": "high", ...},
+  {"name": "/clear", "model": "none", "effort": "none", ...},  // ← RESET
+
+  {"name": "/model sonnet", "model": "sonnet", ...},  // Novo grupo
+  {"name": "/effort medium", "model": "none", "effort": "medium", ...},
+  {"name": "/execute-task", "model": "sonnet", "effort": "medium", ...},
+  {"name": "/clear", "model": "none", "effort": "none", ...}
+]
+```
+
+### Exemplo 3 — Mesmo modelo em vários comandos (SEM /clear entre eles)
+
+```json
+[
+  {"name": "/model sonnet", ...},
+  {"name": "/effort medium", ...},
+  {"name": "/execute-task TASK-1", "model": "sonnet", "effort": "medium", ...},
+  {"name": "/execute-task TASK-2", "model": "sonnet", "effort": "medium", ...},
+  {"name": "/execute-task TASK-3", "model": "sonnet", "effort": "medium", ...},
+  // Sem /clear entre TASK-1/2/3 — estado PERSISTE (desejado!)
+  // Todos executam com sonnet + medium
+  {"name": "/clear", ...}  // Reset final
+]
+```
+
+LECCAO: Omitir /clear entre comandos que QUEREM o mesmo modelo e effort e CORRETO.
+Omitir /clear quando ha MUDANCA de modelo e CRITICO (erro).
+
+═══════════════════════════════════════════════════════════════════════════════
+
+QUANDO MUDAR DE MODELO NO MEIO DA LISTA?
+
+### Regra Prática: Menos trocas = melhor
+
+Organizar a lista por modelo reduz /clear overhead:
+
+```json
+// BOM:
+[
+  /model opus, /effort high, /create-task, /create-overview, /clear,
+  /model sonnet, /effort medium, /execute-task x3, /clear,
+  /model sonnet, /effort low, /github-linking, /clear
+]
+
+// RUIM:
+[
+  /model opus, /effort high, /create-task, /clear,
+  /model sonnet, /effort medium, /execute-task, /clear,
+  /model opus, /effort high, /tdd:create-suite, /clear,  // Volta para opus = caótico
+]
+```
+
+### Grupos Canônicos do DCP (Exemplo: module-0)
+
+```
+FASE_A_CREATION:
+  opus/high: /create-task ×N, /create-overview
+  [/clear]
+  sonnet/medium: /update-task-user-stories
+  [/clear]
+
+FASE_B_TDD:
+  opus/high: /tdd:create-suite
+  [/clear]
+  sonnet/medium: /tdd:lock
+  [/clear]
+
+FASE_B2_BUILD:
+  sonnet/medium: /front-end-build, /back-end-build, /db-migration-create
+  [/clear]
+
+FASE_B3_EXECUTION:
+  sonnet/medium: /execute-task ×N
+  [/clear]
+
+FASE_D5_MODULE_REVIEW:
+  opus/high: /review-executed-module, /tdd:mutation-gate (se aplicavel)
+  [/clear]
+```
+
+Padrão: Opus para decisoes/reasoning (phases A, D5), Sonnet para implementacao (B, B2, B3).
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ATRIBUTOS OBRIGATÓRIOS EM CADA STEP
+
+```json
+{
+  "name": "{string, slash-command com args}",
+  "model": "{opus|sonnet|haiku|none}",          // OBRIGATORIO
+  "effort": "{low|medium|high|none}",           // OBRIGATORIO
+  "interaction": "auto",                        // Sempre "auto" (nao modificar)
+  "phase": "{FASE_X_NAME}",                     // Sempre especificar
+
+  // OPCIONAIS — so quando aplicavel:
+  "per_task": true,                             // Se comando itera sobre tasks
+  "mandatory": true,                            // Se eh gate bloqueante
+  "condition": "{expressao de predicado}",      // Se condicional a presence flags
+  "source_ref": "§6.4 L1147",                   // Referencia ao profiles.py
+  "gate_policy": {                              // Se eh gate
+    "on_failure": "block",
+    "source": "canonical"
+  }
+}
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+
+CHECKLIST DE VALIDAÇÃO
+
+☐ Cada grupo de comandos comeca com /model + /effort?
+☐ Cada grupo de comandos termina com /clear?
+☐ /model none aparece APENAS em /model directive (nunca em comando real)?
+☐ /effort none aparece APENAS em /clear ou /model directives?
+☐ Não há comando real com model=none ou effort=none (herdarão do anterior)?
+☐ Transicoes de modelo estão agrupadas logicamente (opus junto, sonnet junto)?
+☐ JSON é valido: python3 -m json.tool < SPECIFIC-FLOW.json?
+☐ Fases estão em ordem A → B_TDD → B2 → B3 → C → D → D5 → E → F → F2 → H → I?
+☐ Todos os comandos com condition tem seu predicado em profiles.py?
+☐ Gates obrigatorios (ex: /delivery:sign-off) tem mandatory=true?
+
+═══════════════════════════════════════════════════════════════════════════════
+
+DICAS PARA EVITAR ARMADILHAS
+
+1. **Copie de module-0** — padrão jah validado, evita inventar
+2. **Mantenha /model/effort em bloco** — nao intercale directives com comandos
+3. **Valide com jq**: jq '.[] | select(.effort=="none" and .name!="/clear" and .name!="/model") | .name' SPECIFIC-FLOW.json
+4. **Se modelo nao mudar** — deixe /clear fora, deixe estado persistir (economy)
+5. **Se modelo DEVE mudar** — novo /model + novo /effort + /clear anterior (obrigatorio)
+6. **Nao edite manualmente** — use generator.py como autoridade final
+
+═══════════════════════════════════════════════════════════════════════════════
+
+REFERÊNCIA RÁPIDA: MODELS E EFFORTS
+
+| Model | Quando | Custo | Effort | Quando |
+|-------|--------|-------|--------|--------|
+| opus | Reasoning complexo, criacao, design | ~3x | high | Decisões críticas |
+| sonnet | Default, implementacao, build | ~1x | medium | Maioria dos casos |
+| haiku | Trivial, determinístico | ~0.1x | low | Operacoes mecanicas |
+
+═══════════════════════════════════════════════════════════════════════════════
+
+RESUMO FINAL
+
+- /clear e MANDATORIO no fim de cada grupo
+- /model e /effort PERSISTEM ate proximo /clear ou nova declaracao
+- Opus para reasoning, Sonnet para implementacao
+- Agrupar por modelo reduz /clear overhead
+- Validar sempre com generator.py, nao edite manualmente
+- Module-0 e referencia — copie sua estrutura
+"""
+
+
 _DATATEST_FILTERED_IDS = frozenset({
     "main-command-queue",
     "metrics-project-pill",
@@ -599,7 +689,7 @@ _DATATEST_FILTERED_IDS = frozenset({
     "output-toolbar-col1-bottom",
     "output-toolbar-left",
     "terminal-route-toggles",
-    "output-toolbar-col1-top",
+    "progress-section",
     "listeners-frame",
     "queue-progress-ring",
     "queue-count-toggles-row",
@@ -671,6 +761,83 @@ _MODAL_TESTIDS = frozenset({
     "queue-add-json-2",
     "queue-add-json-3",
 })
+
+
+class ProgressSection(QWidget):
+    """Container que hospeda queue-progress-ring + queue-count-label em row.
+
+    Ambos os filhos recebem stretch=1 para que tenham a mesma largura,
+    alinhada com a largura dos dots de listeners-frame (listener-interactive
+    e listener-workspace).
+    Refactor 2026-05-18: extrai a exibicao de progresso do antigo power-bi-section.
+    """
+
+    def __init__(self, *, ring, count_label, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ProgressSection")
+        self.setProperty("testid", "progress-section")
+        from PySide6.QtWidgets import QHBoxLayout, QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "QWidget#ProgressSection { background-color: #1C1C1F;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        self.setMinimumHeight(108)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(ring, 1)
+        layout.addWidget(count_label, 1)
+
+
+class DualStatusSection(QWidget):
+    """Container responsivo que hospeda progress-section + listeners-frame.
+
+    Em row-mode (largura >= _BREAKPOINT_WIDTH): progress-section a esquerda,
+    listeners-frame a direita, ambos com stretch=1 (larguras iguais).
+    Em column-mode (largura insuficiente): progress-section no topo,
+    listeners-frame embaixo.
+
+    Refactor 2026-05-18: substitui PowerBiSection unificado.
+    """
+
+    # Ponto de quebra: soma dos minimos preferidos das duas secoes (cada uma ~190px)
+    # + spacing (8) = 388 ~ arredondado para 380.
+    _BREAKPOINT_WIDTH = 380
+
+    def __init__(self, *, progress_section, listeners_frame, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("DualStatusSection")
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._progress_section = progress_section
+        self._listeners_frame = listeners_frame
+        self._is_row = None
+        self._apply_layout(row=True)
+
+    def _apply_layout(self, *, row: bool) -> None:
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget as _QW
+        if self._is_row == row:
+            return
+        old = self.layout()
+        if old is not None:
+            old.removeWidget(self._progress_section)
+            old.removeWidget(self._listeners_frame)
+            _QW().setLayout(old)
+        new_layout = QHBoxLayout() if row else QVBoxLayout()
+        new_layout.setContentsMargins(0, 0, 0, 0)
+        new_layout.setSpacing(8)
+        new_layout.addWidget(self._progress_section, 1)
+        new_layout.addWidget(self._listeners_frame, 1)
+        self.setLayout(new_layout)
+        self._is_row = row
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        want_row = self.width() >= self._BREAKPOINT_WIDTH
+        if want_row != self._is_row:
+            self._apply_layout(row=want_row)
 
 
 class MainWindow(QMainWindow):
@@ -771,7 +938,6 @@ class MainWindow(QMainWindow):
             _pill_row_layout.addWidget(_btn)
             _btn.hide()
         _pill_row_layout.addStretch(1)
-        self._command_queue.layout().insertWidget(0, _pill_row)
 
         # Window label — etiqueta livre para identificar visualmente esta
         # janela quando varias instancias do workflow-app rodam em paralelo.
@@ -790,7 +956,11 @@ class MainWindow(QMainWindow):
             " padding: 4px 8px;"
             "}"
         )
+        # Inserir window_label primeiro (idx 0), depois pill_row (idx 0) para
+        # que pill_row fique como primeiro item do main-command-queue (acima
+        # de dual-status-section que sera inserido em idx 1 por _build_output_toolbar).
         self._command_queue.layout().insertWidget(0, self._window_label)
+        self._command_queue.layout().insertWidget(0, _pill_row)
 
         # MetricsBar no longer has visible children — hide it.
         self._metrics_bar.hide()
@@ -846,15 +1016,16 @@ class MainWindow(QMainWindow):
         _toolbar_row_layout.addWidget(_test_mode_column)                             # test-mode
         output_layout.addWidget(_toolbar_row)
 
-        # Refactor 2026-05-15 (swap right<->label): output-toolbar-col1-top agora
-        # ocupa idx 0 da coluna 1, empurrando main-window-label (verde limao)
-        # para idx 1. output-toolbar-col1-bottom continua em idx 2 (logo abaixo).
-        # Alinhado a esquerda (Maximum size policy + AlignLeft) para que o
-        # border ajuste ao listeners-frame.
-        self._command_queue.layout().insertWidget(
-            0, _toolbar_bar, alignment=Qt.AlignmentFlag.AlignLeft,
-        )
-        self._command_queue.layout().insertWidget(2, _toolbar_left_top)
+        # Ordem final de main-command-queue (refactor 2026-05-18):
+        # idx 0: _pill_row (metrics-project-pill) — primeiro item
+        # idx 1: _toolbar_bar (dual-status-section: progress-section + listeners-frame)
+        # idx 2: _window_label
+        # idx 3: _toolbar_left_top (output-toolbar-col1-bottom)
+        # _pill_row (idx 0) e _window_label (idx 2) foram inseridos em _setup_ui;
+        # dual-status-section entra em idx 1 (entre pill e label) expandindo
+        # horizontalmente para preencher a largura do queue.
+        self._command_queue.layout().insertWidget(1, _toolbar_bar)
+        self._command_queue.layout().insertWidget(3, _toolbar_left_top)
 
         # Dual terminal: splitter with interactive (top/left) + workspace (bottom/right)
         self._terminal_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -999,33 +1170,35 @@ class MainWindow(QMainWindow):
         - terminal-route-toggles e toolbar-prompts-config-gear viraram extras
           do tab_bar (attach_tab_bar_extras), posicionados como abas extras.
 
+        Refactor 2026-05-17 power-bi-section:
+        - Renomeado `output-toolbar-col1-top` -> `power-bi-section`.
+        - queue-progress-ring saiu de DENTRO do listeners-frame e virou IRMAO.
+        - bar usa DualStatusSection: progress-section (ring+count) a esquerda e
+          listeners-frame a direita em row-mode; empilhados em column-mode.
+
         Retorna apenas:
-        - `bar` (output-toolbar-col1-top): hospeda listeners-frame na coluna 1.
+        - `bar` (dual-status-section): hospeda progress-section + listeners-frame.
         - `left_top` (output-toolbar-col1-bottom): hospeda instance-group abaixo.
         """
-        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout
 
-        from PySide6.QtWidgets import QSizePolicy
-
-        bar = QWidget()
-        bar.setObjectName("OutputToolbar")
-        bar.setProperty("testid", "output-toolbar-col1-top")
-        # Migrado para coluna 1 (entre main-window-label e main-command-queue-pill-row).
-        # Border deve ajustar ao conteudo (listeners-frame com 2 status dots +
-        # queue-progress-ring), sem fixed height/stretch externo.
-        bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
-        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        bar.setStyleSheet(
-            "QWidget#OutputToolbar { background-color: #1C1C1F;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        # Estiliza count_label para exibicao em progress-section (fonte grande,
+        # centralizado, mesmo espaco que o ring — ambos com stretch=1).
+        _count_lbl = self._metrics_bar._lbl_queue_count
+        _count_lbl.setStyleSheet(
+            "background: transparent; border: none; color: #FBBF24;"
+            " font-size: 22px; font-weight: 700; font-family: monospace;"
         )
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(8)
+        _count_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        # Left — reparent listeners-frame (owned by MetricsBar). Qt reparents
-        # automatically when addWidget() is called on a different layout.
-        lay.addWidget(self._metrics_bar._listeners_frame)
+        _progress_section = ProgressSection(
+            ring=self._metrics_bar._queue_progress_ring,
+            count_label=_count_lbl,
+        )
+        bar = DualStatusSection(
+            progress_section=_progress_section,
+            listeners_frame=self._metrics_bar._listeners_frame,
+        )
 
         # left_top: reparenteia instance-group para a coluna esquerda.
         # Posicionado pelo _setup_ui acima de output-toolbar-left.
@@ -1107,40 +1280,91 @@ class MainWindow(QMainWindow):
             )
             return b
 
-        # Refactor 2026-05-15 (gear-config): 4 slots de prompts editaveis via
-        # modal. label/prompt mutaveis e persistidos em QSettings; testid/cores
-        # imutaveis. Slot 4 nasce vazio (preenchido pelo usuario).
-        self._prompt_buttons = [
-            {"label": "MCP-test", "prompt": _MCP_TEST_PROMPT,
-             "testid": "output-btn-mcp-test", "bg": "#0D9488", "hover": "#0F766E",
-             "tooltip": "Verificar se MCP Codex e MCP Kimi estao ativos"},
-            {"label": "Online Review", "prompt": ONLINE_REVIEW_PROMPT,
-             "testid": "output-btn-online-review", "bg": "#EA580C", "hover": "#C2410C",
-             "tooltip": "Online Review — audita remoto/producao do workspace_root usando\n"
-                        "MCPs/SSH/tokens, testa, corrige e gera relatorio."},
-            {"label": "Next Module", "prompt": NEXT_MODULE_PROMPT,
-             "testid": "output-btn-next-module", "bg": "#7C3AED", "hover": "#6D28D9",
-             "tooltip": "Next Module — cria SPECIFIC-FLOW.json determinístico para o próximo\n"
-                        "módulo. Ensina passo a passo: presence flags, models, phases DCP, validação."},
-            {"label": "Progress", "prompt": PROGRESS_PROMPT,
-             "testid": "output-btn-progress", "bg": "#10B981", "hover": "#059669",
-             "tooltip": "Progress — publica prompt longo de execucao adversarial\n"
-                        "(double-mcp + codex review) no terminal alvo (T1/T2)."},
+        # Refactor 2026-05-18: substituir _prompt_buttons (modelo prompt inline)
+        # por _prompt_entries (modelo label+path; prompt vive em arquivo .md).
+        # Paleta de 8 cores para alocacao por roulette.
+        _PROMPT_PALETTE = [
+            ("#0D9488", "#0F766E"),
+            ("#EA580C", "#C2410C"),
+            ("#7C3AED", "#6D28D9"),
+            ("#0891B2", "#0E7490"),
+            ("#10B981", "#059669"),
+            ("#F59E0B", "#D97706"),
+            ("#EF4444", "#DC2626"),
+            ("#8B5CF6", "#7C3AED"),
         ]
+
+        def _slug_label(lbl: str) -> str:
+            import re as _re
+            return _re.sub(r"[^a-z0-9]+", "-", lbl.lower()).strip("-") or "prompt"
+
+        # Entradas padrão (5 legados). Usadas se QSettings nao tiver entries.
+        _DEFAULT_ENTRIES = [
+            {"label": "MCP-test",       "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md"},
+            {"label": "Online Review",  "path": "ai-forge/custom-prompts/prompts-subtab/online-review.md"},
+            {"label": "Next Module",    "path": "ai-forge/custom-prompts/prompts-subtab/next-module.md"},
+            {"label": "Workflow Rules", "path": "ai-forge/custom-prompts/prompts-subtab/workflow-rules.md"},
+            {"label": "Progress",       "path": "ai-forge/custom-prompts/prompts-subtab/progress.md"},
+        ]
+
         _pset = QSettings("systemForge", "workflow-app")
-        for _i in range(4):
-            _lbl = _pset.value(f"prompts_row/slot_{_i}/label")
-            _prm = _pset.value(f"prompts_row/slot_{_i}/prompt")
-            if isinstance(_lbl, str):
-                self._prompt_buttons[_i]["label"] = _lbl
-            if isinstance(_prm, str):
-                self._prompt_buttons[_i]["prompt"] = _prm
+
+        # Migração one-shot: se entries nao existir mas legacy slot_0/label existir,
+        # popular entries a partir dos slots antigos (nao deletar chaves legacy).
+        _raw_entries = _pset.value("prompts_row/entries")
+        if _raw_entries is None:
+            _legacy_has_data = any(
+                _pset.value(f"prompts_row/slot_{i}/label") for i in range(5)
+            )
+            if _legacy_has_data:
+                _migrated = []
+                for _i, _dflt in enumerate(_DEFAULT_ENTRIES):
+                    _lbl = _pset.value(f"prompts_row/slot_{_i}/label") or _dflt["label"]
+                    _migrated.append({"label": _lbl, "path": _dflt["path"]})
+                import json as _json
+                _pset.setValue("prompts_row/entries", _json.dumps(_migrated))
+                _raw_entries = _json.dumps(_migrated)
+
+        if _raw_entries is not None:
+            try:
+                import json as _json
+                _loaded = _json.loads(_raw_entries)
+                if isinstance(_loaded, list):
+                    _entries_data = _loaded
+                else:
+                    _entries_data = _DEFAULT_ENTRIES
+            except Exception:
+                _entries_data = _DEFAULT_ENTRIES
+        else:
+            _entries_data = _DEFAULT_ENTRIES
+
+        self._prompt_entries: list[dict] = []
+        for _i, _e in enumerate(_entries_data):
+            _lbl = _e.get("label", f"Prompt {_i+1}")
+            _bg, _hv = _PROMPT_PALETTE[_i % len(_PROMPT_PALETTE)]
+            self._prompt_entries.append({
+                "label": _lbl,
+                "path": _e.get("path", ""),
+                "testid": f"output-btn-prompt-{_slug_label(_lbl)}",
+                "bg": _bg,
+                "hover": _hv,
+            })
+
+        # Prompt base (persistido em QSettings; editavel no modal)
+        _DEFAULT_BASE_PROMPT = (
+            "Leia o conteudo completo do arquivo indicado abaixo e execute "
+            "exatamente o que ele orienta. Trate o arquivo como a especificacao "
+            "integral da tarefa: nao resuma, nao parafraseie, nao adicione perguntas "
+            "se o arquivo ja for auto-suficiente. Caminho:"
+        )
+        _saved_base = _pset.value("prompts_row/base_prompt")
+        self._prompt_base: str = _saved_base if isinstance(_saved_base, str) else _DEFAULT_BASE_PROMPT
 
         gear_btn = QPushButton("⚙")
         gear_btn.setProperty("testid", "toolbar-prompts-config-gear")
         gear_btn.setFixedSize(32, 32)
         gear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        gear_btn.setToolTip("Configurar labels e prompts dos 4 botoes")
+        gear_btn.setToolTip("Configurar prompts da sub-aba (label, path, prompt base)")
         gear_btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
             "  border: 1px solid #52525B; border-radius: 5px;"
@@ -1149,18 +1373,6 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
         )
         gear_btn.clicked.connect(self._open_prompts_config_dialog)
-
-        self._prompt_btn_widgets = []
-        for _i in range(4):
-            cfg = self._prompt_buttons[_i]
-            b = _prompt_btn(
-                cfg["label"] or f"Slot {_i+1}",
-                cfg["testid"], cfg["bg"], cfg["hover"], cfg["tooltip"],
-            )
-            b.clicked.connect(
-                lambda _checked=False, idx=_i: self._on_prompt_slot_clicked(idx)
-            )
-            self._prompt_btn_widgets.append(b)
 
         _TOGGLE_BTN_STYLE = (
             "QPushButton { background-color: #27272A; color: #D4D4D8;"
@@ -1244,10 +1456,31 @@ class MainWindow(QMainWindow):
         # Refactor 2026-05-15 output-toolbar-left consolidation:
         # output-toolbar-center deletada. Os botoes vivos sao roteados para
         # as novas tabs Prompts/Actions do CommandQueueHeader.
+        # Refactor 2026-05-18: particionar botões nas 4 sub-abas semânticas.
         action_widgets = self._populate_header_actions()
-        self._command_queue.populate_prompts_tab(self._prompt_btn_widgets)
-        self._command_queue.populate_actions_tab(action_widgets)
+        workflow_app_widgets = self._populate_header_workflow_app()
+        paths_extras = self._populate_header_paths_extras()
+
+        # paths & IDs: JSON, WS, Workflow App + 6 campos basic_flow
+        _paths_btns = [action_widgets[0], action_widgets[1], workflow_app_widgets[0]] + paths_extras
+        # cmd & mcp: mcp-codex, mcp-kimi, double-mcp, asq-user
+        _mcps_btns = action_widgets[2:]
+        # rules: dcp+cmd+terminal+listeners+indicators+add-rules
+        _rules_btns = workflow_app_widgets[1:]
+        # prompts: construídos a partir dos entries .md
+        _prompts_btns = self._populate_header_prompts_subtab()
+
+        self._command_queue.populate_paths_subtab(_paths_btns)
+        self._command_queue.populate_mcps_subtab(_mcps_btns)
+        self._command_queue.populate_prompts_subtab(_prompts_btns)
+        self._command_queue.populate_rules_subtab(_rules_btns)
         self._command_queue.attach_tab_bar_extras(_terminal_route_box, gear_btn)
+
+        # queue-count-label vive em progress-section (refactor 2026-05-18).
+        # attach_count_label nao e mais chamado — o label ja esta em ProgressSection.
+        # P4: rastreia clicks em pipelines/workflow/auxiliar para atualizar
+        # queue-template-label com o testid do ultimo botao clicado.
+        self._command_queue.install_template_tracker()
 
         return bar, left_top
 
@@ -1367,27 +1600,41 @@ class MainWindow(QMainWindow):
         "  font-size: 11px; font-weight: 600; padding: 0 10px; text-align: left; }"
         "QPushButton:hover { background-color: #5E5E66; }"
     )
-    # Tri-state checkbox: Unchecked (sem fill) -> PartiallyChecked (amarelo)
-    # -> Checked (verde) -> Unchecked. Ciclo nativo do QCheckBox tristate.
+    # Estado intermediario: checkbox amarelo (PartiallyChecked) -> botao verde
+    # marcando "tarefa em andamento". Verde foi liberado de Prepare loop.
+    _PROGRESS_BOX_BTN_STYLE_GREEN = (
+        "QPushButton { background-color: #16A34A; color: #FAFAFA;"
+        "  border: 1px solid #15803D; border-radius: 5px;"
+        "  font-size: 11px; font-weight: 700; padding: 0 10px; text-align: left; }"
+        "QPushButton:hover { background-color: #15803D; }"
+    )
+    # Tri-state checkbox: Unchecked (sem fill) -> PartiallyChecked (verde)
+    # -> Checked (preto) -> Unchecked. Ciclo nativo do QCheckBox tristate.
+    # Mapeamento card-irmao (ver _on_state):
+    #   Unchecked      -> card colorido (pendente)
+    #   PartiallyCheck -> card verde   (em andamento)
+    #   Checked        -> card cinza   (concluido/arquivado)
     _PROGRESS_BOX_CHK_STYLE = (
         "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
         "  background: transparent; border: none; padding: 0; spacing: 0; }"
         "QCheckBox::indicator { width: 14px; height: 14px; }"
         "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
         "  border: 1px solid #52525B; border-radius: 3px; }"
-        "QCheckBox::indicator:indeterminate { background-color: #FACC15;"
-        "  border: 1px solid #FACC15; border-radius: 3px; }"
-        "QCheckBox::indicator:checked { background-color: #16A34A;"
-        "  border: 1px solid #16A34A; border-radius: 3px; }"
+        "QCheckBox::indicator:indeterminate { background-color: #16A34A;"
+        "  border: 1px solid #15803D; border-radius: 3px; }"
+        "QCheckBox::indicator:checked { background-color: #000000;"
+        "  border: 1px solid #18181B; border-radius: 3px; }"
     )
 
     _PROGRESS_BOX_DEFS = (
         # (slug, label, bg, hover, border, paste_text)
+        # Cores disjuntas: roxo / azul / teal / laranja / rosa. Verde liberado
+        # para indicar estado "em andamento" (checkbox amarelo) no botao irmao.
         ("prompt-to-md",      "Prompt to md",      "#7C3AED", "#6D28D9", "#6D28D9",
             "/tools:prompt-to-md"),
         ("study-that-prompt", "Study",             "#2563EB", "#1D4ED8", "#1D4ED8",
             "limpe as importações, copie o path.md, clique no botão study"),
-        ("loop-the-study",    "Prepare loop",      "#16A34A", "#15803D", "#15803D",
+        ("loop-the-study",    "Prepare loop",      "#0D9488", "#0F766E", "#0F766E",
             "Instrução: apague o import, copie o link e clique no botão loop"),
         ("rocksmash-the-loop","Rocksmash",         "#EA580C", "#C2410C", "#C2410C",
             "abra o json e clique em rocksmash"),
@@ -1449,13 +1696,19 @@ class MainWindow(QMainWindow):
             btn.setProperty("_colored_style", colored_style)
             btn.setStyleSheet(colored_style)
 
-            # Tri-state: botao fica gray em qualquer estado != Unchecked (0).
-            chk.stateChanged.connect(
-                lambda state, b=btn: b.setStyleSheet(
-                    b.property("_colored_style") if state == 0
-                    else self._PROGRESS_BOX_BTN_STYLE_GRAY
-                )
-            )
+            # Tri-state -> 3 visuais distintos no botao irmao:
+            #   Unchecked (0)          -> cor original (tarefa pendente)
+            #   PartiallyChecked (1)   -> verde (em andamento)
+            #   Checked (2)            -> cinza (concluido/arquivado)
+            def _on_state(state: int, b=btn) -> None:
+                if state == 0:
+                    b.setStyleSheet(b.property("_colored_style"))
+                elif state == 1:
+                    b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GREEN)
+                else:
+                    b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GRAY)
+
+            chk.stateChanged.connect(_on_state)
             btn.clicked.connect(
                 lambda _checked=False, t=paste_text: self._publish_to_terminal(t)
             )
@@ -1538,42 +1791,111 @@ class MainWindow(QMainWindow):
                 break
         signal_bus.datatest_mode_changed.emit(mode)
 
-    def _on_prompt_slot_clicked(self, idx: int) -> None:
-        """Handler dos 4 botoes da toolbar-prompts-row.
+    def _on_prompt_btn_clicked(self, idx: int) -> None:
+        """Handler dos botoes da sub-aba prompts.
 
-        Le o prompt mutavel de `self._prompt_buttons[idx]` (em vez de capturar
-        constante na lambda) para refletir edicoes feitas via gear dialog sem
-        precisar reconstruir os botoes.
+        Constroi a mensagem como "<base_prompt> <path>" e publica no terminal
+        alvo (T1/T2) via _publish_to_terminal. NAO le o conteudo do .md —
+        o Claude na outra ponta e quem le.
         """
-        cfg = self._prompt_buttons[idx]
-        prm = (cfg.get("prompt") or "").strip()
-        if not prm:
+        if idx >= len(self._prompt_entries):
+            return
+        entry = self._prompt_entries[idx]
+        path = (entry.get("path") or "").strip()
+        if not path:
             signal_bus.toast_requested.emit(
-                f"Slot {idx+1} vazio. Configure via engrenagem.", "warning",
+                f"Entrada de prompt sem path. Configure via engrenagem.", "warning",
             )
             return
-        self._publish_to_terminal(prm)
+        import os as _os
+        # Verificar existencia do arquivo (relativo ao project_dir ou absoluto)
+        _abs = path if _os.path.isabs(path) else _os.path.join(
+            str(getattr(getattr(self, "_project_dir", None), "__str__", lambda: "")()),
+            path,
+        )
+        if not _os.path.exists(_abs):
+            signal_bus.toast_requested.emit(
+                f"Arquivo de prompt nao encontrado: {path}", "warning",
+            )
+            return
+        msg = f"{self._prompt_base} {path}"
+        self._publish_to_terminal(msg)
+
+    def _populate_header_prompts_subtab(self) -> list[QPushButton]:
+        """Constroi os botoes da sub-aba 'prompts' a partir de self._prompt_entries."""
+        def _prompt_btn(label: str, testid: str, bg: str, hover: str) -> QPushButton:
+            b = QPushButton(label)
+            b.setProperty("testid", testid)
+            b.setFixedHeight(32)
+            b.setMinimumWidth(70)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {hover}; }}"
+            )
+            return b
+
+        btns = []
+        for _i, entry in enumerate(self._prompt_entries):
+            b = _prompt_btn(
+                entry["label"] or f"Prompt {_i+1}",
+                entry["testid"],
+                entry["bg"],
+                entry["hover"],
+            )
+            b.clicked.connect(
+                lambda _c=False, idx=_i: self._on_prompt_btn_clicked(idx)
+            )
+            btns.append(b)
+        return btns
 
     def _open_prompts_config_dialog(self) -> None:
-        """Abre modal de configuracao dos 4 slots de prompts.
+        """Abre modal de configuracao de prompts (label+path+base_prompt).
 
-        Submit -> atualiza `self._prompt_buttons[i]` (label/prompt), persiste
-        em QSettings(systemForge/workflow-app) sob `prompts_row/slot_{i}/*`,
-        atualiza setText do botao correspondente.
+        Submit -> atualiza self._prompt_entries + self._prompt_base, persiste
+        em QSettings, reconstroi sub-aba prompts.
         """
+        import json as _json
         from PySide6.QtWidgets import QDialog
-        dlg = PromptsConfigDialog(self._prompt_buttons, self)
+        dlg = PromptsConfigDialog(self._prompt_entries, self._prompt_base, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_data = dlg.collect()
+        base_prompt, new_entries = dlg.collect()
+
+        import re as _re
+        def _slug(lbl: str) -> str:
+            return _re.sub(r"[^a-z0-9]+", "-", lbl.lower()).strip("-") or "prompt"
+
+        _PALETTE = [
+            ("#0D9488", "#0F766E"), ("#EA580C", "#C2410C"),
+            ("#7C3AED", "#6D28D9"), ("#0891B2", "#0E7490"),
+            ("#10B981", "#059669"), ("#F59E0B", "#D97706"),
+            ("#EF4444", "#DC2626"), ("#8B5CF6", "#7C3AED"),
+        ]
+
+        self._prompt_base = base_prompt
+        self._prompt_entries = []
+        for _i, (lbl, path) in enumerate(new_entries):
+            _bg, _hv = _PALETTE[_i % len(_PALETTE)]
+            self._prompt_entries.append({
+                "label": lbl,
+                "path": path,
+                "testid": f"output-btn-prompt-{_slug(lbl)}",
+                "bg": _bg,
+                "hover": _hv,
+            })
+
         _pset = QSettings("systemForge", "workflow-app")
-        for i, (lbl, prm) in enumerate(new_data):
-            self._prompt_buttons[i]["label"] = lbl
-            self._prompt_buttons[i]["prompt"] = prm
-            _pset.setValue(f"prompts_row/slot_{i}/label", lbl)
-            _pset.setValue(f"prompts_row/slot_{i}/prompt", prm)
-            btn = self._prompt_btn_widgets[i]
-            btn.setText(lbl or f"Slot {i+1}")
+        _pset.setValue("prompts_row/base_prompt", self._prompt_base)
+        _entries_simple = [{"label": e["label"], "path": e["path"]} for e in self._prompt_entries]
+        _pset.setValue("prompts_row/entries", _json.dumps(_entries_simple))
+
+        # Reconstruir sub-aba prompts
+        _new_btns = self._populate_header_prompts_subtab()
+        self._command_queue.populate_prompts_subtab(_new_btns)
         signal_bus.toast_requested.emit("Prompts atualizados.", "info")
 
     def _publish_to_terminal(self, text: str) -> None:
@@ -1726,6 +2048,196 @@ class MainWindow(QMainWindow):
         asq_user_btn.clicked.connect(_paste_cmd("/skill:auq-interview"))
 
         return [json_btn, ws_btn, mcp_codex_btn, mcp_kimi_btn, double_mcp_btn, asq_user_btn]
+
+    def _populate_header_workflow_app(self) -> list[QPushButton]:
+        """Constroi os botoes da row terminal-insertions-row-workflow-app
+        (Parte 3 do request 2026-05-17): atalhos de path para os documentos
+        canonicos do workflow-app + atalho 'add-rules' para o prompt de
+        criacao de novos arquivos de regras (2026-05-17 follow-up).
+
+        Cada botao cola um path/prompt literal no terminal via
+        _publish_to_terminal — respeita terminal-route-toggles (T1/T2) e
+        transfere foco conforme ai-forge/rules/workflow-app-terminal.md.
+        """
+        def _make_btn(
+            label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str,
+        ) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setFixedHeight(28)
+            btn.setMinimumWidth(64)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {pressed}; }}"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            return btn
+
+        def _paste_path(path: str):
+            def _h() -> None:
+                QApplication.clipboard().setText(path)
+                # _publish_to_terminal ja consulta terminal-route-toggles e
+                # transfere foco — ver ai-forge/rules/workflow-app-terminal.md.
+                self._publish_to_terminal(path)
+                signal_bus.toast_requested.emit(
+                    f"Path copiado e digitado no terminal: {path}", "info",
+                )
+            return _h
+
+        workflow_app_btn = _make_btn(
+            "Workflow App", "queue-btn-workflow-app-path",
+            "#0EA5E9", "#0284C7", "#0369A1",
+            "Cola o path ai-forge/workflow-app no terminal\n(respeita terminal-route-toggles)",
+        )
+        workflow_app_btn.clicked.connect(_paste_path("ai-forge/workflow-app"))
+
+        dcp_rules_btn = _make_btn(
+            "Dcp-list-rules", "queue-btn-dcp-command-list-rules-path",
+            "#10B981", "#059669", "#047857",
+            "Cola o path ai-forge/rules/dcp-cmd-list-build.md no terminal\n"
+            "(regras de construcao do SPECIFIC-FLOW.json por module DCP)",
+        )
+        dcp_rules_btn.clicked.connect(_paste_path("ai-forge/rules/dcp-cmd-list-build.md"))
+
+        cmd_rules_btn = _make_btn(
+            "Cmd-list-rules", "queue-btn-command-list-basic-rules-path",
+            "#A855F7", "#9333EA", "#7E22CE",
+            "Cola o path ai-forge/rules/workflow-app-command-lists.md no terminal\n"
+            "(politica de /clear, /model, /effort + anti-redundancia)",
+        )
+        cmd_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-command-lists.md"))
+
+        terminal_rules_btn = _make_btn(
+            "Terminal-rules", "queue-btn-terminal-basic-rules-path",
+            "#F97316", "#EA580C", "#C2410C",
+            "Cola o path ai-forge/rules/workflow-app-terminal.md no terminal\n"
+            "(roteamento via terminal-route-toggles + focus transfer)",
+        )
+        terminal_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-terminal.md"))
+
+        listeners_rules_btn = _make_btn(
+            "Listeners-rules", "queue-btn-listeners-rules-path",
+            "#EF4444", "#DC2626", "#B91C1C",
+            "Cola o path ai-forge/rules/workflow-app-listeners.md no terminal\n"
+            "(3 estados visuais do dot: idle/busy/failed + dual-script-finalize)",
+        )
+        listeners_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-listeners.md"))
+
+        indicators_rules_btn = _make_btn(
+            "Indicators-rules", "queue-btn-indicators-rules-path",
+            "#14B8A6", "#0D9488", "#0F766E",
+            "Cola o path ai-forge/rules/workflow-app-indicators.md no terminal\n"
+            "(regras canonicas dos botoes-indicator /auto-flow em queue-tab-pipelines)",
+        )
+        indicators_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-indicators.md"))
+
+        add_rules_prompt = (
+            "crie no ai-forge/rules um novo arquivo de regras referente a "
+            "este contexto que pedi para estudar agora. Crie estes arquivos "
+            "e estas regras de forma estruturada como os outros arquivos da "
+            "pasta, e faça elas de forma claude-friendly, para serem "
+            "compreensivas pelo claude."
+        )
+
+        def _paste_add_rules() -> None:
+            QApplication.clipboard().setText(add_rules_prompt)
+            # _publish_to_terminal ja consulta terminal-route-toggles e
+            # transfere foco — ver ai-forge/rules/workflow-app-terminal.md.
+            self._publish_to_terminal(add_rules_prompt)
+            signal_bus.toast_requested.emit(
+                "Prompt 'add-rules' copiado e digitado no terminal", "info",
+            )
+
+        add_rules_btn = _make_btn(
+            "add-rules", "queue-btn-add-rules-prompt",
+            "#EAB308", "#CA8A04", "#A16207",
+            "Cola um prompt curto pedindo ao Claude para criar um novo arquivo "
+            "em ai-forge/rules/ a partir do contexto estudado agora\n"
+            "(respeita terminal-route-toggles)",
+        )
+        add_rules_btn.clicked.connect(_paste_add_rules)
+
+        return [
+            workflow_app_btn, dcp_rules_btn, cmd_rules_btn,
+            terminal_rules_btn, listeners_rules_btn, indicators_rules_btn,
+            add_rules_btn,
+        ]
+
+    def _populate_header_paths_extras(self) -> list[QPushButton]:
+        """Constroi 6 botoes para campos basic_flow do project.json ativo.
+
+        Campos: brief_root, wbs_root, docs_root, github_ssh, dcp_root,
+        custom_workflow_root. Resolve via app_state.config; github_ssh via
+        app_state.config.raw["basic_flow"]. Campo ausente ou vazio emite
+        toast warning; preenchido: clipboard + _publish_to_terminal + toast info.
+        Respeita T1/T2 via _publish_to_terminal.
+        """
+        _FIELDS = [
+            ("brief",     "output-btn-brief-path",            "#22D3EE", "#0891B2", "#0E7490",
+             "brief_root",          "Cola o valor de basic_flow.brief_root no terminal"),
+            ("wbs",       "output-btn-wbs-path",              "#A78BFA", "#7C3AED", "#6D28D9",
+             "wbs_root",            "Cola o valor de basic_flow.wbs_root no terminal"),
+            ("docs",      "output-btn-docs-path",             "#34D399", "#059669", "#047857",
+             "docs_root",           "Cola o valor de basic_flow.docs_root no terminal"),
+            ("github",    "output-btn-github-ssh",            "#F472B6", "#DB2777", "#BE185D",
+             "github_ssh",          "Cola o valor de basic_flow.github_ssh no terminal"),
+            ("dcp",       "output-btn-dcp-root",              "#FB923C", "#EA580C", "#C2410C",
+             "dcp_root",            "Cola o valor de basic_flow.dcp_root no terminal"),
+            ("custom-wf", "output-btn-custom-workflow-root",  "#FBBF24", "#F59E0B", "#D97706",
+             "custom_workflow_root","Cola o valor de basic_flow.custom_workflow_root no terminal"),
+        ]
+
+        def _make_btn(label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setFixedHeight(28)
+            btn.setMinimumWidth(56)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #18181B;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; color: #FAFAFA; }}"
+                f"QPushButton:pressed {{ background-color: {pressed}; color: #FAFAFA; }}"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            return btn
+
+        def _make_handler(field: str):
+            def _h() -> None:
+                if not app_state.has_config or not app_state.config:
+                    signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+                    return
+                cfg = app_state.config
+                if field == "github_ssh":
+                    val = (cfg.raw.get("basic_flow") or {}).get("github_ssh", "") or ""
+                else:
+                    val = getattr(cfg, field, "") or ""
+                val = val.strip()
+                if not val:
+                    signal_bus.toast_requested.emit(
+                        f"{field} nao configurado em project.json", "warning",
+                    )
+                    return
+                QApplication.clipboard().setText(val)
+                self._publish_to_terminal(val)
+                signal_bus.toast_requested.emit(
+                    f"Path copiado e digitado no terminal: {val}", "info",
+                )
+            return _h
+
+        btns = []
+        for label, testid, bg, hover, pressed, field, tooltip in _FIELDS:
+            btn = _make_btn(label, testid, bg, hover, pressed, f"{tooltip} ({field})")
+            btn.clicked.connect(_make_handler(field))
+            btns.append(btn)
+        return btns
 
     def _build_terminal_notes_footer(self, testid: str) -> QWidget:
         """Footer de anotacoes livre por terminal — sem comunicacao com o resto
@@ -2919,67 +3431,68 @@ class MainWindow(QMainWindow):
 
 
 class PromptsConfigDialog(QDialog):
-    """Modal de edicao dos 4 slots de prompts da `toolbar-prompts-row`.
+    """Modal de configuracao de prompts da sub-aba prompts.
 
-    Recebe a lista mutavel `self._prompt_buttons` do MainWindow (so leitura
-    aqui — escrita ocorre no caller apos `Accepted`). Para cada slot expoe
-    um QLineEdit (label) e um QPlainTextEdit (prompt). Submit = `Save` do
-    QDialogButtonBox.
+    Recebe a lista de entries (label+path) e o prompt base.
+    Layout: topo = QPlainTextEdit do prompt base; abaixo = lista variavel de
+    linhas (label 25% / path 70% / X 5%); rodape = botao '+ adicionar prompt'.
+    collect() retorna (base_prompt, [(label, path), ...]).
     """
 
-    def __init__(self, prompts: list[dict], parent=None) -> None:
+    def __init__(self, entries: list[dict], base_prompt: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Configurar prompts da toolbar")
-        self.setMinimumSize(680, 560)
+        self.setWindowTitle("Configurar prompts")
+        self.setMinimumSize(720, 560)
         self.setProperty("testid", "prompts-config-dialog")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(10)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        # Prompt base
+        _base_lbl = QLabel("Prompt base:")
+        _base_lbl.setStyleSheet("font-weight: 600;")
+        outer.addWidget(_base_lbl)
+        self._base_edit = QPlainTextEdit(base_prompt)
+        self._base_edit.setProperty("testid", "prompts-config-base-prompt")
+        self._base_edit.setMinimumHeight(80)
+        self._base_edit.setMaximumHeight(100)
+        self._base_edit.setPlaceholderText(
+            "Prefixo enviado ao terminal antes do path do arquivo .md"
+        )
+        outer.addWidget(self._base_edit)
 
-        self._inputs: list[tuple[QLineEdit, QPlainTextEdit]] = []
-        for i, cfg in enumerate(prompts):
-            grp = QFrame()
-            grp.setFrameShape(QFrame.Shape.StyledPanel)
-            grp.setProperty("testid", f"prompts-config-slot-{i}")
-            gl = QVBoxLayout(grp)
-            gl.setContentsMargins(10, 8, 10, 8)
-            gl.setSpacing(6)
+        # Lista variavel de entradas (label / path / X)
+        _list_scroll = QScrollArea()
+        _list_scroll.setWidgetResizable(True)
+        _list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _list_container = QWidget()
+        self._list_layout = QVBoxLayout(_list_container)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(4)
 
-            row = QHBoxLayout()
-            lbl_cap = QLabel(f"Slot {i+1} — Label:")
-            lbl_cap.setStyleSheet("font-weight: 600;")
-            row.addWidget(lbl_cap)
-            le = QLineEdit(cfg.get("label", "") or "")
-            le.setProperty("testid", f"prompts-config-label-{i}")
-            le.setPlaceholderText(f"Slot {i+1}")
-            row.addWidget(le, 1)
-            gl.addLayout(row)
+        self._rows: list[tuple[QLineEdit, QLineEdit]] = []
+        for i, entry in enumerate(entries):
+            self._add_row(entry.get("label", ""), entry.get("path", ""), i)
 
-            pt_cap = QLabel("Prompt:")
-            pt_cap.setStyleSheet("font-weight: 600;")
-            gl.addWidget(pt_cap)
-            pt = QPlainTextEdit(cfg.get("prompt", "") or "")
-            pt.setProperty("testid", f"prompts-config-prompt-{i}")
-            pt.setMinimumHeight(90)
-            pt.setPlaceholderText("Texto enviado para o terminal alvo (T1/T2)")
-            gl.addWidget(pt)
+        self._list_layout.addStretch(1)
+        _list_scroll.setWidget(_list_container)
+        outer.addWidget(_list_scroll, 1)
 
-            layout.addWidget(grp)
-            self._inputs.append((le, pt))
+        # Botao adicionar
+        _add_btn = QPushButton("+ adicionar prompt")
+        _add_btn.setProperty("testid", "prompts-config-add-row")
+        _add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _add_btn.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
+            "  border: 1px solid #52525B; border-radius: 4px;"
+            "  font-size: 11px; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: #52525B; }"
+        )
+        _add_btn.clicked.connect(self._on_add_row)
+        outer.addWidget(_add_btn)
 
-        layout.addStretch(1)
-        scroll.setWidget(container)
-        outer.addWidget(scroll, 1)
-
+        # Botoes Salvar / Cancelar
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -2998,8 +3511,61 @@ class PromptsConfigDialog(QDialog):
         bb.rejected.connect(self.reject)
         outer.addWidget(bb)
 
-    def collect(self) -> list[tuple[str, str]]:
-        return [(le.text(), pt.toPlainText()) for le, pt in self._inputs]
+    def _add_row(self, label: str = "", path: str = "", idx: int | None = None) -> None:
+        """Adiciona uma linha (label | path | X) ao layout da lista."""
+        i = len(self._rows) if idx is None else idx
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        le_label = QLineEdit(label)
+        le_label.setProperty("testid", f"prompts-config-label-{i}")
+        le_label.setPlaceholderText("label")
+
+        le_path = QLineEdit(path)
+        le_path.setProperty("testid", f"prompts-config-path-{i}")
+        le_path.setPlaceholderText("ai-forge/custom-prompts/prompts-subtab/<arquivo>.md")
+
+        del_btn = QPushButton("X")
+        del_btn.setProperty("testid", f"prompts-config-delete-{i}")
+        del_btn.setFixedSize(26, 26)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setStyleSheet(
+            "QPushButton { background-color: #DC2626; color: #FAFAFA;"
+            "  border: none; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #B91C1C; }"
+        )
+
+        row_layout.addWidget(le_label, 25)
+        row_layout.addWidget(le_path, 70)
+        row_layout.addWidget(del_btn, 5)
+
+        # Remover antes do stretch (indice count-1 e o stretch)
+        _stretch_idx = self._list_layout.count() - 1
+        if _stretch_idx >= 0:
+            self._list_layout.insertWidget(_stretch_idx, row_widget)
+        else:
+            self._list_layout.addWidget(row_widget)
+
+        pair = (le_label, le_path)
+        self._rows.append(pair)
+
+        def _on_delete():
+            if pair in self._rows:
+                self._rows.remove(pair)
+            row_widget.setParent(None)  # type: ignore[arg-type]
+            signal_bus.toast_requested.emit("Entrada removida.", "info")
+
+        del_btn.clicked.connect(_on_delete)
+
+    def _on_add_row(self) -> None:
+        self._add_row()
+
+    def collect(self) -> tuple[str, list[tuple[str, str]]]:
+        base = self._base_edit.toPlainText()
+        entries = [(le.text().strip(), lp.text().strip()) for le, lp in self._rows]
+        return base, entries
 
 
 # ──────────────────────────────────────────────────────── Entry point ─── #

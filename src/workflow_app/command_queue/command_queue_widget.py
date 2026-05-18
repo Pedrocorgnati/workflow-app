@@ -21,7 +21,7 @@ import re
 import sys
 from typing import Any, Optional
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -1373,11 +1374,12 @@ class CommandQueueWidget(QWidget):
              lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
              "queue-btn-blog-stockpile"),
             ("legacy-to-dcp",
-             "Legacy-to-DCP — adequa project.json legado (V1/V2 ou boilerplate convertido) ao canonical loop A..I. "
-             "Pipeline: /legacy:detect -> /project-json --migrate-v3 (se necessario) -> /delivery:init|migrate -> "
+             "Legacy-to-DCP — adequa project.json legado (V3 canonico ou boilerplate convertido) ao canonical loop A..I. "
+             "Pipeline: /legacy:detect (aborta V1/V2 com instrucao manual) -> /delivery:init|migrate -> "
              "/legacy:modules-from-features -> /dcp:meta-completeness (auto-fix P0, P1+ -> pending-actions) -> "
              "/legacy:enqueue-all-modules (expande /build-module-pipeline por modulo). "
              "Le project.json do metrics-project-pill. Idempotente: re-rodar nao quebra modulos ja convertidos. "
+             "Para V1/V2: rodar /project-json manualmente para migrar para V3 antes de reenfileirar. "
              "Gaps P0 auto-fix, P1+ registrados em pending-actions/{slug}.md.",
              self._on_legacy_to_dcp_clicked,
              "queue-btn-legacy-to-dcp"),
@@ -1490,34 +1492,52 @@ class CommandQueueWidget(QWidget):
         _ti_layout.setContentsMargins(5, 4, 5, 5)
         _ti_layout.setSpacing(4)
 
-        _prompts_row = QWidget()
-        _prompts_row.setProperty("testid", "terminal-insertions-row-prompts")
-        self._prompts_content_layout = QHBoxLayout(_prompts_row)
-        self._prompts_content_layout.setContentsMargins(0, 0, 0, 0)
-        self._prompts_content_layout.setSpacing(4)
-        self._prompts_content_layout.addStretch(1)
-        _ti_layout.addWidget(_prompts_row)
+        # Refactor 2026-05-18: substituir as 3 rows estáticas
+        # (terminal-insertions-row-prompts, -workflow-app, -actions) por um
+        # QTabWidget com 4 sub-abas semânticas. Populadas via populate_*_subtab()
+        # pelo MainWindow após build (handlers dependem de estado vivo).
+        self._insertions_subtabs = QTabWidget()
+        self._insertions_subtabs.setProperty("testid", "queue-subtabs-insertions")
+        self._insertions_subtabs.setStyleSheet(
+            "QTabWidget::pane { border: none; background: transparent; }"
+            "QTabBar::tab { background: #3F3F46; color: #A1A1AA;"
+            "  border: none; border-radius: 4px 4px 0 0;"
+            "  padding: 2px 8px; font-size: 9px; font-weight: 600; }"
+            "QTabBar::tab:selected { background: #52525B; color: #FAFAFA; }"
+            "QTabBar::tab:hover { background: #52525B; color: #FAFAFA; }"
+        )
 
-        # terminal-insertions-row-workflow-app (2026-05-17): atalhos de path
-        # para os documentos canonicos do workflow-app (Workflow App, Dcp-list-rules,
-        # Cmd-list-rules, Terminal-rules). Posicionado ENTRE prompts e actions
-        # (segue ai-forge/rules/workflow-app-terminal.md - publicacao via
-        # _publish_to_terminal -> respeita terminal-route-toggles + focus).
-        _workflow_app_row = QWidget()
-        _workflow_app_row.setProperty("testid", "terminal-insertions-row-workflow-app")
-        self._workflow_app_content_layout = QHBoxLayout(_workflow_app_row)
-        self._workflow_app_content_layout.setContentsMargins(0, 0, 0, 0)
-        self._workflow_app_content_layout.setSpacing(4)
-        self._workflow_app_content_layout.addStretch(1)
-        _ti_layout.addWidget(_workflow_app_row)
+        def _make_subtab(testid: str) -> tuple[QWidget, QHBoxLayout]:
+            w = QWidget()
+            w.setProperty("testid", testid)
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(0, 2, 0, 2)
+            lay.setSpacing(4)
+            lay.addStretch(1)
+            return w, lay
 
-        _actions_row = QWidget()
-        _actions_row.setProperty("testid", "terminal-insertions-row-actions")
-        self._actions_content_layout = QHBoxLayout(_actions_row)
-        self._actions_content_layout.setContentsMargins(0, 0, 0, 0)
-        self._actions_content_layout.setSpacing(4)
-        self._actions_content_layout.addStretch(1)
-        _ti_layout.addWidget(_actions_row)
+        _paths_tab, self._subtab_paths_layout = _make_subtab("queue-subtab-insertions-paths")
+        _mcps_tab, self._subtab_mcps_layout = _make_subtab("queue-subtab-insertions-mcps")
+        _prompts_tab, self._subtab_prompts_layout = _make_subtab("queue-subtab-insertions-prompts")
+        _rules_tab, self._subtab_rules_layout = _make_subtab("queue-subtab-insertions-rules")
+
+        self._insertions_subtabs.addTab(_paths_tab, "paths & IDs")
+        self._insertions_subtabs.addTab(_mcps_tab, "cmd & mcp")
+        self._insertions_subtabs.addTab(_prompts_tab, "prompts")
+        self._insertions_subtabs.addTab(_rules_tab, "rules")
+
+        # Restaurar sub-aba ativa da sessão anterior; persistir ao mudar.
+        _stg = QSettings("systemForge", "workflow-app")
+        _active_subtab = int(_stg.value("insertions/active_subtab", 0))
+        if 0 <= _active_subtab < 4:
+            self._insertions_subtabs.setCurrentIndex(_active_subtab)
+        self._insertions_subtabs.currentChanged.connect(
+            lambda idx: QSettings("systemForge", "workflow-app").setValue(
+                "insertions/active_subtab", idx
+            )
+        )
+
+        _ti_layout.addWidget(self._insertions_subtabs)
 
         header_layout.addWidget(terminal_insertions_content)
         self._sec_contents.append(terminal_insertions_content)
@@ -2039,14 +2059,13 @@ class CommandQueueWidget(QWidget):
         """Inject the PipelineManager to enable can_reorder guards."""
         self._pipeline_manager = pipeline_manager
 
-    def populate_prompts_tab(self, widgets: list[QWidget]) -> None:
-        """Anexa os botoes de prompt-slot (MCP-test, Online Review, Progress, slot livre).
+    # ── Sub-tab populate helpers (refactor 2026-05-18) ────────────────────── #
+    # Os 3 métodos populate_*_tab foram substituídos por 4 métodos semânticos
+    # que alimentam as sub-abas do QTabWidget queue-subtabs-insertions.
+    # Cada um é idempotente: limpa o layout antes de inserir.
 
-        Chamado por MainWindow apos build porque os handlers (clipboard,
-        toast, _publish_to_terminal) dependem de estado vivo do MainWindow.
-        Idempotente: limpa o layout antes de inserir.
-        """
-        layout = self._prompts_content_layout
+    def _populate_subtab(self, layout: QHBoxLayout, widgets: list[QWidget]) -> None:
+        """Helper interno: limpa layout e insere widgets + stretch final."""
         while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
@@ -2056,37 +2075,21 @@ class CommandQueueWidget(QWidget):
             layout.addWidget(w)
         layout.addStretch(1)
 
-    def populate_actions_tab(self, widgets: list[QWidget]) -> None:
-        """Anexa botoes da actions-tab (JSON, WS, mcp-codex, mcp-kimi, double-mcp, asq-user).
+    def populate_paths_subtab(self, widgets: list[QWidget]) -> None:
+        """Sub-aba 'paths & IDs': JSON, WS, Workflow App + campos basic_flow."""
+        self._populate_subtab(self._subtab_paths_layout, widgets)
 
-        Idempotente. Ver populate_prompts_tab para racional.
-        """
-        layout = self._actions_content_layout
-        while layout.count():
-            item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-        for w in widgets:
-            layout.addWidget(w)
-        layout.addStretch(1)
+    def populate_mcps_subtab(self, widgets: list[QWidget]) -> None:
+        """Sub-aba 'cmd & mcp': mcp-codex, mcp-kimi, double-mcp, asq-user."""
+        self._populate_subtab(self._subtab_mcps_layout, widgets)
 
-    def populate_workflow_app_tab(self, widgets: list[QWidget]) -> None:
-        """Anexa botoes da row terminal-insertions-row-workflow-app (Workflow App,
-        Dcp-list-rules, Cmd-list-rules, Terminal-rules).
+    def populate_prompts_subtab(self, widgets: list[QWidget]) -> None:
+        """Sub-aba 'prompts': botoes de prompt construídos a partir de arquivos .md."""
+        self._populate_subtab(self._subtab_prompts_layout, widgets)
 
-        Adicionado 2026-05-17 (Parte 3 do request de melhorias do workflow-app).
-        Idempotente. Ver populate_prompts_tab para racional.
-        """
-        layout = self._workflow_app_content_layout
-        while layout.count():
-            item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-        for w in widgets:
-            layout.addWidget(w)
-        layout.addStretch(1)
+    def populate_rules_subtab(self, widgets: list[QWidget]) -> None:
+        """Sub-aba 'rules': dcp-list, cmd-list, terminal, listeners, indicators, add-rules."""
+        self._populate_subtab(self._subtab_rules_layout, widgets)
 
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
         """Anexa widgets ao tab_bar apos as 4 section tabs.
@@ -4231,19 +4234,24 @@ class CommandQueueWidget(QWidget):
         Gate 2 verboso pt-BR quando `has_config` ausente: sugere botao
         `queue-btn-json` (/project-json) para carregar/criar project.json.
 
-        Sequencia enfileirada (source.md):
+        Sequencia enfileirada (source.md, pos-codex-review 2026-05-17):
           1. /clear + /model sonnet + /effort medium
           2. /legacy:detect <path>
+             (gate: V1/V2 nao migram automaticamente — /legacy:detect
+              classifica e materializa MODULES-INDEX.json. Quando schema!=V3,
+              o proprio /legacy:detect imprime FALHA com instrucao para
+              executar migracao manual via /project-json antes de reenfileirar
+              esta pipeline. Decisao codex/2026-05-17: opcao B — handler nao
+              tenta migrar schema, pois /project-json nao implementa branch
+              --migrate-v3 e seria violacao Zero Silencio chamar cmd inexistente)
           3. /clear + /model sonnet + /effort medium
-          4. /project-json --migrate-v3 --if-not-v3 <path>
+          4. /delivery:init <path> --from-modules-index (skip if v1 existe)
           5. /clear + /model sonnet + /effort medium
-          6. /delivery:init <path> --from-modules-index (skip if v1 existe)
+          6. /legacy:modules-from-features <path>
           7. /clear + /model sonnet + /effort medium
-          8. /legacy:modules-from-features <path>
-          9. /clear + /model sonnet + /effort medium
-          10. /dcp:meta-completeness --all --auto-fix-p0 <path>
-          11. /clear + /model sonnet + /effort high
-          12. /legacy:enqueue-all-modules <path>
+          8. /dcp:meta-completeness --all --auto-fix-p0 <path>
+          9. /clear + /model sonnet + /effort high
+          10. /legacy:enqueue-all-modules <path>
 
         O ultimo item expande dinamicamente em runtime para uma sequencia
         /build-module-pipeline --module {id} por modulo detectado
@@ -4303,23 +4311,20 @@ class CommandQueueWidget(QWidget):
 
         specs: list[CommandSpec] = []
         pos = 1
-        # Step 1-2: detect
+        # Step 1-2: detect (aborta V1/V2 com instrucao manual; ver docstring)
         specs.extend(_prep(pos)); pos += 3
         specs.append(_cmd(f"/legacy:detect {path}", pos)); pos += 1
-        # Step 3-4: migrate-v3 (idempotente, no-op se ja V3)
-        specs.extend(_prep(pos)); pos += 3
-        specs.append(_cmd(f"/project-json --migrate-v3 --if-not-v3 {path}", pos)); pos += 1
-        # Step 5-6: delivery init/migrate (idempotente)
+        # Step 3-4: delivery init/migrate (idempotente)
         specs.extend(_prep(pos)); pos += 3
         specs.append(_cmd(f"/delivery:init --if-missing {path}", pos)); pos += 1
-        # Step 7-8: modules-from-features
+        # Step 5-6: modules-from-features
         specs.extend(_prep(pos)); pos += 3
         specs.append(_cmd(f"/legacy:modules-from-features {path}", pos)); pos += 1
-        # Step 9-10: meta-completeness com auto-fix-p0 em todos modulos
+        # Step 7-8: meta-completeness com auto-fix-p0 em todos modulos
         specs.extend(_prep(pos)); pos += 3
         specs.append(_cmd(f"/dcp:meta-completeness --all --auto-fix-p0 {path}", pos))
         pos += 1
-        # Step 11-12: enqueue-all-modules (expande dinamicamente em runtime)
+        # Step 9-10: enqueue-all-modules (expande dinamicamente em runtime)
         specs.extend(_prep(pos, EffortLevel.HIGH)); pos += 3
         specs.append(_cmd(f"/legacy:enqueue-all-modules {path}", pos, EffortLevel.HIGH))
 
