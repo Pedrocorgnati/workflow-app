@@ -36,6 +36,20 @@ Notas:
 - Token `/daily-loop:do` **NUNCA** pode aparecer dentro de `items[*].commands`. `loader.py::_resolve_item_commands` rejeita com `DailyLoopConfigError` (linhas 293-298) — Zero Silencio.
 - Shape `{"id":"001","commands":[]}` e legitimo durante a janela `/loop:create-structure` -> `/loop:integration`; passa a ser anti-pattern apos `/loop:integration` completar.
 
+### 2.1 Campos obrigatorios per-item (adicionado 2026-05-17 — rocksmash hardening)
+
+Alem de `id` e `commands`, cada entry em `buckets[*].items[*]` DEVE carregar tres campos canonicos de auditoria/runtime que outros consumers leem direto do bucket (sem cair em `items_index`):
+
+| Campo       | Tipo   | Obrigatorio em | Significado | Consumer |
+|-------------|--------|----------------|-------------|----------|
+| `kind`      | string | T0 (create-structure) | Lifecycle slot: `"preparo"` (1o item), `"iteration"` (corpo), `"finalizacao"` (ultimo item). Sem `kind`, consumers que filtram por lifecycle (rocksmash, qualquer expander futuro) defaultam para `"iteration"` e processam preparo/finalizacao por engano. | `loop_rocksmash_expander.build_loop_rocksmash_specs` (filtra `kind=="iteration"`). |
+| `task_path` | string | T0 (create-structure) | Caminho relativo a `loop_root` (ex: `tasks/items/task-NNN-slug.md`) OU absoluto. Resolvido por `_resolve_task_path` (relativo -> anchored em `loop_root`). | `loop_rocksmash_expander._resolve_task_path` (per-iteration `:do`/`:review-done`). |
+| `target`    | string | opcional (alias de `task_path`) | Alias historico (legacy V2). `_resolve_task_path` aceita ambos; `task_path` ganha precedencia se ambos presentes. | idem `task_path`. |
+
+Por que no bucket e nao so em `items_index`: per CONTRACT.md secao 1, `items_index` e metadata de auditoria; runtime read autoritario e `buckets[*].items[*]`. Consumers em runtime (loader e expanders) leem do bucket por contrato. `_iter_items` do rocksmash faz backfill best-effort de `items_index` quando bucket nao tem o campo (retro-compat para loops pre-2026-05-17), mas isso emite o anti-pattern: producers novos devem escrever DIRETO no bucket.
+
+Producers (`/loop:create-structure`, `/loop:integration`) devem materializar `kind` + `task_path` em ambos `buckets[*].items[*]` e `items_index[NNN]` (paridade exata, gate W9 do `/loop:workflow-app`).
+
 ---
 
 ## 3. Gold example — schema canonico V3 + `daily_loop`
@@ -78,6 +92,8 @@ Copy-paste pronto para `_LOOP-CONFIG.json` em qualquer loop sob `blacksmith/loop
         "items": [
           {
             "id": "001",
+            "kind": "iteration",
+            "task_path": "tasks/items/task-001-...md",
             "commands": [
               "/clear",
               "/model sonnet",
@@ -93,6 +109,8 @@ Copy-paste pronto para `_LOOP-CONFIG.json` em qualquer loop sob `blacksmith/loop
           },
           {
             "id": "002",
+            "kind": "iteration",
+            "task_path": "tasks/items/task-002-...md",
             "commands": [
               "/clear",
               "/model sonnet",

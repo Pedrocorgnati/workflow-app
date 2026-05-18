@@ -132,8 +132,11 @@ def reproducer(tmp_path: Path) -> Path:
             mod["module_type"] = "crud"
 
     # Force fresh-pipeline path (state=pending + clear absolute pointer) so
-    # the destructive modal isn't triggered.
-    cm_id = raw.get("current_module") or "module-0-foundations"
+    # the destructive modal isn't triggered. The on-disk reproducer often
+    # advances as the real project moves forward (current_module=module-2-...
+    # once foundations is done); the test specifically exercises module-0,
+    # so we pin it explicitly rather than inheriting whatever the snapshot has.
+    cm_id = "module-0-foundations"
     raw["current_module"] = cm_id
     mod = raw["modules"][cm_id]
     mod["state"] = "pending"
@@ -145,8 +148,14 @@ def reproducer(tmp_path: Path) -> Path:
     mod["blocked_prev_state"] = None
     mod["flags"]["needs_rework"] = False
     mod["rework_iterations"] = 0
-    mod["artifacts"]["last_specific_flow"] = None
-    mod["artifacts"]["last_specific_flow_sha256"] = None
+    # v2 drops last_specific_flow / last_specific_flow_sha256 (DCP-COMMAND-MATRIX
+    # rollout, ModuleArtifacts extra="forbid"). Strip from every module artifacts
+    # block in case the on-disk reproducer still carries them (legacy snapshot).
+    for _mod in raw["modules"].values():
+        _arts = _mod.get("artifacts")
+        if isinstance(_arts, dict):
+            _arts.pop("last_specific_flow", None)
+            _arts.pop("last_specific_flow_sha256", None)
     mod["artifacts"]["directive_injector_run_at"] = None
     mod["dependencies"] = []
 
@@ -205,19 +214,30 @@ def test_e2e_dcp_build_pipeline_six_items_then_load_substitutes_queue(
 
             assert len(emissions) == 1, "first click should emit exactly one pipeline"
             first_specs = emissions[0]
-            assert len(first_specs) == 6, (
-                f"first emission must have 6 items, got {len(first_specs)}"
+            # `_inject_clears` (WORKFLOW-APP-RULES GROUP_MAP) expands the 6
+            # canonical B-dcp specs with /clear + /model + /effort directive
+            # triplets. Filter them to recover the 6 logical commands.
+            first_real_specs = [
+                s for s in first_specs
+                if not (
+                    s.name == "/clear"
+                    or s.name.startswith("/model ")
+                    or s.name.startswith("/effort ")
+                )
+            ]
+            assert len(first_real_specs) == 6, (
+                f"first emission must have 6 logical items, got "
+                f"{len(first_real_specs)} (raw={len(first_specs)})"
             )
 
             # Slot 1: build-module-pipeline (module 0; fresh path = no --regenerate)
-            assert first_specs[0].name.startswith("/build-module-pipeline ")
-            assert "--module 0" in first_specs[0].name
-            assert "--regenerate" not in first_specs[0].name
+            assert first_real_specs[0].name.startswith("/build-module-pipeline ")
+            assert "--module 0" in first_real_specs[0].name
+            assert "--regenerate" not in first_real_specs[0].name
 
             # Slot 6: local-action with the load action id
-            assert first_specs[5].kind == "local-action"
-            assert first_specs[5].local_action_id == "dcp-load-specific-flow"
-            assert first_specs[5].position == 6
+            assert first_real_specs[5].kind == "local-action"
+            assert first_real_specs[5].local_action_id == "dcp-load-specific-flow"
 
             # Widget must have armed the load context.
             assert isinstance(widget._pending_dcp_load_ctx, DcpBuildContext)
@@ -254,20 +274,15 @@ def test_e2e_dcp_build_pipeline_six_items_then_load_substitutes_queue(
                     },
                 ],
             }
-            # The cascade resolves level-1 via artifacts.last_specific_flow OR
-            # falls back to the canonical wbs path. Update delivery.json so
-            # the level-1 hit fires deterministically.
-            delivery_path = reproducer / DELIVERY_FILENAME
-            raw = json.loads(delivery_path.read_text(encoding="utf-8"))
-            raw["modules"]["module-0-foundations"]["artifacts"][
-                "last_specific_flow"
-            ] = str(flow_path)
-            delivery_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+            # The cascade resolves level-0 (per-module canonical wbs path)
+            # before any other level. v2 schema dropped artifacts.last_specific_flow
+            # (ModuleArtifacts extra="forbid"), so we rely on level-0 alone:
+            # writing the flow at modules/{id}/SPECIFIC-FLOW.json is sufficient.
             flow_path.parent.mkdir(parents=True, exist_ok=True)
             flow_path.write_text(json.dumps(flow_payload, indent=2), encoding="utf-8")
 
             # ── Step 3: invoke the local-action at queue position 6 ─────────
-            local_spec = first_specs[5]
+            local_spec = first_real_specs[5]
             assert isinstance(local_spec, CommandSpec)
             ok = widget._handle_dcp_load_specific_flow(local_spec)
             assert ok is True, "local-action must return True on happy path"

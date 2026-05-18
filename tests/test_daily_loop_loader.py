@@ -312,3 +312,107 @@ def test_items_str_without_items_index_falls_back_silently(
         "Fallback retro-compat (string sem items_index) deveria ser silencioso; "
         f"stderr={captured.err!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cenario 5 — expanded_commands fix (Pitfall 7, 2026-05-17)
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_single_expanded_commands_emitted_when_commands_empty(
+    tmp_path: Path,
+) -> None:
+    """Path 2 do loader (2026-05-17): cmd_complexity=single items tem commands=[]
+    por contrato e expanded_commands populado em items_index. Loader deve emitir
+    cada entrada de expanded_commands como CommandSpec literal, NAO cair no
+    do_command fallback.
+
+    Bug-pattern previo (Pitfall 7, loop 05-15-05-15-study-flow-upgrade): 16
+    items cmd-single foram silenciosamente skipados porque loader so consumia
+    `commands` em buckets[*].items[*].
+    """
+    _write_progress(tmp_path)
+    expanded = [
+        "/cmd:kimi-pair-analyse --approved tasks/items/task-001.md",
+        "/cmd:kimi-pair-execute --approved tasks/items/task-001.md",
+    ]
+    raw_config = _base_config(
+        items=[{"id": "001", "commands": []}],
+        items_index={
+            "001": {
+                "cmd_complexity": "single",
+                "commands": [],
+                "expanded_commands": expanded,
+            }
+        },
+    )
+    raw_config["daily_loop"]["do_command"] = "/loop:noop-fallback"
+
+    specs = build_daily_loop_specs(raw_config, tmp_path)
+    names = [s.name for s in specs]
+
+    for cmd in expanded:
+        assert cmd in names, (
+            f"Comando expanded {cmd!r} ausente dos specs; specs={names}"
+        )
+
+    assert not any("noop-fallback" in n for n in names), (
+        f"do_command fallback nao deveria ser emitido quando expanded_commands "
+        f"esta populado para cmd-single; specs={names}"
+    )
+
+
+def test_cmd_full_does_not_consume_expanded_commands(tmp_path: Path) -> None:
+    """Guard: items NAO cmd-single (cmd_complexity!=single) jamais devem
+    consumir expanded_commands. O fallback deve ser disparado normalmente.
+    """
+    _write_progress(tmp_path)
+    raw_config = _base_config(
+        items=[{"id": "001", "commands": []}],
+        items_index={
+            "001": {
+                "cmd_complexity": "full",
+                "commands": [],
+                "expanded_commands": ["/cmd:kimi-pair-analyse foo"],
+            }
+        },
+    )
+
+    specs = build_daily_loop_specs(raw_config, tmp_path)
+    names = [s.name for s in specs]
+
+    assert not any("kimi-pair-analyse" in n for n in names), (
+        f"expanded_commands NAO deve ser consumido para cmd_complexity=full; "
+        f"specs={names}"
+    )
+    assert any(n.startswith("/daily-loop:do") for n in names), (
+        f"Fallback wrapper esperado para cmd-full com commands=[]; specs={names}"
+    )
+
+
+def test_expanded_commands_rejects_daily_loop_do_token(tmp_path: Path) -> None:
+    """expanded_commands nao pode conter /daily-loop:do (token reservado ao
+    wrapper). Mesmo guard que _resolve_item_commands aplica.
+    """
+    _write_progress(tmp_path)
+    raw_config = _base_config(
+        items=[{"id": "001", "commands": []}],
+        items_index={
+            "001": {
+                "cmd_complexity": "single",
+                "commands": [],
+                "expanded_commands": ["/daily-loop:do --slug x --item 001"],
+            }
+        },
+    )
+
+    with pytest.raises(DailyLoopConfigError) as excinfo:
+        build_daily_loop_specs(raw_config, tmp_path)
+
+    msg = str(excinfo.value)
+    assert "expanded_commands" in msg, (
+        f"Mensagem deveria nomear 'expanded_commands'; recebido: {msg!r}"
+    )
+    assert "/daily-loop:do" in msg, (
+        f"Mensagem deveria nomear o token proibido; recebido: {msg!r}"
+    )

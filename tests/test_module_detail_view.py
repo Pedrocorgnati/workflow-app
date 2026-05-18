@@ -127,7 +127,6 @@ def _module(
         "artifacts": artifacts or {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": None,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
@@ -138,8 +137,15 @@ def _module(
 
 
 def _write_delivery(wbs_root: Path, modules: Dict[str, Dict[str, Any]]) -> Path:
+    # v2 schema: ModuleArtifacts has extra="forbid"; drop v1-only keys some
+    # call sites pass explicitly via the `artifacts` argument of _module_state.
+    for _mod in modules.values():
+        _arts = _mod.get("artifacts") if isinstance(_mod, dict) else None
+        if isinstance(_arts, dict):
+            _arts.pop("last_specific_flow", None)
+            _arts.pop("last_specific_flow_sha256", None)
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": next(iter(modules.keys())),
         "execution_mode": "sequential",
@@ -386,9 +392,11 @@ def test_gates_and_pipeline_populated_from_specific_flow(
 ) -> None:
     wbs_root = tmp_path / "wbs"
     wbs_root.mkdir()
-    flow_rel = "workflow-app/SPECIFIC-FLOW.json"
-    project_root = wbs_root.parent
-    flow_path = project_root / flow_rel
+    # Level-0 of resolve_specific_flow (per-module canonical wbs path) is the
+    # only level v2 supports — ModuleArtifacts.last_specific_flow was removed
+    # (DCP-COMMAND-MATRIX rollout). Drop the flow at the per-module location
+    # so the cascade picks it up without needing a pointer.
+    flow_path = wbs_root / "modules" / "module-1-crud" / "SPECIFIC-FLOW.json"
     flow_path.parent.mkdir(parents=True, exist_ok=True)
     flow_path.write_text(
         json.dumps(
@@ -423,7 +431,6 @@ def test_gates_and_pipeline_populated_from_specific_flow(
                 artifacts={
                     "module_meta_path": None,
                     "overview_path": None,
-                    "last_specific_flow": str(flow_path),
                     "last_review_report": None,
                     "last_commit_sha": None,
                     "last_deploy_url": None,

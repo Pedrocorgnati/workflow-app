@@ -125,12 +125,15 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/loop:clear",                  # 89
     # Meta — cmd hardening
     "/cmd:autocast-hardening",      # 94 (KIMI_PREFERRED)
+    "/cmd:autocast-put",            # 91 (KIMI_PREFERRED)
     # DCP — matrix
     "/dcp:matrix-init",             # 86
     "/dcp:matrix-refine",           # 73
     "/dcp:matrix-replicate",        # 92 (KIMI_PREFERRED)
     "/dcp:matrix-mark-loops",       # 95 (KIMI_PREFERRED)
     "/dcp:matrix-filter-modules",   # 72
+    # Legacy pipeline
+    "/legacy:enqueue-all-modules",  # 73
 })
 
 

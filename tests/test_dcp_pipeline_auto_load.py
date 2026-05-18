@@ -76,7 +76,6 @@ def _module_state(state: str = "creation") -> Dict[str, Any]:
         "artifacts": {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": None,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
@@ -88,7 +87,7 @@ def _module_state(state: str = "creation") -> Dict[str, Any]:
 
 def _write_delivery(wbs_root: Path, module_id: str = "module-1-x") -> Path:
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": module_id,
         "current_modules": [],

@@ -51,7 +51,9 @@ class TestWhitelist:
         # + 1 (test-autoflow-auto, score 85) = 45
         # + 1 (/dcp:matrix-mark-loops, score 95) = 81
         # + 1 (/dcp:matrix-filter-modules, score 72) = 82
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 82
+        # + 1 (/legacy:enqueue-all-modules, score 73) = 83
+        # + 1 (/cmd:autocast-put, score 91) = 84
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 84
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):

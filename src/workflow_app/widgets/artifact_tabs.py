@@ -359,7 +359,6 @@ class ArtifactTabs(QStackedWidget):
         labels_and_values: list[tuple[str, Optional[str]]] = [
             ("MODULE-META", artifacts.module_meta_path),
             ("OVERVIEW", artifacts.overview_path),
-            ("SPECIFIC-FLOW (last)", artifacts.last_specific_flow),
             ("Review Report", artifacts.last_review_report),
             ("Commit SHA", artifacts.last_commit_sha),
             ("Deploy URL", artifacts.last_deploy_url),

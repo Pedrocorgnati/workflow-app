@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import (
     BaseModel,
@@ -132,8 +132,10 @@ class Project(BaseModel):
     workspace_root: str
 
 
-class HistoryEntry(BaseModel):
-    """Single transition record. `from` is a Python keyword, so we alias."""
+class StateTransitionEntry(BaseModel):
+    """Single state-transition history record (build-module-pipeline, /delivery:*).
+
+    `from` is a Python keyword, so we alias."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -142,6 +144,26 @@ class HistoryEntry(BaseModel):
     at: Iso8601Utc
     by: str
     note: str
+
+
+class TddEventEntry(BaseModel):
+    """TDD lifecycle event in history (written by /tdd:* commands).
+
+    Carries arbitrary `details` payload (sha256, totals, paths) instead of
+    a state transition — TDD events do not move ModuleState.state, they
+    annotate substate within the module.tdd block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: Iso8601Utc
+    by: str
+    event: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+HistoryEntry = Union[StateTransitionEntry, TddEventEntry]
+"""Either a state transition or a TDD substate event. Pydantic v2 selects the
+variant by structural match (presence of `from`/`to` vs `event`)."""
 
 
 class ReworkTarget(BaseModel):
@@ -218,6 +240,21 @@ class SignedOff(BaseModel):
     note: Optional[str] = None
 
 
+class BuildVerifyReport(BaseModel):
+    """Resumo do ultimo /build-verify --tdd-gate (PRE-0.5 do canonical loop B.3).
+
+    Persistido em `modules[id].artifacts.build_verify_report`. Captura veredito
+    + blocker + caminho do relatorio completo em disco. Permite que o widget /
+    o /qa:report leia o status sem reabrir o arquivo Markdown."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: Iso8601Utc
+    verdict: Literal["APROVADO", "APROVADO COM RESSALVAS", "BLOQUEADO", "REPROVADO"]
+    blocker: Optional[str] = None
+    report_path: Optional[str] = None
+
+
 class ModuleArtifacts(BaseModel):
     """Optional artifact pointers (all nullable per T-001 schema)."""
 
@@ -231,8 +268,60 @@ class ModuleArtifacts(BaseModel):
     git_tag: Optional[str] = None
     execution: Optional[ExecutionArtifact] = None
     qa: Optional[QaArtifact] = None
+    build_verify_report: Optional[BuildVerifyReport] = None
     directive_injector_run_at: Optional[Iso8601Utc] = None
     """ISO-8601 timestamp do ultimo /dcp:directive-injector neste modulo (tripwire HT-04 #1 idempotencia)."""
+
+
+class TddTotals(BaseModel):
+    """Contagem agregada de testes na suite TDD do modulo."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = Field(ge=0)
+    red: int = Field(ge=0)
+    green_leaked: int = Field(ge=0)
+    environmental: int = Field(ge=0)
+    signature_drift: int = Field(ge=0)
+
+
+class TddUnlockEntry(BaseModel):
+    """Entrada do historico de /tdd:unlock (consome cas_token)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: Iso8601Utc
+    by: str
+    reason: str
+    cas_consumed: Optional[str] = None
+
+
+class Tdd(BaseModel):
+    """Estado do subfluxo B-tdd no modulo (escrito por /tdd:*).
+
+    Persistido em `modules[id].tdd` quando `MODULE-META.tdd.required == true`.
+    Modulos sem TDD continuam com `tdd: None`. Invariante I-13 (WORKFLOW-DETAILED
+    §3.3): se `required == true` e `state in {execution, revision, qa, deploy,
+    done}`, entao `locked_at != null` e `lock_sha256` bate com LOCK.json.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    required: bool = False
+    test_plan_ready: bool = False
+    test_plan_sha256: Optional[str] = None
+    locked: bool = False
+    suites_generated: bool = False
+    behavior_ready: bool = False
+    red_baseline_path: Optional[str] = None
+    index_path: Optional[str] = None
+    adversarial_ack_at: Optional[Iso8601Utc] = None
+    manifest_sha256: Optional[str] = None
+    totals: Optional[TddTotals] = None
+    locked_at: Optional[Iso8601Utc] = None
+    lock_sha256: Optional[str] = None
+    cas_token: Optional[str] = None
+    unlock_history: List[TddUnlockEntry] = Field(default_factory=list)
 
 
 class ModuleState(BaseModel):
@@ -257,6 +346,7 @@ class ModuleState(BaseModel):
     dependencies: List[ModuleKey] = Field(default_factory=list)
     signed_off: Optional[SignedOff] = None
     tasks: Dict[str, Any] = Field(default_factory=dict)
+    tdd: Optional[Tdd] = None
 
     @model_validator(mode="after")
     def _per_module_invariants(self) -> "ModuleState":
@@ -272,11 +362,20 @@ class ModuleState(BaseModel):
                 raise ValueError("state=blocked requires blocked=true")
             if self.blocked_reason is None:
                 raise ValueError("state=blocked requires blocked_reason!=null")
-            if not self.history:
-                raise ValueError("I-12: state=blocked requires non-empty history")
-            if self.history[-1].to != "blocked":
+            last_transition = next(
+                (
+                    h for h in reversed(self.history)
+                    if isinstance(h, StateTransitionEntry)
+                ),
+                None,
+            )
+            if last_transition is None:
                 raise ValueError(
-                    f"I-12: state=blocked requires history[-1].to=='blocked', got {self.history[-1].to!r}"
+                    "I-12: state=blocked requires non-empty history with a state transition"
+                )
+            if last_transition.to != "blocked":
+                raise ValueError(
+                    f"I-12: state=blocked requires last state-transition.to=='blocked', got {last_transition.to!r}"
                 )
         else:
             if self.blocked:
@@ -325,10 +424,18 @@ class ModuleState(BaseModel):
                 f"I-09: rework_iterations={self.rework_iterations} > max={self.max_rework_iterations}"
             )
 
-        # I-07: last history entry must match current state (if history exists).
-        if self.history and self.history[-1].to != self.state:
+        # I-07: last state-transition entry must match current state (TDD event
+        # entries do not transition state, only annotate substate).
+        last_state_transition = next(
+            (
+                h for h in reversed(self.history)
+                if isinstance(h, StateTransitionEntry)
+            ),
+            None,
+        )
+        if last_state_transition is not None and last_state_transition.to != self.state:
             raise ValueError(
-                f"I-07: history[-1].to={self.history[-1].to!r} != state={self.state!r}"
+                f"I-07: last state-transition.to={last_state_transition.to!r} != state={self.state!r}"
             )
 
         # signed_off only valid on done modules (sign-off is the terminal gate).
@@ -562,6 +669,11 @@ __all__ = [
     "FilesTouchedEvent",
     "HistoryEntry",
     "Iso8601Utc",
+    "StateTransitionEntry",
+    "TddEventEntry",
+    "Tdd",
+    "TddTotals",
+    "TddUnlockEntry",
     "Locks",
     "Metadata",
     "ModuleArtifacts",

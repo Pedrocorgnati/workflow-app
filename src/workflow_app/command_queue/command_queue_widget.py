@@ -13,12 +13,12 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import shlex
-from dataclasses import dataclass
-from pathlib import Path
 import os
 import re
+import shlex
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QSettings, QSize, Qt, QTimer, Signal
@@ -42,11 +42,18 @@ from workflow_app import dcp as dcp_pkg
 from workflow_app.command_queue.command_item_widget import CommandItemWidget
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
+from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
+from workflow_app.domain import (
+    CommandSpec,
+    CommandStatus,
+    EffortLevel,
+    FlagSpec,
+    InteractionType,
+    ModelName,
+)
 from workflow_app.services.delivery_invalid_formatter import (
     format_delivery_invalid_popup,
 )
-from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
-from workflow_app.domain import CommandSpec, CommandStatus, EffortLevel, FlagSpec, InteractionType, ModelName
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
     COMMAND_FLAG_SPECS,
@@ -201,7 +208,7 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
     },
     "daily": {
         "model": ModelName.SONNET,
-        "effort": EffortLevel.HIGH,
+        "effort": EffortLevel.STANDARD,  # first step (scan) is sonnet/standard
     },
     "cmd_single": {
         "model": ModelName.OPUS,
@@ -431,24 +438,47 @@ class CommandQueueWidget(QWidget):
             self._loader()
 
     def _on_daily_command_ready(self, command_line: str) -> None:
-        """Expand /daily <args> into individual sub-commands with /clear /model /effort header."""
+        """Expand /daily <args> into individual sub-commands with model/effort transitions.
+
+        Daily pipeline: no /clear between steps (context shared via _DAILY-*.md).
+        Model/effort transitions emitted without /clear to preserve conversation context.
+
+        Pipeline assignments:
+          scan     — sonnet/standard  (mechanical data collection, 2-min target)
+          plan     — opus/high        (judgment-intensive: scope, intent, acceptance criteria)
+          do       — sonnet/high      (constrained implementation following the plan)
+          validate — sonnet/standard  (mechanical: build/lint/test command execution)
+          review   — sonnet/standard  (synthesis of existing artefacts, commit message)
+        """
         prefix = "/daily"
         args = command_line[len(prefix):].strip() if command_line.startswith(prefix) else ""
 
         scan_name = f"/daily:scan {args}".rstrip() if args else "/daily:scan"
         plan_name = f"/daily:plan {args}".rstrip() if args else "/daily:plan"
 
-        prep = _build_prep_specs("daily")
-        cmds = [
-            CommandSpec(scan_name,          model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=0),
-            CommandSpec(plan_name,          model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=1),
-            CommandSpec("/daily:do",        model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=2),
-            CommandSpec("/daily:validate",  model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=3),
-            CommandSpec("/daily:review",    model=ModelName.SONNET, interaction_type=InteractionType.AUTO, effort=EffortLevel.HIGH, position=4),
+        _AT = InteractionType.AUTO
+        _S = ModelName.SONNET
+        _O = ModelName.OPUS
+
+        specs: list[CommandSpec] = [
+            # header inicial — scan: sonnet/standard (Regra 3.4)
+            CommandSpec(name="/clear",           model=_S, interaction_type=_AT, position=1),
+            CommandSpec(name="/model sonnet",    model=_S, interaction_type=_AT, position=2),
+            CommandSpec(name="/effort standard", model=_S, interaction_type=_AT, position=3),
+            CommandSpec(scan_name, model=_S, interaction_type=_AT, effort=EffortLevel.STANDARD, position=4),
+            # transicao sonnet/standard → opus/high (plan)
+            CommandSpec(name="/model opus",      model=_O, interaction_type=_AT, position=5),
+            CommandSpec(name="/effort high",     model=_O, interaction_type=_AT, position=6),
+            CommandSpec(plan_name, model=_O, interaction_type=_AT, effort=EffortLevel.HIGH, position=7),
+            # transicao opus/high → sonnet/high (do — so model muda, effort continua high)
+            CommandSpec(name="/model sonnet",    model=_S, interaction_type=_AT, position=8),
+            CommandSpec("/daily:do",       model=_S, interaction_type=_AT, effort=EffortLevel.HIGH,     position=9),
+            # transicao sonnet/high → sonnet/standard (validate — so effort muda)
+            CommandSpec(name="/effort standard", model=_S, interaction_type=_AT, position=10),
+            CommandSpec("/daily:validate", model=_S, interaction_type=_AT, effort=EffortLevel.STANDARD, position=11),
+            # sem transicao (review: sonnet/standard = mesmo que validate)
+            CommandSpec("/daily:review",   model=_S, interaction_type=_AT, effort=EffortLevel.STANDARD, position=12),
         ]
-        specs = prep + cmds
-        for i, spec in enumerate(specs, start=1):
-            spec.position = i
 
         self._template_label.setText("  \U0001f4cb  Daily")
         self._template_label.setVisible(True)
@@ -4594,8 +4624,9 @@ class CommandQueueWidget(QWidget):
         if dialog.exec() != QDialog.Accepted:
             return
 
-        from workflow_app.config.app_state import app_state as _app_state
         import os as _os
+
+        from workflow_app.config.app_state import app_state as _app_state
         json_path = ""
         if _app_state.has_config and _app_state.config:
             try:
@@ -4819,17 +4850,19 @@ class CommandQueueWidget(QWidget):
         """True quando existe arquivo `{slug}.md` em qualquer skill dir.
 
         slug = parte apos `/skill:` e antes do primeiro espaco/argumento.
-        Idempotente para chamadas repetidas (filesystem check is cheap and
-        already cached pelo SO; nao introduzimos cache em memoria para
-        manter o sinal sempre fresco apos `git pull` durante a sessao)."""
+        Suporta dois formatos de disco:
+          - subdir:     qa/trace.md            (.claude/commands/skill/ usa subdiretorios)
+          - colon-flat: blog:competitor-spy.md  (.agents/skills/ usa ":" no nome do arquivo)
+        """
         import os
         if not slug:
             return False
-        # `slug` pode conter ":" para namespacing (ex: qa:trace) — quando
-        # presente, o arquivo em disco vive em sub-diretorio: qa/trace.md.
-        rel_path = slug.replace(":", "/") + ".md"
+        rel_subdir = slug.replace(":", "/") + ".md"  # qa/trace.md
+        rel_flat   = slug + ".md"                    # blog:competitor-spy.md
         for base in cls._SKILL_SEARCH_DIRS:
-            if os.path.exists(os.path.join(base, rel_path)):
+            if os.path.exists(os.path.join(base, rel_subdir)):
+                return True
+            if rel_flat != rel_subdir and os.path.exists(os.path.join(base, rel_flat)):
                 return True
         return False
 

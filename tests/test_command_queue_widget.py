@@ -1386,3 +1386,126 @@ class TestStudyButtonExpandsByMode:
         names = _spec_names(widget)
         # slugify("investigar Server Actions") -> "investigar-server-actions"
         assert any("--name investigar-server-actions" in n for n in names)
+
+
+class TestLegacyToDcpButton:
+    """Cobertura do botao `queue-btn-legacy-to-dcp` (pipeline legacy-to-dcp).
+
+    Garante:
+      - botao existe em queue-tab-pipelines com testid esperado;
+      - sem project.json carregado (Gate 1) emite toast pt-BR e nao enfileira;
+      - com project.json valido enfileira a sequencia canonica de 12 specs
+        (4 blocos de directives prep + 1 cmd cada, mais bloco final high).
+    """
+
+    def _find_button_by_testid(self, widget: CommandQueueWidget, testid: str):
+        from PySide6.QtWidgets import QPushButton
+        header = getattr(widget, "header_widget", None)
+        search_root = header if header is not None else widget
+        for btn in search_root.findChildren(QPushButton):
+            if btn.property("testid") == testid:
+                return btn
+        return None
+
+    def test_button_exists_with_testid(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-legacy-to-dcp")
+        assert btn is not None, "queue-btn-legacy-to-dcp ausente em queue-tab-pipelines"
+
+    def test_button_tooltip_mentions_canonical_loop(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-legacy-to-dcp")
+        assert btn is not None
+        tip = btn.toolTip()
+        assert "Legacy-to-DCP" in tip
+        assert "canonical loop A..I" in tip
+        assert "/legacy:detect" in tip
+        assert "metrics-project-pill" in tip
+
+    def test_click_without_config_emits_verbose_pt_br_toast(self, widget, qtbot):
+        from PySide6.QtCore import Qt
+
+        from workflow_app.config.app_state import app_state
+
+        toasts: list[tuple[str, str]] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        pipelines: list[list] = []
+        signal_bus.pipeline_ready.connect(lambda specs: pipelines.append(list(specs)))
+
+        # Force has_config False (no project loaded).
+        app_state.clear_config()
+        assert not app_state.has_config
+
+        btn = self._find_button_by_testid(widget, "queue-btn-legacy-to-dcp")
+        assert btn is not None
+        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+        assert pipelines == [], "nao deve enfileirar quando sem config"
+        assert toasts, "esperado toast verboso quando sem config"
+        msg, kind = toasts[-1]
+        assert "project.json" in msg
+        assert "queue-btn-json" in msg
+        assert kind == "warning"
+
+    def test_click_with_config_enqueues_canonical_sequence(
+        self, widget, qtbot, tmp_path,
+    ):
+        from PySide6.QtCore import Qt
+
+        from workflow_app.command_queue.command_queue_widget import GROUP_MAP
+        from workflow_app.config.app_state import app_state
+
+        project_json = tmp_path / "test-project.json"
+        project_json.write_text(
+            '{"name":"test-project","basic_flow":{"wbs_root":"wbs"}}',
+            encoding="utf-8",
+        )
+        # Use the real loader path (app_state.load_config(path) expects a
+        # readable ProjectConfig). We bypass strict validation by setting
+        # attributes directly to keep this test surgical.
+        from types import SimpleNamespace
+
+        fake_cfg = SimpleNamespace(
+            config_path=str(project_json),
+            raw={"name": "test-project"},
+            project_name="test-project",
+        )
+        app_state.clear_config()
+        app_state.set_config(fake_cfg)  # type: ignore[arg-type]
+        assert app_state.has_config
+
+        pipelines: list[list] = []
+        signal_bus.pipeline_ready.connect(lambda specs: pipelines.append(list(specs)))
+
+        btn = self._find_button_by_testid(widget, "queue-btn-legacy-to-dcp")
+        assert btn is not None
+        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+        assert pipelines, "esperado pipeline_ready emitido"
+        specs = pipelines[-1]
+        names = [s.name for s in specs]
+        # Pos-codex-review 2026-05-17: pipeline reduzida para 5 cmds reais
+        # (sem etapa /project-json --migrate-v3, que nao existe como branch).
+        # /legacy:detect agora aborta V1/V2 com exit 2 + gap em pending-actions.
+        # 5 blocos de prep (3 specs cada) + 5 cmds = 20 specs.
+        prep_count = sum(1 for n in names if n in ("/clear",))
+        assert prep_count == 5, f"esperado 5 /clear (1 por bloco), achei {prep_count}"
+        assert any(n.startswith("/legacy:detect ") for n in names)
+        # NAO deve existir /project-json --migrate-v3 (cmd inexistente):
+        assert not any("--migrate-v3" in n for n in names), (
+            "Regressao: handler legacy-to-dcp nao deve enfileirar "
+            "/project-json --migrate-v3 (branch nao existe no /project-json)"
+        )
+        assert any(n.startswith("/delivery:init --if-missing ") for n in names)
+        assert any(n.startswith("/legacy:modules-from-features ") for n in names)
+        assert any(n.startswith("/dcp:meta-completeness --all --auto-fix-p0 ") for n in names)
+        assert any(n.startswith("/legacy:enqueue-all-modules ") for n in names)
+        # Project path injetado em cada cmd real (5).
+        path_str = str(project_json)
+        cmd_with_path = [n for n in names if path_str in n]
+        assert len(cmd_with_path) == 5
+        # GROUP_MAP usa sonnet/medium nos 4 primeiros blocos; ultimo bloco usa high.
+        group = GROUP_MAP["legacy_to_dcp"]
+        assert group["model"] == ModelName.SONNET
+        assert group["effort"] == EffortLevel.STANDARD
+        # Confirma directive final high
+        effort_high_idx = [i for i, n in enumerate(names) if n == "/effort high"]
+        assert effort_high_idx, "esperado pelo menos um /effort high para enqueue-all-modules"

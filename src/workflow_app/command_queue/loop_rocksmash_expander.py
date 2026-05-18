@@ -44,20 +44,22 @@ _FRAMING_EFFORT: EffortLevel = EffortLevel.STANDARD
 def _iter_items(daily_loop: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Return [(item_id, item_dict), ...] sorted by item_id ascending.
 
-    Prefers ``items_index`` (dict keyed by id) when present and non-empty;
-    falls back to flattening ``buckets[*].items[*]``.
+    Reads from ``daily_loop.buckets[*].items[*]`` as the authoritative source
+    per CONTRACT.md (``items_index`` is audit-only metadata; runtime reads
+    from buckets). When a bucket item lacks ``kind``, ``task_path``, or
+    ``target``, falls back to ``items_index[id]`` for that single field
+    (legacy V3 configs pre-2026-05-17 stored these only in items_index).
     """
-    items_index = daily_loop.get("items_index")
-    if isinstance(items_index, dict) and items_index:
-        return sorted(
-            ((str(k), v) for k, v in items_index.items() if isinstance(v, dict)),
-            key=lambda kv: kv[0],
-        )
+    items_index = daily_loop.get("items_index") or {}
+    if not isinstance(items_index, dict):
+        items_index = {}
 
     flat: list[tuple[str, dict[str, Any]]] = []
     for bucket in daily_loop.get("buckets", []) or []:
-        bucket_id = str(bucket.get("id", "")) if isinstance(bucket, dict) else ""
-        for item in (bucket.get("items") or []) if isinstance(bucket, dict) else []:
+        if not isinstance(bucket, dict):
+            continue
+        bucket_id = str(bucket.get("id", ""))
+        for item in bucket.get("items") or []:
             if not isinstance(item, dict):
                 continue
             iid = str(item.get("id", ""))
@@ -65,6 +67,18 @@ def _iter_items(daily_loop: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
                 continue
             enriched = dict(item)
             enriched.setdefault("bucket", bucket_id)
+            # Backfill per-item metadata from items_index when absent in
+            # bucket (retro-compat: pre-2026-05-17 producers only wrote
+            # kind/task_path/target to items_index). New producers MUST
+            # write both per the canonical shape in CONTRACT.md section 2.
+            idx_entry = items_index.get(iid)
+            if isinstance(idx_entry, dict):
+                for fallback_field in ("kind", "task_path", "target"):
+                    if not enriched.get(fallback_field) and idx_entry.get(fallback_field):
+                        enriched[fallback_field] = idx_entry[fallback_field]
+                # task_file (items_index naming) -> task_path (bucket naming)
+                if not enriched.get("task_path") and not enriched.get("target") and idx_entry.get("task_file"):
+                    enriched["task_path"] = idx_entry["task_file"]
             flat.append((iid, enriched))
     return sorted(flat, key=lambda kv: kv[0])
 
@@ -122,11 +136,15 @@ def build_loop_rocksmash_specs(
         (iid, it)
         for iid, it in all_items
         if str(it.get("kind", "iteration")) == "iteration"
+        and not it.get("archived")
+        and it.get("rocksmash_executable", True)
     ]
     if not iteration_items:
         raise DailyLoopConfigError(
             "Nenhum item com kind=iteration encontrado. "
-            "rocksmash exige pelo menos 1 par :do/:review-done."
+            "rocksmash exige pelo menos 1 par :do/:review-done. "
+            "Verifique tambem se algum item esta com rocksmash_executable=false "
+            "(gate RP-EXEC-01 do /loop-rocksmash:prepare)."
         )
 
     specs: list[CommandSpec] = []

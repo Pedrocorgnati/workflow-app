@@ -87,7 +87,6 @@ def _module(
     state: str,
     *,
     module_type: str = "crud",
-    last_specific_flow: str | None = None,
     dependencies: list | None = None,
 ) -> Dict[str, Any]:
     history: list = (
@@ -126,7 +125,6 @@ def _module(
         "artifacts": {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": last_specific_flow,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
@@ -143,7 +141,7 @@ def _write_delivery(
     *,
     execution_mode: str = "sequential",
     current_modules: list | None = None,
-    version: int = 1,
+    version: int = 2,
 ) -> Path:
     payload: Dict[str, Any] = {
         "version": version,
@@ -200,6 +198,13 @@ def _run_preflight(
 ):
     """Instantiate CommandQueueWidget, set config, intercept QMessageBox.*,
     invoke `_dcp_build_preflight`, return its result. Always disposes widget.
+
+    Intercepta tres caminhos:
+    - `QMessageBox.information(parent, title, text, ...)` (gates 1, 3, 4..N)
+    - `QMessageBox.warning(parent, title, text, ...)`
+    - `QMessageBox(parent).setText(...).exec()` (Gate 2 DeliveryInvalid usa
+       o construtor instanciado em vez do helper de classe para acomodar o
+       botao 'Copiar erros').
     """
     from unittest.mock import patch
 
@@ -215,9 +220,29 @@ def _run_preflight(
         if len(args) >= 3:
             captured.append(args[2])
 
+    # Patch QMessageBox.exec to capture the body text of instance-built boxes
+    # (Gate 2 DeliveryInvalid uses `box = QMessageBox(self); box.setText(...);
+    # box.exec()` so the class-method side_effect above does not see it).
+    def _exec_capture(box_self, *_args, **_kwargs):
+        try:
+            text = box_self.text()
+        except Exception:
+            text = ""
+        if text:
+            captured.append(text)
+        return 0  # QDialog.Rejected — no clicked button
+
     try:
-        with patch("PySide6.QtWidgets.QMessageBox.information", side_effect=_capture), \
-             patch("PySide6.QtWidgets.QMessageBox.warning", side_effect=_capture):
+        with patch(
+            "PySide6.QtWidgets.QMessageBox.information",
+            side_effect=_capture,
+        ), patch(
+            "PySide6.QtWidgets.QMessageBox.warning",
+            side_effect=_capture,
+        ), patch(
+            "PySide6.QtWidgets.QMessageBox.exec",
+            new=_exec_capture,
+        ):
             widget = CommandQueueWidget()
             try:
                 return widget._dcp_build_preflight()
@@ -560,23 +585,35 @@ def test_pipeline_pending_emits_6_specs_with_local_action_at_position_6(
     assert len(modal_calls) == 0, "destructive modal must NOT run on pending path"
     assert len(emitted) == 1, "exactly one pipeline_ready emission expected"
     specs = emitted[0]
-    assert len(specs) == 6, f"expected 6 specs, got {len(specs)}"
+
+    # `_inject_clears` expands the 6 canonical B-dcp specs into a list with
+    # `/clear` + `/model {x}` + `/effort {y}` triplet headers between
+    # context-group boundaries (WORKFLOW-APP-RULES GROUP_MAP). Filter the
+    # injected directive headers to recover the 6 logical commands.
+    real_specs = [
+        s for s in specs
+        if not (
+            s.name == "/clear"
+            or s.name.startswith("/model ")
+            or s.name.startswith("/effort ")
+        )
+    ]
+    assert len(real_specs) == 6, f"expected 6 logical specs, got {len(real_specs)} (raw={len(specs)})"
 
     # Slot 1: /build-module-pipeline with --module 1 and no --regenerate
-    assert specs[0].name.startswith("/build-module-pipeline ")
-    assert "--regenerate" not in specs[0].name
-    assert "--module 1" in specs[0].name
+    assert real_specs[0].name.startswith("/build-module-pipeline ")
+    assert "--regenerate" not in real_specs[0].name
+    assert "--module 1" in real_specs[0].name
 
     # Slots 2..5: 4 dcp validators
-    assert "/dcp:congruence-check --module 1" in specs[1].name
-    assert "/dcp:temporality-check --module 1" in specs[2].name
-    assert "/dcp:meta-completeness --module 1" in specs[3].name
-    assert "/dcp:directive-injector --module 1 --in-place" in specs[4].name
+    assert "/dcp:congruence-check --module 1" in real_specs[1].name
+    assert "/dcp:temporality-check --module 1" in real_specs[2].name
+    assert "/dcp:meta-completeness --module 1" in real_specs[3].name
+    assert "/dcp:directive-injector --module 1 --in-place" in real_specs[4].name
 
     # Slot 6: local-action carrying the load action id
-    assert specs[5].kind == "local-action"
-    assert specs[5].local_action_id == "dcp-load-specific-flow"
-    assert specs[5].position == 6
+    assert real_specs[5].kind == "local-action"
+    assert real_specs[5].local_action_id == "dcp-load-specific-flow"
 
 
 def test_pipeline_past_pending_includes_regenerate_when_modal_accepted(
@@ -623,9 +660,19 @@ def test_pipeline_past_pending_includes_regenerate_when_modal_accepted(
 
     assert len(emitted) == 1
     specs = emitted[0]
-    assert len(specs) == 6
-    assert specs[0].name.startswith("/build-module-pipeline --regenerate --module 1 ")
-    assert specs[5].kind == "local-action"
+    # `_inject_clears` expands canonical 6 specs with directive triplets; filter
+    # them out to verify the 6 logical commands (same pattern as P1 above).
+    real_specs = [
+        s for s in specs
+        if not (
+            s.name == "/clear"
+            or s.name.startswith("/model ")
+            or s.name.startswith("/effort ")
+        )
+    ]
+    assert len(real_specs) == 6
+    assert real_specs[0].name.startswith("/build-module-pipeline --regenerate --module 1 ")
+    assert real_specs[5].kind == "local-action"
 
 
 def test_pipeline_regen_modal_rejected_blocks_emission(

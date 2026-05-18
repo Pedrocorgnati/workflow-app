@@ -255,7 +255,22 @@ def resolve(
             "novo pipeline",
         )
 
-    if module.artifacts.last_specific_flow:
+    # v2 dropped artifacts.last_specific_flow; presence is now detected by
+    # checking the canonical per-module path on disk. Use the resolver so the
+    # same cascade (level-0 wbs/modules/{id}/SPECIFIC-FLOW.json -> level-2
+    # custom_workflow_root) decides whether a regenerate-style action applies.
+    from workflow_app.services.delivery_reader import resolve_specific_flow
+
+    try:
+        existing_flow = resolve_specific_flow(
+            delivery,
+            cm_id,
+            Path(config.config_path).resolve().parent,
+            custom_workflow_root=getattr(config, "custom_workflow_root", None) or None,
+        )
+    except Exception:
+        existing_flow = None
+    if existing_flow is not None:
         return SpecificFlowAction(
             build_paste_command_only(
                 config=config, current_module=cm_id, regenerate=True

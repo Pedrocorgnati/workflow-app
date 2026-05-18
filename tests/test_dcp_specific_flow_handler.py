@@ -112,19 +112,44 @@ def _module(
         "artifacts": {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": last_specific_flow,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
             "git_tag": None,
         },
+        # Test-only sentinel — stripped by _write_delivery before serialisation
+        # (v2 ModuleArtifacts has extra="forbid"). When non-None, _write_delivery
+        # also drops a placeholder SPECIFIC-FLOW.json at the canonical level-0
+        # path so the resolver-based regenerate path fires in the production
+        # code (specific_flow_handler.resolve).
+        "_test_specific_flow_marker": last_specific_flow,
         "dependencies": dependencies if dependencies is not None else [],
     }
 
 
 def _write_delivery(wbs_root: Path, current_module: str | None, modules: Dict[str, Any]) -> Path:
+    # v2 schema: ModuleArtifacts has extra="forbid"; drop v1-only keys callers
+    # may have inherited from older fixture helpers. When the test-only
+    # `_test_specific_flow_marker` is non-None, drop a placeholder file at the
+    # canonical level-0 path (wbs/modules/{id}/SPECIFIC-FLOW.json) so the
+    # resolver-based regenerate path fires in production code.
+    for _mid, _mod in modules.items():
+        if not isinstance(_mod, dict):
+            continue
+        _arts = _mod.get("artifacts")
+        if isinstance(_arts, dict):
+            _arts.pop("last_specific_flow", None)
+            _arts.pop("last_specific_flow_sha256", None)
+        marker = _mod.pop("_test_specific_flow_marker", None)
+        if marker:
+            flow_path = wbs_root / "modules" / _mid / "SPECIFIC-FLOW.json"
+            flow_path.parent.mkdir(parents=True, exist_ok=True)
+            if not flow_path.exists():
+                flow_path.write_text(
+                    json.dumps({"version": 1, "commands": []}), encoding="utf-8"
+                )
     payload: Dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": current_module,
         "execution_mode": "sequential",
@@ -404,7 +429,7 @@ def test_dcp_specific_flow_button_disabled_when_reader_missing(
     widget = CommandQueueWidget()
     try:
         target = None
-        for btn in widget.findChildren(QPushButton):
+        for btn in widget.header_widget.findChildren(QPushButton):
             if btn.property("testid") == "queue-btn-dcp-specific-flow":
                 target = btn
                 break
@@ -426,7 +451,7 @@ def test_modules_creation_button_enabled(qapp) -> None:
     widget = CommandQueueWidget()
     try:
         target = None
-        for btn in widget.findChildren(QPushButton):
+        for btn in widget.header_widget.findChildren(QPushButton):
             if btn.property("testid") == "queue-btn-modules":
                 target = btn
                 break
@@ -499,7 +524,7 @@ def test_dcp_build_gate6_blocks_when_dep_not_done(
         widget = CommandQueueWidget()
         try:
             btn = next(
-                (b for b in widget.findChildren(QPushButton)
+                (b for b in widget.header_widget.findChildren(QPushButton)
                  if b.property("testid") == "queue-btn-dcp-build"),
                 None,
             )
@@ -555,9 +580,12 @@ def test_dcp_build_gate6_allows_when_all_deps_done(
     app_state.set_config(cfg)
     monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
 
-    pasted: list[str] = []
+    # B-dcp button now enqueues the 6-step pipeline via pipeline_ready
+    # instead of pasting a single command in the terminal (DCP-COMMAND-MATRIX
+    # rollout). Listen for pipeline_ready, filter to the B-dcp batch.
+    emitted: list[list[Any]] = []
     from workflow_app.signal_bus import signal_bus
-    signal_bus.paste_text_in_terminal.connect(pasted.append)
+    signal_bus.pipeline_ready.connect(emitted.append)
 
     warned: list[str] = []
     with patch(
@@ -567,19 +595,31 @@ def test_dcp_build_gate6_allows_when_all_deps_done(
         widget = CommandQueueWidget()
         try:
             btn = next(
-                (b for b in widget.findChildren(QPushButton)
+                (b for b in widget.header_widget.findChildren(QPushButton)
                  if b.property("testid") == "queue-btn-dcp-build"),
                 None,
             )
             assert btn is not None, "queue-btn-dcp-build not found"
             btn.click()
         finally:
+            try:
+                signal_bus.pipeline_ready.disconnect(emitted.append)
+            except (RuntimeError, TypeError):
+                pass
             widget.deleteLater()
             app_state.clear_config()
 
     assert len(warned) == 0, "must not warn when all deps are done"
-    assert len(pasted) == 1, "must paste command when all deps are done"
-    assert "--module 2" in pasted[0]
+    handler_batches = [
+        batch for batch in emitted
+        if batch and any(s.name.startswith("/build-module-pipeline") for s in batch)
+    ]
+    assert len(handler_batches) == 1, "must enqueue B-dcp pipeline when all deps are done"
+    build_spec = next(
+        s for s in handler_batches[0]
+        if s.name.startswith("/build-module-pipeline")
+    )
+    assert "--module 2" in build_spec.name
 
 
 # ─── Onda 1: destructive guard for --regenerate path ────────────────────────── #
@@ -658,7 +698,7 @@ def test_dcp_build_regen_with_existing_flow_blocks_paste_when_modal_rejected(
         widget = CommandQueueWidget()
         try:
             btn = next(
-                (b for b in widget.findChildren(QPushButton)
+                (b for b in widget.header_widget.findChildren(QPushButton)
                  if b.property("testid") == "queue-btn-dcp-build"),
                 None,
             )
@@ -689,9 +729,10 @@ def test_dcp_build_regen_with_existing_flow_pastes_when_modal_accepted(
     app_state.set_config(cfg)
     monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
 
-    pasted: list[str] = []
+    # B-dcp button now enqueues via pipeline_ready instead of pasting.
+    emitted: list[list[Any]] = []
     from workflow_app.signal_bus import signal_bus
-    signal_bus.paste_text_in_terminal.connect(pasted.append)
+    signal_bus.pipeline_ready.connect(emitted.append)
 
     def fake_exec(self):
         return QDialog.DialogCode.Accepted
@@ -704,19 +745,31 @@ def test_dcp_build_regen_with_existing_flow_pastes_when_modal_accepted(
         widget = CommandQueueWidget()
         try:
             btn = next(
-                (b for b in widget.findChildren(QPushButton)
+                (b for b in widget.header_widget.findChildren(QPushButton)
                  if b.property("testid") == "queue-btn-dcp-build"),
                 None,
             )
             assert btn is not None, "queue-btn-dcp-build not found"
             btn.click()
         finally:
+            try:
+                signal_bus.pipeline_ready.disconnect(emitted.append)
+            except (RuntimeError, TypeError):
+                pass
             widget.deleteLater()
             app_state.clear_config()
 
-    assert len(pasted) == 1, "accepted modal must allow paste"
-    assert "--regenerate" in pasted[0]
-    assert "--module 1" in pasted[0]
+    handler_batches = [
+        batch for batch in emitted
+        if batch and any(s.name.startswith("/build-module-pipeline") for s in batch)
+    ]
+    assert len(handler_batches) == 1, "accepted modal must allow B-dcp pipeline emission"
+    build_spec = next(
+        s for s in handler_batches[0]
+        if s.name.startswith("/build-module-pipeline")
+    )
+    assert "--regenerate" in build_spec.name
+    assert "--module 1" in build_spec.name
 
 
 def test_dcp_build_regen_without_existing_flow_skips_modal(
@@ -736,9 +789,10 @@ def test_dcp_build_regen_without_existing_flow_skips_modal(
     app_state.set_config(cfg)
     monkeypatch.setattr(dcp_pkg, "READER_AVAILABLE", True)
 
-    pasted: list[str] = []
+    # B-dcp button now enqueues via pipeline_ready instead of pasting.
+    emitted: list[list[Any]] = []
     from workflow_app.signal_bus import signal_bus
-    signal_bus.paste_text_in_terminal.connect(pasted.append)
+    signal_bus.pipeline_ready.connect(emitted.append)
 
     modal_calls: list[bool] = []
 
@@ -754,19 +808,31 @@ def test_dcp_build_regen_without_existing_flow_skips_modal(
         widget = CommandQueueWidget()
         try:
             btn = next(
-                (b for b in widget.findChildren(QPushButton)
+                (b for b in widget.header_widget.findChildren(QPushButton)
                  if b.property("testid") == "queue-btn-dcp-build"),
                 None,
             )
             assert btn is not None, "queue-btn-dcp-build not found"
             btn.click()
         finally:
+            try:
+                signal_bus.pipeline_ready.disconnect(emitted.append)
+            except (RuntimeError, TypeError):
+                pass
             widget.deleteLater()
             app_state.clear_config()
 
     assert len(modal_calls) == 0, "modal must NOT run when SPECIFIC-FLOW.json missing"
-    assert len(pasted) == 1, "paste must happen on regen path with no existing file"
-    assert "--regenerate" in pasted[0]
+    handler_batches = [
+        batch for batch in emitted
+        if batch and any(s.name.startswith("/build-module-pipeline") for s in batch)
+    ]
+    assert len(handler_batches) == 1, "pipeline must emit on regen path with no existing file"
+    build_spec = next(
+        s for s in handler_batches[0]
+        if s.name.startswith("/build-module-pipeline")
+    )
+    assert "--regenerate" in build_spec.name
 
 
 # ─── Onda 4: overrides.skipped persistence + filter ────────────────────────── #
@@ -847,7 +913,7 @@ def test_dcp_specific_flow_filters_overrides_skipped(
     widget = CommandQueueWidget()
     try:
         btn = next(
-            (b for b in widget.findChildren(QPushButton)
+            (b for b in widget.header_widget.findChildren(QPushButton)
              if b.property("testid") == "queue-btn-dcp-specific-flow"),
             None,
         )
@@ -888,7 +954,7 @@ def test_dcp_specific_flow_remove_persists_to_overrides_skipped(
     widget = CommandQueueWidget()
     try:
         btn = next(
-            (b for b in widget.findChildren(QPushButton)
+            (b for b in widget.header_widget.findChildren(QPushButton)
              if b.property("testid") == "queue-btn-dcp-specific-flow"),
             None,
         )
@@ -1019,17 +1085,29 @@ def test_pipeline_emits_6_items_with_local_action_at_position_6(
 
     # Filter out emissions that come from CommandQueueWidget construction
     # (e.g. listener-test wiring). The handler-emitted batch is the only
-    # one whose first spec starts with "/build-module-pipeline".
+    # one containing "/build-module-pipeline" (post-`_inject_clears` the
+    # batch starts with /clear directive triplets, not the build command).
     handler_batches = [
         batch for batch in emitted
-        if batch and batch[0].name.startswith("/build-module-pipeline")
+        if batch and any(s.name.startswith("/build-module-pipeline") for s in batch)
     ]
     assert len(handler_batches) == 1, (
         f"expected exactly 1 B-dcp emission, got {len(handler_batches)} "
         f"(total emissions: {len(emitted)})"
     )
-    specs = handler_batches[0]
-    assert len(specs) == 6, f"expected 6 specs, got {len(specs)}"
+    raw_specs = handler_batches[0]
+    # `_inject_clears` expands 6 logical commands with /clear + /model + /effort
+    # triplet headers (WORKFLOW-APP-RULES GROUP_MAP). Filter directive headers
+    # to recover the 6 logical commands.
+    specs = [
+        s for s in raw_specs
+        if not (
+            s.name == "/clear"
+            or s.name.startswith("/model ")
+            or s.name.startswith("/effort ")
+        )
+    ]
+    assert len(specs) == 6, f"expected 6 logical specs, got {len(specs)} (raw={len(raw_specs)})"
 
     # Position 1: /build-module-pipeline (no --regenerate on pending)
     assert specs[0].name.startswith("/build-module-pipeline ")
@@ -1042,13 +1120,15 @@ def test_pipeline_emits_6_items_with_local_action_at_position_6(
     assert specs[3].name.startswith("/dcp:meta-completeness")
     assert specs[4].name.startswith("/dcp:directive-injector")
 
-    # Position 6: local-action (kind + id) — the visible queue marker
-    assert specs[5].position == 6
+    # Position 6 (last logical slot): local-action — the visible queue marker.
+    # The expanded raw position is wherever `_inject_clears` placed it (final),
+    # so check identity (kind + id) rather than the literal index 6.
     assert specs[5].kind == "local-action"
     assert specs[5].local_action_id == "dcp-load-specific-flow"
 
-    # Positions are sequential 1..6
-    assert [s.position for s in specs] == [1, 2, 3, 4, 5, 6]
+    # Positions are strictly increasing across the raw expanded list.
+    raw_positions = [s.position for s in raw_specs]
+    assert raw_positions == sorted(raw_positions) and len(set(raw_positions)) == len(raw_positions)
 
 
 def test_pipeline_includes_regenerate_flag_when_state_past_pending(
@@ -1085,10 +1165,18 @@ def test_pipeline_includes_regenerate_flag_when_state_past_pending(
 
     handler_batches = [
         batch for batch in emitted
-        if batch and batch[0].name.startswith("/build-module-pipeline")
+        if batch and any(s.name.startswith("/build-module-pipeline") for s in batch)
     ]
     assert len(handler_batches) == 1
-    specs = handler_batches[0]
+    raw_specs = handler_batches[0]
+    specs = [
+        s for s in raw_specs
+        if not (
+            s.name == "/clear"
+            or s.name.startswith("/model ")
+            or s.name.startswith("/effort ")
+        )
+    ]
     assert len(specs) == 6
 
     # --regenerate inserted before --module on the first spec

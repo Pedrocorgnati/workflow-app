@@ -164,6 +164,24 @@ def _resolve_task_substitution(task: Optional[str], module_path: str) -> str:
     return f"{module_path}/{task}"
 
 
+def _relative_project_json(config_path: Optional[str]) -> str:
+    """Render `config_path` relative to the repo root (walk-up to CLAUDE.md).
+
+    Mirrors `templating._relative_project_json` so the FASE H rendering on the
+    workflow-app side matches the offline generator path.
+    """
+    if not config_path:
+        return ""
+    p = Path(config_path)
+    for parent in p.parents:
+        if (parent / "CLAUDE.md").exists():
+            try:
+                return str(p.relative_to(parent))
+            except ValueError:
+                break
+    return str(p)
+
+
 def _render(
     template: str,
     *,
@@ -172,6 +190,7 @@ def _render(
     module_id: str,
     wbs_root: Optional[Path],
     commit_variant: str = "simple",
+    config_path: Optional[str] = None,
 ) -> str:
     """Render a CommandIndexEntry.name template into the final command line."""
     if stack and "/{stack}:{stack}-review" in template:
@@ -183,13 +202,26 @@ def _render(
         template = template.replace("/{stack}:{stack}-review", review_cmd)
 
     module_path = _module_path(module_id, wbs_root)
+    module_n = _module_number(module_id)
+
+    # FASE H {github_check_flag} + {commit_target} — mirrored from templating.py.
+    # See profiles.py H-commit StepSpec for the rule rationale.
+    project_json_rel = _relative_project_json(config_path)
+    if commit_variant == "simple" and module_n in {"0", "1"}:
+        github_check_flag = " --github-check"
+    else:
+        github_check_flag = ""
+    commit_target = project_json_rel if project_json_rel else f"--module {module_n}"
+
     substitutions = {
         "{task}": _resolve_task_substitution(task, module_path),
         "{stack}": stack or "",
         "{module_id}": module_id,
-        "{module_n}": _module_number(module_id),
+        "{module_n}": module_n,
         "{module_path}": module_path,
         "{commit_variant}": commit_variant,
+        "{github_check_flag}": github_check_flag,
+        "{commit_target}": commit_target,
     }
     rendered = template
     for key, value in substitutions.items():
@@ -324,6 +356,7 @@ def derive_queue_from_matrix(
             module_id=cm_id,
             wbs_root=wbs_root,
             commit_variant=commit_variant,
+            config_path=config_path,
         )
         # overrides_skipped works on the rendered command name (source.md L463).
         if rendered in overrides_skipped:
@@ -380,6 +413,7 @@ def derive_queue_from_matrix(
                 module_id=cm_id,
                 wbs_root=wbs_root,
                 commit_variant=commit_variant,
+                config_path=config_path,
             )
             if rendered in overrides_skipped:
                 continue

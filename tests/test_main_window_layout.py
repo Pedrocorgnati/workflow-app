@@ -36,11 +36,16 @@ def test_main_window_no_toolbox_header_attr(app):
 
 
 def test_metrics_bar_has_queue_progress_ring(app):
-    """AC-1.3 + GAP 4.4: ring deve estar dentro do listeners-frame."""
+    """Refactor 2026-05-17 power-bi-section: o ring continua owned por
+    MetricsBar (signal pipelines preservados), mas nao e mais filho do
+    listeners-frame — virou IRMAO dentro do power-bi-section montado em
+    MainWindow._build_output_toolbar. Aqui (sem MainWindow), o ring fica
+    sem parent ate ser reparenteado pelo PowerBiSection.
+    """
     mb = MetricsBar()
     assert hasattr(mb, "_queue_progress_ring")
     assert isinstance(mb._queue_progress_ring, QueueProgressRing)
-    assert mb._queue_progress_ring.parent() is mb._listeners_frame
+    assert mb._queue_progress_ring.parent() is None
 
 
 def test_command_queue_has_autocast_buttons(app):

@@ -114,7 +114,7 @@ def _same_context_group(prev_name: str, curr_name: str) -> bool:
     NOT grouped: stack review commands (/nextjs:*, /python:*, etc.) — they are
     independent checks that don't need each other's context.
     """
-    _PIPELINE_PREFIXES = ("/qa:", "/backend:", "/frontend:")
+    _PIPELINE_PREFIXES = ("/qa:", "/backend:", "/frontend:", "/daily:")
     for prefix in _PIPELINE_PREFIXES:
         if prev_name.startswith(prefix) and curr_name.startswith(prefix):
             return True
@@ -384,16 +384,35 @@ TEMPLATE_DEPLOY: list[CommandSpec] = _inject_clears([
 
 # ─── Daily (from .claude/commands/daily/) ──────────────────────────────────────
 # Pipeline leve: scan -> plan -> do -> validate -> review.
-# Todos Sonnet/HIGH. Sem /clear entre steps (compartilham contexto via _DAILY-*.md).
-# _inject_clears emite apenas o header inicial (/clear /model sonnet /effort high).
+# Sem /clear entre steps (compartilham contexto via _DAILY-*.md).
+# Model/effort variam por step — transicoes emitidas sem /clear.
+#   scan     sonnet/standard  coleta mecanica, 2-min target
+#   plan     opus/high        escopo + intencao + criterios de aceite (L2 adversarial)
+#   do       sonnet/high      implementacao constrangida pelo plano
+#   validate sonnet/standard  build/lint/test mecanico
+#   review   sonnet/standard  sintese de artefatos, commit message
+# _inject_clears nao e usada: ela so emite /model e /effort dentro de blocos /clear,
+# incompativel com o padrao de contexto compartilhado + model variavel.
 
-TEMPLATE_DAILY: list[CommandSpec] = _inject_clears([
-    _spec("/daily:scan",     _S, _A, 0, effort=EffortLevel.HIGH),
-    _spec("/daily:plan",     _S, _A, 1, effort=EffortLevel.HIGH),
-    _spec("/daily:do",       _S, _A, 2, effort=EffortLevel.HIGH),
-    _spec("/daily:validate", _S, _A, 3, effort=EffortLevel.HIGH),
-    _spec("/daily:review",   _S, _A, 4, effort=EffortLevel.HIGH),
-])
+TEMPLATE_DAILY: list[CommandSpec] = [
+    # header inicial — scan: sonnet/standard (Regra 3.4)
+    CommandSpec(name="/clear",           model=_S, interaction_type=_A, position=1),
+    CommandSpec(name="/model sonnet",    model=_S, interaction_type=_A, position=2),
+    CommandSpec(name="/effort standard", model=_S, interaction_type=_A, position=3),
+    _spec("/daily:scan",     _S, _A, 4,  effort=EffortLevel.STANDARD),
+    # transicao sonnet/standard → opus/high (plan)
+    CommandSpec(name="/model opus",      model=_O, interaction_type=_A, position=5),
+    CommandSpec(name="/effort high",     model=_O, interaction_type=_A, position=6),
+    _spec("/daily:plan",     _O, _A, 7,  effort=EffortLevel.HIGH),
+    # transicao opus/high → sonnet/high (do — so model muda, effort continua high)
+    CommandSpec(name="/model sonnet",    model=_S, interaction_type=_A, position=8),
+    _spec("/daily:do",       _S, _A, 9,  effort=EffortLevel.HIGH),
+    # transicao sonnet/high → sonnet/standard (validate — so effort muda)
+    CommandSpec(name="/effort standard", model=_S, interaction_type=_A, position=10),
+    _spec("/daily:validate", _S, _A, 11, effort=EffortLevel.STANDARD),
+    # sem transicao (review: sonnet/standard = mesmo que validate)
+    _spec("/daily:review",   _S, _A, 12, effort=EffortLevel.STANDARD),
+]
 
 # ─── Study (from .claude/commands/study.md) ────────────────────────────────────
 # Pesquisa estruturada com output dual (user-friendly + tecnico).

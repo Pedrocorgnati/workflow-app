@@ -137,7 +137,6 @@ def _module(
         "artifacts": {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": None,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
@@ -226,7 +225,7 @@ def _ten_modules_payload(wbs_root: Path) -> Dict[str, Any]:
         ),
     }
     return {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": "module-3-dashboard",
         "execution_mode": "sequential",
@@ -258,7 +257,7 @@ def single_exec_delivery(tmp_path: Path) -> Path:
     wbs_root = tmp_path / "single"
     wbs_root.mkdir()
     payload = {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": "module-1-dashboard",
         "execution_mode": "sequential",

@@ -301,6 +301,52 @@ def _resolve_item_commands(
     return None
 
 
+def _resolve_item_expanded_commands(
+    daily_loop: dict[str, Any], item_id: str
+) -> list[str] | None:
+    """Resolve `expanded_commands` for cmd-single items from `items_index`.
+
+    Returns the expanded_commands list when ALL conditions hold:
+      - items_index[item_id] exists and is a dict
+      - items_index[item_id].cmd_complexity == "single"
+      - items_index[item_id].expanded_commands is a non-empty list[str]
+      - items_index[item_id].commands is empty/missing (per cmd-single contract
+        in /loop:check-tasks-and-cmd PASSO 4)
+
+    Returns None otherwise (caller falls back to do_command wrapper).
+
+    Fix arquitetural 2026-05-17 (PIPELINE-PITFALLS Pitfall 7 bug upstream):
+    cmd_complexity=single items por contrato gravam commands=[] e populam
+    expanded_commands. Sem este resolver, build_daily_loop_specs caia no
+    do_command fallback e perdia 16 items silently (caso canonico:
+    05-15-05-15-study-flow-upgrade).
+    """
+    items_index = daily_loop.get("items_index")
+    if not isinstance(items_index, dict):
+        return None
+    entry = items_index.get(item_id)
+    if not isinstance(entry, dict):
+        return None
+    if str(entry.get("cmd_complexity", "")).strip() != "single":
+        return None
+    cmds = entry.get("commands") or []
+    if isinstance(cmds, list) and len([c for c in cmds if str(c).strip()]) > 0:
+        return None
+    expanded = entry.get("expanded_commands")
+    if not isinstance(expanded, list):
+        return None
+    normalized = [str(c).strip() for c in expanded if str(c).strip()]
+    if not normalized:
+        return None
+    for cmd in normalized:
+        if cmd.split(" ", 1)[0] == "/daily-loop:do":
+            raise DailyLoopConfigError(
+                f"item {item_id}: 'expanded_commands' nao pode conter "
+                f"/daily-loop:do (token wrapper reservado ao fallback)"
+            )
+    return normalized
+
+
 def _rewrite_bare_relative_md_tokens(
     cmds: list[str],
     loop_root: Path,
@@ -639,9 +685,23 @@ def build_daily_loop_specs(
                 workspace_root_path,
                 item.item_id,
             )
+        if not canonical_cmds:
+            # Path 2 (2026-05-17 fix Pitfall 7): cmd_complexity=single items
+            # tem commands=[] por contrato e expanded_commands populado.
+            expanded_cmds = _resolve_item_expanded_commands(
+                daily_loop, item.item_id
+            )
+            if expanded_cmds:
+                canonical_cmds = _rewrite_bare_relative_md_tokens(
+                    expanded_cmds,
+                    loop_root_path,
+                    workspace_root_path,
+                    item.item_id,
+                )
         if canonical_cmds:
-            # Precedencia canonica: items[k].commands populado -> emitir cada
-            # entrada literal como CommandSpec proprio (sem wrapper /slug/--item).
+            # Precedencia canonica: items[k].commands OU items_index[k].
+            # expanded_commands (cmd-single) populado -> emitir cada entrada
+            # literal como CommandSpec proprio (sem wrapper /slug/--item).
             for cmd_str in canonical_cmds:
                 specs.append(
                     CommandSpec(
@@ -1015,10 +1075,23 @@ def build_loop_specs(
                 workspace_root_path,
                 item.item_id,
             )
+        if not canonical_cmds:
+            # Path 2 (2026-05-17 fix Pitfall 7): cmd_complexity=single items
+            # tem commands=[] por contrato e expanded_commands populado.
+            expanded_cmds = _resolve_item_expanded_commands(
+                daily_loop, item.item_id
+            )
+            if expanded_cmds:
+                canonical_cmds = _rewrite_bare_relative_md_tokens(
+                    expanded_cmds,
+                    loop_root_path,
+                    workspace_root_path,
+                    item.item_id,
+                )
         if canonical_cmds:
             # Precedencia canonica /loop --task|--cmd|--cmd-single|--both:
-            # items[k].commands populada por /loop:integration -> emitir cada
-            # entrada literal como CommandSpec (sem wrapper).
+            # items[k].commands OU items_index[k].expanded_commands (cmd-single)
+            # populada -> emitir cada entrada literal como CommandSpec.
             for cmd_str in canonical_cmds:
                 specs.append(
                     CommandSpec(

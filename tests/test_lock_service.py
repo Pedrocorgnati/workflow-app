@@ -122,7 +122,6 @@ def _single_module_payload(wbs_root: Path) -> Dict[str, Any]:
         "artifacts": {
             "module_meta_path": None,
             "overview_path": None,
-            "last_specific_flow": None,
             "last_review_report": None,
             "last_commit_sha": None,
             "last_deploy_url": None,
@@ -131,7 +130,7 @@ def _single_module_payload(wbs_root: Path) -> Dict[str, Any]:
         "dependencies": [],
     }
     return {
-        "version": 1,
+        "version": 2,
         "project": _base_project(wbs_root),
         "current_module": "module-1-dashboard",
         "execution_mode": "sequential",
@@ -144,7 +143,7 @@ def _single_module_payload(wbs_root: Path) -> Dict[str, Any]:
 
 def _minimal_locks_doc(locks: Dict[str, Any]) -> Dict[str, Any]:
     """Just enough JSON for DeliveryLock (which only touches ``locks``)."""
-    return {"version": 1, "modules": {}, "locks": locks}
+    return {"version": 2, "modules": {}, "locks": locks}
 
 
 def _write(path: Path, payload: Dict[str, Any]) -> None:
