@@ -3,7 +3,7 @@ AddCommandDialog — Modal to add a new command to the queue.
 
 Fields:
   - Comando * (QLineEdit, e.g. /prd-create)
-  - Modelo (QComboBox: Opus, Sonnet, Haiku)
+  - Modelo (QComboBox: Opus, Sonnet)
   - Tipo de Interação (QComboBox: Automático, Interativo)
 
 Footer: [Cancelar] [Adicionar] (disabled if command empty)
@@ -95,7 +95,7 @@ class AddCommandDialog(QDialog):
         model_label.setStyleSheet("color: #FAFAFA; font-size: 13px; font-weight: 600;")
         bl.addWidget(model_label)
         self._model_combo = QComboBox()
-        self._model_combo.addItems(["Opus", "Sonnet", "Haiku"])
+        self._model_combo.addItems(["Opus", "Sonnet"])
         self._model_combo.setCurrentIndex(0)
         self._model_combo.setStyleSheet(
             "background-color: #27272A; color: #FAFAFA;"
@@ -175,7 +175,10 @@ class AddCommandDialog(QDialog):
         if not name:
             return
 
-        model_map = {"Opus": ModelName.OPUS, "Sonnet": ModelName.SONNET, "Haiku": ModelName.HAIKU}
+        model_map = {
+            "Opus": ModelName.OPUS,
+            "Sonnet": ModelName.SONNET,
+        }
         inter_map = {"Interativo": InteractionType.INTERACTIVE, "Automático": InteractionType.AUTO}
         effort_map = {
             "low": EffortLevel.LOW,

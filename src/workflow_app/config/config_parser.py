@@ -37,6 +37,7 @@ class PipelineConfig:
     workspace_root: str            # root do código gerado
     dcp_root: str = ""             # ORCH: pasta da matrix DCP, delivery.json, specific flows
     custom_workflow_root: str = "" # onde fica o SPECIFIC-FLOW.json
+    rules_root: str = ""           # pasta gitignored de regras do projeto (workspace_root/rules)
     language: str = "pt-BR"        # idioma da interface do projeto
     queue_root: str = ""           # path do storage dedicado do queue_state
     raw: dict = field(default_factory=dict, repr=False)  # JSON original completo
@@ -102,6 +103,7 @@ def parse_config(path: str) -> PipelineConfig:
             "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
         )
         queue_root = bf.get("queue_root", "")
+        rules_root = bf.get("rules_root", f"{workspace_root}/rules" if workspace_root else "")
     elif "docs_root" in raw or "wbs_root" in raw:
         # V2 — campos direto no root
         brief_root = raw.get("brief_root", raw.get("docs_root", ""))
@@ -113,6 +115,7 @@ def parse_config(path: str) -> PipelineConfig:
             "custom_workflow_root", f"{wbs_root}/specific-flow" if wbs_root else ""
         )
         queue_root = raw.get("queue_root", "")
+        rules_root = raw.get("rules_root", f"{workspace_root}/rules" if workspace_root else "")
     elif "output_root" in raw:
         # V1 — apenas output_root como string
         output_root = str(raw["output_root"])
@@ -123,6 +126,7 @@ def parse_config(path: str) -> PipelineConfig:
         dcp_root = ""
         custom_workflow_root = f"{wbs_root}/specific-flow"
         queue_root = raw.get("queue_root", "")
+        rules_root = f"{workspace_root}/rules"
     elif is_loop_json:
         # Loop JSON (task-loop, cmd-loop, both-loop)
         brief_root = ""
@@ -132,6 +136,7 @@ def parse_config(path: str) -> PipelineConfig:
         dcp_root = ""
         queue_root = raw.get("queue_root", "")
         custom_workflow_root = ""
+        rules_root = ""
     else:
         raise ConfigError(
             f"Formato de project.json não reconhecido em {resolved}. "
@@ -181,6 +186,7 @@ def parse_config(path: str) -> PipelineConfig:
         workspace_root=workspace_root,
         dcp_root=dcp_root,
         custom_workflow_root=custom_workflow_root,
+        rules_root=rules_root,
         language=language,
         queue_root=queue_root,
         raw=raw,

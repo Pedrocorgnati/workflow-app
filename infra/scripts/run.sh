@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Defaults
-DB_PATH="${DB_PATH:-$HOME/.workflow-app/workflow_app.db}"
+DB_PATH="${DB_PATH:-$HOME/.workflow-app/workflow.db}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # Parsear argumentos

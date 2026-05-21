@@ -36,7 +36,6 @@ _MODEL_COLORS: dict[ModelType, tuple[str, str]] = {
     # (bg_color, display_label)
     ModelType.OPUS:   ("#7C3AED", "Opus"),
     ModelType.SONNET: ("#2563EB", "Sonnet"),
-    ModelType.HAIKU:  ("#16A34A", "Haiku"),
 }
 
 _SURFACE = "#27272A"
@@ -107,7 +106,7 @@ class ModelBadge(QLabel):
 
     Example:
         badge = ModelBadge(ModelType.OPUS)
-        badge.set_model(ModelType.HAIKU)
+        badge.set_model(ModelType.SONNET)
     """
 
     def __init__(

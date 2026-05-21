@@ -66,12 +66,12 @@ PIPELINE_COMMANDS: list[_PipelineEntry] = [
     ("/mobile-first-build",    ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
     ("/front-end-build",       ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
     ("/data-test-id",          ModelName.SONNET, InteractionType.AUTO,        False, ["f7", "frontend"]),
-    ("/assets:create",         ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7", "frontend"]),
+    ("/assets:create",         ModelName.SONNET,  InteractionType.AUTO,        True,  ["f7", "frontend"]),
     ("/create-mocks",          ModelName.SONNET, InteractionType.AUTO,        True,  ["f7"]),
-    ("/github-linking",        ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f7"]),
+    ("/github-linking",        ModelName.SONNET,  InteractionType.AUTO,        True,  ["f7"]),
     ("/auto-flow execute",     ModelName.SONNET, InteractionType.AUTO,        False, ["f7"]),
     # F8 — Complemento
-    ("/env-creation",          ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f8"]),
+    ("/env-creation",          ModelName.SONNET,  InteractionType.AUTO,        True,  ["f8"]),
     ("/seed-data-create",      ModelName.SONNET, InteractionType.AUTO,        True,  ["f8"]),
     ("/docker-create",         ModelName.SONNET, InteractionType.AUTO,        True,  ["f8"]),
     # F9 — QA
@@ -79,8 +79,8 @@ PIPELINE_COMMANDS: list[_PipelineEntry] = [
     ("/qa:trace",              ModelName.OPUS,   InteractionType.AUTO,        True,  ["f9"]),
     ("/qa:report",             ModelName.SONNET, InteractionType.AUTO,        True,  ["f9"]),
     # F10 — Validation
-    ("/review-language",       ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f10"]),
-    ("/validate-stack",        ModelName.HAIKU,  InteractionType.AUTO,        True,  ["f10"]),
+    ("/review-language",       ModelName.SONNET,  InteractionType.AUTO,        True,  ["f10"]),
+    ("/validate-stack",        ModelName.SONNET,  InteractionType.AUTO,        True,  ["f10"]),
     ("/final-review",          ModelName.SONNET, InteractionType.AUTO,        True,  ["f10"]),
     # F11 — Deploy
     ("/ci-cd-create",          ModelName.SONNET, InteractionType.AUTO,        True,  ["f11"]),

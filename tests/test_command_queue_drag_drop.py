@@ -21,7 +21,7 @@ def queue_widget(qtbot):
     specs = [
         CommandSpec("/cmd-a", ModelName.SONNET, InteractionType.AUTO, 1),
         CommandSpec("/cmd-b", ModelName.OPUS, InteractionType.AUTO, 2),
-        CommandSpec("/cmd-c", ModelName.HAIKU, InteractionType.AUTO, 3),
+        CommandSpec("/cmd-c", ModelName.SONNET, InteractionType.AUTO, 3),
     ]
     for spec in specs:
         w.add_command(spec)

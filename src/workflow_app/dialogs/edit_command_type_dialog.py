@@ -2,7 +2,7 @@
 EditCommandTypeDialog — Modal to edit model and interaction_type of a CommandSpec.
 
 Fields:
-  - Modelo (QComboBox: Opus, Sonnet, Haiku)
+  - Modelo (QComboBox: Opus, Sonnet)
   - Tipo de Interação (QComboBox: Interativo, Automático)
 
 Footer: [Cancelar] [Salvar]
@@ -88,7 +88,7 @@ class EditCommandTypeDialog(QDialog):
         bl.addWidget(model_label)
         self._model_combo = QComboBox()
         self._model_combo.setProperty("testid", "edit-command-type-combo")
-        self._model_combo.addItems(["Opus", "Sonnet", "Haiku"])
+        self._model_combo.addItems(["Opus", "Sonnet"])
         self._model_combo.setCurrentText(self._spec.model.value)
         self._model_combo.setStyleSheet(combo_style)
         bl.addWidget(self._model_combo)
@@ -160,7 +160,6 @@ class EditCommandTypeDialog(QDialog):
         model_map = {
             "Opus": ModelName.OPUS,
             "Sonnet": ModelName.SONNET,
-            "Haiku": ModelName.HAIKU,
         }
         inter_map = {
             "Interativo": InteractionType.INTERACTIVE,

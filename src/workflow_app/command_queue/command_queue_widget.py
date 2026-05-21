@@ -93,6 +93,44 @@ class _VisibilitySignalLabel(QLabel):
         self.visibility_changed.emit(bool(visible))
 
 
+class _ScheduleAutocastButton(QPushButton):
+    """QPushButton de 2 modos:
+
+    - compact (default): so o icone `⏱` centralizado. Usado em idle
+      ("agendar") e fired ("disparado"); o botao fica 1:1.
+    - expanded: renderiza `⏱ <texto>` para mostrar o cronometro durante
+      a contagem. O caller deve relaxar largura (min/max) e adicionar
+      stretch no layout para o botao crescer.
+
+    `set_expanded(bool)` alterna o modo. `_base_text` sempre guarda o
+    ultimo label recebido para tooltip/consumo externo.
+    """
+
+    _ICON = "⏱"
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(self._ICON, parent)
+        self._base_text = text
+        self._expanded = False
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self._base_text = text
+        self._refresh_display()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self._refresh_display()
+
+    def base_text(self) -> str:
+        return self._base_text
+
+    def _refresh_display(self) -> None:
+        if self._expanded and self._base_text:
+            super().setText(f"{self._ICON} {self._base_text}")
+        else:
+            super().setText(self._ICON)
+
+
 class _TemplateLabel(_VisibilitySignalLabel):
     """Label do queue-template-label com prefixo fixo `Last template: `.
 
@@ -185,7 +223,6 @@ logger = logging.getLogger(__name__)
 _MODEL_MAP = {
     "opus": ModelName.OPUS,
     "sonnet": ModelName.SONNET,
-    "haiku": ModelName.HAIKU,
 }
 
 _EFFORT_MAP = {
@@ -222,6 +259,14 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "model": ModelName.SONNET,
         "effort": EffortLevel.STANDARD,
     },
+    "rocksmash_review": {
+        "model": ModelName.OPUS,
+        "effort": EffortLevel.HIGH,
+    },
+    # NOTA: o pipeline /book-legacy NAO entra no GROUP_MAP porque cada
+    # subcomando tem model/effort proprio (3 tiers do Bloco I-34). GROUP_MAP
+    # so expressa um par model/effort unico por grupo. O builder
+    # _enqueue_book_legacy resolve os tiers per-subcomando internamente.
 }
 
 
@@ -625,11 +670,12 @@ class CommandQueueWidget(QWidget):
         """Computa slug FINAL canonico para enfileirar todas as fases do /loop.
 
         Garante que `/loop:create-structure`, `/loop:individual-analysis`,
-        `/loop:integration`, `/loop:review`, `/loop:workflow-app` (e
-        `/loop:mark-type`, `/loop:check-tasks-and-cmd` em --both) recebam
-        EXATAMENTE o mesmo `--name` final que `/loop:create-structure`
-        materializara em disco. Sem isso, fases 2..N apontariam para
-        diretorio inexistente quando o helper normaliza `foo` -> `05-14-foo`.
+        `/loop:integration`, `/loop:review`, `/loop:integrated-architecture`,
+        `/loop:workflow-app` (e `/loop:mark-type`, `/loop:check-tasks-and-cmd`
+        em --both) recebam EXATAMENTE o mesmo slug final que
+        `/loop:create-structure` materializara em disco (via `--name` ou
+        `--loop-slug`). Sem isso, fases 2..N apontariam para diretorio
+        inexistente quando o helper normaliza `foo` -> `05-14-foo`.
 
         Retorna None se o helper falhar — caller deve abortar com toast.
         """
@@ -930,6 +976,17 @@ class CommandQueueWidget(QWidget):
             specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
             specs.append(
                 CommandSpec(
+                    name=f"/cmd:review {cmd_target_slash} {md_path_str}",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
+            specs.append(
+                CommandSpec(
                     name=f"/cmd:kimi-pair-analyse {cmd_target_slash}",
                     model=loop_model,
                     interaction_type=InteractionType.AUTO,
@@ -941,17 +998,6 @@ class CommandQueueWidget(QWidget):
             specs.append(
                 CommandSpec(
                     name=f"/cmd:kimi-pair-execute {report_path}",
-                    model=loop_model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=loop_effort,
-                    position=len(specs) + 1,
-                )
-            )
-            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
-            specs.append(
-                CommandSpec(
-                    name=f"/cmd:review {cmd_target_slash} {md_path_str}",
                     model=loop_model,
                     interaction_type=InteractionType.AUTO,
                     config_path="",
@@ -980,6 +1026,7 @@ class CommandQueueWidget(QWidget):
                     f"/loop:individual-analysis --name {slug}",
                     f"/loop:integration --name {slug}",
                     f"/loop:review --name {slug}",
+                    f"/loop:integrated-architecture --loop-slug {slug}",
                     f"/loop:workflow-app --name {slug}",
                 ]
             elif mode == "--cmd":
@@ -988,15 +1035,17 @@ class CommandQueueWidget(QWidget):
                     f"/loop:individual-analysis {mode_flag} --name {slug}",
                     f"/loop:integration {mode_flag} --name {slug}",
                     f"/loop:review {mode_flag} --name {slug}",
+                    f"/loop:integrated-architecture --loop-slug {slug}",
                     f"/loop:workflow-app {mode_flag} --name {slug}",
                 ]
             else:  # --both
                 sub_names = [
                     f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
-                    f"/loop:mark-type --name {slug}",
                     f"/loop:individual-analysis {mode_flag} --name {slug}",
                     f"/loop:integration {mode_flag} --name {slug}",
                     f"/loop:review {mode_flag} --name {slug}",
+                    f"/loop:integrated-architecture --loop-slug {slug}",
+                    f"/loop:mark-type --name {slug}",
                     f"/loop:check-tasks-and-cmd --name {slug}",
                     f"/loop:workflow-app {mode_flag} --name {slug}",
                 ]
@@ -1154,6 +1203,23 @@ class CommandQueueWidget(QWidget):
                 f"/study:publish --name {slug}{publish_suffix}",
             ]
 
+        # HARDENING --loop ativo (alinhamento com .claude/commands/study.md FASE 1.7
+        # "Hardening contratual no encadeamento de subcomandos"): filtrar 5 subcomandos
+        # SKIPADOS quando --loop. Drift entre este filtro e a spec eh BUG; reconciliar.
+        # Resolve gap identificado em audit/loop-rocksmash-... (handler nao filtrava).
+        if loop_path:
+            _LOOP_SKIPPED_PREFIXES = (
+                "/study:write-user",
+                "/study:write-tech",
+                "/study:review-user",
+                "/study:consolidate-user",
+                "/study:consolidate-tech",
+            )
+            sub_names = [
+                s for s in sub_names
+                if not any(s.startswith(p) for p in _LOOP_SKIPPED_PREFIXES)
+            ]
+
         study_cfg = GROUP_MAP.get("study", {})
         study_model = study_cfg.get("model", ModelName.OPUS)
         study_effort = study_cfg.get("effort", EffortLevel.HIGH)
@@ -1263,8 +1329,11 @@ class CommandQueueWidget(QWidget):
             "queue-tab-workflow",
             "queue-tab-auxiliar",
             "queue-tab-terminal-insertions",
+            "queue-tab-daily-routine",
         )
-        for i, label in enumerate(("Pipelines", "Workflow", "Auxiliar", "Inserções")):
+        for i, label in enumerate(
+            ("Pipelines", "Workflow", "Auxiliar", "Inserções", "Daily Routine")
+        ):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
@@ -1390,19 +1459,6 @@ class CommandQueueWidget(QWidget):
             daily_loop_btn,
             loop_btn,
             study_btn,
-            ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
-             lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
-             "queue-btn-blog"),
-            ("blog stockpile",
-             "Blog Stockpile — gera 1 pacote quad-locale (pt-BR/it-IT/en/es-ES) e faz push para o repositorio remoto. "
-             "Fase 1: expand-keywords → cluster → prioritize → deduplicate. "
-             "Fase 2: generate-briefs x4 locales (pt-BR cria CURRENT-PACKAGE.json com UUID; demais reutilizam). "
-             "Fase 3: write-articles --output-dir stockpile x4 locales (le UUID de CURRENT-PACKAGE.json). "
-             "Fase 4: review-seo --mode stockpile x4 locales. "
-             "Fase 5: quality-gate --mode stockpile → stockpile-push (commit + push idempotente para main). "
-             "Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
-             lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
-             "queue-btn-blog-stockpile"),
             ("legacy-to-dcp",
              "Legacy-to-DCP — adequa project.json legado (V3 canonico ou boilerplate convertido) ao canonical loop A..I. "
              "Pipeline: /legacy:detect (aborta V1/V2 com instrucao manual) -> /delivery:init|migrate -> "
@@ -1469,11 +1525,29 @@ class CommandQueueWidget(QWidget):
              "directives /clear, /model, /effort auto-injetadas por bucket boundary.",
              self._on_rocksmash_clicked,
              "queue-btn-rocksmash"),
+            ("rocksmash review",
+             "rocksmash review — injeta o template estatico de 12 itens "
+             "(/clear /model opus /effort high + 5x /agents:troop-review {json} "
+             "intercaladas por /clear). Le o JSON do projeto ativo da "
+             "metrics-project-pill. Cada /agents:troop-review e uma rodada "
+             "single-pass sobre o agent-progress-reviewer.md; as 5 invocacoes "
+             "cobrem ate ~25 tasks por acionamento (re-clique para tasklists "
+             "maiores). Requer /agents:troop-review criado. Bloqueia o clique "
+             "se a pill nao apontar para um JSON valido em disco.",
+             self._on_rocksmash_review_clicked,
+             "queue-btn-rocksmash-review"),
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
             ("boilerplate", "Boilerplate: scan → convert-nextjs → cleanup → persona → mockify → persona-assets → enhance-fe → gen-sql → finalize. Abre modal para path do repo (NAO le project.json).",
              self._on_boilerplate_clicked, "queue-btn-boilerplate"),
+            ("book-legacy", "Book Legacy: restauracao de livro escaneado. Abre modal de 5 campos "
+             "(pasta de imagens, nome do livro, formato, fonte, glossario) e enfileira a cadeia "
+             "expandida /book-legacy:* — preparo (:scan) + iteration per-pagina (:ocr, "
+             ":apply-glossary, :diff-original) + finalizacao (:review-orthographic, :layout-plan, "
+             ":compose-pages, :build-pdf, :validate). NUNCA enfileira o orquestrador como entrada "
+             "unica. NAO le project.json.",
+             self._on_book_legacy_clicked, "queue-btn-book-legacy"),
             # Cmd Single: modal simplificado com fixed_flag="cmd-single".
             # Mostra apenas o input de path — sem checkbox, sem campo condicional.
             # Monta automaticamente: /loop --cmd-single <path.md>
@@ -1513,7 +1587,7 @@ class CommandQueueWidget(QWidget):
         # `queue-tab-prompts` e `queue-tab-actions` em uma so aba congruente
         # (itens digitados/inseridos no terminal). Layout em duas linhas:
         # - row top: prompts (MCP-test, Online Review, Progress, slot livre)
-        # - row bottom: actions (JSON, WS, mcp-codex, mcp-kimi, double-mcp, asq-user)
+        # - row bottom: actions (JSON, WS, MCPs, Codex provider skills, asq-user)
         # Populadas via populate_prompts_tab() / populate_actions_tab() pelo
         # MainWindow (handlers dependem de estado vivo: signal_bus, _publish_to_terminal).
         terminal_insertions_content = QWidget()
@@ -1546,21 +1620,42 @@ class CommandQueueWidget(QWidget):
             lay.addStretch(1)
             return w, lay
 
-        _paths_tab, self._subtab_paths_layout = _make_subtab("queue-subtab-insertions-paths")
-        _mcps_tab, self._subtab_mcps_layout = _make_subtab("queue-subtab-insertions-mcps")
+        # paths & IDs usa 2 linhas (QVBoxLayout): row 1 = botoes de path
+        # existentes, row 2 = botoes adicionais (ex: 'repo rules'). As demais
+        # sub-abas seguem com 1 linha via _make_subtab. Refactor 2026-05-19.
+        _paths_tab = QWidget()
+        _paths_tab.setProperty("testid", "queue-subtab-insertions-paths")
+        _paths_outer = QVBoxLayout(_paths_tab)
+        _paths_outer.setContentsMargins(0, 2, 0, 2)
+        _paths_outer.setSpacing(4)
+        _paths_row1 = QWidget()
+        self._subtab_paths_layout = QHBoxLayout(_paths_row1)
+        self._subtab_paths_layout.setContentsMargins(0, 0, 0, 0)
+        self._subtab_paths_layout.setSpacing(4)
+        self._subtab_paths_layout.addStretch(1)
+        _paths_row2 = QWidget()
+        self._subtab_paths_layout_row2 = QHBoxLayout(_paths_row2)
+        self._subtab_paths_layout_row2.setContentsMargins(0, 0, 0, 0)
+        self._subtab_paths_layout_row2.setSpacing(4)
+        self._subtab_paths_layout_row2.addStretch(1)
+        _paths_outer.addWidget(_paths_row1)
+        _paths_outer.addWidget(_paths_row2)
         _prompts_tab, self._subtab_prompts_layout = _make_subtab("queue-subtab-insertions-prompts")
         _rules_tab, self._subtab_rules_layout = _make_subtab("queue-subtab-insertions-rules")
 
         self._insertions_subtabs.addTab(_paths_tab, "paths & IDs")
-        self._insertions_subtabs.addTab(_mcps_tab, "cmd & mcp")
         self._insertions_subtabs.addTab(_prompts_tab, "prompts")
         self._insertions_subtabs.addTab(_rules_tab, "rules")
 
         # Restaurar sub-aba ativa da sessão anterior; persistir ao mudar.
+        # Refactor 2026-05-19: sub-aba "cmd & mcp" deletada (botoes migraram para
+        # output-toolbar-mcp). Indice antigo 1 (mcps) cai em prompts agora;
+        # antigos 2/3 viram 1/2. Clamp para faixa nova [0,2].
         _stg = QSettings("systemForge", "workflow-app")
         _active_subtab = int(_stg.value("insertions/active_subtab", 0))
-        if 0 <= _active_subtab < 4:
-            self._insertions_subtabs.setCurrentIndex(_active_subtab)
+        if not (0 <= _active_subtab < 3):
+            _active_subtab = 0
+        self._insertions_subtabs.setCurrentIndex(_active_subtab)
         self._insertions_subtabs.currentChanged.connect(
             lambda idx: QSettings("systemForge", "workflow-app").setValue(
                 "insertions/active_subtab", idx
@@ -1571,6 +1666,33 @@ class CommandQueueWidget(QWidget):
 
         header_layout.addWidget(terminal_insertions_content)
         self._sec_contents.append(terminal_insertions_content)
+
+        # Daily Routine (refactor 2026-05-20): nova aba ao lado de
+        # queue-tab-terminal-insertions. Recebe os botoes blog/blog-stockpile
+        # migrados da aba Pipelines + um botao 'maintenance' placeholder
+        # (sem onClick por enquanto, apenas aparencia).
+        _maintenance_btn = QPushButton("maintenance")
+        _maintenance_btn.setProperty("testid", "queue-btn-maintenance")
+        _maintenance_btn.setToolTip("Maintenance — placeholder (acao a definir).")
+        _maintenance_btn.setStyleSheet(_SECTION_BTN_STYLE)
+        daily_routine_content = self._build_section_grid([
+            ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
+             lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
+             "queue-btn-blog"),
+            ("blog stockpile",
+             "Blog Stockpile — gera 1 pacote quad-locale (pt-BR/it-IT/en/es-ES) e faz push para o repositorio remoto. "
+             "Fase 1: expand-keywords → cluster → prioritize → deduplicate. "
+             "Fase 2: generate-briefs x4 locales (pt-BR cria CURRENT-PACKAGE.json com UUID; demais reutilizam). "
+             "Fase 3: write-articles --output-dir stockpile x4 locales (le UUID de CURRENT-PACKAGE.json). "
+             "Fase 4: review-seo --mode stockpile x4 locales. "
+             "Fase 5: quality-gate --mode stockpile → stockpile-push (commit + push idempotente para main). "
+             "Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
+             lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
+             "queue-btn-blog-stockpile"),
+            _maintenance_btn,
+        ])
+        header_layout.addWidget(daily_routine_content)
+        self._sec_contents.append(daily_routine_content)
 
         # Default: Workflow active (index 1)
         self._active_section = 1
@@ -1584,7 +1706,7 @@ class CommandQueueWidget(QWidget):
         play_bar.setStyleSheet(
             "background-color: #1C1C1F; border-bottom: 1px solid #3F3F46;"
         )
-        play_bar.setFixedHeight(82)
+        play_bar.setFixedHeight(110)
         pl = QVBoxLayout(play_bar)
         pl.setContentsMargins(8, 5, 8, 5)
         pl.setSpacing(4)
@@ -1592,11 +1714,11 @@ class CommandQueueWidget(QWidget):
         play_row_top = QHBoxLayout()
         play_row_top.setContentsMargins(0, 0, 0, 0)
         play_row_top.setSpacing(8)
-        play_row_bottom = QHBoxLayout()
-        play_row_bottom.setContentsMargins(0, 0, 0, 0)
-        play_row_bottom.setSpacing(8)
+        play_row_third = QHBoxLayout()
+        play_row_third.setContentsMargins(0, 0, 0, 0)
+        play_row_third.setSpacing(8)
         pl.addLayout(play_row_top)
-        pl.addLayout(play_row_bottom)
+        pl.addLayout(play_row_third)
 
         # "Rodar próximo" — botão dominante da play bar (primeira posição,
         # verde #16A34A, stretch=7). Executa o proximo item pendente da fila e
@@ -1613,7 +1735,7 @@ class CommandQueueWidget(QWidget):
         self._play_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 13px; font-weight: 700; }"
+            "  font-size: 13px; font-weight: 700; text-align: center; }"
             "QPushButton:hover { background-color: #15803D; }"
             "QPushButton:pressed { background-color: #166534; }"
             "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -1645,7 +1767,7 @@ class CommandQueueWidget(QWidget):
         self._btn_autocast.setStyleSheet(
             "QPushButton { background-color: #1E3A8A; color: #FAFAFA;"
             "  border: 1px solid #3B82F6; border-radius: 5px;"
-            "  font-size: 12px; font-weight: 700; padding: 0 10px; }"
+            "  font-size: 12px; font-weight: 700; padding: 0 10px; text-align: center; }"
             "QPushButton:hover { background-color: #1D4ED8; }"
             "QPushButton:checked { background-color: #DC2626; border-color: #EF4444; }"
             "QPushButton:checked:hover { background-color: #B91C1C; }"
@@ -1668,38 +1790,103 @@ class CommandQueueWidget(QWidget):
 
         self._btn_autocast.toggled.connect(_on_autocast_play_toggled)
         signal_bus.autocast_state_changed.connect(_on_autocast_state_synced)
-        play_row_top.addWidget(self._btn_autocast, stretch=2)
+        # autocast + schedule dividem 60% da row (play_btn fica com 40%).
+        # autocast min reduzido para 64 para conseguir encolher quando o
+        # schedule cresce com o cronometro sem clipping de "▶▶  autocast".
+        self._btn_autocast.setMinimumWidth(64)
+        self._ac_sched_layout = QHBoxLayout()
+        self._ac_sched_layout.setContentsMargins(0, 0, 0, 0)
+        self._ac_sched_layout.setSpacing(8)
+        self._ac_sched_layout.addWidget(self._btn_autocast, stretch=1)
 
-        # Schedule-autocast (terceira posicao — invertido com autocast em
-        # Iter 12). Width menor (minimumWidth=42) que o autocast adjacente.
-        self._btn_schedule_autocast = QPushButton("agendar")
+        # Schedule-autocast (sobe para play_row_top em Iter 13). Dois modos:
+        # idle/fired -> 1:1 (32x32), so icone. running -> expande, mostra
+        # "⏱ MM:SS" e ocupa stretch=2 dentro do segmento de 60% — autocast
+        # encolhe. Acabou o cronometro, autocast e disparado (via state machine
+        # em metrics_bar._fire_schedule_autocast) e o schedule volta a 1:1.
+        self._btn_schedule_autocast = _ScheduleAutocastButton("agendar")
         self._btn_schedule_autocast.setProperty("testid", "schedule-autocast-btn")
         self._btn_schedule_autocast.setFixedHeight(32)
-        self._btn_schedule_autocast.setMinimumWidth(42)
+        self._btn_schedule_autocast.setMinimumWidth(32)
+        self._btn_schedule_autocast.setMaximumWidth(32)
         self._btn_schedule_autocast.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_schedule_autocast.setToolTip(
             "Agendar disparo automatico do autocast"
         )
-        self._btn_schedule_autocast.setStyleSheet(
+
+        # 3 variantes compactas (idle/running/fired) — mantemos a paleta dos
+        # stylesheets originais (#27272A / #F0B90B / #22C55E) mas com padding 0
+        # e tamanho de fonte adequado ao icone centralizado em 32x32.
+        _SCHED_BTN_IDLE_QSS = (
             "QPushButton { background-color: #27272A; color: #D4D4D8;"
             "  border: 1px solid #52525B; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 600; padding: 0 8px; }"
+            "  font-size: 16px; font-weight: 600; padding: 0;"
+            "  text-align: center; }"
             "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA; }"
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
         )
+        # Running usa padding lateral porque o texto "⏱ MM:SS" precisa de
+        # respiro; font menor para caber em rows estreitas.
+        _SCHED_BTN_RUNNING_QSS = (
+            "QPushButton { background-color: #F0B90B; color: #18181B;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 13px; font-weight: 700; padding: 0 10px;"
+            "  text-align: center; }"
+            "QPushButton:hover { background-color: #D9A509; }"
+        )
+        _SCHED_BTN_FIRED_QSS = (
+            "QPushButton { background-color: #22C55E; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 16px; font-weight: 700; padding: 0;"
+            "  text-align: center; }"
+        )
+        _COMPACT_WIDTH = 32  # 1:1 com setFixedHeight(32)
+        _EXPANDED_MIN_WIDTH = 72  # cabe "⏱ 00:23" sem clipping
+        _QWIDGETSIZE_MAX = 16777215
+        self._btn_schedule_autocast.setStyleSheet(_SCHED_BTN_IDLE_QSS)
         self._btn_schedule_autocast.clicked.connect(
             lambda: signal_bus.schedule_autocast_requested.emit()
         )
 
+        def _set_schedule_compact() -> None:
+            """idle/fired -> 1:1 (32x32), so o icone, sem stretch."""
+            self._btn_schedule_autocast.set_expanded(False)
+            self._btn_schedule_autocast.setMinimumWidth(_COMPACT_WIDTH)
+            self._btn_schedule_autocast.setMaximumWidth(_COMPACT_WIDTH)
+            # schedule sem stretch -> autocast (stretch=1) ocupa o restante.
+            self._ac_sched_layout.setStretch(0, 1)
+            self._ac_sched_layout.setStretch(1, 0)
+
+        def _set_schedule_expanded() -> None:
+            """running -> mostra '⏱ MM:SS' e cresce para autocast encolher."""
+            self._btn_schedule_autocast.set_expanded(True)
+            self._btn_schedule_autocast.setMinimumWidth(_EXPANDED_MIN_WIDTH)
+            self._btn_schedule_autocast.setMaximumWidth(_QWIDGETSIZE_MAX)
+            # autocast 1 : schedule 2 -> autocast diminui visivelmente.
+            self._ac_sched_layout.setStretch(0, 1)
+            self._ac_sched_layout.setStretch(1, 2)
+
         def _on_schedule_visual_changed(label: str, qss: str, tooltip: str) -> None:
+            # Ignora qss recebido (formatos vinham com padding/font para o
+            # antigo botao com texto); mapeia o estado pelo label.
+            # "agendar" = idle (compact); "disparado" = fired (compact);
+            # demais = running (expanded com cronometro).
             self._btn_schedule_autocast.setText(label)
-            self._btn_schedule_autocast.setStyleSheet(qss)
+            if label == "agendar":
+                self._btn_schedule_autocast.setStyleSheet(_SCHED_BTN_IDLE_QSS)
+                _set_schedule_compact()
+            elif label == "disparado":
+                self._btn_schedule_autocast.setStyleSheet(_SCHED_BTN_FIRED_QSS)
+                _set_schedule_compact()
+            else:
+                self._btn_schedule_autocast.setStyleSheet(_SCHED_BTN_RUNNING_QSS)
+                _set_schedule_expanded()
             self._btn_schedule_autocast.setToolTip(tooltip)
 
         signal_bus.schedule_autocast_visual_changed.connect(_on_schedule_visual_changed)
-        play_row_bottom.addWidget(self._btn_schedule_autocast, stretch=1)
-        # schedule-autocast-btn e queue-div-use-kimi compartilham o mesmo
-        # stretch para se redimensionarem identicamente conforme a janela.
+        self._ac_sched_layout.addWidget(self._btn_schedule_autocast, stretch=0)
+        # play_btn (stretch=2) + ac_sched (stretch=3) -> 40/60 split na row.
+        play_row_top.addLayout(self._ac_sched_layout, stretch=3)
 
         # Use Kimi checkbox — quando marcado, [Rodar próximo] (queue-btn-play-next)
         # clica na seta AZUL (kimi) ao inves da VERDE (claude) para items que
@@ -1734,9 +1921,9 @@ class CommandQueueWidget(QWidget):
             "QCheckBox::indicator:hover { border-color: #93C5FD; }"
         )
         _kbl.addWidget(self._use_kimi_chk)
-        play_row_bottom.addWidget(_kimi_box, stretch=1)
+        play_row_third.addWidget(_kimi_box, stretch=1)
 
-        # --force Kimi checkbox (terceira posicao em play_row_bottom). Quando
+        # --force Kimi checkbox (segunda posicao em play_row_third). Quando
         # marcado, o fluxo da seta verde (per-item e "Rodar proximo") passa a
         # cuspir no terminal-workspace-output em vez do interactive, /model e
         # /effort viram apenas bolinha amarela sem dispatch, /clear vai SO para
@@ -1772,11 +1959,10 @@ class CommandQueueWidget(QWidget):
             "QCheckBox::indicator:hover { border-color: #93C5FD; }"
         )
         _fkbl.addWidget(self._force_kimi_chk)
-        play_row_bottom.addWidget(_force_kimi_box, stretch=1)
+        play_row_third.addWidget(_force_kimi_box, stretch=1)
 
         # Botao de copiar todos os comandos renderizados em queue-command-list.
-        # Posicionado ao lado de queue-div-force-kimi (sibling em play_row_bottom)
-        # a pedido do usuario; reaproveita o copy.svg usado em terminal-workspace-notes.
+        # Posicionado em play_row_third apos --force Kimi.
         self._copy_commands_btn = QPushButton()
         self._copy_commands_btn.setProperty(
             "testid", "queue-btn-copy-commands"
@@ -1802,7 +1988,7 @@ class CommandQueueWidget(QWidget):
             "  border-color: #FBBF24; }"
         )
         self._copy_commands_btn.clicked.connect(self._on_copy_rendered_commands)
-        play_row_bottom.addWidget(
+        play_row_third.addWidget(
             self._copy_commands_btn, alignment=Qt.AlignmentFlag.AlignVCenter
         )
 
@@ -1813,6 +1999,59 @@ class CommandQueueWidget(QWidget):
         self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
 
         main_layout.addWidget(play_bar)
+
+        # Model/Effort row — above queue-template-label.
+        # Espelha o comportamento visual de queue-template-label e
+        # queue-last-command. Dois divs internos em row: esquerda renderiza
+        # o ultimo `/model X` rodado em queue-command-list; direita renderiza
+        # o ultimo `/effort X`. Atualizado em _on_run_command; resetado em
+        # load_pipeline / clear_queue.
+        self._model_effort_row = QWidget()
+        self._model_effort_row.setProperty("testid", "queue-model-effort-row")
+        self._model_effort_row.setFixedHeight(28)
+        self._model_effort_row.setStyleSheet(
+            "QWidget { background-color: #1C1C1F;"
+            " border-bottom: 1px solid #3F3F46; }"
+        )
+        _mel = QHBoxLayout(self._model_effort_row)
+        _mel.setContentsMargins(10, 4, 10, 4)
+        _mel.setSpacing(6)
+
+        _ME_LBL_BASE = (
+            "background: transparent; border: none;"
+            " color: #D4D4D8; font-size: 11px; font-family: monospace;"
+        )
+
+        self._last_model_div = QWidget()
+        self._last_model_div.setProperty("testid", "queue-last-model")
+        self._last_model_div.setStyleSheet("background: transparent;")
+        _lmdl = QHBoxLayout(self._last_model_div)
+        _lmdl.setContentsMargins(0, 0, 0, 0)
+        _lmdl.setSpacing(4)
+        self._last_model_label = QLabel("/model: —")
+        self._last_model_label.setProperty("testid", "queue-last-model-value")
+        self._last_model_label.setStyleSheet(_ME_LBL_BASE)
+        _lmdl.addWidget(self._last_model_label)
+        _lmdl.addStretch(1)
+        _mel.addWidget(self._last_model_div, stretch=1)
+
+        self._last_effort_div = QWidget()
+        self._last_effort_div.setProperty("testid", "queue-last-effort")
+        self._last_effort_div.setStyleSheet("background: transparent;")
+        _ledl = QHBoxLayout(self._last_effort_div)
+        _ledl.setContentsMargins(0, 0, 0, 0)
+        _ledl.setSpacing(4)
+        _ledl.addStretch(1)
+        self._last_effort_label = QLabel("/effort: —")
+        self._last_effort_label.setProperty("testid", "queue-last-effort-value")
+        self._last_effort_label.setStyleSheet(_ME_LBL_BASE)
+        _ledl.addWidget(self._last_effort_label)
+        _mel.addWidget(self._last_effort_div, stretch=1)
+
+        self._last_model_value: str = ""
+        self._last_effort_value: str = ""
+
+        main_layout.addWidget(self._model_effort_row)
 
         # Template indicator label — shows which template/button was clicked.
         self._template_row = QWidget()
@@ -2105,13 +2344,16 @@ class CommandQueueWidget(QWidget):
             layout.addWidget(w)
         layout.addStretch(1)
 
-    def populate_paths_subtab(self, widgets: list[QWidget]) -> None:
-        """Sub-aba 'paths & IDs': JSON, WS, Workflow App + campos basic_flow."""
-        self._populate_subtab(self._subtab_paths_layout, widgets)
+    def populate_paths_subtab(
+        self, widgets: list[QWidget], second_row: list[QWidget] | None = None,
+    ) -> None:
+        """Sub-aba 'paths & IDs': JSON, WS, Workflow App + campos basic_flow.
 
-    def populate_mcps_subtab(self, widgets: list[QWidget]) -> None:
-        """Sub-aba 'cmd & mcp': mcp-codex, mcp-kimi, double-mcp, asq-user."""
-        self._populate_subtab(self._subtab_mcps_layout, widgets)
+        `second_row` (opcional) popula a linha de baixo da sub-aba — usada
+        pelo botao 'repo rules'. Ambas as linhas sao idempotentes.
+        """
+        self._populate_subtab(self._subtab_paths_layout, widgets)
+        self._populate_subtab(self._subtab_paths_layout_row2, second_row or [])
 
     def populate_prompts_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'prompts': botoes de prompt construídos a partir de arquivos .md."""
@@ -2222,7 +2464,7 @@ class CommandQueueWidget(QWidget):
         Inserts a '/model X' row before each command where the model changes,
         so the user only needs to switch models at transition points.
         The model rows carry no config_path.
-        Skips /clear for model tracking — no /model haiku before /clear.
+        Skips /clear for model tracking — no /model sonnet before /clear.
         """
         if name:
             self._template_label.setText(f"  \U0001f4cb  {name}")
@@ -2725,35 +2967,35 @@ class CommandQueueWidget(QWidget):
             ),
             CommandSpec(
                 name=f"/dcp:congruence-check --module {module_num}",
-                model=ModelName.HAIKU,
+                model=ModelName.SONNET,
                 interaction_type=InteractionType.AUTO,
                 position=2,
                 effort=EffortLevel.HIGH,
             ),
             CommandSpec(
                 name=f"/dcp:temporality-check --module {module_num}",
-                model=ModelName.HAIKU,
+                model=ModelName.SONNET,
                 interaction_type=InteractionType.AUTO,
                 position=3,
                 effort=EffortLevel.STANDARD,
             ),
             CommandSpec(
                 name=f"/dcp:meta-completeness --module {module_num}",
-                model=ModelName.HAIKU,
+                model=ModelName.SONNET,
                 interaction_type=InteractionType.AUTO,
                 position=4,
                 effort=EffortLevel.STANDARD,
             ),
             CommandSpec(
                 name=f"/dcp:directive-injector --module {module_num} --in-place",
-                model=ModelName.HAIKU,
+                model=ModelName.SONNET,
                 interaction_type=InteractionType.AUTO,
                 position=5,
                 effort=EffortLevel.STANDARD,
             ),
             CommandSpec(
                 name="DCP: Carregar Specific-Flow",
-                model=ModelName.HAIKU,
+                model=ModelName.SONNET,
                 interaction_type=InteractionType.AUTO,
                 position=6,
                 effort=EffortLevel.LOW,
@@ -2897,9 +3139,9 @@ class CommandQueueWidget(QWidget):
         Steps:
           1. Pop `_pending_dcp_load_ctx`; refuse with a toast if absent.
           2. Re-read delivery.json (mutated by the 5 previous pipeline steps).
-          3. Resolve SPECIFIC-FLOW.json for the same module via DCP-9.2 cascade.
-          4. Delegate to `_enqueue_specific_flow` (shared with the manual
-             [DCP: Specific-Flow] button and `/dcp:build-and-load`).
+          3. Try DCP-COMMAND-MATRIX.json first and emit the derived queue.
+          4. Fallback to SPECIFIC-FLOW.json legacy cascade only when matrix is
+             absent or invalid.
 
         Returns True only when the enqueue succeeds; False on any guard
         miss (no context, delivery indisponivel, flow ausente, enqueue
@@ -2946,22 +3188,7 @@ class CommandQueueWidget(QWidget):
             )
             return False
 
-        flow_path = resolve_specific_flow(
-            result.delivery,
-            ctx.cm_id,
-            config.project_dir,
-            custom_workflow_root=config.custom_workflow_root or None,
-        )
-        if flow_path is None or not flow_path.exists():
-            signal_bus.toast_requested.emit(
-                f"Pipeline rodou mas SPECIFIC-FLOW.json nao apareceu para "
-                f"{ctx.cm_id}. Verifique logs de /build-module-pipeline na "
-                f"sessao Claude.",
-                "warning",
-            )
-            return False
-
-        module_dir = flow_path.parent
+        module_dir = ctx.wbs_root / "modules" / ctx.cm_id
 
         # Surface advisory output of gate 4 (/dcp:meta-completeness) as a
         # non-blocking toast. Does not block the load — meta-completeness is
@@ -2982,12 +3209,30 @@ class CommandQueueWidget(QWidget):
         # DCP-COMMAND-MATRIX.json has not yet been generated.
         matrix_queue = self._derive_queue_from_matrix_inmemory(ctx, config)
         if matrix_queue is not None:
+            self._template_label.setText(f"  \U0001f4cb  DCP Matrix: {ctx.cm_id}")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save(f"DCP Matrix {ctx.cm_id}")
             signal_bus.pipeline_ready.emit(matrix_queue)
             logger.info(
                 "[DCP] queue derivada in-memory (matrix) | modulo=%s count=%d",
                 ctx.cm_id, len(matrix_queue),
             )
             return True
+
+        flow_path = resolve_specific_flow(
+            result.delivery,
+            ctx.cm_id,
+            config.project_dir,
+            custom_workflow_root=config.custom_workflow_root or None,
+        )
+        if flow_path is None or not flow_path.exists():
+            signal_bus.toast_requested.emit(
+                f"Matrix ausente/invalida e SPECIFIC-FLOW.json nao apareceu "
+                f"para {ctx.cm_id}. Regenere via "
+                f"[DCP: Build Module Pipeline].",
+                "warning",
+            )
+            return False
 
         return self._enqueue_specific_flow(
             flow_path=flow_path,
@@ -3009,10 +3254,8 @@ class CommandQueueWidget(QWidget):
         the caller falls back to the legacy SPECIFIC-FLOW.json read path.
 
         Side effects on success:
-          - Appends a `load-queue` entry to the in-memory matrix module trail.
-            Persistence is left to the next gate that writes the matrix back
-            (write-on-mutate gates already cover this; we never write back
-            from here to keep the load read-only at I/O level).
+          - Appends and persists a `load-queue` entry to the matrix module
+            trail so the operator-visible load is auditable.
         """
         from workflow_app.dcp.queue_derivation import (
             build_load_queue_trail_entry,
@@ -3123,6 +3366,7 @@ class CommandQueueWidget(QWidget):
                 wbs_root=wbs_root,
                 config_path=getattr(config, "config_path", "") or "",
                 commit_variant=commit_variant,
+                include_directives=True,
             )
         except Exception as exc:
             signal_bus.toast_requested.emit(
@@ -3154,9 +3398,16 @@ class CommandQueueWidget(QWidget):
             )
             entry = TrailEntry.model_validate(trail_dict)
             matrix.modules[ctx.cm_id].trail.append(entry)
+            matrix_path = dcp_root / "DCP-COMMAND-MATRIX.json"
+            tmp_path = matrix_path.with_suffix(".json.tmp")
+            tmp_path.write_text(
+                matrix.model_dump_json(by_alias=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            tmp_path.replace(matrix_path)
         except Exception as exc:  # pragma: no cover — trail append is non-blocking
             logger.warning(
-                "[DCP] trail load-queue append falhou (nao bloqueante): %s", exc,
+                "[DCP] trail load-queue persist falhou (nao bloqueante): %s", exc,
             )
 
         return queue
@@ -3229,6 +3480,28 @@ class CommandQueueWidget(QWidget):
             )
             return
 
+        # Canonical path: the Specific Flow button renders the sequence from
+        # DCP-COMMAND-MATRIX.json. SPECIFIC-FLOW.json remains only as legacy
+        # fallback for projects not migrated to the matrix contract.
+        matrix_ctx = DcpBuildContext(
+            cm_id=cm_id,
+            module_state=module.state,
+            regenerate=False,
+            wbs_root=wbs_root,
+            delivery=delivery,
+        )
+        matrix_queue = self._derive_queue_from_matrix_inmemory(matrix_ctx, config)
+        if matrix_queue is not None:
+            self._template_label.setText(f"  \U0001f4cb  DCP Matrix: {cm_id}")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save(f"DCP Matrix {cm_id}")
+            signal_bus.pipeline_ready.emit(matrix_queue)
+            logger.info(
+                "[DCP] Specific-Flow button carregou matrix | modulo=%s count=%d",
+                cm_id, len(matrix_queue),
+            )
+            return
+
         flow_path = resolve_specific_flow(
             delivery,
             cm_id,
@@ -3252,8 +3525,9 @@ class CommandQueueWidget(QWidget):
                     ]
                     dep_extra = f" Deps bloqueantes: {', '.join(labels)}."
             signal_bus.toast_requested.emit(
-                f"SPECIFIC-FLOW.json nao encontrado para {cm_id}. "
-                f"Execute [DCP: Gerar Pipeline] primeiro.{dep_extra}",
+                f"Matrix ausente/invalida e SPECIFIC-FLOW.json nao encontrado "
+                f"para {cm_id}. Execute [DCP: Gerar Pipeline] "
+                f"primeiro.{dep_extra}",
                 "warning",
             )
             return
@@ -3362,7 +3636,6 @@ class CommandQueueWidget(QWidget):
         _model_map = {
             "opus": ModelName.OPUS,
             "sonnet": ModelName.SONNET,
-            "haiku": ModelName.HAIKU,
         }
         _effort_map = {
             "low": EffortLevel.LOW,
@@ -3917,27 +4190,19 @@ class CommandQueueWidget(QWidget):
                 if isinstance(item, dict)
                 else ""
             )
-            kimi_eligible = (
-                bool(item.get("kimi_eligible", False))
-                if isinstance(item, dict)
-                else False
-            )
 
-            phases = ["pre", "exec", "post"]
-            if (
-                kimi_eligible
-                and "kimi_eligible_wrapper" in iteration_template
-                and self._use_kimi_chk.isChecked()
-            ):
-                phases = ["pre", "kimi_eligible_wrapper", "post"]
-
-            for phase in phases:
+            # Task-mode loops nunca injetam kimi-pair: /cmd:kimi-pair-* opera
+            # sobre arquivos de slash-command (.claude/commands/*.md) apos
+            # /cmd:create ou /cmd:update — task descriptors nao sao alvo
+            # valido. Wrapper kimi continua disponivel apenas em --cmd e no
+            # bloco cmd de --both.
+            for phase in ("pre", "exec", "post"):
                 commands = iteration_template.get(phase, [])
                 for cmd in commands:
                     resolved = cmd.replace("{task_path}", task_path).replace(
                         "{name}", loop_name
                     )
-                    _add_command(resolved, kimi_eligible=kimi_eligible)
+                    _add_command(resolved)
 
         for cmd in finalization.get("commands", []):
             resolved = cmd.replace("{name}", loop_name)
@@ -4263,6 +4528,111 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save(f"rocksmash {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
+    def _on_rocksmash_review_clicked(self) -> None:
+        """Enfileira o template estatico do botao `rocksmash review`.
+
+        Le o JSON do projeto ativo (metrics-project-pill) e injeta o
+        template estatico de 12 itens da Secao 4 do
+        task-004-botao-workflow-app.md (loop 05-21-rocksmash-review-base):
+
+            /clear /model opus /effort high
+            /agents:troop-review {json}
+            /clear  /agents:troop-review {json}   (x4)
+
+        Sao 5 invocacoes single-pass de /agents:troop-review. A primeira
+        herda o /clear do bloco prep; as outras 4 recebem /clear proprio.
+        /model e /effort aparecem uma unica vez (WORKFLOW-APP-RULES.md
+        secao 3 — politica anti-redundancia).
+
+        Guardrails da Secao 4.0:
+          a/b. valida que a pill aponta para um JSON suportado; bloqueia
+               o clique com toast acionavel quando ausente/invalido;
+          c.   desabilita o botao por uma janela curta (anti duplo-disparo);
+          d.   registra no log timestamp (formatter), json e contagem.
+
+        Dependencia de runtime: /agents:troop-review precisa existir
+        (criado pela Task 3 do mesmo loop). Este botao apenas enfileira
+        a string do comando — nao cria/atualiza o slash-command.
+        """
+        from workflow_app.config.app_state import app_state
+
+        # ── Guardrail 4.0 a/b: JSON suportado na metrics-project-pill ──
+        if not app_state.has_config or app_state.config is None:
+            signal_bus.toast_requested.emit(
+                "rocksmash review requer um JSON carregado na "
+                "metrics-project-pill. Use o botao [json] (queue-btn-json) "
+                "para carregar ou criar um project.json antes de acionar "
+                "este botao.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        json_path = str(config.config_path or "")
+        if not json_path or not Path(json_path).is_file():
+            signal_bus.toast_requested.emit(
+                "O JSON da metrics-project-pill nao foi localizado em disco "
+                f"({json_path or 'caminho vazio'}). Recarregue o projeto via "
+                "botao [json] (queue-btn-json) e tente novamente.",
+                "error",
+            )
+            return
+
+        # ── Guardrail 4.0 c: anti duplo-disparo — desabilita o botao ──
+        btn = next(
+            (
+                b for b in self.findChildren(QPushButton)
+                if b.property("testid") == "queue-btn-rocksmash-review"
+            ),
+            None,
+        )
+        if btn is not None:
+            btn.setEnabled(False)
+            QTimer.singleShot(800, lambda b=btn: b.setEnabled(True))
+
+        # ── Monta o template estatico de 12 itens (Secao 4 da task-004) ──
+        cfg = GROUP_MAP["rocksmash_review"]
+        model = cfg["model"]
+        effort = cfg["effort"]
+        troop_rounds = 5
+
+        specs: list[CommandSpec] = list(_build_prep_specs("rocksmash_review"))
+        pos = len(specs) + 1
+        for round_idx in range(troop_rounds):
+            # A 1a invocacao herda o /clear do bloco prep; as demais
+            # recebem /clear proprio. /model e /effort ja vigentes —
+            # nao reemitir (anti-redundancia).
+            if round_idx > 0:
+                specs.append(
+                    CommandSpec(
+                        name="/clear", model=model,
+                        interaction_type=InteractionType.AUTO, position=pos,
+                    )
+                )
+                pos += 1
+            specs.append(
+                CommandSpec(
+                    name=f"/agents:troop-review {json_path}",
+                    model=model, effort=effort,
+                    interaction_type=InteractionType.AUTO, position=pos,
+                )
+            )
+            pos += 1
+
+        # ── Guardrail 4.0 d: log da UI (timestamp via formatter) ──
+        logger.info(
+            "[rocksmash-review] json=%s | %d comandos injetados na fila "
+            "(%d rodadas /agents:troop-review)",
+            json_path, len(specs), troop_rounds,
+        )
+        self._template_label.setText(
+            f"  \U0001f4cb  rocksmash review "
+            f"({troop_rounds}x /agents:troop-review)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("rocksmash review")
+        signal_bus.pipeline_ready.emit(specs)
+
     def _on_legacy_to_dcp_clicked(self) -> None:
         """Enfileira pipeline legacy-to-dcp para o project.json carregado.
 
@@ -4461,6 +4831,182 @@ class CommandQueueWidget(QWidget):
             f"Boilerplate carregado: 9 passos sobre {basename}", "success"
         )
 
+    def _on_book_legacy_clicked(self) -> None:
+        """Abre o modal de 5 campos do pipeline /book-legacy e enfileira a cadeia.
+
+        Comportamento especial (espelha _on_boilerplate_clicked): NAO le
+        metrics-project-pill (project.json). Abre BookLegacyDialog para o
+        operador informar os 5 inputs (pasta de imagens, nome do livro,
+        formato, fonte, glossario).
+
+        Ao confirmar, o dict book_legacy_inputs alimenta o builder
+        _enqueue_book_legacy, que expande a cadeia de subcomandos
+        /book-legacy:* como itens proprios da fila. O orquestrador
+        /book-legacy NUNCA e enfileirado como entrada unica
+        (workflow-app-command-lists.md secao 8).
+        """
+        from workflow_app.dialogs.book_legacy_dialog import BookLegacyDialog
+
+        dlg = BookLegacyDialog(parent=self)
+        if dlg.exec() != BookLegacyDialog.Accepted:
+            return
+
+        book_legacy_inputs = dlg.book_legacy_inputs
+        if not book_legacy_inputs.get("images_path") or not book_legacy_inputs.get(
+            "book_name"
+        ):
+            signal_bus.toast_requested.emit(
+                "Inputs incompletos — book-legacy cancelado.", "warning"
+            )
+            return
+
+        specs = self._enqueue_book_legacy(book_legacy_inputs)
+
+        book_name = book_legacy_inputs["book_name"]
+        logger.info(
+            "[book-legacy] enqueued %d specs for book=%s",
+            len(specs),
+            book_name,
+        )
+        self._template_label.setText(
+            f"  \U0001f4d6  Book Legacy: {book_name} ({len(specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        # NOTA: pulamos _maybe_auto_save porque este fluxo nao depende de
+        # projeto carregado (espelha _on_boilerplate_clicked).
+        signal_bus.pipeline_ready.emit(specs)
+        signal_bus.toast_requested.emit(
+            f"Book Legacy carregado: cadeia /book-legacy:* sobre '{book_name}'",
+            "success",
+        )
+
+    def _enqueue_book_legacy(
+        self, book_legacy_inputs: dict[str, str]
+    ) -> list[CommandSpec]:
+        """Expande o pipeline /book-legacy na cadeia de subcomandos /book-legacy:*.
+
+        Mapeamento canonico (source.md Parte 12, daily_loop.buckets[*].items[*]):
+          - preparo:      /book-legacy:scan
+          - iteration:    /book-legacy:ocr, :apply-glossary, :diff-original
+          - finalizacao:  /book-legacy:review-orthographic, :layout-plan,
+                          :compose-pages, :build-pdf, :validate
+
+        Regra INVIOLAVEL (workflow-app-command-lists.md secao 8): o orquestrador
+        /book-legacy NUNCA entra como entrada unica. Este builder sempre expande
+        os 9 subcomandos como itens proprios.
+
+        model/effort por subcomando segue os 3 tiers do Bloco I-34:
+          - Tier mecanico (sonnet/low): scan, ocr, apply-glossary, build-pdf,
+                                        validate
+          - Tier texto    (sonnet/medium): diff-original, layout-plan,
+                                           compose-pages
+          - Tier juizo    (opus/high):  review-orthographic
+
+        NOTA sobre o tier mecanico: o frontmatter v2 dos subcomandos declara
+        `model: sonnet`; a diretiva textual `/model sonnet` na fila e o campo
+        CommandSpec.model (usado para o badge da UI) ficam ambos alinhados ao
+        enum ModelName do workflow-app.
+
+        /clear, /model e /effort sao injetados no boundary de cada subcomando
+        para isolar o contexto (analogo a build_loop_specs / boilerplate).
+        """
+        # Tiers do Bloco I-34: (token textual do /model, enum representavel,
+        # token textual do /effort, enum de effort).
+        _MECHANICAL = ("sonnet", ModelName.SONNET, "low", EffortLevel.LOW)
+        _TEXT = ("sonnet", ModelName.SONNET, "medium", EffortLevel.STANDARD)
+        _JUDGMENT = ("opus", ModelName.OPUS, "high", EffortLevel.HIGH)
+
+        images_path = book_legacy_inputs["images_path"]
+        book_name = book_legacy_inputs["book_name"]
+        page_format = book_legacy_inputs.get("page_format", "14x21cm")
+        font = book_legacy_inputs.get("font", "EB Garamond")
+        glossary = book_legacy_inputs.get("glossary", "glossario-base.json")
+
+        # Argumentos comuns repassados a cada subcomando. shlex.quote protege
+        # nome de livro e fonte que podem conter espacos.
+        common_args = (
+            f"{shlex.quote(images_path)}"
+            f" --book {shlex.quote(book_name)}"
+            f" --format {shlex.quote(page_format)}"
+            f" --font {shlex.quote(font)}"
+            f" --glossary {shlex.quote(glossary)}"
+        )
+
+        # Cada tupla: (slash-command, tier). A ordem reflete o canonical loop
+        # do pipeline (preparo -> iteration -> finalizacao). O orquestrador
+        # /book-legacy NAO aparece — apenas os 9 subcomandos expandidos.
+        chain: list[tuple[str, tuple]] = [
+            # preparo
+            ("/book-legacy:scan", _MECHANICAL),
+            # iteration (per-pagina)
+            ("/book-legacy:ocr", _MECHANICAL),
+            ("/book-legacy:apply-glossary", _MECHANICAL),
+            ("/book-legacy:diff-original", _TEXT),
+            # finalizacao
+            ("/book-legacy:review-orthographic", _JUDGMENT),
+            ("/book-legacy:layout-plan", _TEXT),
+            ("/book-legacy:compose-pages", _TEXT),
+            ("/book-legacy:build-pdf", _MECHANICAL),
+            ("/book-legacy:validate", _MECHANICAL),
+        ]
+
+        specs: list[CommandSpec] = []
+        pos = 0
+        current_model_token: str | None = None
+        current_effort_token: str | None = None
+
+        for cmd_name, tier in chain:
+            model_token, model_enum, effort_token, effort_enum = tier
+            # Boundary directives: /clear sempre, /model e /effort apenas quando
+            # o token muda em relacao ao subcomando anterior (evita ruido).
+            pos += 1
+            specs.append(
+                CommandSpec(
+                    name="/clear",
+                    model=model_enum,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=pos,
+                )
+            )
+            if model_token != current_model_token:
+                pos += 1
+                specs.append(
+                    CommandSpec(
+                        name=f"/model {model_token}",
+                        model=model_enum,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                    )
+                )
+                current_model_token = model_token
+            if effort_token != current_effort_token:
+                pos += 1
+                specs.append(
+                    CommandSpec(
+                        name=f"/effort {effort_token}",
+                        model=model_enum,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=pos,
+                    )
+                )
+                current_effort_token = effort_token
+            pos += 1
+            specs.append(
+                CommandSpec(
+                    name=f"{cmd_name} {common_args}",
+                    model=model_enum,
+                    effort=effort_enum,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=pos,
+                )
+            )
+
+        return specs
+
     def _on_run_command(self, cmd_text: str) -> None:
         """Update last-command row e highlight a queue row correspondente.
 
@@ -4477,6 +5023,14 @@ class CommandQueueWidget(QWidget):
         self._last_cmd_count_slot.setVisible(True)
         self._last_cmd_eye.setVisible(True)
         self._last_cmd_eye.setToolTip(cleaned)
+        # queue-model-effort-row: captura o ultimo /model e /effort rodados
+        # a partir de queue-command-list. Atualiza so o lado correspondente.
+        if cmd_token == "/model" and len(parts) > 1:
+            self._last_model_value = parts[1]
+            self._last_model_label.setText(f"/model: {self._last_model_value}")
+        elif cmd_token == "/effort" and len(parts) > 1:
+            self._last_effort_value = parts[1]
+            self._last_effort_label.setText(f"/effort: {self._last_effort_value}")
         self._highlight_current_command(cleaned)
         self._maybe_auto_save(cmd_text)
 
@@ -4492,6 +5046,10 @@ class CommandQueueWidget(QWidget):
         # _current_dcp_flow_path AFTER this signal returns, so DCP-sourced
         # loads end up with the path correctly set. Non-DCP sources stay None.
         self._current_dcp_flow_path = None
+
+        # Reset queue-model-effort-row: nova pipeline reseta o ultimo /model
+        # e /effort rodados (escopados a queue-command-list atual).
+        self._reset_model_effort_row()
 
         # Clear existing
         for item in self._items:
@@ -4714,11 +5272,18 @@ class CommandQueueWidget(QWidget):
         self._last_cmd_eye.setVisible(False)
         self._last_cmd_eye.setToolTip("")
         self._last_cmd_full = ""
+        self._reset_model_effort_row()
         # P4: queue-template-label e sempre visivel; nao escondemos mais.
         self._empty_widget.setVisible(True)
         self._list_widget.setVisible(False)
         self._emit_progress_metrics()
         self._update_save_btn_state()
+
+    def _reset_model_effort_row(self) -> None:
+        self._last_model_value = ""
+        self._last_effort_value = ""
+        self._last_model_label.setText("/model: —")
+        self._last_effort_label.setText("/effort: —")
 
     def _item_at(self, position: int) -> CommandItemWidget | None:
         for item in self._items:

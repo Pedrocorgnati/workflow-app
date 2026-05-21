@@ -39,14 +39,12 @@ class ModelName(str, enum.Enum):
     """Supported Claude model names (UI display name)."""
     OPUS = "Opus"
     SONNET = "Sonnet"
-    HAIKU = "Haiku"
 
 
 class ModelType(str, enum.Enum):
     """Supported Claude model types (DB/backend key, matches ModelName)."""
     OPUS = "opus"
     SONNET = "sonnet"
-    HAIKU = "haiku"
 
 
 class InteractionType(str, enum.Enum):

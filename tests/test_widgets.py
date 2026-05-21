@@ -60,8 +60,8 @@ class TestModelBadge:
 
     def test_set_model(self, qapp):
         badge = ModelBadge()
-        badge.set_model(ModelType.HAIKU)
-        assert badge.model_type == ModelType.HAIKU
+        badge.set_model(ModelType.SONNET)
+        assert badge.model_type == ModelType.SONNET
 
     def test_all_models_apply_without_error(self, qapp):
         badge = ModelBadge()

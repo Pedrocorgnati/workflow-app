@@ -109,8 +109,9 @@ QPushButton {
     color: #FAFAFA;
     border: 1px solid #52525B;
     border-radius: 4px;
-    padding: 6px 14px;
+    padding: 6px 10px;
     font-weight: 500;
+    text-align: left;
 }
 
 QPushButton:hover {
@@ -162,6 +163,7 @@ QPushButton#IconButton {
     border: none;
     padding: 4px;
     border-radius: 4px;
+    text-align: center;
 }
 
 QPushButton#IconButton:hover {
@@ -315,15 +317,6 @@ QDialog {
 
 #BadgeSonnet {
     background-color: #2563EB;
-    color: #FFFFFF;
-    border-radius: 4px;
-    padding: 2px 6px;
-    font-size: 11px;
-    font-weight: 600;
-}
-
-#BadgeHaiku {
-    background-color: #059669;
     color: #FFFFFF;
     border-radius: 4px;
     padding: 2px 6px;

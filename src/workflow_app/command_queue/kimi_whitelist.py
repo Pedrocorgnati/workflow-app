@@ -119,6 +119,7 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     # Loop rocksmash pipeline
     "/loop-rocksmash:do",           # 86 (density split deterministic — zero AskUser, templates byte-exatos)
     "/loop-rocksmash:rename",         # 91 (KIMI_PREFERRED — consolidador determinista pos-rocksmash)
+    "/loop-rocksmash:compare",      # 85 (KIMI_OK — pareamento JSON + sumario prosa determinista; idempotente por hash)
     # Test-autoflow (deterministic test commands)
     "/test-autoflow-auto",          # 85 (comando de teste determinístico — aguarda 30s e finaliza)
     # Loop housekeeping

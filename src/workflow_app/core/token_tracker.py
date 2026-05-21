@@ -14,7 +14,6 @@ from workflow_app.domain import ModelType
 _DEFAULT_PRICES: dict[str, tuple[float, float]] = {
     ModelType.OPUS.value:   (15.0,  75.0),
     ModelType.SONNET.value: (3.0,   15.0),
-    ModelType.HAIKU.value:  (0.25,  1.25),
 }
 
 

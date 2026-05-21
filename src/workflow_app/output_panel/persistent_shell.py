@@ -19,6 +19,7 @@ import subprocess
 import sys
 import termios
 import time
+from collections.abc import Mapping
 
 from PySide6.QtCore import QObject, QSocketNotifier, Signal
 
@@ -34,11 +35,28 @@ class PersistentShell(QObject):
 
     output_received = Signal(str)  # raw PTY output chunk
 
-    def __init__(self, cols: int = 220, rows: int = 50, cwd: str | None = None, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        cols: int = 220,
+        rows: int = 50,
+        cwd: str | None = None,
+        shell: str | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
         self._cols = cols
         self._rows = rows
         self._cwd = cwd
+        # Allow callers to force a specific shell binary (e.g. zsh). When None,
+        # fall back to the host's $SHELL (or /bin/bash).
+        self._shell = shell or _SHELL
+        # Extra env merged into the spawned shell's environ. Used by OutputPanel
+        # to inject `WF_CHANNEL_OVERRIDE` per-channel so that any Bash subprocess
+        # the embedded CLI (Claude/Kimi) spawns inherits the correct channel
+        # without each command/wrapper having to set it manually. See
+        # ai-forge/rules/workflow-app-listeners.md §2.4.
+        self._extra_env: dict[str, str] = dict(extra_env) if extra_env else {}
         self._master_fd: int | None = None
         self._proc: subprocess.Popen | None = None
         self._notifier: QSocketNotifier | None = None
@@ -72,10 +90,15 @@ class PersistentShell(QObject):
                 env[key] = "C.UTF-8"
         # Remove CLAUDECODE so sub-claude CLIs work inside the shell
         env.pop("CLAUDECODE", None)
+        # Caller-supplied overrides (channel binding etc). Applied last so
+        # they always win over inherited env, including any stale value from
+        # a previous parent process.
+        for key, val in self._extra_env.items():
+            env[key] = val
 
         try:
             self._proc = subprocess.Popen(
-                [_SHELL, "--login", "-i"],
+                [self._shell, "--login", "-i"],
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -100,7 +123,7 @@ class PersistentShell(QObject):
         self._notifier = QSocketNotifier(master_fd, QSocketNotifier.Type.Read, self)
         self._notifier.activated.connect(self._read_output)
 
-        logger.info("[PersistentShell] Started %s (pid=%d)", _SHELL, self._proc.pid)
+        logger.info("[PersistentShell] Started %s (pid=%d)", self._shell, self._proc.pid)
 
     def send_raw(self, data: bytes) -> None:
         """Write raw bytes to the shell PTY (key forwarding)."""

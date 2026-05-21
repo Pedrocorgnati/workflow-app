@@ -79,7 +79,7 @@
 
 ### 5. hardcodes — 3 issues (0 corrigidos)
 
-- **HC-001 (Médio)** — `sdk_adapter.py:39-42` — model strings hardcoded: `"claude-haiku-4-5"`, `"claude-sonnet-4-5"`, `"claude-opus-4-5"`. Centralizados no dict `_MODEL_STRINGS` no módulo (adequado), mas sem vínculo com `AppConfig`.
+- **HC-001 (Médio)** — `sdk_adapter.py:39-42` — model strings hardcoded: `"claude-sonnet-4-5"`, `"claude-sonnet-4-5"`, `"claude-opus-4-5"`. Centralizados no dict `_MODEL_STRINGS` no módulo (adequado), mas sem vínculo com `AppConfig`.
 - **HC-002 (Baixo)** — `sdk_worker.py:132` — timeout `300.0` sem constante nomeada. Deveria ser `INTERACTIVE_TIMEOUT_S = 300`.
 - **HC-003 (Baixo)** — `main_window.py:82` — cor `"#18181B"` hardcoded, duplicando `tokens.py:COLORS.background`.
 

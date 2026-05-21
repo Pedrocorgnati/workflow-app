@@ -33,7 +33,7 @@ def test_bridge_emits_output_on_shell_data(qapp, shell):
     PersistentShell.output_received already decodes bytes -> str via an
     incremental UTF-8 decoder before emitting, so the bridge just forwards.
     """
-    bridge = _PtyBridge(shell=shell)
+    bridge = _PtyBridge(shell=shell, channel="workspace_xterm")
     shell.output_received.connect(bridge.output_received)
 
     received: list[str] = []
@@ -48,7 +48,7 @@ def test_bridge_emits_output_on_shell_data(qapp, shell):
 def test_bridge_writes_to_shell_on_input(qapp):
     """bridge.write_to_pty('hello') must call shell.send_raw(b'hello')."""
     mock_shell = MagicMock(spec=PersistentShell)
-    bridge = _PtyBridge(shell=mock_shell)
+    bridge = _PtyBridge(shell=mock_shell, channel="workspace_xterm")
 
     bridge.write_to_pty("hello")
 
@@ -58,8 +58,76 @@ def test_bridge_writes_to_shell_on_input(qapp):
 def test_bridge_resizes_shell(qapp):
     """bridge.resize_pty(80, 24) must call shell.resize(80, 24)."""
     mock_shell = MagicMock(spec=PersistentShell)
-    bridge = _PtyBridge(shell=mock_shell)
+    bridge = _PtyBridge(shell=mock_shell, channel="workspace_xterm")
 
     bridge.resize_pty(80, 24)
 
     mock_shell.resize.assert_called_once_with(80, 24)
+
+
+def test_bridge_drops_degenerate_resize(qapp):
+    """resize_pty with non-positive dims (collapsed 0x0 webview) is dropped.
+
+    A collapsed QWebEngineView makes xterm.js' FitAddon emit resize(0, 0).
+    Forwarding it to the PTY triggers a SIGWINCH storm that pins the
+    Terminal 3 listener yellow — so the bridge must drop those.
+    """
+    mock_shell = MagicMock(spec=PersistentShell)
+    bridge = _PtyBridge(shell=mock_shell, channel="workspace_xterm")
+
+    bridge.resize_pty(0, 0)
+    bridge.resize_pty(-1, 24)
+    bridge.resize_pty(80, 0)
+
+    mock_shell.resize.assert_not_called()
+
+
+def test_bridge_does_not_start_session_on_protocol_reply(qapp):
+    """A bare xterm.js terminal-report reply (CPR) must NOT start a session.
+
+    xterm.js routes its automatic CPR/DA/DSR replies through the same
+    onData channel as user keystrokes. Those carry no CR/LF and must not
+    release the workspace_xterm idle lock — regression: a collapsed/idle
+    Terminal 3 was pinned yellow by the CPR reply of the zsh prompt.
+    The reply is still forwarded to the PTY (the shell needs it).
+    """
+    from workflow_app.signal_bus import signal_bus
+
+    mock_shell = MagicMock(spec=PersistentShell)
+    bridge = _PtyBridge(shell=mock_shell, channel="workspace_xterm")
+
+    started: list[str] = []
+
+    def _record(channel: str) -> None:
+        started.append(channel)
+
+    signal_bus.terminal_session_started.connect(_record)
+    try:
+        bridge.write_to_pty("\x1b[24;80R")  # CPR reply emitted by xterm.js
+    finally:
+        signal_bus.terminal_session_started.disconnect(_record)
+
+    assert started == []
+    mock_shell.send_raw.assert_called_once_with(b"\x1b[24;80R")
+
+
+def test_bridge_starts_session_on_submitted_line(qapp):
+    """A submitted command line (data carrying CR) DOES start a session."""
+    from workflow_app.signal_bus import signal_bus
+
+    mock_shell = MagicMock(spec=PersistentShell)
+    bridge = _PtyBridge(shell=mock_shell, channel="workspace_xterm")
+
+    started: list[str] = []
+
+    def _record(channel: str) -> None:
+        started.append(channel)
+
+    signal_bus.terminal_session_started.connect(_record)
+    try:
+        bridge.write_to_pty("\r")
+    finally:
+        signal_bus.terminal_session_started.disconnect(_record)
+
+    assert started == ["workspace_xterm"]
+    mock_shell.send_raw.assert_called_once_with(b"\r")

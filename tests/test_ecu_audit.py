@@ -63,9 +63,7 @@ def test_pipeline_status_enum_has_required_members():
 
 
 def test_model_type_enum():
-    """ModelType deve ter Opus, Sonnet, Haiku."""
+    """ModelType deve ter apenas Opus e Sonnet."""
     from workflow_app.domain import ModelType
 
-    assert ModelType.OPUS.value == "opus"
-    assert ModelType.SONNET.value == "sonnet"
-    assert ModelType.HAIKU.value == "haiku"
+    assert [member.value for member in ModelType] == ["opus", "sonnet"]

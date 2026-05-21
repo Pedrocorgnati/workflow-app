@@ -104,7 +104,7 @@ def test_sdk_worker_not_gc_while_running(qapp, qtbot, command_spec):
 
 
 def test_sdk_worker_model_conversion(qapp, qtbot):
-    """SDKWorker converts ModelName (Opus/Sonnet/Haiku) to ModelType correctly."""
+    """SDKWorker converts ModelName (Opus/Sonnet) to ModelType correctly."""
     from workflow_app.domain import ModelType
 
     received_models: list[ModelType] = []
@@ -115,7 +115,7 @@ def test_sdk_worker_model_conversion(qapp, qtbot):
 
     from unittest.mock import MagicMock
 
-    for model_name in (ModelName.HAIKU, ModelName.SONNET, ModelName.OPUS):
+    for model_name in (ModelName.SONNET, ModelName.OPUS):
         spec = CommandSpec(name="/test", model=model_name, position=0)
         adapter = MagicMock()
         adapter.run_command = capturing_adapter
@@ -126,8 +126,8 @@ def test_sdk_worker_model_conversion(qapp, qtbot):
         with qtbot.waitSignal(worker.finished, timeout=5000):
             worker.start()
 
-    assert len(received_models) == 3
-    # ModelName values are title-case ("Haiku"); ModelType values are lower-case ("haiku")
+    assert len(received_models) == 2
+    # ModelName values are title-case ("Sonnet"); ModelType values are lower-case ("sonnet")
     for model_type in received_models:
         assert isinstance(model_type, ModelType)
-    assert set(received_models) == {ModelType.HAIKU, ModelType.SONNET, ModelType.OPUS}
+    assert set(received_models) == {ModelType.SONNET, ModelType.OPUS}

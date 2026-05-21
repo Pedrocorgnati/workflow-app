@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -132,13 +133,12 @@ class ProgressItem:
     item_id: str          # "001"
     status: str           # "pending" | "done" | "failed"
     target: str           # path or identifier
-    bucket_id: str        # "T-sonnet-medium" (haiku/low rejeitados — ver _bucket_to_model_effort)
+    bucket_id: str        # "T-sonnet-medium" (low rejeitado)
 
 
 _MODEL_MAP: dict[str, ModelName] = {
     "opus": ModelName.OPUS,
     "sonnet": ModelName.SONNET,
-    "haiku": ModelName.HAIKU,
 }
 
 _EFFORT_MAP: dict[str, EffortLevel] = {
@@ -158,6 +158,73 @@ _ITEM_ROW = re.compile(
     r"(?P<target>[^|]+?)\s*\|\s*"
     r"(?P<bucket>[A-Za-z0-9_.:-]+)\s*\|"
 )
+
+
+def diagnose_workspace_doubled_path(
+    value: Any,
+    loop_root: Path,
+) -> str | None:
+    """Detect the workspace-doubled-path anti-pattern (CONTRACT v1.1 secao 2.2).
+
+    Symptom: a `daily_loop.*` path field carries a workspace-relative value
+    (e.g. ``"blacksmith/loop-archives/{slug}/PROGRESS.md"``) while ``loop_root``
+    already terminates in ``.../blacksmith/loop-archives/{slug}``. The resolver
+    then joins them, producing a doubled path that never exists on disk
+    (``.../{slug}/blacksmith/loop-archives/{slug}/PROGRESS.md``).
+
+    Returns:
+        Suggested loop_root-relative replacement (e.g. ``"PROGRESS.md"``) when
+        the pattern is detected, ``None`` otherwise.
+
+    Notes:
+        - Detection key: the basename of ``loop_root`` (the slug) appears as a
+          path component inside the candidate value. Slugs are kebab-case and
+          typically unique, so collision risk is low.
+        - Absolute values are never reported (they bypass the resolver and are
+          governed by their own contract).
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    p = Path(value.strip())
+    if p.is_absolute():
+        return None
+    slug = loop_root.name
+    parts = p.parts
+    if slug not in parts:
+        return None
+    last_idx = len(parts) - 1 - tuple(reversed(parts)).index(slug)
+    tail = parts[last_idx + 1:]
+    if not tail:
+        return None
+    return str(Path(*tail))
+
+
+def assert_loop_root_relative_path(
+    value: Any,
+    loop_root: Path,
+    *,
+    label: str,
+) -> None:
+    """Enforce CONTRACT v1.1 secao 2.2 (Path field convention) on a single field.
+
+    Raises ``DailyLoopConfigError`` when the value is workspace-relative
+    (i.e. it embeds the loop_root slug as a path prefix). Intended for
+    write-time guards in producers and for review-time validators. Resolver
+    code path (``resolve_loop_path``) does NOT call this — the resolver
+    remains tolerant; only ``diagnose_*`` is invoked there to enrich error
+    messages when resolution fails. This keeps the runtime contract stable
+    and the strict gate explicit.
+    """
+    suggestion = diagnose_workspace_doubled_path(value, loop_root)
+    if suggestion is not None:
+        raise DailyLoopConfigError(
+            f"daily_loop.{label} viola CONTRACT v1.1 secao 2.2 "
+            f"(workspace-relative detectado): value={value!r} embute o slug "
+            f"{loop_root.name!r} que ja faz parte de loop_root.\n"
+            f"  fix: trocar para {suggestion!r} (filename-only relativo a loop_root) "
+            "ou path absoluto.\n"
+            "  ref: ai-forge/workflow-app/src/workflow_app/daily_loop/CONTRACT.md secao 2.2."
+        )
 
 
 def resolve_loop_path(
@@ -410,12 +477,12 @@ def _rewrite_bare_relative_md_tokens(
 
 # /daily-loop:do tem piso obrigatorio de modelo/effort. Persona forte protege
 # contra: PROGRESS.md corrompido, criterio de aceite aprovado erroneamente,
-# falhas silenciadas. haiku/low produziu regressoes no historico — coercoes
-# silenciosas para o piso impedem o /daily-loop:plan (ou config legado) de
+# falhas silenciadas. low produziu regressoes no historico — coercao
+# silenciosa para o piso impede o /daily-loop:plan (ou config legado) de
 # passar valores fracos ao terminal.
 _DAILY_LOOP_FLOOR_MODEL: ModelName = ModelName.SONNET
 _DAILY_LOOP_FLOOR_EFFORT: EffortLevel = EffortLevel.STANDARD
-_FORBIDDEN_MODELS: frozenset[ModelName] = frozenset({ModelName.HAIKU})
+_FORBIDDEN_MODELS: frozenset[ModelName] = frozenset()
 _FORBIDDEN_EFFORTS: frozenset[EffortLevel] = frozenset({EffortLevel.LOW})
 
 
@@ -436,12 +503,6 @@ def _bucket_to_model_effort(b: dict[str, Any]) -> tuple[ModelName, EffortLevel]:
     # Configs legados (gerados antes da regra v1.2 do plan/enumerate) sao
     # promovidos sem perguntar; mensagem visivel via stderr para auditoria.
     if model in _FORBIDDEN_MODELS:
-        import sys
-        print(
-            f"[daily-loop] WARN: bucket {b.get('id')!r} model={model_key!r} "
-            f"violates floor (haiku banned) -> coerced to {_DAILY_LOOP_FLOOR_MODEL.value}",
-            file=sys.stderr,
-        )
         model = _DAILY_LOOP_FLOOR_MODEL
     if effort in _FORBIDDEN_EFFORTS:
         import sys
@@ -526,6 +587,215 @@ def _warn_silent_fallback_if_items_index_populated(
     )
 
 
+# Canonical per-iteration command tokens for rocksmash mode (B6 2026-05-19).
+# The loader validates that, when raw_config["mode"] == "rocksmash", each
+# iteration item's `commands` list contains exactly these four tokens (in
+# this order), with any /clear|/model|/effort directives stripped before the
+# comparison. Producers (/loop:create-structure, /loop:integration) must
+# write this exact 4-tuple per item; auto-upgrade of legacy 2-tuple loops
+# (do + review-done only) is covered by /legacy:* + B12 backfill.
+_ROCKSMASH_CANONICAL_TOKENS: tuple[str, ...] = (
+    "/loop-rocksmash:do",
+    "/loop-rocksmash:review-done",
+    "/loop-rocksmash:compare",
+    "/loop-rocksmash:integrate",
+)
+
+
+def is_rocksmash_mode(raw_config: dict[str, Any]) -> bool:
+    """Return True when raw_config declares the canonical rocksmash mode.
+
+    The discriminator lives at top-level ``mode`` in ``_LOOP-CONFIG.json`` and
+    is set by ``/loop --rocksmash`` (or by ``/legacy:detect`` when promoting a
+    legacy rocksmash loop). All other values (``"normal"``, ``"task"``,
+    ``"cmd"``, ``"cmd-single"``, ``"both"``, missing) imply non-rocksmash.
+
+    Missing or non-string ``mode`` defaults to non-rocksmash silently
+    (retro-compat for V3 loops produced before 2026-05-19, per B6 contract).
+    """
+    mode = raw_config.get("mode")
+    if not isinstance(mode, str):
+        return False
+    return mode.strip().lower() == "rocksmash"
+
+
+def _strip_directives(cmds: list[str]) -> list[str]:
+    """Remove /clear, /model X, /effort Y directives from a command list."""
+    out: list[str] = []
+    for c in cmds:
+        c = str(c).strip()
+        if not c:
+            continue
+        head = c.split(" ", 1)[0]
+        if head in ("/clear", "/model", "/effort"):
+            continue
+        out.append(c)
+    return out
+
+
+def assert_rocksmash_iteration_shape(
+    raw_config: dict[str, Any],
+) -> None:
+    """Enforce the canonical 4-command per-iteration shape for rocksmash loops.
+
+    Behavior:
+      - Noop unless ``is_rocksmash_mode(raw_config)`` returns True.
+      - For every item with ``kind == "iteration"`` (or missing kind, treated
+        as iteration), strip /clear/model/effort directives and assert the
+        remaining tokens are exactly the 4 canonical tokens (matched by their
+        first whitespace-separated word, so per-iteration ``--task <path>``
+        suffixes are accepted).
+      - Items with ``kind in {"preparo", "finalizacao"}`` are skipped.
+      - Empty ``commands`` is tolerated only when the loop is pre-integration
+        (``metadata.integration_completed_at`` absent); after integration the
+        empty list is rejected with a descriptive ``DailyLoopConfigError``.
+
+    Raises:
+        DailyLoopConfigError: on any divergence, with the offending item id,
+        the observed token sequence and the expected 4-tuple.
+    """
+    if not is_rocksmash_mode(raw_config):
+        return
+
+    daily_loop = raw_config.get("daily_loop")
+    if not isinstance(daily_loop, dict):
+        return
+
+    metadata = raw_config.get("metadata") or {}
+    integration_done = bool(
+        isinstance(metadata, dict) and metadata.get("integration_completed_at")
+    )
+
+    expected = list(_ROCKSMASH_CANONICAL_TOKENS)
+    for bucket in daily_loop.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        for item in bucket.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind", "iteration")).strip().lower()
+            if kind in ("preparo", "finalizacao"):
+                continue
+            iid = str(item.get("id", "?"))
+            cmds = item.get("commands")
+            if not isinstance(cmds, list):
+                raise DailyLoopConfigError(
+                    f"rocksmash item {iid}: 'commands' deve ser list[str] "
+                    f"com 4 tokens canonicos (do/review-done/compare/integrate); "
+                    f"recebido {type(cmds).__name__}"
+                )
+            stripped = _strip_directives(cmds)
+            if not stripped and not integration_done:
+                # Pre-integration placeholder is tolerated.
+                continue
+            heads = [c.split(" ", 1)[0] for c in stripped]
+            if heads != expected:
+                raise DailyLoopConfigError(
+                    f"rocksmash item {iid}: shape de iteration_template invalido. "
+                    f"Esperado 4 tokens canonicos {expected}; "
+                    f"recebido {heads}. "
+                    f"Re-rodar /loop:integration ou aplicar /legacy:detect."
+                )
+
+
+_KIMI_PAIR_COMMANDS = ("/cmd:kimi-pair-analyse", "/cmd:kimi-pair-execute")
+
+
+def _iter_all_command_strings(
+    daily_loop: dict[str, Any],
+) -> Iterator[tuple[str, str]]:
+    """Yield (location_label, command_string) over every command source.
+
+    Covers ``buckets[*].items[*].commands``, ``items_index[*].commands``,
+    ``items_index[*].expanded_commands`` and a recursive walk of
+    ``iteration_template``. Used by ``_assert_no_orphan_kimi_pair`` to scan
+    for contraband ``/cmd:kimi-pair-*`` tokens wherever they may hide.
+    """
+    for bucket in daily_loop.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        bid = str(bucket.get("bucket_id", bucket.get("id", "?")))
+        for item in bucket.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            iid = str(item.get("id", "?"))
+            for cmd in item.get("commands", []) or []:
+                if isinstance(cmd, str):
+                    yield (f"buckets[{bid}].items[{iid}].commands", cmd)
+
+    items_index = daily_loop.get("items_index")
+    if isinstance(items_index, dict):
+        for iid, entry in items_index.items():
+            if not isinstance(entry, dict):
+                continue
+            for cmd in entry.get("commands", []) or []:
+                if isinstance(cmd, str):
+                    yield (f"items_index[{iid}].commands", cmd)
+            for cmd in entry.get("expanded_commands", []) or []:
+                if isinstance(cmd, str):
+                    yield (f"items_index[{iid}].expanded_commands", cmd)
+
+    def _walk(node: Any, label: str) -> Iterator[tuple[str, str]]:
+        if isinstance(node, str):
+            yield (label, node)
+        elif isinstance(node, list):
+            for idx, child in enumerate(node):
+                yield from _walk(child, f"{label}[{idx}]")
+        elif isinstance(node, dict):
+            for key, child in node.items():
+                yield from _walk(child, f"{label}.{key}")
+
+    yield from _walk(daily_loop.get("iteration_template"), "iteration_template")
+
+
+def _assert_no_orphan_kimi_pair(raw_config: dict[str, Any]) -> None:
+    """Reject ``/cmd:kimi-pair-*`` tokens that have no business in this loop.
+
+    Last line of defense for legacy archives that the ``/loop:review`` C15 and
+    ``/loop:workflow-app`` W10 spec gates never re-validated. Two guards:
+
+      1. ``mode == "task"``: ANY ``/cmd:kimi-pair-analyse`` or
+         ``/cmd:kimi-pair-execute`` token is a hard error. The Kimi pair adapts
+         SLASH-COMMANDS and only exists in ``--cmd``/``--both`` loops, always
+         chained right after ``/cmd:create|update|review``.
+      2. ANY mode: a ``/cmd:kimi-pair-*`` token carrying a ``--task`` argument
+         is a hard error. The ``--task`` form is the contamination smell; only
+         the ``--approved`` form is valid inside a loop.
+
+    Raises:
+        DailyLoopConfigError: on the first offending token found (Zero Silencio).
+    """
+    daily_loop = raw_config.get("daily_loop")
+    if not isinstance(daily_loop, dict):
+        return
+
+    mode = raw_config.get("mode")
+    if not isinstance(mode, str):
+        metadata = raw_config.get("metadata")
+        if isinstance(metadata, dict):
+            mode = metadata.get("mode")
+    mode = mode.strip().lower() if isinstance(mode, str) else ""
+
+    for label, cmd in _iter_all_command_strings(daily_loop):
+        head = cmd.split(" ", 1)[0].strip()
+        if head not in _KIMI_PAIR_COMMANDS:
+            continue
+        if mode == "task":
+            raise DailyLoopConfigError(
+                f"par Kimi contaminando loop modo --task em {label}: "
+                f"'{cmd}'. O wrapper /cmd:kimi-pair-* adapta SLASH-COMMANDS "
+                f"e so existe em loops --cmd/--both, sempre encadeado apos "
+                f"/cmd:create, /cmd:update ou /cmd:review. "
+                f"Re-rodar /loop:integration."
+            )
+        if "--task" in cmd.split():
+            raise DailyLoopConfigError(
+                f"par Kimi na forma --task em {label}: '{cmd}'. "
+                f"Apenas a forma /cmd:kimi-pair-* --approved e valida dentro "
+                f"de um loop; a forma --task <path> indica contaminacao."
+            )
+
+
 def build_daily_loop_specs(
     raw_config: dict[str, Any],
     loop_root: Path | str,
@@ -550,6 +820,11 @@ def build_daily_loop_specs(
             "_LOOP-CONFIG.json sem bloco 'daily_loop' — gere via /daily-loop:enumerate"
         )
 
+    # Reject /cmd:kimi-pair-* tokens orphaned in a --task loop or carrying the
+    # --task contamination form (runtime guard, mirrors /loop:review C15 and
+    # /loop:workflow-app W10 for legacy archives those gates never touched).
+    _assert_no_orphan_kimi_pair(raw_config)
+
     slug = str(daily_loop.get("slug", "")).strip()
     if not slug:
         raise DailyLoopConfigError("daily_loop.slug ausente")
@@ -569,12 +844,22 @@ def build_daily_loop_specs(
     )
 
     if not progress_path.exists():
+        raw_value = daily_loop.get("progress_path")
+        fix_hint = diagnose_workspace_doubled_path(raw_value, loop_root_path)
+        fix_line = (
+            f"  ANTI-PATTERN DETECTADO (CONTRACT v1.1 secao 2.2): progress_path "
+            f"parece workspace-relative. Trocar para {fix_hint!r} (filename-only "
+            "relativo a loop_root) ou path absoluto.\n"
+            if fix_hint
+            else ""
+        )
         raise DailyLoopConfigError(
             "PROGRESS.md nao encontrado.\n"
-            f"  declarado em _LOOP-CONFIG.json:  progress_path = {daily_loop.get('progress_path')!r}\n"
+            f"  declarado em _LOOP-CONFIG.json:  progress_path = {raw_value!r}\n"
             f"  loop_root resolvido:              {loop_root_path}\n"
             f"  caminho final calculado:          {progress_path}\n"
-            "  acao: rode /daily-loop:enumerate para regerar OU corrija progress_path "
+            + fix_line
+            + "  acao: rode /daily-loop:enumerate para regerar OU corrija progress_path "
             "no JSON (filename-only relativo a loop_root, ou path absoluto)."
         )
 
@@ -964,6 +1249,16 @@ def build_loop_specs(
             "_LOOP-CONFIG.json sem bloco 'daily_loop' — gere via /loop ou /daily-loop:enumerate"
         )
 
+    # B6 (2026-05-19): when raw_config declares mode=='rocksmash', enforce the
+    # canonical 4-command per-iteration shape. Noop for other modes.
+    if is_rocksmash_mode(raw_config):
+        assert_rocksmash_iteration_shape(raw_config)
+
+    # Reject /cmd:kimi-pair-* tokens orphaned in a --task loop or carrying the
+    # --task contamination form (runtime guard, mirrors /loop:review C15 and
+    # /loop:workflow-app W10 for legacy archives those gates never touched).
+    _assert_no_orphan_kimi_pair(raw_config)
+
     slug = str(daily_loop.get("slug", "")).strip()
     if not slug:
         raise DailyLoopConfigError("daily_loop.slug ausente")
@@ -983,12 +1278,22 @@ def build_loop_specs(
     )
 
     if not progress_path.exists():
+        raw_value = daily_loop.get("progress_path")
+        fix_hint = diagnose_workspace_doubled_path(raw_value, loop_root_path)
+        fix_line = (
+            f"  ANTI-PATTERN DETECTADO (CONTRACT v1.1 secao 2.2): progress_path "
+            f"parece workspace-relative. Trocar para {fix_hint!r} (filename-only "
+            "relativo a loop_root) ou path absoluto.\n"
+            if fix_hint
+            else ""
+        )
         raise DailyLoopConfigError(
             "PROGRESS.md nao encontrado.\n"
-            f"  declarado em _LOOP-CONFIG.json:  progress_path = {daily_loop.get('progress_path')!r}\n"
+            f"  declarado em _LOOP-CONFIG.json:  progress_path = {raw_value!r}\n"
             f"  loop_root resolvido:              {loop_root_path}\n"
             f"  caminho final calculado:          {progress_path}\n"
-            "  acao: rode /loop ou /daily-loop:enumerate para regerar OU corrija "
+            + fix_line
+            + "  acao: rode /loop ou /daily-loop:enumerate para regerar OU corrija "
             "progress_path no JSON (filename-only relativo a loop_root, ou path absoluto)."
         )
 
@@ -1092,6 +1397,10 @@ def build_loop_specs(
             # Precedencia canonica /loop --task|--cmd|--cmd-single|--both:
             # items[k].commands OU items_index[k].expanded_commands (cmd-single)
             # populada -> emitir cada entrada literal como CommandSpec.
+            # review_done_command NAO e injetado aqui: canonical_cmds ja carrega
+            # seu proprio reviewer per-item (/loop:iteraction:review-executed-task,
+            # /cmd:review, etc.). Injetar causaria cross-lane contamination
+            # (/daily-loop:review-done revisando output de /loop:iteraction:execute-task).
             for cmd_str in canonical_cmds:
                 specs.append(
                     CommandSpec(
@@ -1120,41 +1429,41 @@ def build_loop_specs(
                     phase="loop",
                 )
             )
-
-        if _REVIEW_DONE_MODEL != current_model:
+            # Fallback path only: inject review_done_command.
+            # canonical_cmds path omits this — reviewer e embedded nos commands.
+            if _REVIEW_DONE_MODEL != current_model:
+                specs.append(
+                    CommandSpec(
+                        name=f"/model {_REVIEW_DONE_MODEL.value.lower()}",
+                        model=_REVIEW_DONE_MODEL,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=0,
+                    )
+                )
+                current_model = _REVIEW_DONE_MODEL
+            if _REVIEW_DONE_EFFORT != current_effort:
+                specs.append(
+                    CommandSpec(
+                        name=f"/effort {_REVIEW_DONE_EFFORT.value.lower()}",
+                        model=_REVIEW_DONE_MODEL,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        position=0,
+                    )
+                )
+                current_effort = _REVIEW_DONE_EFFORT
             specs.append(
                 CommandSpec(
-                    name=f"/model {_REVIEW_DONE_MODEL.value.lower()}",
+                    name=f"{review_done_command} --slug {slug} --item {item.item_id}",
                     model=_REVIEW_DONE_MODEL,
                     interaction_type=InteractionType.AUTO,
                     config_path="",
                     position=0,
+                    effort=_REVIEW_DONE_EFFORT,
+                    phase="loop",
                 )
             )
-            current_model = _REVIEW_DONE_MODEL
-        if _REVIEW_DONE_EFFORT != current_effort:
-            specs.append(
-                CommandSpec(
-                    name=f"/effort {_REVIEW_DONE_EFFORT.value.lower()}",
-                    model=_REVIEW_DONE_MODEL,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    position=0,
-                )
-            )
-            current_effort = _REVIEW_DONE_EFFORT
-
-        specs.append(
-            CommandSpec(
-                name=f"{review_done_command} --slug {slug} --item {item.item_id}",
-                model=_REVIEW_DONE_MODEL,
-                interaction_type=InteractionType.AUTO,
-                config_path="",
-                position=0,
-                effort=_REVIEW_DONE_EFFORT,
-                phase="loop",
-            )
-        )
 
     review_command = str(
         daily_loop.get("review_command", "/daily-loop:review")

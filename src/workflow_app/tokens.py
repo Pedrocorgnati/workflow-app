@@ -45,7 +45,6 @@ class ColorTokens:
     # Model badges
     model_opus: str = "#7C3AED"
     model_sonnet: str = "#2563EB"
-    model_haiku: str = "#059669"
 
 
 @dataclass(frozen=True)

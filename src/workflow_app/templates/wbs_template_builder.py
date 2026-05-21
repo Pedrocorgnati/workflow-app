@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _O = ModelName.OPUS
 _S = ModelName.SONNET
-_H = ModelName.HAIKU
+_H = ModelName.SONNET
 _A = InteractionType.AUTO
 
 

@@ -130,7 +130,7 @@ def test_all_positions_sequential():
 
 
 def test_all_commands_have_valid_model():
-    valid = {ModelName.OPUS, ModelName.SONNET, ModelName.HAIKU}
+    valid = {ModelName.OPUS, ModelName.SONNET}
     for name, (_, commands) in FACTORY_TEMPLATES.items():
         for cmd in commands:
             assert cmd.model in valid, f"Invalid model '{cmd.model}' in '{name}/{cmd.name}'"

@@ -56,6 +56,9 @@ htmlcov/
 test-users.md
 test-users.json
 
+# Runtime artifacts (wf-notify heartbeat)
+.wf-notify/
+
 # Asset placeholders
 public/images/
 assets/images/

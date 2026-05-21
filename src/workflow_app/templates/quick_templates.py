@@ -43,7 +43,7 @@ from workflow_app.domain import CommandSpec, EffortLevel, FlagSpec, InteractionT
 
 _O = ModelName.OPUS
 _S = ModelName.SONNET
-_H = ModelName.HAIKU
+_H = ModelName.SONNET
 _I = InteractionType.INTERACTIVE
 _A = InteractionType.AUTO
 
@@ -106,6 +106,9 @@ def _same_context_group(prev_name: str, curr_name: str) -> bool:
     Groups are sub-pipelines where each step feeds into the next and benefits
     from shared conversation context:
       - /qa:prep → /qa:trace → /qa:report
+      - /create-task → /review-created-task
+      - /execute-task → /review-executed-task
+      - /tdd:* chain
       - /backend:scan → /backend:audit → /backend:test-check → /backend:report
       - /frontend:scan → /frontend:audit → /frontend:assets-check → /frontend:report
       - /deep-research-1 → /deep-research-2
@@ -118,6 +121,15 @@ def _same_context_group(prev_name: str, curr_name: str) -> bool:
     for prefix in _PIPELINE_PREFIXES:
         if prev_name.startswith(prefix) and curr_name.startswith(prefix):
             return True
+    prev_head = prev_name.split(maxsplit=1)[0]
+    curr_head = curr_name.split(maxsplit=1)[0]
+    if (prev_head, curr_head) in {
+        ("/create-task", "/review-created-task"),
+        ("/execute-task", "/review-executed-task"),
+    }:
+        return True
+    if prev_head.startswith("/tdd:") and curr_head.startswith("/tdd:"):
+        return True
     if prev_name.startswith("/deep-research") and curr_name.startswith("/deep-research"):
         return True
     if "diagram-create" in prev_name and "diagram-create" in curr_name:
@@ -158,8 +170,8 @@ def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
       - Leading /clear entries in the input are stripped — this function owns
         block-header emission.
       - An initial header is emitted once, seeded from the first real command.
-      - INTERACTIVE commands: no header emitted before them (they build context
-        through dialogue and need the conversation history).
+      - INTERACTIVE commands follow the same state rules as AUTO commands;
+        interaction mode does not imply model/effort inheritance is safe.
       - AUTO commands in the same context group as the previous command:
         no header emitted (they share a sub-pipeline).
       - Other AUTO commands: full `/clear` + `/model` + `/effort` block header
@@ -202,7 +214,6 @@ def _inject_clears(specs: list[CommandSpec]) -> list[CommandSpec]:
         effective_effort = _resolve_effort(spec.name, spec.effort)
         needs_header = (
             prev_name != ""
-            and spec.interaction_type == _A
             and not _same_context_group(prev_name, spec.name)
         )
         if needs_header:
@@ -459,13 +470,13 @@ TEMPLATE_CREATE_DAILY_LOOP: list[CommandSpec] = [
 TEMPLATE_INTAKE_SEED: list[CommandSpec] = [
     # /model e /effort so sao reinjetados quando o valor MUDA. /clear nao reseta
     # nem modelo nem effort no CLI. Transicoes:
-    #   model:  haiku (bloco 0) -> opus (bloco 1, mantem em 2)
+    #   model:  sonnet (bloco 0) -> opus (bloco 1, mantem em 2)
     #   effort: low (bloco 0)   -> medium (bloco 1) -> high (bloco 2)
 
-    # Bloco 0: Reset de feature paths (Haiku / low) — restaura project.json para paths base
+    # Bloco 0: Reset de feature paths (Sonnet / low) — restaura project.json para paths base
     # — executa /reset:project-json deteccao + preview + confirmacao
     _spec("/clear",              _H, _A, 0),
-    _spec("/model haiku",        _H, _A, 1),
+    _spec("/model sonnet",        _H, _A, 1),
     _spec("/effort low",         _H, _A, 2),
     _spec("/reset:project-json", _H, _A, 3),
 
@@ -572,16 +583,16 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
     # Bloco 4.5: scan de assets/imagens faltantes — append em ASSETS-TO-CREATE.md
     _spec("/assets:create",                  _S, _A, 41, effort=EffortLevel.STANDARD),
 
-    # Bloco 5: housekeeping (Haiku / low) — limpa historico para nova execucao
+    # Bloco 5: housekeeping (Sonnet / low) — limpa historico para nova execucao
     _spec("/clear",                          _H, _A, 42),
-    _spec("/model haiku",                    _H, _A, 43),
+    _spec("/model sonnet",                    _H, _A, 43),
     _spec("/effort low",                     _H, _A, 44),
     _spec("/intake-review:clear",            _H, _A, 45, optional=True, effort=EffortLevel.LOW),
 ]
 
 # ─── Intake MAX Review (versao deep — Opus/MAX + Codex adversarial + gates) ── #
 # Clone do TEMPLATE_INTAKE_REVIEW com effort 1-2 graus acima em cada comando
-# (excecao do /intake-review:clear final — mantido Haiku/LOW por instrucao direta).
+# (excecao do /intake-review:clear final — mantido Sonnet/LOW por instrucao direta).
 #
 # Ajustes sobre o clone naive (analise Level 2 primary+secondary):
 #  - /skill:mcp-codex recebe argumento explicito (skip_prompt implicito via topic),
@@ -609,7 +620,7 @@ TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
     # /model e /effort so sao injetados quando o valor MUDA. /clear nao reseta
     # nem o modelo nem o effort, entao reinjetar entre blocos com mesmo valor
     # e desperdicio. Transicoes:
-    #   model:  opus (inicio)               -> haiku (housekeeping)
+    #   model:  opus (inicio)               -> sonnet (housekeeping)
     #   effort: high (inicio) -> max (2a)   -> high (3c) -> max (4) -> low (5)
 
     # Bloco 1: extracao inicial — Opus/HIGH (era Sonnet/medium, +2 graus)
@@ -687,9 +698,9 @@ TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
     # de workspace_root em ordem de chegada). Sonnet/medium e o default.
     _spec("/assets:create",                  _S, _A, 28, effort=EffortLevel.STANDARD),
 
-    # Bloco 5: housekeeping — Haiku/LOW (mudanca de modelo: opus -> haiku)
+    # Bloco 5: housekeeping — Sonnet/LOW (mudanca de modelo: opus -> sonnet)
     _spec("/clear",                          _H, _A, 29),
-    _spec("/model haiku",                    _H, _A, 30),
+    _spec("/model sonnet",                    _H, _A, 30),
     _spec("/effort low",                     _H, _A, 31),
     _spec("/intake-review:clear",            _H, _A, 32, optional=True, effort=EffortLevel.LOW),
 ]

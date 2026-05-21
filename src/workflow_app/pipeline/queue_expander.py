@@ -22,7 +22,7 @@ _DEPLOY_EXPANSION: list[CommandSpec] = [
     ),
     CommandSpec(
         "/changelog-create",
-        ModelName.HAIKU,
+        ModelName.SONNET,
         InteractionType.AUTO,
         position=0,
     ),

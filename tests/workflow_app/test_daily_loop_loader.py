@@ -23,7 +23,9 @@ import pytest
 from workflow_app.daily_loop import (
     DailyLoopConfigError,
     ReviewBlockedSentinel,
+    assert_loop_root_relative_path,
     build_daily_loop_specs,
+    diagnose_workspace_doubled_path,
     parse_progress_items,
     read_review_blocked_sentinel,
     resolve_loop_path,
@@ -152,6 +154,90 @@ class TestResolveLoopPath:
     def test_list_value_raises(self, loop_root: Path) -> None:
         with pytest.raises(DailyLoopConfigError, match="deve ser string"):
             resolve_loop_path(["PROGRESS.md"], loop_root, label="progress_path")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CONTRACT v1.1 secao 2.2 — Path field convention (hardening 2026-05-19)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestDiagnoseWorkspaceDoubledPath:
+    """Detector for the workspace-relative-stored-in-loop-root-relative-field bug.
+
+    Reproduces the failure mode from loop 05-19-gap-tasklist: producer stored
+    `daily_loop.progress_path = "blacksmith/loop-archives/{slug}/PROGRESS.md"`
+    while `loop_root` already terminated in that suffix, yielding a doubled
+    final path. The detector returns the suggested loop_root-relative tail.
+    """
+
+    def test_returns_fix_when_slug_appears_in_value(self, loop_root: Path) -> None:
+        slug = loop_root.name
+        bad_value = f"blacksmith/loop-archives/{slug}/PROGRESS.md"
+        assert diagnose_workspace_doubled_path(bad_value, loop_root) == "PROGRESS.md"
+
+    def test_returns_fix_for_nested_path(self, loop_root: Path) -> None:
+        slug = loop_root.name
+        bad_value = f"blacksmith/loop-archives/{slug}/tasks/T-opus-high.md"
+        assert (
+            diagnose_workspace_doubled_path(bad_value, loop_root)
+            == "tasks/T-opus-high.md"
+        )
+
+    def test_clean_filename_returns_none(self, loop_root: Path) -> None:
+        assert diagnose_workspace_doubled_path("PROGRESS.md", loop_root) is None
+
+    def test_clean_subdir_returns_none(self, loop_root: Path) -> None:
+        assert diagnose_workspace_doubled_path("tasks/foo.md", loop_root) is None
+
+    def test_absolute_path_returns_none(self, loop_root: Path) -> None:
+        assert diagnose_workspace_doubled_path(str(loop_root / "PROGRESS.md"), loop_root) is None
+
+    def test_empty_returns_none(self, loop_root: Path) -> None:
+        assert diagnose_workspace_doubled_path("", loop_root) is None
+        assert diagnose_workspace_doubled_path("   ", loop_root) is None
+
+    def test_none_returns_none(self, loop_root: Path) -> None:
+        assert diagnose_workspace_doubled_path(None, loop_root) is None
+
+    def test_non_string_returns_none(self, loop_root: Path) -> None:
+        assert diagnose_workspace_doubled_path(42, loop_root) is None
+        assert diagnose_workspace_doubled_path(["a"], loop_root) is None
+
+    def test_slug_substring_does_not_trigger(self, loop_root: Path) -> None:
+        # value contains the slug as substring of a path component but NOT as a
+        # whole component — must NOT trigger false positive.
+        slug = loop_root.name
+        bad_lookalike = f"prefix-{slug}-suffix/PROGRESS.md"
+        assert diagnose_workspace_doubled_path(bad_lookalike, loop_root) is None
+
+
+class TestAssertLoopRootRelativePath:
+    """Strict guard for producers and review-time validators."""
+
+    def test_clean_filename_passes(self, loop_root: Path) -> None:
+        assert_loop_root_relative_path("PROGRESS.md", loop_root, label="progress_path")
+
+    def test_clean_subdir_passes(self, loop_root: Path) -> None:
+        assert_loop_root_relative_path("tasks/T-opus-high.md", loop_root, label="spec_path")
+
+    def test_absolute_passes(self, loop_root: Path) -> None:
+        assert_loop_root_relative_path(
+            str(loop_root / "PROGRESS.md"), loop_root, label="progress_path"
+        )
+
+    def test_workspace_relative_raises(self, loop_root: Path) -> None:
+        slug = loop_root.name
+        bad = f"blacksmith/loop-archives/{slug}/PROGRESS.md"
+        with pytest.raises(DailyLoopConfigError, match="CONTRACT v1.1 secao 2.2"):
+            assert_loop_root_relative_path(bad, loop_root, label="progress_path")
+
+    def test_error_message_carries_fix_suggestion(self, loop_root: Path) -> None:
+        slug = loop_root.name
+        bad = f"blacksmith/loop-archives/{slug}/tasks/T-opus-high.md"
+        with pytest.raises(DailyLoopConfigError) as exc:
+            assert_loop_root_relative_path(bad, loop_root, label="buckets[0].spec_path")
+        assert "tasks/T-opus-high.md" in str(exc.value)
+        assert "buckets[0].spec_path" in str(exc.value)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -325,28 +411,28 @@ class TestBuildDailyLoopSpecs:
                 f"/daily-loop:review-done --slug test-slug --item {item_id}"
             )
 
-    def test_haiku_low_bucket_is_coerced_to_sonnet_medium_floor(
+    def test_sonnet_low_bucket_is_coerced_to_sonnet_medium_floor(
         self, loop_root: Path
     ) -> None:
-        """Floor enforcement: /daily-loop:do must NEVER run on haiku/low.
+        """Floor enforcement: /daily-loop:do must NEVER run on sonnet/low.
 
-        The loader silently coerces haiku → sonnet and low → medium when the
+        The loader silently coerces sonnet → sonnet and low → medium when the
         config carries forbidden values (legacy configs or buggy plan output).
         Coercion is logged to stderr but does not raise.
         """
         cfg = _base_config(loop_root)
         # Force the bucket to forbidden values:
-        cfg["daily_loop"]["buckets"][0]["model"] = "haiku"
+        cfg["daily_loop"]["buckets"][0]["model"] = "sonnet"
         cfg["daily_loop"]["buckets"][0]["effort"] = "low"
         _write_progress(loop_root, items=[("001", " ", "x", "T-sonnet-medium")])
         specs = build_daily_loop_specs(cfg, loop_root)
         # /clear + /model sonnet + /effort medium + :do + /model opus
         # + :review-done (effort STANDARD == "medium" — dedup skips)
         # + /clear + /effort high + :review = 9 specs.
-        # NOT /model haiku + /effort low.
+        # NOT /model sonnet + /effort low.
         assert len(specs) == 9
         assert specs[1].name == "/model sonnet", (
-            f"haiku bucket should coerce to sonnet, got {specs[1].name}"
+            f"sonnet bucket should coerce to sonnet, got {specs[1].name}"
         )
         assert specs[2].name == "/effort medium", (
             f"low bucket should coerce to medium, got {specs[2].name}"

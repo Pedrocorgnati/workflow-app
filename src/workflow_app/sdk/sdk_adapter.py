@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 # Mapping ModelType → SDK model string
 _MODEL_STRINGS: dict[ModelType, str] = {
-    ModelType.HAIKU: "claude-haiku-4-5",
     ModelType.SONNET: "claude-sonnet-4-6",
     ModelType.OPUS: "claude-opus-4-6",
 }
@@ -376,7 +375,7 @@ class SDKAdapter:
 
         Args:
             command: Command name without slash (e.g. "prd-create") or with slash.
-            model: ModelType (HAIKU/SONNET/OPUS).
+            model: ModelType (SONNET/OPUS).
             permission_mode: "acceptEdits" | "autoAccept" | "manual".
             workspace_dir: Working directory for Claude (docs_root or workspace_root).
 

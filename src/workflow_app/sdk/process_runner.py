@@ -31,7 +31,6 @@ _PERMISSION_MODE_MAP: dict[str, str] = {
 }
 
 _MODEL_MAP: dict[str, str] = {
-    "haiku": "claude-haiku-4-5",
     "sonnet": "claude-sonnet-4-6",
     "opus": "claude-opus-4-6",
 }
@@ -117,7 +116,7 @@ class ProcessRunner(QObject):
 
         Args:
             command: Slash command, e.g. "/project-json" or "project-json".
-            model: "haiku" | "sonnet" | "opus" (or full model ID).
+            model: "sonnet" | "opus" (or full model ID).
             permission_mode: "autoAccept" | "acceptEdits" | "manual".
             workspace_dir: Override CWD (defaults to SystemForge root).
         """

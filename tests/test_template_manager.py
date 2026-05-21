@@ -210,13 +210,13 @@ def test_update_sha256_nonexistent(tm):
 
 
 def test_model_type_roundtrip(tm):
-    """Save with ModelName.HAIKU → load back as ModelName.HAIKU."""
+    """Save with ModelName.SONNET → load back as ModelName.SONNET."""
     cmds = [
-        CommandSpec(name="/test", model=ModelName.HAIKU, position=1),
+        CommandSpec(name="/test", model=ModelName.SONNET, position=1),
     ]
     tid = tm.save_custom_template("Model RT", "d", cmds)
     dto = tm.load_template(tid)
-    assert dto.commands[0].model == ModelName.HAIKU
+    assert dto.commands[0].model == ModelName.SONNET
 
 
 def test_interaction_type_roundtrip(tm):

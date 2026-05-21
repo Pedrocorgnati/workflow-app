@@ -41,14 +41,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-_SCHEDULE_STATE_FILE = Path.home() / ".workflow-app" / "schedule-autocast.json"
-
 # ─── Instance buttons drag&drop (output-toolbar-center-top) ───────────────── #
 #
-# Os botoes do `instance-group` (clauded/kimid/clauded2/kimid2) sao reordenaveis
+# Os botoes do `instance-group` (clauded/kimid/clauded2/kimid2/codex) sao reordenaveis
 # via drag&drop. A ordem persiste em QSettings("SystemForge", "WorkflowApp")
 # sob `_INSTANCE_ORDER_SETTINGS_KEY` e e restaurada na proxima abertura do app.
-_CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "clauded2", "kimid2"]
+_CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "clauded2", "kimid2", "codex"]
 _INSTANCE_ORDER_SETTINGS_KEY = "MetricsBar/instanceOrder"
 _INSTANCE_DRAG_MIME = "application/x-workflow-instance-button"
 _INSTANCE_DRAG_THRESHOLD = 6
@@ -251,32 +249,6 @@ _SCHEDULE_FIRED = (
 )
 
 
-def _read_schedule_state() -> dict | None:
-    try:
-        if not _SCHEDULE_STATE_FILE.exists():
-            return None
-        return json.loads(_SCHEDULE_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _write_schedule_state(end_at_iso: str) -> None:
-    try:
-        _SCHEDULE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SCHEDULE_STATE_FILE.write_text(
-            json.dumps({"end_at": end_at_iso}), encoding="utf-8"
-        )
-    except OSError:
-        pass
-
-
-def _clear_schedule_state() -> None:
-    try:
-        _SCHEDULE_STATE_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
 class TerminalStatusDot(QWidget):
     """Circular indicator for terminal activity state.
 
@@ -293,8 +265,12 @@ class TerminalStatusDot(QWidget):
 
     _SIZE = 28
     _MIN_SIZE = 16
-    _IDLE_COLOR = "#22C55E"
-    _BUSY_COLOR = "#F59E0B"
+    _STATE_COLORS: dict[str, str] = {
+        "idle": "#22C55E",
+        "busy": "#F59E0B",
+        "failed": "#EF4444",
+        "awaiting_user": "#3B82F6",
+    }
 
     def __init__(
         self,
@@ -303,33 +279,49 @@ class TerminalStatusDot(QWidget):
         parent: "QWidget | None" = None,
         *,
         size: int = _SIZE,
+        rectangle: bool = False,
+        rect_height: int = 24,
     ) -> None:
         super().__init__(parent)
         self._channel = channel
         self._label = label
-        self._busy = False
+        self._state = "idle"
         self._size = int(size)
+        self._rectangle = bool(rectangle)
+        self._rect_height = int(rect_height)
         self.setProperty("testid", f"listener-{channel}")
         # Responsive sizing: parent layout drives actual width/height; widget
         # keeps preferred `size` via sizeHint while accepting shrink to _MIN_SIZE.
-        self.setMinimumSize(self._MIN_SIZE, self._MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        if self._rectangle:
+            self.setMinimumSize(self._MIN_SIZE, 14)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.setFixedHeight(self._rect_height)
+        else:
+            self.setMinimumSize(self._MIN_SIZE, self._MIN_SIZE)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._apply_style()
         self.setToolTip(f"{label}: parado")
 
     def sizeHint(self) -> QSize:
+        if self._rectangle:
+            return QSize(self._size, self._rect_height)
         return QSize(self._size, self._size)
 
     def minimumSizeHint(self) -> QSize:
+        if self._rectangle:
+            return QSize(self._MIN_SIZE, 14)
         return QSize(self._MIN_SIZE, self._MIN_SIZE)
 
     def _current_diameter(self) -> int:
         return max(self._MIN_SIZE, min(self.width(), self.height()))
 
     def _apply_style(self) -> None:
-        color = self._BUSY_COLOR if self._busy else self._IDLE_COLOR
-        radius = self._current_diameter() // 2
+        color = self._STATE_COLORS.get(self._state, self._STATE_COLORS["idle"])
+        if self._rectangle:
+            radius = min(10, max(5, self.height() // 2))
+        else:
+            radius = self._current_diameter() // 2
         self.setStyleSheet(
             f"QWidget {{ background-color: {color}; border-radius: {radius}px; }}"
         )
@@ -340,19 +332,34 @@ class TerminalStatusDot(QWidget):
 
     @property
     def is_busy(self) -> bool:
-        return self._busy
+        return self._state == "busy"
 
     @property
     def channel(self) -> str:
         return self._channel
 
     def set_busy(self, busy: bool) -> None:
-        if busy == self._busy:
-            return
-        self._busy = busy
-        self._apply_style()
-        self.setToolTip(f"{self._label}: {'executando' if busy else 'parado'}")
+        self.set_state("busy" if busy else "idle")
         self.busy_changed.emit(self._channel, busy)
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def set_state(self, state: str) -> None:
+        if state not in self._STATE_COLORS:
+            return
+        if state == self._state:
+            return
+        self._state = state
+        self._apply_style()
+        tip_map = {
+            "idle": "parado",
+            "busy": "executando",
+            "failed": "falhou",
+            "awaiting_user": "aguardando usuario",
+        }
+        self.setToolTip(f"{self._label}: {tip_map.get(state, 'parado')}")
 
 
 class MetricsBar(QWidget):
@@ -384,21 +391,13 @@ class MetricsBar(QWidget):
         self._awaiting_user_input: bool = False
 
         # MARKER_SCHEDULE_AUTOCAST_STATE - schedule-autocast countdown state
+        # In-memory only; cada MetricsBar/janela tem seu proprio cronometro.
+        # Nao ha persistencia em disco (decisao 2026-05-18): fechar a janela
+        # ou abrir uma nova nunca herda timer de uma instancia anterior.
         self._schedule_end_at: QDateTime | None = None
         self._schedule_timer = QTimer(self)
         self._schedule_timer.setInterval(1000)
         self._schedule_timer.timeout.connect(self._on_schedule_tick)
-
-        # Restore schedule-autocast state from disk
-        state = _read_schedule_state()
-        if state and isinstance(state.get("end_at"), str):
-            restored = QDateTime.fromString(state["end_at"], Qt.DateFormat.ISODate)
-            if restored.isValid() and QDateTime.currentDateTime().secsTo(restored) > 0:
-                self._schedule_end_at = restored
-                self._schedule_timer.start()
-                QTimer.singleShot(0, self._update_schedule_visual)
-            else:
-                _clear_schedule_state()
 
         self._setup_ui()
         self._setup_activity_timers()
@@ -456,14 +455,15 @@ class MetricsBar(QWidget):
         _pl.addWidget(self._project_name_lbl)
         self._proj_x = QPushButton("✕")
         self._proj_x.setObjectName("ProjCloseBtn")
+        self._proj_x.setProperty("testid", "metrics-btn-proj-unload")
         self._proj_x.setFixedSize(20, 20)
         self._proj_x.setToolTip("Desvincular projeto")
         self._proj_x.setCursor(Qt.CursorShape.PointingHandCursor)
         self._proj_x.setStyleSheet(
             "QPushButton#ProjCloseBtn { background: transparent; border: none;"
-            "  color: #EF4444; font-size: 14px; font-weight: 700;"
+            "  color: #FAFAFA; font-size: 14px; font-weight: 700;"
             "  min-width: 20px; min-height: 20px; padding: 0; margin: 0; }"
-            "QPushButton#ProjCloseBtn:hover { color: #FCA5A5; background: rgba(239, 68, 68, 0.15); border-radius: 3px; }"
+            "QPushButton#ProjCloseBtn:hover { color: #FFFFFF; background: rgba(255, 255, 255, 0.12); border-radius: 3px; }"
         )
         self._proj_x.clicked.connect(self._on_proj_unload)
         _pl.addWidget(self._proj_x)
@@ -511,7 +511,8 @@ class MetricsBar(QWidget):
         # ── Instance toggle buttons (clauded group) ───────────────────── #
         # Task 4 (loop 05-13-workflow-app-layout-2):
         #   4a: adicionado `kimid2` apos `clauded2` (mirror clauded2 — interactive terminal).
-        #   4d: removido `codex` (eliminado do layout + handler orfao).
+        #   4d: removido `codex` (historico).
+        # 2026-05-19+: `codex` reintroduzido e roteado para T3.
         # 2026-05-14: botoes sao reordenaveis via drag&drop (output-toolbar-center-top).
         # Ordem persiste em QSettings/_INSTANCE_ORDER_SETTINGS_KEY e e restaurada aqui.
         self._instance_order_settings = QSettings("SystemForge", "WorkflowApp")
@@ -614,16 +615,30 @@ class MetricsBar(QWidget):
         )
         lf = QHBoxLayout(self._listeners_frame)
         lf.setContentsMargins(12, 8, 12, 8)
-        lf.setSpacing(16)
+        lf.setSpacing(10)
 
+        self._dot_general = TerminalStatusDot(
+            "general", "Listener geral", self._listeners_frame, size=88,
+        )
         self._dot_interactive = TerminalStatusDot(
-            "interactive", "Claude CLI", self._listeners_frame, size=88,
+            "interactive", "Terminal 1", self._listeners_frame, size=88, rectangle=True, rect_height=22,
         )
         self._dot_workspace = TerminalStatusDot(
-            "workspace", "Kimi CLI", self._listeners_frame, size=88,
+            "workspace", "Terminal 2", self._listeners_frame, size=88, rectangle=True, rect_height=22,
         )
-        lf.addWidget(self._dot_interactive, 1)
-        lf.addWidget(self._dot_workspace, 1)
+        self._dot_workspace_xterm = TerminalStatusDot(
+            "workspace_xterm", "Terminal 3", self._listeners_frame, size=88, rectangle=True, rect_height=22,
+        )
+        lf.addWidget(self._dot_general, 1)
+        listeners_col = QWidget(self._listeners_frame)
+        listeners_col_layout = QVBoxLayout(listeners_col)
+        listeners_col_layout.setContentsMargins(0, 0, 0, 0)
+        listeners_col_layout.setSpacing(6)
+        listeners_col_layout.addWidget(self._dot_interactive)
+        listeners_col_layout.addWidget(self._dot_workspace)
+        listeners_col_layout.addWidget(self._dot_workspace_xterm)
+        lf.addWidget(listeners_col, 1)
+        self._update_overall_listener()
 
         # queue-progress-ring vive em ProgressSection dentro do DualStatusSection
         # (montado em main_window._build_output_toolbar). Owned por MetricsBar
@@ -650,7 +665,7 @@ class MetricsBar(QWidget):
         self._queue_count_toggles_row.setProperty(
             "testid", "queue-count-toggles-row"
         )
-        self._queue_count_toggles_layout = QVBoxLayout(
+        self._queue_count_toggles_layout = QHBoxLayout(
             self._queue_count_toggles_row
         )
         self._queue_count_toggles_layout.setContentsMargins(0, 0, 0, 0)
@@ -706,15 +721,16 @@ class MetricsBar(QWidget):
         self._btn_workflow.hide()
         self._btn_comandos.hide()
 
-        # ── DataTest toggle ───────────────────────────────────────────── #
-        self._btn_datatest = QPushButton("DataTest")
-        self._btn_datatest.setFixedSize(68, 32)
+        # ── Key toggle (renomeado de DataTest; modo "key" = subset curado) ── #
+        # Var name `_btn_datatest` preservado para compat com MainWindow.
+        self._btn_datatest = QPushButton("Key")
+        self._btn_datatest.setFixedSize(56, 32)
         self._btn_datatest.setCheckable(True)
-        self._btn_datatest.setToolTip("Exibir data-testid em todos os componentes")
+        self._btn_datatest.setToolTip("Exibir apenas os data-testid principais (subset curado)")
         self._btn_datatest.setStyleSheet(
             "QPushButton { background-color: transparent; color: #4ADE80;"
             "  border: 1px solid #16A34A; border-radius: 6px;"
-            "  font-size: 11px; font-weight: 600; padding: 0 6px; }"
+            "  font-size: 11px; font-weight: 600; padding: 0; text-align: center; }"
             "QPushButton:hover { color: #FAFAFA; background-color: #166534;"
             "  border-color: #22C55E; }"
             "QPushButton:checked { background-color: #16A34A; color: #FAFAFA;"
@@ -771,6 +787,12 @@ class MetricsBar(QWidget):
         self._idle_timer_workspace.timeout.connect(
             lambda: self._on_idle_confirmed("workspace")
         )
+        self._idle_timer_workspace_xterm = QTimer(self)
+        self._idle_timer_workspace_xterm.setSingleShot(True)
+        self._idle_timer_workspace_xterm.setInterval(3_000)
+        self._idle_timer_workspace_xterm.timeout.connect(
+            lambda: self._on_idle_confirmed("workspace_xterm")
+        )
 
         # One notify file per channel — eliminates cross-channel race conditions.
         # Files are created here so QFileSystemWatcher can watch them from the start.
@@ -779,6 +801,7 @@ class MetricsBar(QWidget):
         self._notify_files: dict[str, Path] = {
             "interactive": notify_dir / "terminal-notify-interactive.json",
             "workspace":   notify_dir / "terminal-notify-workspace.json",
+            "workspace_xterm": notify_dir / "terminal-notify-workspace-xterm.json",
         }
         for p in self._notify_files.values():
             if not p.exists():
@@ -810,7 +833,11 @@ class MetricsBar(QWidget):
         # external PTY session starts. After the command finishes (notify
         # file → hardening → silence) the lock returns to True and the dot
         # is green again until the next dispatch.
-        self._idle_locked: dict[str, bool] = {"interactive": True, "workspace": True}
+        self._idle_locked: dict[str, bool] = {
+            "interactive": True,
+            "workspace": True,
+            "workspace_xterm": True,
+        }
         # NOTE: the legacy 30s TTL safety net was removed — it conflicted
         # with green-by-default semantics by periodically opening a window
         # in which a stray click could flip the dot yellow. The lock now
@@ -822,13 +849,21 @@ class MetricsBar(QWidget):
         # current epoch is rejected — prevents a delayed notify from command A
         # re-locking the dot while command B is already running. Initialized
         # to 0 so notifies before the first command are still accepted.
-        self._command_epoch: dict[str, float] = {"interactive": 0.0, "workspace": 0.0}
+        self._command_epoch: dict[str, float] = {
+            "interactive": 0.0,
+            "workspace": 0.0,
+            "workspace_xterm": 0.0,
+        }
 
         # External-session fence: True between terminal_session_started and
         # terminal_session_finished. While active, authoritative notifies are
         # ignored — runner-driven sessions own the dot via the legacy
         # heuristic path (terminal_session_finished -> _on_force_idle).
-        self._session_active: dict[str, bool] = {"interactive": False, "workspace": False}
+        self._session_active: dict[str, bool] = {
+            "interactive": False,
+            "workspace": False,
+            "workspace_xterm": False,
+        }
 
         # Hardcap timers are created on-demand by `_arm_hardening` when
         # called with `hardcap_ms`. Skills (notify file path) call without
@@ -887,7 +922,9 @@ class MetricsBar(QWidget):
         self._selected_instance = index
         self._apply_instance_styles()
         self._signal_bus.instance_selected.emit(name)
-        if name == "kimid":
+        if name == "codex":
+            self._signal_bus.run_command_in_workspace_xterm.emit(name)
+        elif name == "kimid":
             self._signal_bus.run_command_in_workspace_terminal.emit(name)
         else:
             self._signal_bus.run_command_in_terminal.emit(name)
@@ -1103,7 +1140,11 @@ class MetricsBar(QWidget):
         # Dot went green. Only proceed once BOTH are idle and we are in 'running'.
         if self._autocast_phase != "running":
             return
-        if self._dot_interactive.is_busy or self._dot_workspace.is_busy:
+        if (
+            self._dot_interactive.is_busy
+            or self._dot_workspace.is_busy
+            or self._dot_workspace_xterm.is_busy
+        ):
             return
         # Debounce a touch so paired green-transitions arriving in the same tick
         # don't double-fire and so any late PTY chunk has a chance to flip yellow.
@@ -1123,10 +1164,15 @@ class MetricsBar(QWidget):
         bus.terminal_force_idle.connect(self._on_force_idle)
         bus.terminal_session_started.connect(self._on_terminal_session_started)
         bus.terminal_session_finished.connect(self._on_terminal_session_finished)
+        bus.terminal_force_failed.connect(self._on_terminal_force_failed)
+        bus.terminal_awaiting_user.connect(self._on_terminal_awaiting_user)
 
         # Autocast — listen to dot busy transitions to drive the loop state machine
         self._dot_interactive.busy_changed.connect(self._on_dot_busy_changed)
         self._dot_workspace.busy_changed.connect(self._on_dot_busy_changed)
+        self._dot_interactive.busy_changed.connect(lambda _c, _b: self._update_overall_listener())
+        self._dot_workspace.busy_changed.connect(lambda _c, _b: self._update_overall_listener())
+        self._dot_workspace_xterm.busy_changed.connect(lambda _c, _b: self._update_overall_listener())
 
         # Autocast/schedule buttons moved to play_bar (TASK-1 AC-1.4): receive
         # toggle/click via signal_bus and proxy to the existing state machine.
@@ -1148,6 +1194,7 @@ class MetricsBar(QWidget):
         # over self after MetricsBar destruction.
         bus.run_command_in_terminal.connect(self._on_command_dispatched_interactive)
         bus.run_command_in_workspace_terminal.connect(self._on_command_dispatched_workspace)
+        bus.run_command_in_workspace_xterm.connect(self._on_command_dispatched_workspace_xterm)
         # Blue-arrow Kimi dispatch uses a different signal (paste + 500ms +
         # Enter), but it IS still a command dispatch from the dot's POV —
         # without listening here the workspace epoch never advances and
@@ -1573,7 +1620,21 @@ class MetricsBar(QWidget):
             )
             if expected is not None and channel != expected:
                 return
-            if data.get("state") == "idle" and channel in ("interactive", "workspace"):
+            state = data.get("state")
+            if state == "failed" and channel in ("interactive", "workspace", "workspace_xterm"):
+                self._on_terminal_force_failed(channel, data.get("reason", "notify"))
+                return
+            if state == "awaiting_user" and channel in ("interactive", "workspace", "workspace_xterm"):
+                self._on_terminal_awaiting_user(channel)
+                return
+            if state == "busy" and channel in ("interactive", "workspace", "workspace_xterm"):
+                self._release_idle_lock(channel)
+                dot = self._dot_for(channel)
+                if dot:
+                    dot.set_state("busy")
+                self._update_overall_listener()
+                return
+            if state == "idle" and channel in ("interactive", "workspace", "workspace_xterm"):
                 # Epoch fence: drop notifies that do not strictly post-date
                 # the latest command dispatched on this channel. Without
                 # this, a delayed notify from command A could re-lock the dot
@@ -1616,7 +1677,7 @@ class MetricsBar(QWidget):
         change or session_finished path), no-op to preserve workspace's
         explicit 5s post-notify contract.
         """
-        if channel != "interactive":
+        if channel not in ("interactive", "workspace_xterm"):
             return
         if self._idle_locked.get(channel):
             return
@@ -1707,6 +1768,7 @@ class MetricsBar(QWidget):
         dot = self._dot_for(channel)
         if dot:
             dot.set_busy(False)
+        self._update_overall_listener()
 
     def _release_idle_lock(self, channel: str) -> None:
         """Release the authoritative idle lock for a channel.
@@ -1755,6 +1817,7 @@ class MetricsBar(QWidget):
         self._release_idle_lock("interactive")
         self._dot_interactive.set_busy(True)
         self._maybe_schedule_helper_auto_idle("interactive", cmd)
+        self._update_overall_listener()
 
     def _on_command_dispatched_workspace(self, cmd: str) -> None:
         """Bound slot — a new workspace command was dispatched."""
@@ -1762,6 +1825,14 @@ class MetricsBar(QWidget):
         self._release_idle_lock("workspace")
         self._dot_workspace.set_busy(True)
         self._maybe_schedule_helper_auto_idle("workspace", cmd)
+        self._update_overall_listener()
+
+    def _on_command_dispatched_workspace_xterm(self, cmd: str) -> None:
+        self._bump_command_epoch("workspace_xterm")
+        self._release_idle_lock("workspace_xterm")
+        self._dot_workspace_xterm.set_busy(True)
+        self._maybe_schedule_helper_auto_idle("workspace_xterm", cmd)
+        self._update_overall_listener()
 
     # Queue helpers — no notify file, just mutate CLI session state or
     # change the bash environment. All these get a deferred hardening
@@ -1769,7 +1840,7 @@ class MetricsBar(QWidget):
     _HELPER_COMMANDS: tuple[str, ...] = (
         "/model", "/effort", "/clear",            # slash-helpers
         "cd",                                      # bash directory change
-        "clauded", "kimid", "clauded2", "kimid2",  # CLI launches
+        "clauded", "kimid", "clauded2", "kimid2", "codex",  # CLI launches
     )
     _HELPER_AUTO_IDLE_MS: int = 1_000
     # Extra delay added to /clear on the workspace channel: Kimi's TUI
@@ -1861,9 +1932,12 @@ class MetricsBar(QWidget):
             dot.set_busy(True)
         if timer and timer.isActive():
             timer.start()  # reset 2s countdown while summary is still printing
+        self._update_overall_listener()
 
     def _on_terminal_session_started(self, channel: str) -> None:
         """External PTY session started — ensure dot is yellow, stop idle timer."""
+        if channel not in self._session_active:
+            return
         self._session_active[channel] = True
         self._release_idle_lock(channel)
         dot = self._dot_for(channel)
@@ -1872,11 +1946,14 @@ class MetricsBar(QWidget):
             timer.stop()
         if dot:
             dot.set_busy(True)
+        self._update_overall_listener()
 
     def _on_terminal_session_finished(self, channel: str) -> None:
         """External PTY session finished — clear the session fence so
         notify-driven hardening can engage on the next legitimate notify.
         """
+        if channel not in self._session_active:
+            return
         self._session_active[channel] = False
 
     def _dot_for(self, channel: str) -> "TerminalStatusDot | None":
@@ -1884,6 +1961,8 @@ class MetricsBar(QWidget):
             return self._dot_interactive
         if channel == "workspace":
             return self._dot_workspace
+        if channel == "workspace_xterm":
+            return self._dot_workspace_xterm
         return None
 
     def _idle_timer_for(self, channel: str) -> "QTimer | None":
@@ -1891,7 +1970,43 @@ class MetricsBar(QWidget):
             return self._idle_timer_interactive
         if channel == "workspace":
             return self._idle_timer_workspace
+        if channel == "workspace_xterm":
+            return self._idle_timer_workspace_xterm
         return None
+
+    def _on_terminal_force_failed(self, channel: str, _reason: str) -> None:
+        dot = self._dot_for(channel)
+        if not dot:
+            return
+        self._release_idle_lock(channel)
+        dot.set_state("failed")
+        self._update_overall_listener()
+        self._signal_bus.autocast_abort_requested.emit("listener-failure", channel)
+
+    def _on_terminal_awaiting_user(self, channel: str) -> None:
+        dot = self._dot_for(channel)
+        if not dot:
+            return
+        self._release_idle_lock(channel)
+        dot.set_state("awaiting_user")
+        self._update_overall_listener()
+
+    def _update_overall_listener(self) -> None:
+        states = [
+            self._dot_interactive.state,
+            self._dot_workspace.state,
+            self._dot_workspace_xterm.state,
+        ]
+        if any(s == "awaiting_user" for s in states):
+            self._dot_general.set_state("awaiting_user")
+            return
+        if any(s == "failed" for s in states):
+            self._dot_general.set_state("failed")
+            return
+        if any(s == "busy" for s in states):
+            self._dot_general.set_state("busy")
+            return
+        self._dot_general.set_state("idle")
 
     # Backward-compat stubs (called by older code, now no-ops)
     def set_progress_text(self, completed: int, total: int) -> None:
@@ -1932,7 +2047,6 @@ class MetricsBar(QWidget):
             if seconds <= 0:
                 return
             self._schedule_end_at = QDateTime.currentDateTime().addSecs(seconds)
-            _write_schedule_state(self._schedule_end_at.toString(Qt.DateFormat.ISODate))
             self._schedule_timer.start()
             self._update_schedule_visual()
             return
@@ -1940,7 +2054,6 @@ class MetricsBar(QWidget):
         # Cancelamento
         self._schedule_timer.stop()
         self._schedule_end_at = None
-        _clear_schedule_state()
         self._reset_schedule_visual_to_idle()
 
     def _on_schedule_tick(self) -> None:
@@ -1968,7 +2081,6 @@ class MetricsBar(QWidget):
         )
 
     def _fire_schedule_autocast(self) -> None:
-        _clear_schedule_state()
         # Ja ligado: ignorar silenciosamente, sem clicar, sem toast, sem tooltip.
         if self._btn_autocast.isChecked():
             self._schedule_end_at = None

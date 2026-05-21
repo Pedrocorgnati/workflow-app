@@ -116,9 +116,23 @@ class OutputPanel(QWidget):
         # real widget geometry. Starting early with fallback cols/rows makes
         # Claude Code (and any TUI) render its banner at the wrong width,
         # which then wraps/duplicates lines forever.
+        # parent=self mete o QObject do shell na ownership tree do panel
+        # (cleanup adicional via shutdown() em aboutToQuit — ver main_window.main()).
         self._shell: PersistentShell | None = None
+        # Per-channel WF_CHANNEL_OVERRIDE binding. Injected at PTY spawn so
+        # every Bash subprocess the embedded CLI starts (Claude in T1, Kimi
+        # in T2) inherits the correct channel. Without this, the bash block
+        # in `## FASE FINAL — Autocast contract` defaults to `interactive`
+        # and the workspace listener never receives the workspace notify
+        # (canonical bug: listener-workspace stuck yellow after a Kimi run).
+        # Bound explicitly for both modes so a stale env from the parent
+        # process can never bleed in. See ai-forge/rules/workflow-app-listeners.md §2.4.
         self._shell = PersistentShell(
-            cols=self._cols, rows=self._rows, cwd=_find_systemforge_root()
+            cols=self._cols,
+            rows=self._rows,
+            cwd=_find_systemforge_root(),
+            extra_env={"WF_CHANNEL_OVERRIDE": "workspace" if workspace_mode else "interactive"},
+            parent=self,
         )
         self._shell.output_received.connect(self._on_chunk)
         self._shell_started: bool = False
@@ -543,8 +557,55 @@ class OutputPanel(QWidget):
             resize(self._cols, self._rows)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.shutdown()
+        super().closeEvent(event)
+
+    def shutdown(self) -> None:
+        """Cleanup garantido do PTY shell + process group.
+
+        Chamado em dois caminhos: (a) closeEvent (quando recebido pelo panel),
+        (b) QApplication.aboutToQuit conectado em main_window.main() — este eh
+        o caminho confiavel para teardown no fechamento do app, ja que widgets
+        filhos nao recebem closeEvent garantido em todos os SOs.
+
+        Mata o process group inteiro (start_new_session=True faz o shell ser
+        lider de sessao). Sem isso, processos filhos do shell (claude, vim, etc)
+        vazariam orfaos.
+
+        Idempotente: re-chamadas saem cedo via `_shell is None`.
+        """
+        import os
+        import signal as _sig
+
         self._render_timer.stop()
         self._resize_timer.stop()
-        if self._shell is not None:
+        if self._shell is None:
+            return
+        proc = getattr(self._shell, "_proc", None)
+        # SIGTERM no process group (cobre filhos do shell).
+        if proc is not None and proc.poll() is None:
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, _sig.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        # Cleanup interno (fecha FD, desliga notifier, terminate o subprocess).
+        try:
             self._shell.terminate()
-        super().closeEvent(event)
+        except Exception:  # noqa: BLE001
+            pass
+        # Fallback: se ainda vivo apos terminate, SIGKILL no grupo + reap final.
+        if proc is not None:
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:  # noqa: BLE001
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, _sig.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:  # noqa: BLE001
+                    pass
+        self._shell = None

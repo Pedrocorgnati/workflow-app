@@ -51,7 +51,7 @@ Makefile                    # Atalhos para comandos comuns
 Variáveis de ambiente aceitas:
 | Variável | Default | Descrição |
 |----------|---------|-----------|
-| `DB_PATH` | `~/.workflow-app/workflow_app.db` | Caminho do banco SQLite |
+| `DB_PATH` | `~/.workflow-app/workflow.db` | Caminho do banco SQLite |
 | `LOG_LEVEL` | `INFO` | Nível de log (DEBUG, INFO, WARNING, ERROR) |
 
 ---

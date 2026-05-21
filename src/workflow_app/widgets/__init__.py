@@ -6,6 +6,10 @@ from workflow_app.widgets.base import (
     StatusBadge,
     TimerWidget,
 )
+from workflow_app.widgets.mcp_prompt_button import (
+    MCPPromptButton,
+    MCPPromptConfigModal,
+)
 from workflow_app.widgets.model_badge import ModelBadge as ModelBadgeLegacy
 from workflow_app.widgets.notification_banner import (
     NotificationBanner,
@@ -24,4 +28,6 @@ __all__ = [
     "NotificationBanner",
     "ToastNotification",
     "ToastManager",
+    "MCPPromptButton",
+    "MCPPromptConfigModal",
 ]

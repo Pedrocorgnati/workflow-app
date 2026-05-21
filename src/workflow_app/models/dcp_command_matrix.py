@@ -45,7 +45,9 @@ __all__ = [
 
 PhaseLiteral = Literal[
     "A-creation",
+    "B-tdd",
     "B-build",
+    "B-dcp",
     "B3-execute",
     "C-linkage",
     "D-f8-micro",
@@ -61,9 +63,9 @@ PhaseLiteral = Literal[
 
 BitLiteral = Literal[0, 1]
 
-ModelLiteral = Literal["opus", "sonnet", "haiku"]
-EffortLiteral = Literal["low", "medium", "high"]
-InteractionLiteral = Literal["interactive", "headless"]
+ModelLiteral = Literal["opus", "sonnet"]
+EffortLiteral = Literal["low", "medium", "high", "max"]
+InteractionLiteral = Literal["interactive", "headless", "manual", "auto", "inter"]
 
 
 _BASE_CONFIG = ConfigDict(
@@ -94,7 +96,12 @@ class CommandRef(BaseModel):
 
     name: str
     phase: PhaseLiteral
+    model: Optional[ModelLiteral] = None
+    effort: Optional[EffortLiteral] = None
+    interaction: Optional[InteractionLiteral] = None
     condition: Optional[str] = None
+    mandatory: bool = False
+    source_ref: Optional[str] = None
 
 
 class FilterTrailEntry(BaseModel):
@@ -114,6 +121,7 @@ TrailGateLiteral = Literal[
     "meta-completeness",
     "directive-injector",
     "replicate",
+    "load-queue",
     "filter-modules",
     "mark-loops",
 ]
@@ -257,7 +265,9 @@ class DcpCommandMatrix(BaseModel):
             )
         canonical_phases = {
             "A-creation",
+            "B-tdd",
             "B-build",
+            "B-dcp",
             "B3-execute",
             "C-linkage",
             "D-f8-micro",

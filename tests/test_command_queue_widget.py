@@ -29,7 +29,7 @@ def specs() -> list[CommandSpec]:
     return [
         CommandSpec("/prd-create", ModelName.OPUS, position=1),
         CommandSpec("/hld-create", ModelName.SONNET, position=2),
-        CommandSpec("/lld-create", ModelName.HAIKU, position=3),
+        CommandSpec("/lld-create", ModelName.SONNET, position=3),
     ]
 
 

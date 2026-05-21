@@ -37,7 +37,7 @@ _F11_SECTION = (
     f"{_BLOCK_SEP}\n[ ]\n/model Sonnet\n/ci-cd-create\n"
     f"{_BLOCK_SEP}\n[ ]\n/model Sonnet\n/pre-deploy-testing\n"
     f"{_BLOCK_SEP}\n[ ]\n/model Sonnet\n/post-deploy-verify\n"
-    f"{_BLOCK_SEP}\n[ ]\n/model Haiku\n/changelog-create\n"
+    f"{_BLOCK_SEP}\n[ ]\n/model Sonnet\n/changelog-create\n"
 )
 
 

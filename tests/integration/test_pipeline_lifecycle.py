@@ -349,7 +349,7 @@ def test_full_lifecycle_readable_via_history_manager(int_session_factory, histor
             pipeline_id=pe.id,
             position=pos,
             command_name=f"/history-cmd-{pos}",
-            model="haiku",
+            model="sonnet",
             status=CommandStatus.CONCLUIDO.value,
             elapsed_seconds=10,
         ))

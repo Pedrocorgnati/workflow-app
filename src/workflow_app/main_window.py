@@ -388,7 +388,7 @@ REGRAS (INVIOLAVEIS)
 
 # Task 8 (workflow-rules — DCP mechanics): guia detalhado das regras que governam
 # SPECIFIC-FLOW.json: como /clear, /model, /effort funcionam, persistencia de estado,
-# quando mudar de modelo (Opus/Sonnet/Haiku) sem resetar desnecessariamente, e padroes
+# quando mudar de modelo (Opus/Sonnet) sem resetar desnecessariamente, e padroes
 # de grupos de comandos. Tratado como literal — nao parsear, nao interpolar.
 WORKFLOW_RULES_PROMPT = """\
 🎯 REGRAS PADRÃO DE SPECIFIC-FLOW.json — Sistema de Diretivas DCP
@@ -405,7 +405,7 @@ FUNDAÇÃO: TRINITY OF DIRECTIVES
 Todo SPECIFIC-FLOW.json é construído sobre 3 directives especiais que nao sao
 comandos reais, mas SIM CONFIGURADORES DE ESTADO:
 
-1. **/model {opus|sonnet|haiku}**
+1. **/model {opus|sonnet}**
    - Define qual Claude vai executar o PROXIMO comando
    - PERSISTE para comandos seguintes até novo /model encontrado
    - Influencia: tempo de execucao, custo, qualidade de reasoning
@@ -489,17 +489,8 @@ QUANDO CADA MODELO?
   effort: medium (padroes conhecidos, nao precisa raciocinio pesado)
   Custo: ~1x (baseline)
 
-### Haiku (tarefas triviais, determinísticas)
-  Uso: RARAMENTE — so para operacoes 100% determinísticas
-  Exemplos:
-    - /github-linking (validar URLs, sem logica)
-    - /documentation-update (refactor mecanico)
-  effort: low
-  Custo: ~0.1x (muito barato)
-
 ⚠️ HEURISTICAS:
-- Nunca use Haiku para decisoes (pode falhar em ambiguidade)
-- Sonnet e suficiente para 90% dos casos
+- Sonnet e suficiente para 90% dos casos (inclusive operacoes mecanicas e determinísticas)
 - Opus APENAS quando reasoning/creativity sao critticos
 - Quando em duvida: use Sonnet + effort=medium
 
@@ -616,7 +607,7 @@ ATRIBUTOS OBRIGATÓRIOS EM CADA STEP
 ```json
 {
   "name": "{string, slash-command com args}",
-  "model": "{opus|sonnet|haiku|none}",          // OBRIGATORIO
+  "model": "{opus|sonnet|none}",                // OBRIGATORIO
   "effort": "{low|medium|high|none}",           // OBRIGATORIO
   "interaction": "auto",                        // Sempre "auto" (nao modificar)
   "phase": "{FASE_X_NAME}",                     // Sempre especificar
@@ -666,8 +657,7 @@ REFERÊNCIA RÁPIDA: MODELS E EFFORTS
 | Model | Quando | Custo | Effort | Quando |
 |-------|--------|-------|--------|--------|
 | opus | Reasoning complexo, criacao, design | ~3x | high | Decisões críticas |
-| sonnet | Default, implementacao, build | ~1x | medium | Maioria dos casos |
-| haiku | Trivial, determinístico | ~0.1x | low | Operacoes mecanicas |
+| sonnet | Default, implementacao, build, operacoes mecanicas | ~1x | medium | Maioria dos casos |
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -785,6 +775,7 @@ class ProgressSection(QWidget):
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
         self.setMinimumHeight(108)
+        self.setMinimumWidth(224)   # 2×92 + margins(8+8) + spacing(8) + border(1+1)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
@@ -803,9 +794,8 @@ class DualStatusSection(QWidget):
     Refactor 2026-05-18: substitui PowerBiSection unificado.
     """
 
-    # Ponto de quebra: soma dos minimos preferidos das duas secoes (cada uma ~190px)
-    # + spacing (8) = 388 ~ arredondado para 380.
-    _BREAKPOINT_WIDTH = 380
+    # Ponto de quebra: soma dos min-w das duas secoes (224 cada) + spacing (8) = 456.
+    _BREAKPOINT_WIDTH = 456
 
     def __init__(self, *, progress_section, listeners_frame, parent=None) -> None:
         super().__init__(parent)
@@ -1002,20 +992,28 @@ class MainWindow(QMainWindow):
         # output-toolbar-left (CommandQueue header_widget) agora ocupa toda
         # a largura disponivel a esquerda — output-toolbar-center deletada.
         _toolbar_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
-        # Coluna progress-boxes (entre output-toolbar-left e output-toolbar-queue-toggles):
+        # Coluna MCP (2026-05-19): entre output-toolbar-left e output-toolbar-progress-boxes.
+        # 3 linhas: mcp-codex/mcp-kimi/double-mcp (orange),
+        #           kimi-claude/kimi-codex/kimi-dual (blue),
+        #           skill-claude/skill-kimi/skill-dual (purple).
+        _mcp_column = self._build_mcp_column(self._mcp_column_btns)
+        _toolbar_row_layout.addWidget(_mcp_column)                                   # mcp
+        # Coluna progress-boxes (entre output-toolbar-mcp e output-toolbar-queue-toggles):
         # 5 botoes coloridos com checkbox-label que apenas alternam a cor do botao
         # para cinza (estado "checado") sem efeitos colaterais.
         _progress_boxes_column = self._build_progress_boxes_column()
         _toolbar_row_layout.addWidget(_progress_boxes_column)                        # progress-boxes
-        # Nova coluna irma a esquerda de test-mode: aloja terminal-engine-toggle
-        # (topo) + queue-count-toggles-row (abaixo). Reparenteia _engine_toggle_btn
-        # de _build_workspace_label_bar e _queue_count_toggles_row de
-        # metrics_bar (criado orfao, sem parent intermediario).
+        # Ultima coluna empilhada (2026-05-19): test-mode em cima, queue-toggles
+        # embaixo. queue-toggles agora dispoe seus 2 botoes em row.
         _queue_toggles_column = self._build_queue_toggles_column()
-        _toolbar_row_layout.addWidget(_queue_toggles_column)                         # queue-toggles
-        # Task 3 (loop 05-13-workflow-app-layout-2): 4o sibling com width=conteudo (stretch=0)
         _test_mode_column = self._build_test_mode_column()
-        _toolbar_row_layout.addWidget(_test_mode_column)                             # test-mode
+        _last_column = QWidget()
+        _last_column_layout = QVBoxLayout(_last_column)
+        _last_column_layout.setContentsMargins(0, 0, 0, 0)
+        _last_column_layout.setSpacing(6)
+        _last_column_layout.addWidget(_test_mode_column)
+        _last_column_layout.addWidget(_queue_toggles_column)
+        _toolbar_row_layout.addWidget(_last_column)                                  # test-mode + queue-toggles
         output_layout.addWidget(_toolbar_row)
 
         # Ordem final de main-command-queue (refactor 2026-05-18):
@@ -1066,9 +1064,14 @@ class MainWindow(QMainWindow):
         workspace_layout.setContentsMargins(0, 0, 0, 0)
         workspace_layout.setSpacing(0)
         workspace_layout.addWidget(self._build_workspace_label_bar())
+        # Inner splitter perpendicular ao outer (_terminal_splitter). Default
+        # outer = Horizontal (T1 left, T2 right) -> inner = Vertical (T2 pyte
+        # acima do T3 xterm quando expandido). _apply_workspace_inner_orientation
+        # mantem a invariante ao alternar layout.
         self._workspace_terminal_splitter = QSplitter(Qt.Vertical, parent=self._workspace_wrapper)
         self._workspace_terminal_splitter.setProperty("testid", "terminal-workspace-splitter")
 
+        # Child 0 = pyte (T2, colapsavel). Child 1 = xterm (T3, sempre visivel).
         self._workspace_panel = OutputPanel(parent=self._workspace_terminal_splitter, workspace_mode=True)
         self._workspace_panel.setProperty("testid", "terminal-workspace")
         self._workspace_panel.setProperty("data-engine", "pyte")
@@ -1081,7 +1084,15 @@ class MainWindow(QMainWindow):
             self._workspace_panel_xterm.setProperty("testid", "terminal-workspace")
             self._workspace_panel_xterm.setProperty("data-engine", "xterm")
             self._workspace_terminal_splitter.addWidget(self._workspace_panel_xterm)
+            # Estado inicial fixo: T3 colapsado, T2 (pyte) ocupa 100%
+            # (sem memoria entre sessoes). child 0 = T2, child 1 = T3.
+            self._t3_visible = False
             self._workspace_terminal_splitter.setSizes([1, 0])
+        else:
+            # Sem xterm, apenas pyte (T2) existe. T3 toggle nao opera.
+            self._t3_visible = False
+            self._workspace_terminal_splitter.setSizes([1, 0])
+        self._update_t3_arrow_icon()
 
         workspace_layout.addWidget(self._workspace_terminal_splitter, stretch=1)
         workspace_layout.addWidget(
@@ -1233,8 +1244,9 @@ class MainWindow(QMainWindow):
         self._chk_route_t1.setProperty("testid", "terminal-route-t1")
         self._chk_route_t1.setChecked(True)
         self._chk_route_t1.setToolTip(
-            "T1: publicar em terminal-interactive-output.\n"
-            "T1+T2 publica em ambos. Nenhum = no-op silencioso."
+            "T1: publicar em terminal-interactive (pyte).\n"
+            "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
+            "Nenhum = no-op silencioso."
         )
         self._chk_route_t1.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
@@ -1242,10 +1254,29 @@ class MainWindow(QMainWindow):
         self._chk_route_t2.setProperty("testid", "terminal-route-t2")
         self._chk_route_t2.setChecked(False)
         self._chk_route_t2.setToolTip(
-            "T2: publicar em terminal-workspace-output.\n"
-            "T1+T2 publica em ambos. Nenhum = no-op silencioso."
+            "T2: publicar em terminal-workspace pyte (colapsavel via arrow).\n"
+            "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
+            "Nenhum = no-op silencioso."
         )
         self._chk_route_t2.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
+
+        # 2026-05-19+: T3 = xterm do workspace (semantica invertida).
+        # Por default desligado — o operador expande o T2 pelo arrow no
+        # label bar do terminal-workspace-splitter e ativa o route quando
+        # quiser scriptar diretamente naquele painel.
+        self._chk_route_t3 = QCheckBox("T3")
+        self._chk_route_t3.setProperty("testid", "terminal-route-t3")
+        self._chk_route_t3.setChecked(False)
+        self._chk_route_t3.setEnabled(XTERM_AVAILABLE)
+        self._chk_route_t3.setToolTip(
+            "T3: publicar em terminal-workspace xterm (sempre visivel).\n"
+            "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
+            "Nenhum = no-op silencioso."
+            if XTERM_AVAILABLE else
+            "T3 indisponivel: engine xterm ausente. "
+            "Instale: pip install workflow-app[xterm]"
+        )
+        self._chk_route_t3.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
         _terminal_route_box = QWidget()
         _terminal_route_box.setProperty("testid", "terminal-route-toggles")
@@ -1259,6 +1290,7 @@ class MainWindow(QMainWindow):
         _trbl.setSpacing(8)
         _trbl.addWidget(self._chk_route_t1)
         _trbl.addWidget(self._chk_route_t2)
+        _trbl.addWidget(self._chk_route_t3)
 
         _MCP_TEST_PROMPT = (
             "/skill:mcp-codex ping test — verificar se MCP Codex esta ativo. "
@@ -1378,18 +1410,26 @@ class MainWindow(QMainWindow):
         _saved_base = _pset.value("prompts_row/base_prompt")
         self._prompt_base: str = _saved_base if isinstance(_saved_base, str) else _DEFAULT_BASE_PROMPT
 
-        gear_btn = QPushButton("⚙")
+        gear_btn = QPushButton("")
         gear_btn.setProperty("testid", "toolbar-prompts-config-gear")
         gear_btn.setFixedSize(32, 32)
         gear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         gear_btn.setToolTip("Configurar prompts da sub-aba (label, path, prompt base)")
         gear_btn.setStyleSheet(
-            "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
-            "  border: 1px solid #52525B; border-radius: 5px;"
-            "  font-size: 16px; padding: 0; }"
+            "QPushButton { background-color: #3F3F46;"
+            "  border: 1px solid #52525B; border-radius: 5px; padding: 0; }"
             "QPushButton:hover { background-color: #52525B; border-color: #71717A; }"
-            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
+            "QPushButton:pressed { background-color: #FBBF24; }"
+            "QPushButton:pressed QLabel { color: #18181B; }"
         )
+        _gear_lbl = QLabel("⚙", gear_btn)
+        _gear_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _gear_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _gear_lbl.setStyleSheet("color: #FAFAFA; font-size: 16px; background: transparent; border: none;")
+        _gear_layout = QHBoxLayout(gear_btn)
+        _gear_layout.setContentsMargins(0, 0, 0, 0)
+        _gear_layout.setSpacing(0)
+        _gear_layout.addWidget(_gear_lbl, 0, Qt.AlignmentFlag.AlignCenter)
         gear_btn.clicked.connect(self._open_prompts_config_dialog)
 
         # Watcher para auto-detectar novos .md criados em prompts-subtab
@@ -1409,7 +1449,7 @@ class MainWindow(QMainWindow):
         _TOGGLE_BTN_STYLE = (
             "QPushButton { background-color: #27272A; color: #D4D4D8;"
             "  border: 1px solid #52525B; border-radius: 4px;"
-            "  font-size: 15px; padding: 2px 0; }"
+            "  font-size: 15px; padding: 0; text-align: center; }"
             "QPushButton:hover { background-color: #3F3F46; color: #FAFAFA;"
             "  border-color: #71717A; }"
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
@@ -1432,7 +1472,7 @@ class MainWindow(QMainWindow):
         self._layout_toggle_btn = QPushButton()
         self._layout_toggle_btn.setProperty("testid", "terminal-layout-toggle")
         self._layout_toggle_btn.setToolTip("Layout: lado a lado. Clique para empilhar")
-        self._layout_toggle_btn.setFixedSize(68, 32)
+        self._layout_toggle_btn.setFixedSize(56, 32)
         self._layout_toggle_btn.setIconSize(_QSize(20, 20))
         # Estado inicial: lado a lado -> clique vai empilhar -> mostra icone "stacked".
         self._layout_toggle_btn.setIcon(self._layout_icon_stacked)
@@ -1446,12 +1486,12 @@ class MainWindow(QMainWindow):
         self._collapse_chevron = QPushButton("\u25BA")
         self._collapse_chevron.setProperty("testid", "terminal-workspace-collapse")
         self._collapse_chevron.setToolTip("Colapsar terminal Workspace")
-        self._collapse_chevron.setFixedSize(68, 32)
+        self._collapse_chevron.setFixedSize(56, 32)
         self._collapse_chevron.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_chevron.setStyleSheet(
             "QPushButton { background-color: #27272A; color: #FFFFFF;"
             "  border: 1px solid #52525B; border-radius: 4px;"
-            "  font-size: 15px; padding: 2px 0; }"
+            "  font-size: 15px; padding: 0; text-align: center; }"
             "QPushButton:hover { background-color: #3F3F46; color: #FFFFFF;"
             "  border-color: #71717A; }"
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
@@ -1462,26 +1502,9 @@ class MainWindow(QMainWindow):
             self._collapse_chevron
         )
 
-        # Task 012 (loop 05-14-workflow-app-terminal-fix-plan, PR2):
-        # toggle ciclico [1-pyte][2-xterm][split] ajusta _workspace_terminal_splitter.setSizes.
-        # Reusa _TOGGLE_BTN_STYLE definido acima; reparenteado para
-        # _queue_count_toggles_layout (mesmo padrao de _layout_toggle_btn e
-        # _collapse_chevron). Desabilitado quando PySide6-WebEngine ausente.
-        self._engine_toggle_btn = QPushButton("1-pyte")
-        self._engine_toggle_btn.setProperty("testid", "terminal-engine-toggle")
-        self._engine_toggle_btn.setFixedSize(68, 32)
-        self._engine_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._engine_toggle_btn.setToolTip(
-            "Alterna foco do terminal. Click 1: pyte 100%. "
-            "Click 2: xterm 100%. Click 3: 50/50."
-            if XTERM_AVAILABLE else
-            "Engine xterm indisponivel. "
-            "Instale: pip install workflow-app[xterm]"
-        )
-        self._engine_toggle_btn.setEnabled(XTERM_AVAILABLE)
-        self._engine_toggle_btn.clicked.connect(self._on_engine_toggle_clicked)
-        self._engine_toggle_state = 0
-        self._update_engine_toggle_style()
+        # 2026-05-19: engine-toggle ("1-pyte") removido. O pyte vira T3
+        # (terminal colapsavel) controlado pelo arrow em terminal-workspace-splitter
+        # label bar; xterm permanece como T2 sempre visivel.
         # Task 3 (loop 05-13-workflow-app-layout-2): _btn_datatest movido para a nova
         # coluna `output-toolbar-test-mode` (4o sibling de _toolbar_row).
 
@@ -1495,15 +1518,18 @@ class MainWindow(QMainWindow):
 
         # paths & IDs: JSON, WS, Workflow App + 6 campos basic_flow
         _paths_btns = [action_widgets[0], action_widgets[1], workflow_app_widgets[0]] + paths_extras
-        # cmd & mcp: mcp-codex, mcp-kimi, double-mcp, asq-user
-        _mcps_btns = action_widgets[2:]
+        # MCP column (output-toolbar-mcp): 9 botoes (3 orange + 3 blue + 3 purple).
+        # Consumido por _setup_ui via self._mcp_column_btns. Sub-aba
+        # `queue-subtab-insertions-mcps` foi deletada em 2026-05-19.
+        self._mcp_column_btns = action_widgets[2:11]
         # rules: dcp+cmd+terminal+listeners+indicators+add-rules
         _rules_btns = workflow_app_widgets[1:]
-        # prompts: construídos a partir dos entries .md
-        _prompts_btns = self._populate_header_prompts_subtab()
+        # prompts: asq-user (migrado da ex-subtab mcps) + entries .md
+        _prompts_btns = [action_widgets[11]] + self._populate_header_prompts_subtab()
 
-        self._command_queue.populate_paths_subtab(_paths_btns)
-        self._command_queue.populate_mcps_subtab(_mcps_btns)
+        # Linha de baixo da sub-aba paths & IDs: botao 'repo rules'.
+        _paths_row2_btns = [self._build_repo_rules_button()]
+        self._command_queue.populate_paths_subtab(_paths_btns, _paths_row2_btns)
         self._command_queue.populate_prompts_subtab(_prompts_btns)
         self._command_queue.populate_rules_subtab(_rules_btns)
         self._command_queue.attach_tab_bar_extras(_terminal_route_box, gear_btn)
@@ -1515,6 +1541,318 @@ class MainWindow(QMainWindow):
         self._command_queue.install_template_tracker()
 
         return bar, left_top
+
+    # Aba `brainstorm`: grade 3x3. Colunas = cor (laranja / azul / roxo),
+    # linhas = label. Cada botao publica "<label> <path-do-md>" no terminal.
+    _BRAINSTORM_COL_STYLES = (
+        # (bg, hover, color_slug) — coluna 1 laranja, 2 azul, 3 roxo
+        ("#EA580C", "#C2410C", "orange"),
+        ("#2563EB", "#1D4ED8", "blue"),
+        ("#7C3AED", "#6D28D9", "purple"),
+    )
+    _BRAINSTORM_ROW_LABELS = ("study", "controversial", "hardening")
+    # Mapeia o label da linha -> (persona, nome do arquivo de regras).
+    # O nome resolve para um path absoluto via `_agents_prompt_dir()` — os
+    # prompts vivem sempre em `ai-forge/custom-prompts/agents/`, raiz fixa.
+    _BRAINSTORM_AGENTS = {
+        "study": (
+            "pesquisador profissional",
+            "study-researcher-rules.md",
+        ),
+        "controversial": (
+            "critico controversial / advogado do diabo",
+            "controversial-devils-advocate-rules.md",
+        ),
+        "hardening": (
+            "engenheiro de hardening",
+            "hardening-engineer-rules.md",
+        ),
+    }
+
+    # Path canonico dos prompts de agente, relativo a raiz do SystemForge.
+    # O terminal roda sempre nessa raiz, entao este path resolve direto la.
+    _AGENTS_PROMPT_RELDIR = "ai-forge/custom-prompts/agents"
+
+    @staticmethod
+    def _systemforge_root() -> Path:
+        """Raiz do repositorio SystemForge — cwd canonico do terminal.
+
+        Este modulo vive sempre em
+        `ai-forge/workflow-app/src/workflow_app/main_window.py`, logo
+        `parents[4]` aponta deterministicamente para a raiz do repo.
+        """
+        return Path(__file__).resolve().parents[4]
+
+    def _agents_prompt_dir(self) -> Path:
+        """Diretorio absoluto dos prompts de agente — so para checar existencia."""
+        return self._systemforge_root() / self._AGENTS_PROMPT_RELDIR
+
+    def _rel_to_root(self, abs_path: str) -> str:
+        """Converte um path absoluto para relativo a raiz do SystemForge.
+
+        Arquivo fora do repo: devolve o path absoluto inalterado — o terminal
+        na raiz ainda resolve um path absoluto (Zero Estados Indefinidos).
+        """
+        try:
+            return str(
+                Path(abs_path).resolve().relative_to(self._systemforge_root())
+            )
+        except ValueError:
+            return abs_path
+
+    def _build_mcp_column(self, mcp_btns: list[QPushButton]) -> QWidget:
+        """Coluna entre output-toolbar-left e output-toolbar-progress-boxes.
+
+        2 tabs + stacked pages:
+        - Tab `MCPs`:      9 botoes MCP em 3 linhas (linha 1 laranja `/skill:mcp-*`,
+          linha 2 azul `/skill:*` Kimi-side, linha 3 roxa `Use skill-* ...` Codex-side).
+        - Tab `brainstorm`: picker de .md + grade 3x3 de botoes que publicam
+          "<label> <path-do-md>" no terminal roteado (T1/T2/T3).
+
+        `mcp_btns` na ordem fixa retornada por `_populate_header_actions`:
+        [mcp-codex, mcp-kimi, double-mcp, kimi-claude, kimi-codex, kimi-dual,
+         skill-claude, skill-kimi, skill-dual].
+        """
+        if len(mcp_btns) != 9:
+            raise ValueError(
+                f"_build_mcp_column espera exatamente 9 botoes MCP, "
+                f"recebeu {len(mcp_btns)}. Verifique _populate_header_actions."
+            )
+        from PySide6.QtWidgets import (
+            QFileDialog,
+            QGridLayout,
+            QHBoxLayout,
+            QStackedWidget,
+            QVBoxLayout,
+        )
+
+        column = QWidget()
+        column.setObjectName("OutputToolbarMcp")
+        column.setProperty("testid", "output-toolbar-mcp")
+        column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        column.setStyleSheet(
+            "QWidget#OutputToolbarMcp { background-color: #1C1C1F;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        col_layout = QVBoxLayout(column)
+        col_layout.setContentsMargins(8, 6, 8, 6)
+        col_layout.setSpacing(4)
+
+        # Tab bar com 2 tabs: MCPs / brainstorm
+        tab_bar = QWidget()
+        tab_bar.setProperty("testid", "output-progress-tabbar")
+        tab_bar_layout = QHBoxLayout(tab_bar)
+        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
+        tab_bar_layout.setSpacing(3)
+
+        self._mcp_tab_buttons: list[QPushButton] = []
+        for label, slug in (("MCPs", "mcps"), ("brainstorm", "brainstorm")):
+            btn = QPushButton(label)
+            btn.setFixedHeight(22)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setProperty("testid", f"output-mcp-tab-{slug}")
+            tab_bar_layout.addWidget(btn, stretch=1)
+            self._mcp_tab_buttons.append(btn)
+
+        col_layout.addWidget(tab_bar)
+
+        def _row(btns: list[QPushButton]) -> QWidget:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            for b in btns:
+                row.addWidget(b)
+            return row_widget
+
+        # Page 0 — MCPs: 9 botoes em 3 linhas (linha 1 laranja, linha 2 azul, linha 3 roxa).
+        mcps_page = QWidget()
+        mcps_layout = QVBoxLayout(mcps_page)
+        mcps_layout.setContentsMargins(0, 0, 0, 0)
+        mcps_layout.setSpacing(4)
+        mcps_layout.addWidget(_row(mcp_btns[:3]))   # linha 1: laranja (Claude-side)
+        mcps_layout.addWidget(_row(mcp_btns[3:6]))  # linha 2: azul (Kimi-side)
+        mcps_layout.addWidget(_row(mcp_btns[6:9]))  # linha 3: roxo (Codex-side)
+
+        # Page 1 — brainstorm: picker .md + grade 3x3.
+        brainstorm_page = self._build_brainstorm_page(QFileDialog, QGridLayout)
+
+        stack = QStackedWidget()
+        stack.addWidget(mcps_page)       # page 0
+        stack.addWidget(brainstorm_page) # page 1
+        col_layout.addWidget(stack, stretch=1)
+
+        # Conectar tabs ao stack
+        def _switch_mcp_tab(idx: int) -> None:
+            stack.setCurrentIndex(idx)
+            for i, b in enumerate(self._mcp_tab_buttons):
+                b.setStyleSheet(
+                    self._PROGRESS_TAB_ACTIVE_STYLE if i == idx else self._PROGRESS_TAB_INACTIVE_STYLE
+                )
+
+        for i, btn in enumerate(self._mcp_tab_buttons):
+            btn.clicked.connect(lambda _ch=False, idx=i: _switch_mcp_tab(idx))
+
+        _switch_mcp_tab(0)
+
+        return column
+
+    def _build_brainstorm_page(self, q_file_dialog, q_grid_layout) -> QWidget:
+        """Page da aba `brainstorm` da coluna MCP.
+
+        Topo: botao picker de .md (abre QFileDialog, igual metrics-project-pill).
+        O caminho selecionado fica em `self._brainstorm_md_path` e o proprio
+        botao passa a exibir o nome do arquivo.
+
+        Abaixo: grade 3x3 — 3 linhas (`study` / `controversial` / `hardening`),
+        3 colunas (laranja / azul / roxo). Cada botao publica
+        "<label> <path-do-md>" no terminal roteado via `_publish_to_terminal`.
+        """
+        from PySide6.QtWidgets import QPushButton, QVBoxLayout
+
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(4)
+
+        # Picker de .md — guarda o path para os 9 botoes da grade.
+        self._brainstorm_md_path: str | None = None
+        md_btn = QPushButton("Selecionar .md")
+        md_btn.setProperty("testid", "brainstorm-md-picker")
+        md_btn.setFixedHeight(24)
+        md_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        md_btn.setToolTip(
+            "Abrir e selecionar um arquivo .md para os botoes de brainstorm"
+        )
+        md_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #FBBF24;"
+            "  border: 1px solid #FBBF24; border-radius: 5px;"
+            "  font-size: 11px; font-weight: 600; padding: 0 10px; }"
+            "QPushButton:hover { background: rgba(251, 191, 36, 0.12); }"
+        )
+        self._brainstorm_md_btn = md_btn
+
+        def _pick_md(_checked: bool = False) -> None:
+            path, _ = q_file_dialog.getOpenFileName(
+                self, "Selecionar arquivo .md", str(Path.cwd()),
+                "Markdown (*.md);;All Files (*)",
+            )
+            if not path:
+                return
+            self._brainstorm_md_path = path
+            md_btn.setText(Path(path).name)
+            md_btn.setToolTip(path)
+
+        md_btn.clicked.connect(_pick_md)
+        page_layout.addWidget(md_btn)
+
+        # Grade 3x3 — linhas = label, colunas = cor.
+        grid_widget = QWidget()
+        grid = q_grid_layout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+
+        self._brainstorm_btns: list[QPushButton] = []
+        for r, label in enumerate(self._BRAINSTORM_ROW_LABELS):
+            for c, (bg, hover, color_slug) in enumerate(self._BRAINSTORM_COL_STYLES):
+                b = QPushButton(label)
+                b.setProperty("testid", f"brainstorm-btn-{label}-{color_slug}")
+                b.setFixedHeight(22)
+                b.setMinimumWidth(60)
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
+                b.setStyleSheet(
+                    f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                    "  border: none; border-radius: 5px;"
+                    "  font-size: 10px; font-weight: 700; padding: 0 6px; }}"
+                    f"QPushButton:hover {{ background-color: {hover}; }}"
+                    f"QPushButton:pressed {{ background-color: {hover}; }}"
+                )
+                b.clicked.connect(
+                    lambda _c=False, lbl=label, cs=color_slug:
+                        self._on_brainstorm_btn_clicked(lbl, cs)
+                )
+                grid.addWidget(b, r, c)
+                self._brainstorm_btns.append(b)
+
+        page_layout.addWidget(grid_widget)
+        page_layout.addStretch(1)
+        return page
+
+    def _on_brainstorm_btn_clicked(self, label: str, color_slug: str) -> None:
+        """Publica o prompt do agente no terminal fixo pela cor do botao.
+
+        A mensagem publicada referencia DOIS arquivos:
+        - o .md anexado via picker (`self._brainstorm_md_path`);
+        - o arquivo de regras do agente em `ai-forge/custom-prompts/agents/`,
+          escolhido pelo label da linha (`_BRAINSTORM_AGENTS`).
+
+        Roteamento por cor (ignora os checkboxes T1/T2/T3):
+        - laranja (orange) -> Terminal 1 (interativo)
+        - azul   (blue)    -> Terminal 2 (workspace pyte)
+        - roxo   (purple)  -> Terminal 3 (workspace xterm)
+
+        Zero Silencio: sem .md selecionado, emite toast warning ao inves de
+        publicar uma mensagem incompleta.
+        """
+        md_path = (self._brainstorm_md_path or "").strip()
+        if not md_path:
+            signal_bus.toast_requested.emit(
+                "Nenhum arquivo .md selecionado. Clique em 'Selecionar .md' primeiro.",
+                "warning",
+            )
+            return
+        persona, rules_file = self._BRAINSTORM_AGENTS.get(
+            label, ("profissional", ""),
+        )
+        # Zero Silencio: nao publica path quebrado se o arquivo de regras
+        # tiver sido movido/renomeado.
+        if rules_file and not (self._agents_prompt_dir() / rules_file).is_file():
+            signal_bus.toast_requested.emit(
+                f"Arquivo de regras nao encontrado: "
+                f"{self._AGENTS_PROMPT_RELDIR}/{rules_file}",
+                "warning",
+            )
+            return
+        rules_path = (
+            f"{self._AGENTS_PROMPT_RELDIR}/{rules_file}" if rules_file else ""
+        )
+        # Tudo relativo a raiz do SystemForge (cwd do terminal).
+        md_ref = self._rel_to_root(md_path)
+        msg = (
+            f"Analise este {md_ref} como se voce fosse um {persona} "
+            f"seguindo estas regras {rules_path}, faca uma analise muito "
+            "bem feita e edite este mesmo arquivo."
+        )
+        terminal = {"orange": 1, "blue": 2, "purple": 3}.get(color_slug, 1)
+        self._publish_to_specific_terminal(msg, terminal)
+
+    def _publish_to_specific_terminal(self, text: str, terminal: int) -> None:
+        """Publica `text` num terminal especifico (1/2/3), ignorando T1/T2/T3.
+
+        Espelha o mapping de `_publish_to_terminal` sem consultar os
+        checkboxes `terminal-route-toggles`:
+        - 1 -> terminal-interactive (pyte) via paste_text_in_terminal.
+        - 2 -> terminal-workspace pyte via paste_text_in_workspace_terminal.
+        - 3 -> terminal-workspace xterm via _xterm_inject_text
+               (no-op silencioso se XTERM_AVAILABLE=False).
+        """
+        if terminal == 1:
+            signal_bus.paste_text_in_terminal.emit(text)
+            signal_bus.focus_interactive_terminal.emit()
+        elif terminal == 2:
+            signal_bus.paste_text_in_workspace_terminal.emit(text)
+            try:
+                self._workspace_panel._terminal.setFocus()
+            except AttributeError:
+                pass
+        elif terminal == 3:
+            self._xterm_inject_text(text, with_enter=False)
+            if hasattr(self, "_workspace_panel_xterm"):
+                try:
+                    self._workspace_panel_xterm._terminal.setFocus()
+                except AttributeError:
+                    pass
 
     # Task 3 (loop 05-13-workflow-app-layout-2): nova coluna test-mode com toggle radio-like.
     _TEST_MODE_BTN_STYLE = (
@@ -1546,17 +1884,30 @@ class MainWindow(QMainWindow):
     )
 
     def _build_test_mode_column(self) -> QWidget:
-        """4a div irma de _toolbar_row com 3 botoes test-mode (DataTest/BodyTest/BtnTest).
+        """4a div irma de _toolbar_row com 4 botoes test-mode em grid 2x2.
 
-        Comportamento radio-like via QButtonGroup.ExclusionPolicy.ExclusiveOptional:
-        zero ou um botao checado. Click no checado desliga (-> modo "off"). Click em
-        outro reseta o anterior automaticamente (Qt). Estado inicial: nenhum checado
-        (preserva default original do `_btn_datatest`).
+        Layout:
+            +-------+-------+
+            |  All  |  Key  |
+            +-------+-------+
+            | Body  |  Btn  |
+            +-------+-------+
+
+        Modos (radio-like, no maximo 1 ativo):
+        - All: renderiza TODOS os testids (sem filtro).
+        - Key: subset curado (`_DATATEST_FILTERED_IDS`) com os IDs principais.
+        - Body: todos EXCETO QAbstractButton.
+        - Btn:  APENAS QAbstractButton.
+
+        Re-click no botao ativo desliga (-> "off"). Click em outro reseta o
+        anterior. Estado inicial: nenhum checado.
         """
         from PySide6.QtWidgets import (
             QButtonGroup,
+            QCheckBox,
+            QGridLayout,
             QHBoxLayout,  # noqa: F401 — referenced only in _build_output_toolbar
-            QVBoxLayout,
+            QPushButton,
         )
 
         column = QWidget()
@@ -1567,49 +1918,73 @@ class MainWindow(QMainWindow):
             "QWidget#OutputToolbarTestMode { background-color: #1C1C1F;"
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
-        col_layout = QVBoxLayout(column)
-        col_layout.setContentsMargins(6, 16, 6, 6)
-        col_layout.setSpacing(6)
+        col_layout = QGridLayout(column)
+        col_layout.setContentsMargins(6, 6, 6, 6)
+        col_layout.setHorizontalSpacing(6)
+        col_layout.setVerticalSpacing(6)
 
-        # DataTest: reusa o botao ja criado pelo MetricsBar. Reparent automatico
-        # ao adicionar em outro layout.
-        btn_data = self._metrics_bar._btn_datatest
-        # BodyTest e BtnTest: mesmo perfil do DataTest (size, checkable); cores distintas.
-        from PySide6.QtWidgets import QPushButton
+        # All: checkbox para renderizar 100% dos testids (sem filtro).
+        chk_all = QCheckBox("")
+        _test_mode_btn_w = 56
+        _test_mode_btn_h = 32
+        chk_all.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
+        chk_all.setToolTip("Exibir TODOS os data-testid (sem filtro)")
+        chk_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        chk_all.setStyleSheet(
+            "QCheckBox { color: #A1A1AA; font-size: 11px; font-weight: 700;"
+            "  background: transparent; border: 1px solid #52525B; border-radius: 6px;"
+            "  padding: 0; spacing: 0; }"
+            "QCheckBox:hover { color: #FAFAFA; background-color: #3F3F46;"
+            "  border-color: #71717A; }"
+            "QCheckBox::indicator { width: 10px; height: 10px;"
+            "  border: 1px solid #71717A; border-radius: 2px; background-color: transparent;"
+            "  subcontrol-position: center; }"
+            "QCheckBox::indicator:checked { background-color: #DC2626; border-color: #DC2626; }"
+            "QCheckBox:checked { background-color: #DC2626; color: #FAFAFA;"
+            "  border-color: #DC2626; }"
+        )
 
-        btn_body = QPushButton("BodyTest")
-        btn_body.setFixedSize(68, 32)
+        # Key: reusa o botao ja criado pelo MetricsBar (var `_btn_datatest`).
+        # Texto/tooltip ja atualizados no MetricsBar; reparent automatico ao
+        # adicionar em outro layout.
+        btn_key = self._metrics_bar._btn_datatest
+
+        # Body e Btn: mesmo perfil; cores distintas.
+        btn_body = QPushButton("Body")
+        btn_key.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
+        btn_body.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
         btn_body.setCheckable(True)
         btn_body.setToolTip("Exibir testids EXCETO em botoes")
         btn_body.setStyleSheet(self._TEST_MODE_BTN_STYLE_BODY)
         btn_body.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        btn_btn = QPushButton("BtnTest")
-        btn_btn.setFixedSize(68, 32)
+        btn_btn = QPushButton("Btn")
+        btn_btn.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
         btn_btn.setCheckable(True)
         btn_btn.setToolTip("Exibir testids APENAS em botoes")
         btn_btn.setStyleSheet(self._TEST_MODE_BTN_STYLE_BTN)
         btn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        col_layout.addWidget(btn_data)
-        col_layout.addWidget(btn_body)
-        col_layout.addWidget(btn_btn)
-        col_layout.addStretch(1)
+        # Grid 2x2 — (0,0)=All (checkbox) (0,1)=Key (1,0)=Body (1,1)=Btn.
+        col_layout.addWidget(chk_all,  0, 0)
+        col_layout.addWidget(btn_key,  0, 1)
+        col_layout.addWidget(btn_body, 1, 0)
+        col_layout.addWidget(btn_btn,  1, 1)
 
         # Toggle radio-like: zero ou um selecionado. PySide6 6.7 nao expoe
         # `setExclusionPolicy`, entao usamos `exclusive=False` + logica manual
-        # no handler para desligar os outros dois quando um eh ativado.
-        # Re-click no botao ativo o desliga (comportamento padrao de checkable=True
-        # com exclusive=False).
+        # no handler para desligar os outros tres quando um eh ativado.
         self._test_mode_group = QButtonGroup(self)
         self._test_mode_group.setExclusive(False)
-        self._test_mode_group.addButton(btn_data)
+        self._test_mode_group.addButton(chk_all)
+        self._test_mode_group.addButton(btn_key)
         self._test_mode_group.addButton(btn_body)
         self._test_mode_group.addButton(btn_btn)
 
-        # Estado inicial: nenhum checado (preserva default `DataTest off` original).
+        # Estado inicial: nenhum checado.
         self._test_mode_buttons = {
-            "all": btn_data,
+            "all": chk_all,
+            "key": btn_key,
             "body": btn_body,
             "buttons": btn_btn,
         }
@@ -1623,13 +1998,13 @@ class MainWindow(QMainWindow):
     _PROGRESS_BOX_BTN_STYLE_TPL = (
         "QPushButton {{ background-color: {bg}; color: #FAFAFA;"
         "  border: 1px solid {border}; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 700; padding: 0 10px; text-align: left; }}"
+        "  font-size: 11px; font-weight: 700; padding: 0.5px 10px; text-align: left; }}"
         "QPushButton:hover {{ background-color: {hover}; }}"
     )
     _PROGRESS_BOX_BTN_STYLE_GRAY = (
         "QPushButton { background-color: #52525B; color: #A1A1AA;"
         "  border: 1px solid #3F3F46; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 600; padding: 0 10px; text-align: left; }"
+        "  font-size: 11px; font-weight: 600; padding: 0.5px 10px; text-align: left; }"
         "QPushButton:hover { background-color: #5E5E66; }"
     )
     # Estado intermediario: checkbox amarelo (PartiallyChecked) -> botao verde
@@ -1637,7 +2012,7 @@ class MainWindow(QMainWindow):
     _PROGRESS_BOX_BTN_STYLE_GREEN = (
         "QPushButton { background-color: #16A34A; color: #FAFAFA;"
         "  border: 1px solid #15803D; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 700; padding: 0 10px; text-align: left; }"
+        "  font-size: 11px; font-weight: 700; padding: 0.5px 10px; text-align: left; }"
         "QPushButton:hover { background-color: #15803D; }"
     )
     # Tri-state checkbox: Unchecked (sem fill) -> PartiallyChecked (verde)
@@ -1648,7 +2023,7 @@ class MainWindow(QMainWindow):
     #   Checked        -> card cinza   (concluido/arquivado)
     _PROGRESS_BOX_CHK_STYLE = (
         "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
-        "  background: transparent; border: none; padding: 0; spacing: 0; }"
+        "  background: transparent; border: none; padding: 0; spacing: 0; margin-right: 1px; }"
         "QCheckBox::indicator { width: 14px; height: 14px; }"
         "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
         "  border: 1px solid #52525B; border-radius: 3px; }"
@@ -1656,6 +2031,13 @@ class MainWindow(QMainWindow):
         "  border: 2px solid #FFFFFF; border-radius: 3px; }"
         "QCheckBox::indicator:checked { background-color: #000000;"
         "  border: 1px solid #18181B; border-radius: 3px; }"
+    )
+    _PROGRESS_BOX_MINI_BTN_STYLE = (
+        "QPushButton { background-color: #27272A; color: #FAFAFA;"
+        "  border: 1px solid #52525B; border-radius: 5px;"
+        "  font-size: 11px; font-weight: 700; padding: 0; text-align: center; }"
+        "QPushButton:hover { background-color: #3F3F46; border-color: #71717A; }"
+        "QPushButton:pressed { background-color: #FBBF24; color: #18181B; border-color: #FBBF24; }"
     )
 
     _PROGRESS_BOX_DEFS = (
@@ -1673,6 +2055,29 @@ class MainWindow(QMainWindow):
         ("execute-loop",      "Execute loop",      "#DB2777", "#BE185D", "#BE185D",
             "abra o json e clique em loop"),
     )
+    _PROGRESS_BOX_CANONIC_LABELS = ("Brieg", "Prd", "Modules", "DCP", "QA")
+    _PROGRESS_TAB_ACTIVE_STYLE = (
+        "QPushButton { background-color: #FBBF24; color: #18181B;"
+        "  border: none; border-radius: 3px;"
+        "  font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }"
+    )
+    _PROGRESS_TAB_INACTIVE_STYLE = (
+        "QPushButton { background-color: transparent; color: #A1A1AA;"
+        "  border: none; border-radius: 3px;"
+        "  font-size: 10px; font-weight: 600; letter-spacing: 0.5px; }"
+        "QPushButton:hover { color: #D4D4D8; background-color: #2D2D30; }"
+    )
+
+    def _click_command_queue_button(self, testid: str) -> None:
+        """Programa um click no botão da command queue identificado por testid."""
+        from PySide6.QtWidgets import QPushButton as _Btn
+
+        if not hasattr(self, "_command_queue"):
+            return
+        for btn in self._command_queue.findChildren(_Btn):
+            if btn.property("testid") == testid:
+                btn.click()
+                return
 
     def _build_progress_boxes_column(self) -> QWidget:
         """Coluna irma entre output-toolbar-left e output-toolbar-queue-toggles.
@@ -1686,7 +2091,9 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import (
             QCheckBox,
             QHBoxLayout,
+            QInputDialog,
             QPushButton,
+            QStackedWidget,
             QVBoxLayout,
         )
 
@@ -1704,63 +2111,166 @@ class MainWindow(QMainWindow):
 
         self._progress_box_buttons: dict[str, QPushButton] = {}
         self._progress_box_checks: dict[str, QCheckBox] = {}
+        self._progress_tab_buttons: list[QPushButton] = []
 
-        for slug, label, bg, hover, border, paste_text in self._PROGRESS_BOX_DEFS:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(8)
-
-            chk = QCheckBox()
-            chk.setProperty("testid", f"progress-box-{slug}-chk")
-            chk.setCursor(Qt.CursorShape.PointingHandCursor)
-            chk.setTristate(True)
-            chk.setStyleSheet(self._PROGRESS_BOX_CHK_STYLE)
-
+        tab_bar = QWidget()
+        tab_bar.setProperty("testid", "output-progress-tabbar")
+        tab_bar_layout = QHBoxLayout(tab_bar)
+        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
+        tab_bar_layout.setSpacing(3)
+        for mode, label in (("loop", "LOOP"), ("canonic", "CANONIC"), ("custom", "CUSTOM")):
             btn = QPushButton(label)
-            btn.setProperty("testid", f"progress-box-{slug}-btn")
             btn.setFixedHeight(22)
-            btn.setMinimumWidth(160)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            colored_style = self._PROGRESS_BOX_BTN_STYLE_TPL.format(
-                bg=bg, hover=hover, border=border,
-            )
-            btn.setProperty("_colored_style", colored_style)
-            btn.setStyleSheet(colored_style)
+            btn.setProperty("testid", f"output-progress-tab-{mode}")
+            btn.clicked.connect(lambda _ch=False, m=mode: self._switch_progress_boxes_mode(m))
+            tab_bar_layout.addWidget(btn, stretch=1)
+            self._progress_tab_buttons.append(btn)
+        col_layout.addWidget(tab_bar)
 
-            # Tri-state -> 3 visuais distintos no botao irmao:
-            #   Unchecked (0)          -> cor original (tarefa pendente)
-            #   PartiallyChecked (1)   -> verde (em andamento)
-            #   Checked (2)            -> cinza (concluido/arquivado)
-            def _on_state(state: int, b=btn) -> None:
-                if state == 0:
-                    b.setStyleSheet(b.property("_colored_style"))
-                elif state == 1:
-                    b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GREEN)
+        self._progress_boxes_stack = QStackedWidget()
+        col_layout.addWidget(self._progress_boxes_stack, stretch=1)
+
+        def _build_page(
+            labels: tuple[str, ...], *, mode_tag: str, custom_mode: bool = False
+        ) -> QWidget:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(3)
+            for idx, (slug, _base_label, bg, hover, border, paste_text) in enumerate(self._PROGRESS_BOX_DEFS):
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(8)
+
+                chk = QCheckBox()
+                chk_testid = (
+                    f"progress-box-{slug}-chk"
+                    if mode_tag == "loop"
+                    else f"progress-box-{mode_tag}-{slug}-chk"
+                )
+                chk.setProperty("testid", chk_testid)
+                chk.setCursor(Qt.CursorShape.PointingHandCursor)
+                chk.setTristate(True)
+                chk.setStyleSheet(self._PROGRESS_BOX_CHK_STYLE)
+
+                btn_label = labels[idx] if idx < len(labels) else ""
+                btn = QPushButton(btn_label)
+                btn_testid = (
+                    f"progress-box-{slug}-btn"
+                    if mode_tag == "loop"
+                    else f"progress-box-{mode_tag}-{slug}-btn"
+                )
+                btn.setProperty("testid", btn_testid)
+                btn.setFixedHeight(22)
+                btn.setMinimumWidth(160)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                colored_style = self._PROGRESS_BOX_BTN_STYLE_TPL.format(
+                    bg=bg, hover=hover, border=border,
+                )
+                btn.setProperty("_colored_style", colored_style)
+                btn.setStyleSheet(colored_style)
+
+                def _on_state(state: int, b=btn) -> None:
+                    if state == 0:
+                        b.setStyleSheet(b.property("_colored_style"))
+                    elif state == 1:
+                        b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GREEN)
+                    else:
+                        b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GRAY)
+
+                chk.stateChanged.connect(_on_state)
+                if custom_mode:
+                    def _edit_label(_checked: bool = False, b=btn) -> None:
+                        new_text, ok = QInputDialog.getText(
+                            self, "Editar card", "Texto do card:", text=b.text()
+                        )
+                        if ok:
+                            b.setText(new_text.strip())
+                    btn.clicked.connect(_edit_label)
                 else:
-                    b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GRAY)
+                    btn.clicked.connect(
+                        lambda _checked=False, t=paste_text: self._publish_to_terminal(t)
+                    )
 
-            chk.stateChanged.connect(_on_state)
-            btn.clicked.connect(
-                lambda _checked=False, t=paste_text: self._publish_to_terminal(t)
-            )
+                # Mini-botao (apenas aba LOOP) — criado antes de montar a row
+                # para permitir a ordem invertida 3-2-1.
+                mini_btn = None
+                if mode_tag == "loop" and not custom_mode:
+                    mini_map: dict[str, tuple[str, str | None, str | None]] = {
+                        "prompt-to-md": ("P", None, paste_text),
+                        "study-that-prompt": ("s", "queue-btn-study", None),
+                        "loop-the-study": ("l", "queue-btn-loop", None),
+                        "rocksmash-the-loop": ("r", "queue-btn-rocksmash", None),
+                        "execute-loop": ("l", "queue-btn-loop", None),
+                    }
+                    letter, queue_btn_testid, publish_text = mini_map.get(slug, ("", None, None))
+                    if letter:
+                        mini_btn = QPushButton(letter)
+                        mini_btn.setProperty("testid", f"progress-box-{slug}-mini")
+                        mini_btn.setFixedSize(btn.height(), btn.height())
+                        mini_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                        mini_btn.setStyleSheet(self._PROGRESS_BOX_MINI_BTN_STYLE)
+                        if queue_btn_testid:
+                            mini_btn.clicked.connect(
+                                lambda _checked=False, tid=queue_btn_testid: self._click_command_queue_button(tid)
+                            )
+                        elif publish_text is not None:
+                            mini_btn.clicked.connect(
+                                lambda _checked=False, t=publish_text: self._publish_to_terminal(t)
+                            )
+                        btn.setMinimumWidth(max(120, btn.minimumWidth() - mini_btn.width() - 8))
 
-            row_layout.addWidget(chk)
-            row_layout.addWidget(btn, stretch=1)
-            col_layout.addWidget(row)
+                # Ordem dos itens na row, invertida em todas as abas:
+                # LOOP -> [mini] [chk] [btn] (3-2-1);
+                # CANONIC / CUSTOM -> [chk] [btn] (2-1).
+                if mode_tag == "loop":
+                    if mini_btn is not None:
+                        row_layout.addWidget(mini_btn)
+                    row_layout.addWidget(chk)
+                    row_layout.addWidget(btn, stretch=1)
+                else:
+                    row_layout.addWidget(chk)
+                    row_layout.addWidget(btn, stretch=1)
+                page_layout.addWidget(row)
 
-            self._progress_box_buttons[slug] = btn
-            self._progress_box_checks[slug] = chk
+                if mode_tag == "loop" and not custom_mode:
+                    self._progress_box_buttons[slug] = btn
+                    self._progress_box_checks[slug] = chk
 
-        col_layout.addStretch(1)
+            page_layout.addStretch(1)
+            return page
+
+        loop_labels = tuple(d[1] for d in self._PROGRESS_BOX_DEFS)
+        canonic_labels = self._PROGRESS_BOX_CANONIC_LABELS
+        custom_labels = tuple("" for _ in self._PROGRESS_BOX_DEFS)
+
+        self._progress_boxes_stack.addWidget(_build_page(loop_labels, mode_tag="loop"))
+        self._progress_boxes_stack.addWidget(_build_page(canonic_labels, mode_tag="canonic"))
+        self._progress_boxes_stack.addWidget(
+            _build_page(custom_labels, mode_tag="custom", custom_mode=True)
+        )
+        self._switch_progress_boxes_mode("loop")
         return column
+
+    def _switch_progress_boxes_mode(self, mode: str) -> None:
+        index_map = {"loop": 0, "canonic": 1, "custom": 2}
+        idx = index_map.get(mode, 0)
+        if hasattr(self, "_progress_boxes_stack"):
+            self._progress_boxes_stack.setCurrentIndex(idx)
+        for i, btn in enumerate(getattr(self, "_progress_tab_buttons", [])):
+            btn.setStyleSheet(
+                self._PROGRESS_TAB_ACTIVE_STYLE if i == idx else self._PROGRESS_TAB_INACTIVE_STYLE
+            )
 
     def _build_queue_toggles_column(self) -> QWidget:
         """Coluna irma de output-toolbar-test-mode, posicionada a esquerda dela.
 
-        Aloja (cima -> baixo):
-        - terminal-engine-toggle (reparenteado de _build_workspace_label_bar)
-        - queue-count-toggles-row (reparenteado de metrics_bar — widget orfao)
+        Aloja queue-count-toggles-row (reparenteado de metrics_bar — widget
+        orfao). O antigo terminal-engine-toggle ("1-pyte") foi removido em
+        2026-05-19; pyte virou T3 controlado pelo arrow no label bar do
+        terminal-workspace-splitter.
         """
         from PySide6.QtWidgets import QVBoxLayout
 
@@ -1775,14 +2285,6 @@ class MainWindow(QMainWindow):
         col_layout = QVBoxLayout(column)
         col_layout.setContentsMargins(6, 16, 6, 6)
         col_layout.setSpacing(6)
-
-        # terminal-engine-toggle no topo (reparent de _build_workspace_label_bar)
-        if hasattr(self, "_engine_toggle_btn"):
-            self._engine_toggle_btn.setParent(column)
-            col_layout.addWidget(
-                self._engine_toggle_btn,
-                alignment=Qt.AlignmentFlag.AlignHCenter,
-            )
 
         # queue-count-toggles-row (reparent de metrics_bar — widget orfao)
         toggles_row = getattr(self._metrics_bar, "_queue_count_toggles_row", None)
@@ -1822,6 +2324,15 @@ class MainWindow(QMainWindow):
                 mode = key
                 break
         signal_bus.datatest_mode_changed.emit(mode)
+
+    def _send_testid_probe_to_selected_terminal(self, testid: str) -> None:
+        """Envia `data-testid="..."` + backspace para o(s) terminal(is) roteado(s).
+
+        Reusa `_publish_to_terminal` para respeitar `terminal-route-toggles`
+        e transferir foco para o terminal com prioridade configurada.
+        """
+        payload = f'data-testid="{testid}"\x08'
+        self._publish_to_terminal(payload)
 
     def _on_prompt_btn_clicked(self, idx: int) -> None:
         """Handler dos botoes da sub-aba prompts.
@@ -2045,30 +2556,72 @@ class MainWindow(QMainWindow):
             f"{len(_new)} novo(s) prompt(s) detectado(s) e adicionado(s).", "info"
         )
 
+    # ── Workspace dispatch helpers (2026-05-19+: T2=pyte, T3=xterm) ─── #
+    def _xterm_inject_text(self, text: str, with_enter: bool = False) -> bool:
+        """Injeta `text` diretamente no shell que alimenta o xterm (T3).
+
+        Retorna True quando o shell esta vivo e recebeu os bytes; False se
+        xterm nao esta disponivel (PySide6-WebEngine ausente). Quando
+        `with_enter=True`, agenda um \r como keypress separado (mesmo padrao
+        de OutputPanel._run_shell_command para evitar swallow em CLIs Ink).
+        """
+        if not XTERM_AVAILABLE or not hasattr(self, "_workspace_panel_xterm"):
+            return False
+        shell = getattr(self._workspace_panel_xterm, "_shell", None)
+        if shell is None:
+            return False
+        try:
+            shell.send_raw(text.encode("utf-8", errors="replace"))
+            if with_enter:
+                QTimer.singleShot(80, lambda: shell.send_raw(b"\r"))
+        except Exception:  # noqa: BLE001
+            logger.exception("xterm shell.send_raw failed")
+            return False
+        return True
+
+    def _dispatch_workspace_text(self, text: str, with_enter: bool = False) -> None:
+        """Helper para emissores que historicamente miravam o pyte direto
+        (label-bar WORKSPACE/SystemForge/cd/mention + notes-bar ↑).
+
+        Politica: T2 (pyte) e o terminal sempre visivel no workspace e
+        recebe sempre. T3 (xterm) so recebe quando o operador o expandiu
+        pelo arrow do label bar (Zero Silencio: nao injeta em terminal
+        colapsado/invisivel).
+        """
+        # T2 (pyte): sempre visivel -> recebe sempre.
+        if with_enter:
+            signal_bus.run_command_in_workspace_terminal.emit(text)
+        else:
+            signal_bus.paste_text_in_workspace_terminal.emit(text)
+        # T3 (xterm): so quando expandido.
+        if XTERM_AVAILABLE and getattr(self, "_t3_visible", False):
+            self._xterm_inject_text(text, with_enter=with_enter)
+
     def _publish_to_terminal(self, text: str) -> None:
-        """Task 6 (loop 05-13-workflow-app-layout-2): roteia `text` para
-        terminal(es) conforme estado dos checkboxes T1/T2.
+        """Task 6 (loop 05-13-workflow-app-layout-2, revisado 2026-05-19):
+        roteia `text` conforme estado dos checkboxes T1/T2/T3.
 
-        Escopo ESTRITO: chamada exclusivamente pelos handlers dos botoes das
-        rows output-toolbar-actions-row e output-toolbar-controls-row. Demais
-        emissores de paste_text_in_terminal / paste_text_in_workspace_terminal
-        permanecem intactos.
+        Mapping atualizado apos refactor terminal-workspace-splitter (T2/T3 invertidos):
+        - T1 -> terminal-interactive (pyte) via paste_text_in_terminal.
+        - T2 -> terminal-workspace pyte via paste_text_in_workspace_terminal.
+        - T3 -> terminal-workspace xterm via PersistentShell.send_raw.
+                (no-op se XTERM_AVAILABLE=False; checkbox ja vem desabilitado.)
 
-        Matriz 4 estados (Zero Estados Indefinidos: nenhum cai em no-op
-        explicito, nao em silencio acidental):
-        - T1 only: paste em terminal-interactive-output + focus interactive.
-        - T2 only: paste em terminal-workspace-output + focus workspace.
-        - T1 + T2: paste em ambos + focus interactive (preferencia padrao).
-        - Nenhum: retorno silencioso sem traceback.
+        Foco: prioridade T1 > T2 > T3. Nenhum marcado = no-op silencioso
+        (Zero Estados Indefinidos: caso explicito, nao acidente).
         """
         t1 = bool(self._chk_route_t1.isChecked()) if hasattr(self, "_chk_route_t1") else True
         t2 = bool(self._chk_route_t2.isChecked()) if hasattr(self, "_chk_route_t2") else False
-        if not t1 and not t2:
+        t3 = bool(self._chk_route_t3.isChecked()) if hasattr(self, "_chk_route_t3") else False
+        if not (t1 or t2 or t3):
             return
         if t1:
             signal_bus.paste_text_in_terminal.emit(text)
         if t2:
             signal_bus.paste_text_in_workspace_terminal.emit(text)
+        if t3:
+            self._xterm_inject_text(text, with_enter=False)
+        # Focus priority: T1 (interactive) > T2 (pyte) > T3 (xterm).
         if t1:
             signal_bus.focus_interactive_terminal.emit()
         elif t2:
@@ -2076,10 +2629,15 @@ class MainWindow(QMainWindow):
                 self._workspace_panel._terminal.setFocus()
             except AttributeError:
                 pass
+        elif t3 and hasattr(self, "_workspace_panel_xterm"):
+            try:
+                self._workspace_panel_xterm._terminal.setFocus()
+            except AttributeError:
+                pass
 
     def _populate_header_actions(self) -> list[QPushButton]:
-        """Constroi os 6 botoes da actions-tab: JSON, WS, mcp-codex, mcp-kimi,
-        double-mcp, asq-user.
+        """Constroi botoes da actions-tab: JSON, WS, MCPs Claude-side (laranja),
+        skills Kimi-side (azul), skills Codex-side (roxo) e asq-user.
 
         Refactor 2026-05-15 output-toolbar-left consolidation:
         Brief/Docs descartados. Removido o fallback para `_header_actions_layout`
@@ -2158,33 +2716,94 @@ class MainWindow(QMainWindow):
         )
         ws_btn.clicked.connect(_on_ws_path)
 
-        # Botoes adversarial/MCP: largura reduzida 30% (64 -> 45) versus
-        # JSON/WS, por convencao herdada do antigo output-toolbar-actions-row.
-        _ACTIONS_ROW_MIN_WIDTH = 45
+        # Botoes da coluna MCP (output-toolbar-mcp): labels resumidos + cores
+        # padronizadas por linha. Linha 1 (Anthropic laranja): MCPs Claude-side.
+        # Linha 2 (azul): skills Kimi-side. Linha 3 (roxo): skills Codex-side.
+        # Largura fixa apos reducao de label.
+        _MCP_BTN_WIDTH = 58
+        _ACTIONS_ROW_MIN_WIDTH = 64
+        _ANTHROPIC_ORANGE = ("#CC785C", "#B8674E", "#A55A42")
+        _MCP_BLUE = ("#2563EB", "#1D4ED8", "#1E40AF")
+        _MCP_PURPLE = ("#7C3AED", "#6D28D9", "#5B21B6")
 
         mcp_codex_btn = _make_action_btn(
-            "mcp-codex", "output-btn-mcp-codex",
-            "#7C3AED", "#6D28D9", "#5B21B6",
+            "codex", "output-btn-mcp-codex",
+            *_ANTHROPIC_ORANGE,
             "/skill:mcp-codex \u2014 Pair programming com Codex MCP",
         )
-        mcp_codex_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
+        mcp_codex_btn.setFixedWidth(_MCP_BTN_WIDTH)
         mcp_codex_btn.clicked.connect(_paste_cmd("/skill:mcp-codex"))
 
         mcp_kimi_btn = _make_action_btn(
-            "mcp-kimi", "output-btn-mcp-kimi",
-            "#2563EB", "#1D4ED8", "#1E40AF",
+            "kimi", "output-btn-mcp-kimi",
+            *_ANTHROPIC_ORANGE,
             "/skill:mcp-kimi \u2014 Persona-aware Kimi orchestrator",
         )
-        mcp_kimi_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
+        mcp_kimi_btn.setFixedWidth(_MCP_BTN_WIDTH)
         mcp_kimi_btn.clicked.connect(_paste_cmd("/skill:mcp-kimi"))
 
         double_mcp_btn = _make_action_btn(
-            "double-mcp", "output-btn-double-mcp",
-            "#DC2626", "#B91C1C", "#991B1B",
+            "dual", "output-btn-double-mcp",
+            *_ANTHROPIC_ORANGE,
             "/skill:double-mcp \u2014 Co-execucao paralela Codex+Kimi",
         )
-        double_mcp_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
+        double_mcp_btn.setFixedWidth(_MCP_BTN_WIDTH)
         double_mcp_btn.clicked.connect(_paste_cmd("/skill:double-mcp"))
+
+        skill_claude_btn = _make_action_btn(
+            "claude", "output-btn-skill-claude",
+            *_MCP_PURPLE,
+            "Codex: use skill-claude com saida JSON consultiva",
+        )
+        skill_claude_btn.setFixedWidth(_MCP_BTN_WIDTH)
+        skill_claude_btn.clicked.connect(
+            _paste_cmd("Use skill-claude. Output JSON. Prompt: ")
+        )
+
+        skill_kimi_btn = _make_action_btn(
+            "kimi", "output-btn-skill-kimi",
+            *_MCP_PURPLE,
+            "Codex: use skill-kimi com saida JSON consultiva",
+        )
+        skill_kimi_btn.setFixedWidth(_MCP_BTN_WIDTH)
+        skill_kimi_btn.clicked.connect(
+            _paste_cmd("Use skill-kimi. Output JSON. Prompt: ")
+        )
+
+        skill_dual_btn = _make_action_btn(
+            "dual", "output-btn-skill-dual",
+            *_MCP_PURPLE,
+            "Codex: use skill-dual para consulta Claude+Kimi com divergencia",
+        )
+        skill_dual_btn.setFixedWidth(_MCP_BTN_WIDTH)
+        skill_dual_btn.clicked.connect(
+            _paste_cmd("Use skill-dual. Output JSON. Mode: stereo. Prompt: ")
+        )
+
+        # Linha 2 (azul): Kimi-side — chama Claude, Codex ou ambos via skill.
+        kimi_claude_btn = _make_action_btn(
+            "claude", "output-btn-kimi-claude",
+            *_MCP_BLUE,
+            "Kimi: chama Claude como consultor externo via /skill:claude",
+        )
+        kimi_claude_btn.setFixedWidth(_MCP_BTN_WIDTH)
+        kimi_claude_btn.clicked.connect(_paste_cmd("/skill:claude"))
+
+        kimi_codex_btn = _make_action_btn(
+            "codex", "output-btn-kimi-codex",
+            *_MCP_BLUE,
+            "Kimi: chama Codex como consultor externo via /skill:codex",
+        )
+        kimi_codex_btn.setFixedWidth(_MCP_BTN_WIDTH)
+        kimi_codex_btn.clicked.connect(_paste_cmd("/skill:codex"))
+
+        kimi_dual_btn = _make_action_btn(
+            "dual", "output-btn-kimi-dual",
+            *_MCP_BLUE,
+            "Kimi: chama Claude+Codex em paralelo via /skill:dual",
+        )
+        kimi_dual_btn.setFixedWidth(_MCP_BTN_WIDTH)
+        kimi_dual_btn.clicked.connect(_paste_cmd("/skill:dual"))
 
         asq_user_btn = _make_action_btn(
             "asq-user", "output-btn-asq-user",
@@ -2194,7 +2813,20 @@ class MainWindow(QMainWindow):
         asq_user_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
         asq_user_btn.clicked.connect(_paste_cmd("/skill:auq-interview"))
 
-        return [json_btn, ws_btn, mcp_codex_btn, mcp_kimi_btn, double_mcp_btn, asq_user_btn]
+        return [
+            json_btn,
+            ws_btn,
+            mcp_codex_btn,
+            mcp_kimi_btn,
+            double_mcp_btn,
+            kimi_claude_btn,
+            kimi_codex_btn,
+            kimi_dual_btn,
+            skill_claude_btn,
+            skill_kimi_btn,
+            skill_dual_btn,
+            asq_user_btn,
+        ]
 
     def _populate_header_workflow_app(self) -> list[QPushButton]:
         """Constroi os botoes da row terminal-insertions-row-workflow-app
@@ -2345,6 +2977,8 @@ class MainWindow(QMainWindow):
              "dcp_root",            "Cola o valor de basic_flow.dcp_root no terminal"),
             ("custom-wf", "output-btn-custom-workflow-root",  "#FBBF24", "#F59E0B", "#D97706",
              "custom_workflow_root","Cola o valor de basic_flow.custom_workflow_root no terminal"),
+            ("app-rules", "output-btn-rules-path",            "#10B981", "#059669", "#047857",
+             "rules_root",          "Cola o valor de basic_flow.rules_root no terminal (pasta gitignored de regras)"),
         ]
 
         def _make_btn(label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str) -> QPushButton:
@@ -2392,7 +3026,91 @@ class MainWindow(QMainWindow):
             btn = _make_btn(label, testid, bg, hover, pressed, f"{tooltip} ({field})")
             btn.clicked.connect(_make_handler(field))
             btns.append(btn)
+
+        # Botão "Analise a documentação" — mix de json+brief+docs+wbs num único prompt
+        analyse_btn = _make_btn(
+            "Analise a documentação",
+            "output-btn-analyse-docs",
+            "#6366F1", "#4F46E5", "#4338CA",
+            "Gera no terminal um prompt de análise combinando JSON, brief, docs e wbs",
+        )
+
+        def _on_analyse_docs() -> None:
+            if not app_state.has_config or not app_state.config:
+                signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+                return
+            cfg = app_state.config
+            import os
+            try:
+                json_path = os.path.relpath(cfg.config_path, str(cfg.project_dir))
+            except ValueError:
+                json_path = cfg.config_path
+            brief = (getattr(cfg, "brief_root", "") or "").strip()
+            docs  = (getattr(cfg, "docs_root",  "") or "").strip()
+            wbs   = (getattr(cfg, "wbs_root",   "") or "").strip()
+            missing = [f for f, v in [("brief_root", brief), ("docs_root", docs), ("wbs_root", wbs)] if not v]
+            if missing:
+                signal_bus.toast_requested.emit(
+                    f"Campo(s) ausente(s) no project.json: {', '.join(missing)}", "warning",
+                )
+                return
+            text = (
+                f"Analise a documentação referente ao projeto {json_path}, "
+                f"a documentação do brief do produto está no {brief}, "
+                f"a documentação técnica como PRD, HLD, USER STORIES, ADRs, DESIGN, entre outras estão no {docs}. "
+                f"Caso seja necessário também, detalhamento dos modules e tasks da contrução do sistema estão no {wbs}"
+            )
+            self._publish_to_terminal(text)
+            signal_bus.toast_requested.emit("Prompt de análise enviado ao terminal.", "info")
+
+        analyse_btn.clicked.connect(_on_analyse_docs)
+        btns.append(analyse_btn)
         return btns
+
+    def _build_repo_rules_button(self) -> QPushButton:
+        """Botao 'repo rules' da linha de baixo da sub-aba paths & IDs.
+
+        Cola no terminal o path `{workspace_root}/rules`, onde workspace_root
+        vem do project.json ativo (anexado em metrics-project-pill). Sem
+        projeto carregado ou workspace_root vazio: toast warning, nada e
+        publicado (anti Zero Silencio). Respeita T1/T2 via _publish_to_terminal.
+        """
+        btn = QPushButton("repo rules")
+        btn.setProperty("testid", "queue-btn-repo-rules-path")
+        btn.setFixedHeight(28)
+        btn.setMinimumWidth(64)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(
+            "Cola no terminal o path {workspace_root}/rules do projeto ativo\n"
+            "(workspace_root vem do project.json anexado em metrics-project-pill)"
+        )
+        btn.setStyleSheet(
+            "QPushButton { background-color: #14B8A6; color: #18181B;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "QPushButton:hover { background-color: #0D9488; color: #FAFAFA; }"
+            "QPushButton:pressed { background-color: #0F766E; color: #FAFAFA; }"
+            "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+        )
+        btn.clicked.connect(self._on_repo_rules_path)
+        return btn
+
+    def _on_repo_rules_path(self) -> None:
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+            return
+        ws = (app_state.config.workspace_root or "").strip()
+        if not ws:
+            signal_bus.toast_requested.emit(
+                "workspace_root nao configurado em project.json", "warning",
+            )
+            return
+        path = f"{ws.rstrip('/')}/rules"
+        QApplication.clipboard().setText(path)
+        self._publish_to_terminal(path)
+        signal_bus.toast_requested.emit(
+            f"Path copiado e digitado no terminal: {path}", "info",
+        )
 
     def _build_terminal_notes_footer(self, testid: str) -> QWidget:
         """Footer de anotacoes livre por terminal — sem comunicacao com o resto
@@ -2469,11 +3187,20 @@ class MainWindow(QMainWindow):
             if not text:
                 return
             if is_workspace:
-                signal_bus.paste_text_in_workspace_terminal.emit(text)
-                try:
-                    self._workspace_panel._terminal.setFocus()
-                except AttributeError:
-                    pass
+                # 2026-05-19: workspace = xterm (T2 sempre visivel) +
+                # opcionalmente pyte (T3) se expandido. Foco no xterm
+                # quando disponivel; fallback pyte caso contrario.
+                self._dispatch_workspace_text(text, with_enter=False)
+                if XTERM_AVAILABLE and hasattr(self, "_workspace_panel_xterm"):
+                    try:
+                        self._workspace_panel_xterm._terminal.setFocus()
+                    except AttributeError:
+                        pass
+                else:
+                    try:
+                        self._workspace_panel._terminal.setFocus()
+                    except AttributeError:
+                        pass
             else:
                 signal_bus.paste_text_in_terminal.emit(text)
                 signal_bus.focus_interactive_terminal.emit()
@@ -2579,13 +3306,29 @@ class MainWindow(QMainWindow):
         btn_ws = _btn("WORKSPACE", "#A78BFA")
         btn_ws.setToolTip("cd → workspace do projeto carregado")
 
+        # 2026-05-19: label-bar buttons agora roteiam para o terminal
+        # WORKSPACE visivel (xterm = T2; tambem pyte = T3 se expandido) via
+        # _dispatch_workspace_text. Antes miravam pyte direto via signal_bus,
+        # o que silenciava quando pyte estava colapsado (T3 hidden).
+        def _focus_workspace() -> None:
+            if XTERM_AVAILABLE and hasattr(self, "_workspace_panel_xterm"):
+                try:
+                    self._workspace_panel_xterm._terminal.setFocus()
+                    return
+                except AttributeError:
+                    pass
+            try:
+                self._workspace_panel._terminal.setFocus()
+            except AttributeError:
+                pass
+
         def _on_workspace() -> None:
             if not app_state.has_config or not app_state.config:
                 signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
                 return
             path = str(app_state.config.project_dir / app_state.config.workspace_root)
-            signal_bus.run_command_in_workspace_terminal.emit(f"cd {path}")
-            self._workspace_panel._terminal.setFocus()
+            self._dispatch_workspace_text(f"cd {path}", with_enter=True)
+            _focus_workspace()
 
         btn_ws.clicked.connect(_on_workspace)
 
@@ -2594,8 +3337,8 @@ class MainWindow(QMainWindow):
         btn_sf.setToolTip(f"cd → {_SYSTEMFORGE_DIR}")
         btn_sf.clicked.connect(
             lambda: (
-                signal_bus.run_command_in_workspace_terminal.emit(f"cd {_SYSTEMFORGE_DIR}"),
-                self._workspace_panel._terminal.setFocus(),
+                self._dispatch_workspace_text(f"cd {_SYSTEMFORGE_DIR}", with_enter=True),
+                _focus_workspace(),
             )
         )
 
@@ -2604,8 +3347,8 @@ class MainWindow(QMainWindow):
         btn_wa.setToolTip(f"cd → {_WORKFLOW_APP_DIR}")
         btn_wa.clicked.connect(
             lambda: (
-                signal_bus.run_command_in_workspace_terminal.emit(f"cd {_WORKFLOW_APP_DIR}"),
-                self._workspace_panel._terminal.setFocus(),
+                self._dispatch_workspace_text(f"cd {_WORKFLOW_APP_DIR}", with_enter=True),
+                _focus_workspace(),
             )
         )
 
@@ -2614,8 +3357,8 @@ class MainWindow(QMainWindow):
         btn_wa_mention.setToolTip("Cola 'ai-forge/workflow-app' no terminal (sem Enter)")
         btn_wa_mention.clicked.connect(
             lambda: (
-                signal_bus.paste_text_in_workspace_terminal.emit("ai-forge/workflow-app"),
-                self._workspace_panel._terminal.setFocus(),
+                self._dispatch_workspace_text("ai-forge/workflow-app", with_enter=False),
+                _focus_workspace(),
             )
         )
 
@@ -2627,9 +3370,30 @@ class MainWindow(QMainWindow):
         lay.addSpacing(6)
         lay.addWidget(btn_wa_mention)
         lay.addSpacing(10)
-        # terminal-engine-toggle migrado para output-toolbar-queue-toggles
-        # (_build_queue_toggles_column). Mantemos a label bar sem o toggle.
+        # space-between: stretch empurra o arrow T3 para a borda oposta dos
+        # botoes de path/mention.
         lay.addStretch()
+
+        # ── Arrow T3 (pyte) — colapsar/expandir terceiro terminal ─────── #
+        # 2026-05-19: substitui o antigo terminal-engine-toggle ("1-pyte").
+        # Icone reage ao layout outer:
+        #   - T1+T2 column (terminal_is_vertical=True)  -> seta lateral ◀/▶
+        #   - T1+T2 row    (terminal_is_vertical=False) -> seta vertical ▲/▼
+        self._t3_arrow_btn = QPushButton()
+        self._t3_arrow_btn.setProperty("testid", "terminal-t3-toggle")
+        self._t3_arrow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._t3_arrow_btn.setFixedSize(18, 18)
+        self._t3_arrow_btn.setEnabled(XTERM_AVAILABLE)
+        self._t3_arrow_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " color: #FAFAFA; font-size: 12px; font-weight: 700; padding: 0; }"
+            "QPushButton:hover { color: #FBBF24; background: transparent; }"
+            "QPushButton:disabled { color: #52525B; }"
+        )
+        self._t3_arrow_btn.clicked.connect(self._on_t3_arrow_clicked)
+        self._update_t3_arrow_icon()
+        lay.addWidget(self._t3_arrow_btn)
+        lay.addSpacing(4)
         return bar
 
     def _build_history_panel(self) -> QWidget:
@@ -2698,6 +3462,9 @@ class MainWindow(QMainWindow):
             self._layout_toggle_btn.setToolTip("Layout: empilhado. Clique para lado a lado")
             self._terminal_is_vertical = True
         self._update_collapse_chevron()
+        # Inner workspace splitter (T2 + T3) must remain perpendicular to outer.
+        self._apply_workspace_inner_orientation()
+        self._update_t3_arrow_icon()
 
     def _toggle_workspace_collapse(self) -> None:
         """Toggle collapse/expand of the workspace terminal."""
@@ -2723,36 +3490,71 @@ class MainWindow(QMainWindow):
         else:
             text = "\u25C4" if self._workspace_collapsed else "\u25BA"
         self._collapse_chevron.setText(text)
-    def _update_engine_toggle_style(self) -> None:
-        state = getattr(self, "_engine_toggle_state", 0)
-        labels = ["1-pyte", "2-xterm", "split"]
-        colors = ["#22C55E", "#60A5FA", "#FBBF24"]
-        label = labels[state % 3]
-        color = colors[state % 3]
-        self._engine_toggle_btn.setText(label)
-        self._engine_toggle_btn.setStyleSheet(
-            f"QPushButton {{ background-color: #27272A; color: {color};"
-            "  border: 1px solid #52525B; border-radius: 3px;"
-            "  font-size: 10px; font-weight: 700; padding: 0 4px; }"
-            f"QPushButton:hover {{ background-color: #3F3F46; color: {color}; }}"
-            "QPushButton:disabled { background-color: #27272A; color: #52525B; }"
-        )
 
-    def _on_engine_toggle_clicked(self) -> None:
-        # Task 012 (loop 05-14-workflow-app-terminal-fix-plan, PR2):
-        # cicla [1-pyte] -> [2-xterm] -> [split] ajustando proporcao do
-        # _workspace_terminal_splitter (vertical pyte/xterm dentro do workspace),
-        # nao do _terminal_splitter (horizontal interactive/workspace).
+    # ── T3 (pyte) arrow toggle (2026-05-19) ───────────────────────────── #
+    def _apply_workspace_inner_orientation(self) -> None:
+        """Reorienta _workspace_terminal_splitter perpendicular ao _terminal_splitter.
+
+        - _terminal_is_vertical = True  (T1+T2 column) -> inner Horizontal
+        - _terminal_is_vertical = False (T1+T2 row)    -> inner Vertical
+        Ajusta sizes conforme _t3_visible.
+        """
+        if not hasattr(self, "_workspace_terminal_splitter"):
+            return
+        if self._terminal_is_vertical:
+            self._workspace_terminal_splitter.setOrientation(Qt.Orientation.Horizontal)
+        else:
+            self._workspace_terminal_splitter.setOrientation(Qt.Orientation.Vertical)
+        self._apply_workspace_split_sizes()
+
+    def _apply_workspace_split_sizes(self) -> None:
+        """Aplica split do workspace sem substituir terminais.
+
+        child 0 = T2 (pyte), child 1 = T3 (xterm). Regra (so 2 estados):
+        - T3 expandido -> 50/50 exato entre T2 e T3
+        - T3 colapsado -> T2 ocupa 100%, T3 fica em 0
+        T3 NUNCA ocupa a area inteira.
+        """
+        if not hasattr(self, "_workspace_terminal_splitter"):
+            return
+        splitter = self._workspace_terminal_splitter
+        if splitter.orientation() == Qt.Orientation.Vertical:
+            total = max(0, splitter.height() - splitter.handleWidth())
+        else:
+            total = max(0, splitter.width() - splitter.handleWidth())
+        if total <= 0:
+            # Layout ainda nao estabilizou; fallback proporcional.
+            splitter.setSizes([1, 1] if getattr(self, "_t3_visible", False) else [1, 0])
+            return
+        if getattr(self, "_t3_visible", False):
+            second = total // 2
+            first = total - second
+            splitter.setSizes([first, second])
+        else:
+            splitter.setSizes([total, 0])
+
+    def _update_t3_arrow_icon(self) -> None:
+        if not hasattr(self, "_t3_arrow_btn"):
+            return
+        visible = getattr(self, "_t3_visible", False)
+        if self._terminal_is_vertical:
+            text = "▶" if visible else "◀"
+        else:
+            text = "▼" if visible else "▲"
+        tip = (
+            "Colapsar terminal 3 (xterm)"
+            if visible
+            else "Expandir terminal 3 (xterm) em 50/50"
+        )
+        self._t3_arrow_btn.setText(text)
+        self._t3_arrow_btn.setToolTip(tip)
+
+    def _on_t3_arrow_clicked(self) -> None:
         if not XTERM_AVAILABLE:
             return
-        self._engine_toggle_state = (self._engine_toggle_state + 1) % 3
-        if self._engine_toggle_state == 0:
-            self._workspace_terminal_splitter.setSizes([1, 0])
-        elif self._engine_toggle_state == 1:
-            self._workspace_terminal_splitter.setSizes([0, 1])
-        else:
-            self._workspace_terminal_splitter.setSizes([1, 1])
-        self._update_engine_toggle_style()
+        self._t3_visible = not getattr(self, "_t3_visible", False)
+        self._apply_workspace_inner_orientation()
+        self._update_t3_arrow_icon()
 
     def _connect_signals(self) -> None:
         self._command_queue.add_command_requested.connect(self._open_add_command)
@@ -2768,6 +3570,9 @@ class MainWindow(QMainWindow):
         # signal_bus por compat mas nao mais emitido pela UI.
         signal_bus.datatest_mode_changed.connect(self._on_datatest_mode_changed)
         signal_bus.focus_interactive_terminal.connect(self._on_focus_interactive_terminal)
+        signal_bus.run_command_in_workspace_xterm.connect(
+            lambda text: self._xterm_inject_text(text, with_enter=True)
+        )
         signal_bus.pipeline_completed.connect(self._refresh_history_list)
         signal_bus.permission_request_received.connect(self._on_permission_request)
         # _btn_new removed — pipeline creator accessible via command queue or Ctrl+N
@@ -2957,16 +3762,22 @@ class MainWindow(QMainWindow):
         """Compat legado: roteia para o novo handler de modo.
 
         Mantido caso codigo externo ainda emita `signal_bus.datatest_toggled`.
+        Mapeia `True` para `"key"` (subset curado) — comportamento original
+        do antigo botao DataTest (que filtrava por _DATATEST_FILTERED_IDS).
         """
-        self._on_datatest_mode_changed("all" if enabled else "off")
+        self._on_datatest_mode_changed("key" if enabled else "off")
 
     def _on_datatest_mode_changed(self, mode: str) -> None:
-        """Task 3 (loop 05-13-workflow-app-layout-2): handler de modo test-mode.
+        """Handler de modo test-mode.
 
-        Modos validos: `off`, `all`, `body` (tudo MENOS QAbstractButton),
-        `buttons` (APENAS QAbstractButton).
+        Modos validos:
+        - `off`     : sem overlays.
+        - `all`     : todos os testids (sem filtro).
+        - `key`     : subset curado em `_DATATEST_FILTERED_IDS`.
+        - `body`    : tudo MENOS QAbstractButton.
+        - `buttons` : APENAS QAbstractButton.
         """
-        if mode not in ("off", "all", "body", "buttons"):
+        if mode not in ("off", "all", "key", "body", "buttons"):
             mode = "off"
         self._datatest_mode = mode
         self._datatest_active = mode != "off"
@@ -3029,7 +3840,9 @@ class MainWindow(QMainWindow):
                 if not widget.isVisible() or not widget.isVisibleTo(central):
                     continue
                 testid_str = str(testid)
-                if _mode == "all" and testid_str not in _DATATEST_FILTERED_IDS:
+                # Modo "key" = subset curado; "all"/"body"/"buttons" sem filtro
+                # adicional alem do _is_btn ja aplicado acima.
+                if _mode == "key" and testid_str not in _DATATEST_FILTERED_IDS:
                     continue
 
                 # Map widget position to central widget coordinates
@@ -3055,6 +3868,9 @@ class MainWindow(QMainWindow):
                 def _make_click(lbl, text):
                     def _handler(_event):
                         _QApp.clipboard().setText(f'data-testid="{text}"')
+                        _all_mode_btn = getattr(self, "_test_mode_buttons", {}).get("all")
+                        if _all_mode_btn is not None and _all_mode_btn.isChecked():
+                            self._send_testid_probe_to_selected_terminal(text)
                         lbl.setStyleSheet(_STYLE_COPIED)
                         QTimer.singleShot(600, lambda: lbl.setStyleSheet(_STYLE_NORMAL))
                     return _handler
@@ -3846,6 +4662,20 @@ def main() -> None:
 
     window = MainWindow()
     window.show()
+
+    # Cleanup garantido do PTY no fechamento do app (widgets-filho nao
+    # recebem closeEvent confiavelmente; aboutToQuit eh o caminho safe).
+    # Cobre todos os OutputPanel ativos (interactive + workspace pyte).
+    def _shutdown_terminals() -> None:
+        for attr in ("_output_panel", "_workspace_panel"):
+            panel = getattr(window, attr, None)
+            if panel is not None and hasattr(panel, "shutdown"):
+                try:
+                    panel.shutdown()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    app.aboutToQuit.connect(_shutdown_terminals)
 
     sys.exit(app.exec())
 

@@ -41,6 +41,30 @@ class TestOutputPanelInitialState:
         assert panel._pipeline_runner is None
 
 
+class TestOutputPanelChannelEnvBinding:
+    """The PTY spawned by OutputPanel must export WF_CHANNEL_OVERRIDE
+    bound to its channel. This is what makes the bash `## FASE FINAL —
+    Autocast contract` block resolve the correct channel without each
+    command/wrapper having to set the env manually. Regression guard:
+    a Kimi run in T2 used to default to `interactive` and leave
+    listener-workspace stuck yellow.
+    """
+
+    def test_workspace_panel_binds_workspace_channel(self, qapp, qtbot):
+        from workflow_app.output_panel.output_panel import OutputPanel
+        ws = OutputPanel(workspace_mode=True)
+        qtbot.addWidget(ws)
+        assert ws._shell is not None
+        assert ws._shell._extra_env.get("WF_CHANNEL_OVERRIDE") == "workspace"
+
+    def test_interactive_panel_binds_interactive_channel(self, qapp, qtbot):
+        from workflow_app.output_panel.output_panel import OutputPanel
+        ia = OutputPanel(workspace_mode=False)
+        qtbot.addWidget(ia)
+        assert ia._shell is not None
+        assert ia._shell._extra_env.get("WF_CHANNEL_OVERRIDE") == "interactive"
+
+
 class TestOutputPanelHeuristicIdleByChannel:
     """The heuristic 2s `_idle_timer` is armed for INTERACTIVE channel
     only. Workspace bypasses it (Kimi's prompt emits subtle PTY chunks

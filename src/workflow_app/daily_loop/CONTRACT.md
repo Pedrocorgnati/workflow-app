@@ -50,6 +50,93 @@ Por que no bucket e nao so em `items_index`: per CONTRACT.md secao 1, `items_ind
 
 Producers (`/loop:create-structure`, `/loop:integration`) devem materializar `kind` + `task_path` em ambos `buckets[*].items[*]` e `items_index[NNN]` (paridade exata, gate W9 do `/loop:workflow-app`).
 
+### 2.2 Path field convention (adicionado 2026-05-19 — Onda 9 hardening, anti workspace-doubled-path)
+
+**Regra de ouro:** todo campo path do bloco `daily_loop` (e adjacentes) e **filename-only relativo a `loop_root`** (ou path raso `tasks/...` para `spec_path`/`task_path`). Absoluto e tolerado para `loop_root` e `basic_flow.*`; workspace-relative (com slug embutido) e PROIBIDO.
+
+**Por que:** o helper `resolve_loop_path(value, loop_root)` em `loader.py` aplica regra simples — relativos resolvem como `loop_root / value`, absolutos sao usados as-is. Se um producer grava `daily_loop.progress_path = "blacksmith/loop-archives/{slug}/PROGRESS.md"`, o loader resolve como `{loop_root}/blacksmith/loop-archives/{slug}/PROGRESS.md` (duplicacao do slug) e quebra com `PROGRESS.md nao encontrado`. O contrato simples e a-prova-de-substituicao porque NAO depende de o consumidor saber qual e a "base" da relativizacao.
+
+**Tabela canonica por campo:**
+
+| Campo                              | Convencao                                              | Exemplo correto                        | Anti-pattern (PROIBIDO)                                       |
+|------------------------------------|--------------------------------------------------------|----------------------------------------|---------------------------------------------------------------|
+| `daily_loop.loop_root`             | Absoluto (preferido) OU workspace-relative resolvivel  | `/abs/.../blacksmith/loop-archives/{slug}` | n/a                                                       |
+| `daily_loop.progress_path`         | Filename-only relativo a `loop_root`                   | `"PROGRESS.md"`                        | `"blacksmith/loop-archives/{slug}/PROGRESS.md"`               |
+| `daily_loop.tasks_dir`             | Filename-only relativo a `loop_root`                   | `"tasks"`                              | `"blacksmith/loop-archives/{slug}/tasks"`                     |
+| `daily_loop.log_path`              | Filename-only relativo a `loop_root`                   | `"_LOOP-LOG.md"`                       | qualquer string com `/` embutindo o slug                      |
+| `daily_loop.source_config_path`    | Filename-only relativo a `loop_root`                   | `"_LOOP-CONFIG.json"`                  | workspace-relative                                            |
+| `daily_loop.buckets[*].spec_path`  | Relativo a `loop_root` comecando por `tasks/`          | `"tasks/T-opus-high.md"`               | absoluto OU prefixado com `blacksmith/.../{slug}/`            |
+| `daily_loop.buckets[*].items[*].task_path` | Relativo a `loop_root` (`tasks/items/...`)     | `"tasks/items/task-001-...md"`         | bare-relativo com slug embutido                               |
+| `items_index[*].task_path`         | Relativo a `loop_root` (`tasks/items/...`)             | `"tasks/items/task-001-...md"`         | absoluto sem necessidade                                      |
+| `metadata.source_md`               | Filename-only relativo a `loop_root`                   | `"source.md"`                          | `"blacksmith/loop-archives/{slug}/source.md"`                 |
+
+**Excecao:** tokens em `buckets[*].items[*].commands` que apontam para arquivos (`--task <path>`, `/cmd:update <path>`) sao **workspace-relative** (porque `command_queue_widget` injeta com `cwd == workspace_root`). Esse caso e separado do contrato de path do `daily_loop.*` e e coberto pela validacao W4b do `/loop:workflow-app`.
+
+**Detector canonico (referencia python):**
+
+```python
+from workflow_app.daily_loop import (
+    assert_loop_root_relative_path,
+    diagnose_workspace_doubled_path,
+)
+
+# Diagnostico (retorna sugestao de fix ou None):
+suggestion = diagnose_workspace_doubled_path(value, loop_root)
+# Enforce (raises DailyLoopConfigError):
+assert_loop_root_relative_path(value, loop_root, label="progress_path")
+```
+
+Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader.py`. Testes em `tests/workflow_app/test_daily_loop_loader.py` (classes `TestDiagnoseWorkspaceDoubledPath`, `TestAssertLoopRootRelativePath`).
+
+**Gates que enforcam esta regra:**
+
+- Producers (`/loop:create-structure`, `/loop:integration`): documentam o contrato em "CONTRATO DE PATHS" e DEVEM nao gerar workspace-relative.
+- Validator estrutural (`/loop:review` C15): detecta + auto-fixa (`fix_action: edit-json`).
+- Validator pre-runtime (`/loop:workflow-app` W10): detecta + bloqueia veredict APROVADO; `auto_fixable: false` (correcao via re-rodar `/loop:integration` ou via C15 do `/loop:review`).
+- Runtime defense (`loader.py::build_daily_loop_specs` e `build_loop_specs`): mensagens de erro enriquecidas com sugestao via `diagnose_workspace_doubled_path` quando `PROGRESS.md nao encontrado` por path doubling.
+
+**Bug-fix referencia:** `blacksmith/loop-archives/05-19-gap-tasklist/_HANDOFF.md` (Onda 9, 2026-05-19). Loop quebrou em runtime porque 6 campos foram gravados workspace-relative pelo `/loop:create-structure`. Fix aplicado: normalizacao manual + hardening em todas as 4 camadas listadas acima.
+
+### 2.3 Top-level `mode` discriminator + rocksmash 4-command iteration (adicionado 2026-05-19 — B6 rocksmash quad-loop integration)
+
+**Regra de ouro:** o campo top-level `mode` em `_LOOP-CONFIG.json` declara o sabor canonico da fila. Quando `mode == "rocksmash"`, cada item com `kind == "iteration"` (ou sem `kind`, tratado como iteration) carrega EXATAMENTE 4 tokens canonicos em `commands` (apos remover `/clear|/model|/effort`) e nessa ordem: `do` -> `review-done` -> `compare` -> `integrate`. Para os demais valores (`"normal"`, `"task"`, `"cmd"`, `"cmd-single"`, `"both"`, ausente), a contagem permanece variavel (tipicamente 4 — `create-task` + `review-created-task` + `execute-task` + `review-executed-task` — no fluxo `--task`/`--both`).
+
+**Enum canonico:**
+
+| Valor de `mode`   | Origem                              | Per-iteration commands | Consumer canonico                                   |
+|-------------------|-------------------------------------|------------------------|----------------------------------------------------|
+| `"rocksmash"`     | `/loop --rocksmash`, `/legacy:detect`| 4 (do/review-done/compare/integrate) | `build_loop_rocksmash_specs` + `build_loop_specs` |
+| `"task"`          | `/loop --task`                      | variavel               | `build_loop_specs`                                  |
+| `"cmd"`           | `/loop --cmd`                       | variavel               | `build_loop_specs`                                  |
+| `"cmd-single"`    | `/loop --cmd-single`                | variavel + expanded    | `build_loop_specs`                                  |
+| `"both"`          | `/loop --both`                      | variavel               | `build_loop_specs`                                  |
+| `"normal"`        | retro-compat (sem CLI flag)         | variavel               | `build_loop_specs` ou `build_daily_loop_specs`      |
+| ausente / null    | retro-compat V3 pre-2026-05-19      | tratado como `"normal"`| idem                                                |
+
+**Validador canonico (referencia python):**
+
+```python
+from workflow_app.daily_loop import (
+    is_rocksmash_mode,
+    assert_rocksmash_iteration_shape,
+)
+
+if is_rocksmash_mode(raw_config):
+    assert_rocksmash_iteration_shape(raw_config)  # raises DailyLoopConfigError
+```
+
+Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader.py`. Chamados internamente em `build_loop_specs` (lane `/loop`) e em `build_loop_rocksmash_specs` (lane `queue-btn-rocksmash`).
+
+**Producers (gravam `mode`):**
+
+- `/loop:create-structure` — escreve `mode` top-level apos detectar o flag do CLI (`--rocksmash` => `"rocksmash"`; demais => valor literal do flag). Sem flag, omite o campo (defaulta a non-rocksmash silenciosamente).
+- `/loop:integration` — preserva `mode`; quando `mode == "rocksmash"`, materializa `buckets[*].items[*].commands` com os 4 tokens canonicos (e replica em `items_index[NNN].commands` para auditoria W9).
+- `/legacy:detect` — promove loops legacy rocksmash setando `mode = "rocksmash"` E aplicando backfill via `/legacy:enqueue-all-modules` para converter `[do, review-done]` em `[do, review-done, compare, integrate]` (B12).
+
+**Migracao:** loops V3 sem `mode` (pre-2026-05-19) sao tratados como `"normal"` automaticamente, sem warning. Loops rocksmash legacy (com `daily_loop.rocksmash_legacy_two_step: true`) continuam emitindo 2 comandos por iteracao no expander; o backfill B12 promove para 4 comandos quando o operador estiver pronto.
+
+**Gate de runtime:** `assert_rocksmash_iteration_shape` rejeita com `DailyLoopConfigError` quando o shape diverge dos 4 tokens canonicos. Falha apresenta o `id` do item, a sequencia observada e a sequencia esperada — Zero Silencio. Para itens com `commands == []` em estado pre-integration (`metadata.integration_completed_at` ausente), o validator tolera o placeholder (alinha com a tabela da secao 2: shape `{"id":"NNN","commands":[]}` e legitimo pre-`/loop:integration`).
+
 ---
 
 ## 3. Gold example — schema canonico V3 + `daily_loop`
@@ -145,6 +232,54 @@ Notas sobre o gold:
 - `daily_loop.do_command` define o wrapper de fallback (alvo do anti-pattern). Em modo `--both`/`--task`/`--cmd` canonico, **o fallback nunca dispara** porque `commands` esta populado em `buckets[*].items[*]`.
 - `task_types[NNN]` controla o gate `task_type=ambiguous` no loader (`_normalize_items()` rejeita itens ambiguous; resolucao manual obrigatoria via `/loop:check-tasks-and-cmd`).
 
+### 3.1 Gold example — modo `rocksmash` (4 commands por iteracao)
+
+Variante canonica quando `mode == "rocksmash"`. Cada item iteration carrega EXATAMENTE 4 tokens canonicos (apos remover `/clear|/model|/effort`).
+
+```json
+{
+  "name": "exemplo-rocksmash",
+  "kind": "daily-loop",
+  "mode": "rocksmash",
+  "basic_flow": { "...": "..." },
+  "daily_loop": {
+    "slug": "exemplo-rocksmash",
+    "loop_root": "/abs/path/blacksmith/loop-archives/exemplo-rocksmash",
+    "buckets": [
+      {
+        "id": "T-opus-high",
+        "model": "opus",
+        "effort": "high",
+        "items": [
+          {
+            "id": "002",
+            "kind": "iteration",
+            "task_path": "tasks/items/task-002-...md",
+            "commands": [
+              "/clear",
+              "/model opus",
+              "/effort high",
+              "/loop-rocksmash:do blacksmith/loop-archives/exemplo-rocksmash/tasks/items/task-002-...md",
+              "/loop-rocksmash:review-done blacksmith/loop-archives/exemplo-rocksmash/tasks/items/task-002-...md",
+              "/loop-rocksmash:compare blacksmith/loop-archives/exemplo-rocksmash/tasks/items/task-002-...md",
+              "/loop-rocksmash:integrate blacksmith/loop-archives/exemplo-rocksmash/tasks/items/task-002-...md"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Notas sobre o gold rocksmash:
+
+- Tokens canonicos (apos strip de directives): `["/loop-rocksmash:do", "/loop-rocksmash:review-done", "/loop-rocksmash:compare", "/loop-rocksmash:integrate"]`. Ordem importa.
+- Suffix `<task_path>` em cada token e permitido e ignorado pelo validador (que compara apenas a primeira palavra de cada comando).
+- Opt-in legacy: para manter o shape de 2 comandos (apenas `:do` + `:review-done`), gravar `daily_loop.rocksmash_legacy_two_step: true` E NAO declarar `mode == "rocksmash"`. O validador `assert_rocksmash_iteration_shape` so dispara quando `mode == "rocksmash"`.
+- Items `kind in {"preparo", "finalizacao"}` sao ignorados pelo validador.
+- `assert_rocksmash_iteration_shape` tolera `commands == []` quando `metadata.integration_completed_at` esta ausente (placeholder pre-`/loop:integration`).
+
 ---
 
 ## 4. Producers (escritores deste shape)
@@ -173,9 +308,16 @@ Tres call sites em `loader.py` consomem o shape canonico. Toda regressao silenci
 |----------|---------------------------|----------------------|---------------|
 | `_resolve_item_commands(daily_loop, item_id)` | linhas 252-300 | helper compartilhado | Retorna `list[str]` literal quando `buckets[*].items[*].commands` esta populado; retorna `[]` ou `None` nos shapes do fallback (vide tabela secao 2). Rejeita `/daily-loop:do` dentro de `commands` com `DailyLoopConfigError`. |
 | `build_daily_loop_specs(raw_config, loop_root)` | linhas 421-712 (chamada de `_resolve_item_commands` em 568; warning em 587) | lane legacy `/daily-loop` (`queue-btn-daily-loop`) | Emite UM `CommandSpec` por entrada de `commands` quando populado. Caso fallback: emite `CommandSpec(name=f"{do_command} --slug {slug} --item {item_id}")` + warning stderr se `items_index[item_id].commands` tem conteudo (drift detectavel). |
-| `build_loop_specs(raw_config, loop_root)` | linhas 802-988 (chamada de `_resolve_item_commands` em 933; warning em 952) | lane `/loop --task\|--cmd\|--cmd-single\|--both` (`queue-btn-loop`, `queue-btn-cmd-single`) | Mirror exato de `build_daily_loop_specs` para a lane do `/loop`, com a unica diferenca de que NAO atualiza `PROGRESS.md` automaticamente (responsabilidade do `/loop:iteraction:review-executed-task` no `[post]`). |
+| `build_loop_specs(raw_config, loop_root)` | linhas 802-988 (chamada de `_resolve_item_commands` em 933; warning em 952) | lane `/loop --task\|--cmd\|--cmd-single\|--both` (`queue-btn-loop`, `queue-btn-cmd-single`) | Comportamento diverge de `build_daily_loop_specs` em `review_done_command` (ver nota abaixo). |
 
-Per-item, apos o `do` (literal canonico ou wrapper de fallback), todos os 3 consumers emitem `CommandSpec(name=f"{review_done_command} --slug {slug} --item {item_id}")` (default `/daily-loop:review-done`). Ao termino da fila, emitem UMA vez `CommandSpec(name=f"{review_command} --slug {slug}")` (default `/daily-loop:review`). Esses dois caminhos finais NAO tem lane "per-item commands" e nao sao afetados pela precedencia do shape.
+**Nota de divergencia `review_done_command` entre lanes (fix 2026-05-20):**
+
+- **Lane legacy `/daily-loop` (`build_daily_loop_specs`):** `review_done_command` e injetado SEMPRE apos cada item, independente de `canonical_cmds`. Comportamento inalterado.
+- **Lane `/loop` (`build_loop_specs`):** `review_done_command` e injetado SOMENTE no path de fallback (quando `canonical_cmds` esta vazio). Quando `canonical_cmds` esta populado, o reviewer per-item ja esta embutido nos proprios comandos (`/loop:iteraction:review-executed-task`, `/cmd:review`, etc.) e injetar `review_done_command` adicionalmente causaria contaminacao cross-lane (`/daily-loop:review-done` revisando output de `/loop:iteraction:execute-task`). Isso e semanticamente incorreto: sao fluxos ortogonais, com contratos de argumentos e responsabilidades incompativeis.
+
+Per-item na lane legacy `/daily-loop`: apos o `do` (literal canonico ou wrapper de fallback), `build_daily_loop_specs` emite `CommandSpec(name=f"{review_done_command} --slug {slug} --item {item_id}")` (default `/daily-loop:review-done`). Ao termino da fila, emite UMA vez `CommandSpec(name=f"{review_command} --slug {slug}")` (default `/daily-loop:review`).
+
+Per-item na lane `/loop` com `canonical_cmds` populado: `build_loop_specs` NAO emite `review_done_command`. O reviewer e o ultimo comando da sequencia `canonical_cmds`. Ao termino da fila, emite UMA vez `CommandSpec(name=f"{review_command} --slug {slug}")` (default `/daily-loop:review`, substituivel por `/loop:iteraction:review-executed-loop` via `daily_loop.review_command`).
 
 ---
 

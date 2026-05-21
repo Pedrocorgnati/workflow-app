@@ -5,14 +5,23 @@ canonical ``/loop-rocksmash:*`` queue:
 
     /loop-rocksmash:prepare {abs/path/_LOOP-CONFIG.json}
     [ /loop-rocksmash:do {abs/path/tasks/items/task-NNN-*.md}
-      /loop-rocksmash:review-done {abs/path/tasks/items/task-NNN-*.md} ]   x N
+      /loop-rocksmash:review-done {abs/path/tasks/items/task-NNN-*.md}
+      /loop-rocksmash:compare {abs/path/tasks/items/task-NNN-*.md}
+      /loop-rocksmash:integrate {abs/path/tasks/items/task-NNN-*.md} ]   x N
     /loop-rocksmash:rename {abs/path/_LOOP-CONFIG.json}
+
+Per-iteration shape (canonical 2026-05-19 onwards, B6): four commands per
+iteration item — ``:do`` -> ``:review-done`` -> ``:compare`` -> ``:integrate``.
+Legacy two-command iterations (``:do`` + ``:review-done`` only) are still
+emitted when ``daily_loop.rocksmash_legacy_two_step == true`` is set
+explicitly (auto-upgrade path covered by B12). The default for new loops is
+the four-command iteration.
 
 Iteration items are sourced from ``daily_loop.items_index`` (preferred when
 present) or, as a fallback, from ``daily_loop.buckets[*].items[*]``. Items
 with ``kind`` in {``preparo``, ``finalizacao``} are skipped — only
 ``iteration`` items (or items without an explicit kind, treated as
-iteration) produce ``:do`` + ``:review-done`` pairs.
+iteration) produce the per-iteration command set.
 
 ``/clear``, ``/model`` and ``/effort`` directives are auto-injected at
 bucket boundaries, mirroring ``build_loop_specs``. The fixed framing
@@ -29,6 +38,8 @@ from workflow_app.daily_loop.loader import (
     DailyLoopConfigError,
     _bucket_to_model_effort,
     _resolve_bucket_index,
+    assert_rocksmash_iteration_shape,
+    is_rocksmash_mode,
 )
 from workflow_app.domain import (
     CommandSpec,
@@ -129,7 +140,20 @@ def build_loop_rocksmash_specs(
     loop_root_path = Path(loop_root)
     config_path = loop_root_path / "_LOOP-CONFIG.json"
 
+    # B6 (2026-05-19): when raw_config declares mode=='rocksmash', enforce the
+    # canonical 4-command per-iteration shape on items[].commands. The
+    # validator skips silently for non-rocksmash mode (retro-compat for V3
+    # loops produced before B6 and for loops driven by the legacy two-step
+    # opt-in flag below).
+    if is_rocksmash_mode(raw_config):
+        assert_rocksmash_iteration_shape(raw_config)
+
     bucket_index = _resolve_bucket_index(daily_loop)
+
+    # B6 canonical: four commands per iteration (do/review-done/compare/integrate).
+    # Legacy two-step opt-in via daily_loop.rocksmash_legacy_two_step (default
+    # False). Backfill in B12 promotes legacy loops to four-step automatically.
+    legacy_two_step = bool(daily_loop.get("rocksmash_legacy_two_step", False))
 
     all_items = _iter_items(daily_loop)
     iteration_items = [
@@ -264,6 +288,29 @@ def build_loop_rocksmash_specs(
                 phase="loop-rocksmash",
             )
         )
+        if not legacy_two_step:
+            specs.append(
+                CommandSpec(
+                    name=f"/loop-rocksmash:compare {task_path}",
+                    model=model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                    effort=effort,
+                    phase="loop-rocksmash",
+                )
+            )
+            specs.append(
+                CommandSpec(
+                    name=f"/loop-rocksmash:integrate {task_path}",
+                    model=model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    position=0,
+                    effort=effort,
+                    phase="loop-rocksmash",
+                )
+            )
 
     # Framing rename — switch back to framing model/effort if drifted.
     specs.append(

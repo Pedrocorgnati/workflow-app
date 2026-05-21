@@ -671,7 +671,7 @@ def test_pipeline_past_pending_includes_regenerate_when_modal_accepted(
         )
     ]
     assert len(real_specs) == 6
-    assert real_specs[0].name.startswith("/build-module-pipeline --regenerate --module 1 ")
+    assert real_specs[0].name == "/build-module-pipeline --regenerate --module 1"
     assert real_specs[5].kind == "local-action"
 
 

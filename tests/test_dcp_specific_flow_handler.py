@@ -1283,7 +1283,7 @@ def _make_local_action_spec():
 
     return CommandSpec(
         name="DCP: Carregar Specific-Flow",
-        model=ModelName.HAIKU,
+        model=ModelName.SONNET,
         interaction_type=InteractionType.AUTO,
         position=6,
         effort=EffortLevel.LOW,

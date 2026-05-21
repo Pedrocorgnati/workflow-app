@@ -59,6 +59,7 @@ from workflow_app.models.dcp_command_matrix import (
     DcpCommandMatrix,
     ModuleEntry,
 )
+from workflow_app.templates.quick_templates import _inject_clears
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +236,6 @@ def _render(
 _MODEL_MAP: dict[str, ModelName] = {
     "opus": ModelName.OPUS,
     "sonnet": ModelName.SONNET,
-    "haiku": ModelName.HAIKU,
 }
 
 _EFFORT_MAP: dict[str, EffortLevel] = {
@@ -251,6 +251,7 @@ _INTERACTION_MAP: dict[str, InteractionType] = {
     # is "auto" | "inter". Headless = runs without prompting -> AUTO.
     "headless": InteractionType.AUTO,
     "auto": InteractionType.AUTO,
+    "manual": InteractionType.INTERACTIVE,
     "interactive": InteractionType.INTERACTIVE,
     "inter": InteractionType.INTERACTIVE,
 }
@@ -306,6 +307,7 @@ def derive_queue_from_matrix(
     config_path: str = "",
     commit_variant: str = "simple",
     stack: Optional[str] = None,
+    include_directives: bool = False,
 ) -> list[CommandSpec]:
     """Build the queue for `cm_id` per source.md st-05 algorithm 9-17.
 
@@ -318,6 +320,9 @@ def derive_queue_from_matrix(
         stack: optional stack short name for `{stack}` substitution / review
             command swap. When the matrix carries multi-stack reviews the
             caller is expected to expand them per stack separately.
+        include_directives: when True, inject render-ready `/clear`, `/model`
+            and `/effort` rows as first-class `CommandSpec` entries. Keep
+            False for programmatic consumers that need the real-command list.
 
     Returns:
         Ordered list of `CommandSpec` ready for `signal_bus.pipeline_ready.emit`.
@@ -418,11 +423,11 @@ def derive_queue_from_matrix(
             if rendered in overrides_skipped:
                 continue
             position += 1
-            queue.append(CommandSpec(
-                name=rendered,
-                model=ModelName.OPUS,        # fold-in rules are operator-grade
-                effort=EffortLevel.HIGH,
-                interaction_type=InteractionType.AUTO,
+            queue.append(_to_command_spec(
+                rendered,
+                model=ref.model or "opus",
+                effort=ref.effort or "high",
+                interaction=ref.interaction or "auto",
                 phase=phase_label,
                 position=position,
                 config_path=config_path,
@@ -434,7 +439,7 @@ def derive_queue_from_matrix(
         emit_fold(matrix.fold_in_rules.G_deploy, "G-deploy")
         emit_fold(matrix.fold_in_rules.I_human_mkt, "I-human-mkt")
 
-    return queue
+    return _inject_clears(queue) if include_directives else queue
 
 
 def build_load_queue_trail_entry(
@@ -457,7 +462,7 @@ def build_load_queue_trail_entry(
     """
     return {
         "ts": datetime.now(tz=timezone.utc).isoformat(),
-        "gate": "replicate",  # closest canonical gate literal for in-memory load
+        "gate": "load-queue",
         "run_id": run_id or f"load-queue-{cm_id}",
         "action": "load-queue",
         "reason": f"cm_id={cm_id} count={queue_size} is_last={is_last}",

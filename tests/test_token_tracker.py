@@ -47,7 +47,7 @@ def test_record_calculates_opus_cost(mock_db):
 def test_record_updates_command_fields(mock_db):
     db, cmd = mock_db
     tracker = TokenTracker(db)
-    cost = tracker.record(1, tokens_in=100, tokens_out=50, model=ModelType.HAIKU)
+    cost = tracker.record(1, tokens_in=100, tokens_out=50, model=ModelType.SONNET)
     assert cmd.tokens_input == 100
     assert cmd.tokens_output == 50
     assert cost > 0  # cost_usd lives on PipelineExecution, not CommandExecution
@@ -111,7 +111,6 @@ def test_zero_tokens_no_error(mock_db):
 def test_default_prices_contain_all_models():
     assert ModelType.OPUS.value in _DEFAULT_PRICES
     assert ModelType.SONNET.value in _DEFAULT_PRICES
-    assert ModelType.HAIKU.value in _DEFAULT_PRICES
 
 
 def test_update_prices_changes_calculation(mock_db):

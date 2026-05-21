@@ -111,8 +111,8 @@ class TestCommandItemWidgetSetModel:
 
     def test_set_model_updates_spec(self, item):
         """set_model updates the internal spec model."""
-        item.set_model(ModelName.HAIKU)
-        assert item.get_spec().model == ModelName.HAIKU
+        item.set_model(ModelName.SONNET)
+        assert item.get_spec().model == ModelName.SONNET
 
 
 class TestCommandItemWidgetSignals:

@@ -306,7 +306,7 @@ def test_items_str_without_items_index_falls_back_silently(
     )
 
     captured = capsys.readouterr()
-    # Filtra a coercao de floor do bucket (haiku/low) que tambem usa stderr — aqui
+    # Filtra a coercao de floor do bucket (sonnet/low) que tambem usa stderr — aqui
     # bucket eh opus/high, entao stderr deveria estar realmente vazio.
     assert captured.err.strip() == "", (
         "Fallback retro-compat (string sem items_index) deveria ser silencioso; "

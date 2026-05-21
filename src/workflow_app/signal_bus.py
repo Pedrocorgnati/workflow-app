@@ -138,6 +138,7 @@ class SignalBus(QObject):
     # --- Terminal (run command directly in persistent shell) ---
     run_command_in_terminal = Signal(str)           # sends text + Enter — interactive terminal only
     run_command_in_workspace_terminal = Signal(str) # sends text + Enter — workspace terminal only
+    run_command_in_workspace_xterm = Signal(str)    # sends text + Enter — workspace xterm terminal
     paste_text_in_terminal = Signal(str)            # text only (no Enter — inserts inline)
     paste_text_in_workspace_terminal = Signal(str)  # text only (no Enter) — workspace terminal
     submit_enter_to_terminal = Signal()             # bare Enter (\r) to interactive terminal
@@ -175,8 +176,10 @@ class SignalBus(QObject):
     # --- DataTest debug mode ---
     datatest_toggled = Signal(bool)        # legado: True=show testid overlays, False=hide (mantido por compat; nao mais emitido pela UI)
     # Task 3 (loop 05-13-workflow-app-layout-2): toggle radio-like com 3 modos.
-    # Modos: "off" (sem overlays), "all" (todos os testids), "body" (todos MENOS QAbstractButton),
-    # "buttons" (APENAS QAbstractButton). Emitido pelos botoes DataTest/BodyTest/BtnTest.
+    # Modos: "off" (sem overlays), "all" (todos os testids, SEM filtro),
+    # "key" (subset curado em _DATATEST_FILTERED_IDS — IDs principais),
+    # "body" (todos MENOS QAbstractButton), "buttons" (APENAS QAbstractButton).
+    # Emitido pelos botoes All/Key/Body/Btn da test-mode column.
     datatest_mode_changed = Signal(str)
 
     # --- Terminal focus (switch to output + focus terminal widget) ---

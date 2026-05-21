@@ -101,6 +101,21 @@ class TestSetupLogging:
         ]
         assert len(stream_handlers) == 0
 
+    def test_stream_handler_fallback_when_file_logging_fails(self, tmp_path, monkeypatch):
+        log_dir = tmp_path / "logs"
+        monkeypatch.setattr(logger_mod, "_LOG_DIR", log_dir)
+        monkeypatch.setattr(logger_mod, "_LOG_FILE", log_dir / "workflow-app.log")
+        monkeypatch.setattr(logger_mod.RotatingFileHandler, "__init__", _raise_os_error)
+        logger_mod._configured = False
+
+        setup_logging(level=logging.INFO)
+
+        root = logging.getLogger()
+        stream_handlers = [
+            h for h in root.handlers if type(h) is logging.StreamHandler
+        ]
+        assert len(stream_handlers) >= 1
+
 
 class TestGetLogger:
     def test_returns_logger(self):
@@ -115,3 +130,7 @@ class TestGetLogger:
         lg1 = get_logger("workflow_app.shared")
         lg2 = get_logger("workflow_app.shared")
         assert lg1 is lg2
+
+
+def _raise_os_error(self, *args, **kwargs):
+    raise OSError("read-only log directory")

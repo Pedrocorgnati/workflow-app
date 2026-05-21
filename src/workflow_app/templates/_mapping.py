@@ -21,7 +21,8 @@ def model_type_to_name(model_type: str) -> ModelName:
     mapping = {
         ModelType.OPUS.value: ModelName.OPUS,
         ModelType.SONNET.value: ModelName.SONNET,
-        ModelType.HAIKU.value: ModelName.HAIKU,
+        ModelType.SONNET.value: ModelName.SONNET,
+        "sonnet": ModelName.SONNET,
     }
     return mapping.get(model_type.lower(), ModelName.SONNET)
 

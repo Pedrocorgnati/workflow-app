@@ -37,7 +37,7 @@ from workflow_app.signal_bus import signal_bus
 
 _O = ModelName.OPUS
 _S = ModelName.SONNET
-_H = ModelName.HAIKU
+_H = ModelName.SONNET
 _I = InteractionType.INTERACTIVE
 _A = InteractionType.AUTO
 
@@ -81,7 +81,7 @@ COMMAND_CATALOG_DCP: list[tuple[str, list[tuple[str, ModelName, InteractionType]
     ]),
     ("C - Linkage", [
         ("/clear",                      _S, _A),
-        ("/model haiku",                _H, _A),
+        ("/model sonnet",               _H, _A),
         ("/effort low",                 _H, _A),
         ("/github-linking",             _H, _I),
         ("/sync:github",                _H, _I),
@@ -89,7 +89,7 @@ COMMAND_CATALOG_DCP: list[tuple[str, list[tuple[str, ModelName, InteractionType]
     ]),
     ("D - F8 micro", [
         ("/clear",                      _S, _A),
-        ("/model haiku",                _H, _A),
+        ("/model sonnet",               _H, _A),
         ("/env-creation",               _H, _I),
         ("/create-test-user",           _H, _I),
         ("/seed-data-create",           _S, _I),
@@ -272,7 +272,6 @@ COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] 
 _MODEL_COLOR = {
     ModelName.OPUS:   ("#7C3AED", "#FFFFFF"),
     ModelName.SONNET: ("#2563EB", "#FFFFFF"),
-    ModelName.HAIKU:  ("#059669", "#FFFFFF"),
 }
 
 

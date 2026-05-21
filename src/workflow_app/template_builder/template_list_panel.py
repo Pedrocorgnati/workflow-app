@@ -47,14 +47,12 @@ _DROP_COLOR = QColor("#F59E0B")
 _MODEL_COLOR: dict[ModelName, tuple[str, str]] = {
     ModelName.OPUS:   ("#7C3AED", "#FFFFFF"),
     ModelName.SONNET: ("#2563EB", "#FFFFFF"),
-    ModelName.HAIKU:  ("#059669", "#FFFFFF"),
 }
 
 _MODEL_OPTIONS: list[tuple[str, ModelName | None]] = [
     ("— Sem modelo —", None),
     ("Opus",           ModelName.OPUS),
     ("Sonnet",         ModelName.SONNET),
-    ("Haiku",          ModelName.HAIKU),
 ]
 
 _EFFORT_COLOR: dict[EffortLevel, tuple[str, str]] = {
@@ -93,7 +91,7 @@ def _effort_badge_style(effort: EffortLevel) -> str:
 _WORKFLOW_ENTRY_RE = re.compile(r"^\s*\(([hos])\)\s+(/\S+)")
 _SECTION_HEADER_RE = re.compile(r"^##\s+(.+)")
 _MODEL_MAP_WF: dict[str, ModelName] = {
-    "h": ModelName.HAIKU,
+    "h": ModelName.SONNET,
     "s": ModelName.SONNET,
     "o": ModelName.OPUS,
 }

@@ -25,6 +25,8 @@ def setup_logging(level: int = logging.DEBUG) -> None:
     """Configure root logger with RotatingFileHandler (and optional StreamHandler).
 
     Idempotent: subsequent calls are no-ops.
+    If the user log directory is not writable, keep startup alive with stderr
+    logging instead of aborting the desktop app.
 
     Args:
         level: Minimum log level (default DEBUG).
@@ -34,28 +36,35 @@ def setup_logging(level: int = logging.DEBUG) -> None:
     if _configured:
         return
 
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     root = logging.getLogger()
     root.setLevel(level)
 
     formatter = logging.Formatter(_FMT, datefmt=_DATE_FMT)
 
     # Rotating file handler — 5 MB × 5 backups
-    file_handler = RotatingFileHandler(
-        _LOG_FILE,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
+    file_logging_enabled = False
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            _LOG_FILE,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+        file_logging_enabled = True
+    except OSError as exc:
+        # Startup must not depend on ~/.workflow-app being writable.
+        sys.stderr.write(
+            f"[workflow-app] WARN: file logging disabled for {_LOG_FILE}: {exc}\n"
+        )
 
-    # Stream handler only in DEBUG mode (dev convenience)
-    if level <= logging.DEBUG:
+    # Stream handler in DEBUG mode, or as the fallback when file logging fails.
+    if level <= logging.DEBUG or not file_logging_enabled:
         stream_handler = logging.StreamHandler(sys.stderr)
-        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setLevel(logging.DEBUG if level <= logging.DEBUG else level)
         stream_handler.setFormatter(formatter)
         root.addHandler(stream_handler)
 

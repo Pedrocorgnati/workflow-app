@@ -133,7 +133,7 @@ def _make_config(tmp_path: Path, wbs_root: Path) -> PipelineConfig:
 def _make_spec() -> CommandSpec:
     return CommandSpec(
         name="DCP: Carregar Specific-Flow",
-        model=ModelName.HAIKU,
+        model=ModelName.SONNET,
         interaction_type=InteractionType.AUTO,
         position=6,
         kind="local-action",

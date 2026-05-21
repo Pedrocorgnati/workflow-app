@@ -314,3 +314,84 @@ class TestBuildLoopSpecsPrecedence:
         assert all(
             not n.startswith("/daily-loop:do --slug") for n in names
         ), "wrapper must NOT be emitted when items[].commands is populated"
+
+    def test_loop_canonical_cmds_does_not_inject_review_done(
+        self, loop_root: Path
+    ) -> None:
+        """Anti-regression: build_loop_specs must NOT inject /daily-loop:review-done
+        when items[].commands is populated (canonical path).
+
+        Pre-fix (before 2026-05-20), review_done_command was ALWAYS appended
+        per-item regardless of whether canonical_cmds was populated. This caused
+        cross-lane contamination: /daily-loop:review-done (designed to review
+        /daily-loop:do output via --slug --item) was injected after
+        /loop:iteraction:execute-task (which operates per task_path with
+        delegate_kind routing). A mechanic reviewing a doctor's work.
+        """
+        _write_progress(
+            loop_root, [("001", " ", "fix bar", "T-sonnet-medium")]
+        )
+        cfg = _cfg(
+            loop_root,
+            [
+                {
+                    "id": "001",
+                    "commands": [
+                        "/loop:iteraction:execute-task --task blacksmith/loop-archives/test-slug/tasks/items/task-001-preparo.md",
+                        "/loop:iteraction:review-executed-task --task blacksmith/loop-archives/test-slug/tasks/items/task-001-preparo.md",
+                    ],
+                }
+            ],
+            kind="loop",
+        )
+        specs = build_loop_specs(cfg, loop_root)
+        names = _names(specs)
+        assert "/loop:iteraction:execute-task --task blacksmith/loop-archives/test-slug/tasks/items/task-001-preparo.md" in names
+        assert "/loop:iteraction:review-executed-task --task blacksmith/loop-archives/test-slug/tasks/items/task-001-preparo.md" in names
+        assert not any(
+            "daily-loop:review-done" in n for n in names
+        ), "/daily-loop:review-done must NOT be injected when canonical_cmds is populated (cross-lane contamination)"
+
+    def test_loop_fallback_still_injects_review_done(
+        self, loop_root: Path
+    ) -> None:
+        """Fallback path: build_loop_specs MUST inject review_done_command when
+        canonical_cmds is empty (items without populated commands).
+
+        This is the legitimate use of review_done_command in the /loop lane —
+        only for items that fall back to the do_command wrapper.
+        """
+        _write_progress(
+            loop_root, [("001", " ", "fix bar", "T-sonnet-medium")]
+        )
+        cfg = _cfg(
+            loop_root,
+            [{"id": "001", "commands": []}],
+            kind="loop",
+        )
+        specs = build_loop_specs(cfg, loop_root)
+        names = _names(specs)
+        assert any(
+            "daily-loop:review-done" in n for n in names
+        ), "review_done_command must still be injected in fallback path (empty commands)"
+
+    def test_daily_loop_lane_review_done_unchanged(
+        self, loop_root: Path
+    ) -> None:
+        """Regression guard: build_daily_loop_specs must continue to emit
+        /daily-loop:review-done even when items[].commands is populated.
+
+        The fix in build_loop_specs must NOT affect the legacy /daily-loop lane.
+        """
+        _write_progress(
+            loop_root, [("001", " ", "edit foo", "T-sonnet-medium")]
+        )
+        cfg = _cfg(
+            loop_root,
+            [{"id": "001", "commands": ["/cmd:update --foo"]}],
+        )
+        specs = build_daily_loop_specs(cfg, loop_root)
+        names = _names(specs)
+        assert (
+            "/daily-loop:review-done --slug test-slug --item 001" in names
+        ), "daily-loop lane must continue to emit review-done unconditionally (not affected by loop fix)"

@@ -1,7 +1,7 @@
 {
   "version": "1.7.0-pre",
-  "updated_at": "2026-05-13",
-  "updated_note": "HT-05 mitigation — meta-loop estrategia-de-separacao prep: declared 4 new /dcp:* advisory gates (congruence-check, temporality-check, meta-completeness, directive-injector) que serao consumidos pelo /dcp:build-and-load apos item 006 do meta-loop. Versao bumpeada para 1.7.0-pre — final 1.7.0 sera marcada apos item 007 com smoke test verde.",
+  "updated_at": "2026-05-19",
+  "updated_note": "HT-05 mitigation — meta-loop estrategia-de-separacao prep: declared 4 new /dcp:* advisory gates (congruence-check, temporality-check, meta-completeness, directive-injector) que serao consumidos pelo /dcp:build-and-load apos item 006 do meta-loop. Versao bumpeada para 1.7.0-pre — final 1.7.0 sera marcada apos item 007 com smoke test verde. 2026-05-19: adicionada secao top-level `tripwires[]` com HT-RS-01 (idempotencia de `/loop-rocksmash:integrate`) — escopo, descricao, script de verificacao e exit code esperado (4 = no-op). Item B11 do loop 05-19-tasks-faltantes.",
   "gates": [
     {
       "gate_id": "B-dcp.exit",
@@ -52,6 +52,44 @@
       "idempotent": true,
       "tripwire": "rodar UMA UNICA vez per build — re-emissao na mesma sessao proibida (HT-04 tripwire (1))",
       "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    }
+  ],
+  "tripwires": [
+    {
+      "tripwire_id": "HT-RS-01",
+      "scope": "loop-rocksmash:integrate",
+      "command_under_test": "/loop-rocksmash:integrate",
+      "subsystem": "rocksmash",
+      "version_introduced": "1.7.0-pre",
+      "status": "active",
+      "description": "Idempotencia de `/loop-rocksmash:integrate`: rodar duas vezes na mesma task com hash identico do bloco de pareamento JSON detecta no-op e NAO duplica `## ADR Log` nem reescreve `## Task atual`. A 2a execucao deve sair com exit 4 (no-op) e o documento alvo (rocksmash architecture doc) deve permanecer byte-identico apos a 2a invocacao.",
+      "dependencies": [
+        "B5 (loop-rocksmash:integrate precisa existir)",
+        "B3 (block hash JSON do pareamento)",
+        "B10 (telemetria JSONL para registrar a deteccao de no-op)"
+      ],
+      "verification_script": "set -euo pipefail; TARGET_TASK=\"${TARGET_TASK:?defina TARGET_TASK=path/para/task.md}\"; TARGET_DOC=\"${TARGET_DOC:?defina TARGET_DOC=path/para/architecture.md}\"; sha_before=$(sha256sum \"$TARGET_DOC\" | awk '{print $1}'); /loop-rocksmash:integrate --task \"$TARGET_TASK\" >/dev/null 2>&1; rc1=$?; if [ \"$rc1\" -ne 0 ] && [ \"$rc1\" -ne 4 ]; then echo \"HT-RS-01 FAIL: 1a execucao retornou $rc1 (esperado 0 ou 4)\" >&2; exit 1; fi; sha_mid=$(sha256sum \"$TARGET_DOC\" | awk '{print $1}'); /loop-rocksmash:integrate --task \"$TARGET_TASK\" >/dev/null 2>&1; rc2=$?; sha_after=$(sha256sum \"$TARGET_DOC\" | awk '{print $1}'); if [ \"$rc2\" -ne 4 ]; then echo \"HT-RS-01 FAIL: 2a execucao retornou $rc2 (esperado 4 = no-op)\" >&2; exit 1; fi; if [ \"$sha_mid\" != \"$sha_after\" ]; then echo \"HT-RS-01 FAIL: doc mudou entre 1a e 2a execucao identicas ($sha_mid -> $sha_after)\" >&2; exit 1; fi; grep -c '^## ADR Log' \"$TARGET_DOC\" | awk '$1!=1 {print \"HT-RS-01 FAIL: ## ADR Log apareceu \"$1\" vezes (esperado 1)\" > \"/dev/stderr\"; exit 1}'; echo \"HT-RS-01 PASS: idempotencia preservada (rc1=$rc1, rc2=$rc2, hash estavel, ADR Log unico)\"; exit 0",
+      "expected_exit_code": 4,
+      "exit_codes_acceptable_first_run": [0, 4],
+      "exit_code_required_second_run": 4,
+      "on_fail": "abort with exit 1 — duplicacao de `## ADR Log` ou reescrita de `## Task atual` em re-execucao identica viola contrato de idempotencia documentado em source.md linha 448-451 do loop 05-19-tasks-faltantes",
+      "secondary_conditions_runtime_warnings": [
+        "lock_pid orfao no cursor (proxima execucao limpa automaticamente; NAO bloqueia HT-RS-01)",
+        "hash mismatch entre `<!-- arch-seed:hash=... -->` e inputs atuais sem flag `--reseed` (regenera silenciosamente; NAO bloqueia HT-RS-01)",
+        "backfill conflict (legacy doc com `## Arquitetura semeada` divergente; aborta com exit 8 e exige `--force-backfill`; NAO eh HT-RS-01)"
+      ],
+      "warnings_telemetry": {
+        "stderr_format": "[WARN][rocksmash] <message>",
+        "jsonl_path": "{wbs_root}/.rocksmash-telemetry/{YYYY-MM}.jsonl",
+        "jsonl_schema_extension": "schema do B10 estendido com `level: 'info'|'warning'` e `message: <string>` opcionais (default level=info)",
+        "workflow_app_capture": "stderr capturado no console widget do canto inferior do workflow-app (operador GUI ve sem precisar do terminal)",
+        "toast_policy": "NAO criar toast amarelo — mantem decisao 'toast strict' verde+vermelho de source.md linha 166"
+      },
+      "introduced_by": "B11 do loop 05-19-tasks-faltantes (commit pendente)",
+      "consumed_by": [
+        "/dcp:directive-injector (smoke test pre-commit valida sem regressao)",
+        "/loop-rocksmash:integrate (auto-aplicacao da regra interna)"
+      ]
     }
   ],
   "canonical_loop": {
