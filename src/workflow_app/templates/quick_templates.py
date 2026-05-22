@@ -973,42 +973,30 @@ TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
     _spec("/blog:hreflang-map",           _H, _A, 18),
 ])
 
-# ─── Blog Stockpile (gera 1 pacote quad-locale + push; sem promote, sem hreflang) ──────────── #
-# Fase 1 (steps 1-4):   keywords pipeline — todos os locales via config.
-# Fase 2 (steps 5-8):   generate-briefs por locale (pt-BR escreve CURRENT-PACKAGE.json com UUID;
-#                        it-IT/en/es-ES reutilizam mesmo UUID se idade <= 1h).
-# Fase 3 (steps 9-12):  write-articles --output-dir stockpile por locale (le CURRENT-PACKAGE.json).
-# Fase 4 (steps 13-16): review-seo --mode stockpile por locale.
-# Fase 5 (step 17):     quality-gate --mode stockpile (todos locales).
-# Fase 6 (step 18):     stockpile-push — commit + push idempotente para main remoto.
+# ─── Blog Stockpile (gera 1 pacote completo + push; sem promote, sem hreflang) ──────────────── #
+# Correcao T002 — blacksmith/05-21-auto-blog/TASKLIST.md, decisao D1/Opcao B
+# (DECISION-LOG.md). O template anterior era uma copia DESENROLADA e INCOMPLETA de
+# /blog:stockpile-generate: tinha os 17 passos de keywords/briefs/artigos/review/
+# quality-gate, mas NAO materializava packages/{uuid}/package.json (faltava o
+# equivalente ao Passo 2.4 do gerador) nem rodava validate:stockpile (FASE 3).
+# Resultado: o botao produzia diretorios orfaos que o promotor
+# (promote-from-stockpile.ts) ignora silenciosamente — o artigo nunca era publicado.
+# Consolidado numa unica chamada ao gerador canonico /blog:stockpile-generate, que
+# ja inclui o Passo 2.4 (package.json com promotion_state=available, locales_present,
+# lifecycle ISO, freshness_policy, scores) e a FASE 3. --max-packages 1 preserva a
+# intencao 1:1 atual do botao (escopo por clique = decisao D2/T013). NAO passar
+# workspace explicito: stockpile-generate resolve workspace pela mesma regra
+# cwd/active-workspace dos demais /blog:* (ressalva R1 do D1). --max-packages 1 sem
+# --days-of-stock/--per-day nao dispara a validacao cruzada M==DxP (ressalva R2).
 # Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC
 # (promote-from-stockpile.yml), NAO desta pipeline local.
 
 TEMPLATE_BLOG_STOCKPILE: list[CommandSpec] = _inject_clears([
-    _spec("/clear",                                              _S, _A,  0),
-    # Fase 1 — keywords / topics (locale-agnostic ou itera internamente)
-    _spec("/blog:expand-keywords",                               _S, _A,  1),
-    _spec("/blog:cluster-keywords",                              _O, _A,  2),
-    _spec("/blog:prioritize-topics",                             _S, _A,  3),
-    _spec("/blog:deduplicate-topics",                            _S, _A,  4),
-    # Fase 2 — briefs por locale (1o locale cria CURRENT-PACKAGE.json; demais reutilizam UUID)
-    _spec("/blog:generate-briefs pt-BR",                         _O, _A,  5),
-    _spec("/blog:generate-briefs it-IT",                         _O, _A,  6),
-    _spec("/blog:generate-briefs en",                            _O, _A,  7),
-    _spec("/blog:generate-briefs es-ES",                         _O, _A,  8),
-    # Fase 3 — artigos por locale (le equivalence_id de CURRENT-PACKAGE.json)
-    _spec("/blog:write-articles --output-dir stockpile pt-BR",   _O, _A,  9),
-    _spec("/blog:write-articles --output-dir stockpile it-IT",   _O, _A, 10),
-    _spec("/blog:write-articles --output-dir stockpile en",      _O, _A, 11),
-    _spec("/blog:write-articles --output-dir stockpile es-ES",   _O, _A, 12),
-    # Fase 4 — review-seo por locale
-    _spec("/blog:review-seo --mode stockpile pt-BR",             _S, _A, 13),
-    _spec("/blog:review-seo --mode stockpile it-IT",             _S, _A, 14),
-    _spec("/blog:review-seo --mode stockpile en",                _S, _A, 15),
-    _spec("/blog:review-seo --mode stockpile es-ES",             _S, _A, 16),
-    # Fase 5 — quality-gate (todos locales) + push
-    _spec("/blog:quality-gate --mode stockpile",                 _S, _A, 17),
-    _spec("/blog:stockpile-push",                                _S, _A, 18),
+    # Gera 1 pacote completo (topicos -> briefs -> artigos -> review -> quality-gate
+    # -> package.json -> validate:stockpile). Output: packages/{uuid}/.
+    _spec("/blog:stockpile-generate --max-packages 1",           _S, _A,  1),
+    # Commit + push idempotente do diretorio stockpile/ para main remoto.
+    _spec("/blog:stockpile-push",                                _S, _A,  2),
 ])
 
 

@@ -1679,15 +1679,28 @@ class CommandQueueWidget(QWidget):
             ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
              lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
              "queue-btn-blog"),
-            ("blog stockpile",
-             "Blog Stockpile — gera 1 pacote quad-locale (pt-BR/it-IT/en/es-ES) e faz push para o repositorio remoto. "
+            ("blog stockpile (gera estoque)",
+             "Blog Stockpile — GERA ESTOQUE, NAO PUBLICA. "
+             "Gera 1 pacote de estoque (stockpile) quad-locale (pt-BR/it-IT/en/es-ES) "
+             "para o blog e faz commit/push APENAS do pacote de estoque "
+             "(em .claude/blog/data/stockpile/) para o repositorio. O artigo NAO vai "
+             "ao ar com este botao. A publicacao em content/{locale}/blog/, o hreflang "
+             "e o deploy acontecem DEPOIS, automaticamente, pelo GitHub Actions "
+             "(cron 13h UTC, promote-from-stockpile.yml) — nao ha botao de 'publicar "
+             "agora' no app por decisao de design (T012): publicar e responsabilidade "
+             "exclusiva do CI, para nao acoplar geracao de estoque a deploy de producao. "
              "Fase 1: expand-keywords → cluster → prioritize → deduplicate. "
              "Fase 2: generate-briefs x4 locales (pt-BR cria CURRENT-PACKAGE.json com UUID; demais reutilizam). "
              "Fase 3: write-articles --output-dir stockpile x4 locales (le UUID de CURRENT-PACKAGE.json). "
              "Fase 4: review-seo --mode stockpile x4 locales. "
-             "Fase 5: quality-gate --mode stockpile → stockpile-push (commit + push idempotente para main). "
-             "Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC (promote-from-stockpile.yml).",
-             lambda: self._load_quick_template(TEMPLATE_BLOG_STOCKPILE, name="Blog Stockpile"),
+             "Fase 5: quality-gate --mode stockpile → stockpile-push (commit + push idempotente para main).",
+             lambda: self._load_quick_template(
+                 TEMPLATE_BLOG_STOCKPILE,
+                 # T012: o nome vira o label persistente (_template_label) que
+                 # fica VISIVEL na tela apos o clique — nao some como o tooltip.
+                 # Carrega a mensagem "nao publica" numa superficie persistente.
+                 name="Blog Stockpile (estoque, NAO publica)",
+             ),
              "queue-btn-blog-stockpile"),
             _maintenance_btn,
         ])

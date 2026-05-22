@@ -1294,7 +1294,7 @@ class MainWindow(QMainWindow):
 
         _MCP_TEST_PROMPT = (
             "/skill:mcp-codex ping test — verificar se MCP Codex esta ativo. "
-            "Apenas responda: \"MCP Codex OK — modelo gpt-5.4, pronto.\" Nada mais.\n"
+            "Apenas responda: \"MCP Codex OK — modelo gpt-5.5, pronto.\" Nada mais.\n"
             "/skill:mcp-kimi ping test — verificar se MCP Kimi esta ativo. "
             "Apenas responda: \"MCP Kimi OK — modelo kimi-code/kimi-for-coding, pronto.\" Nada mais."
         )
@@ -2398,6 +2398,40 @@ class MainWindow(QMainWindow):
                 lambda _c=False, idx=_i: self._on_prompt_btn_clicked(idx)
             )
             btns.append(b)
+
+        # Botao fixo 'executar-tasks': cola um prompt literal de loop de
+        # execucao de tasklist com revisao adversarial via Codex. Diferente
+        # dos botoes de entrada acima (modelo label+path, que publicam
+        # base_prompt + caminho do .md), este publica o prompt cru direto no
+        # terminal via _publish_to_terminal (roteamento T1/T2/T3).
+        _EXECUTAR_TASKS_PROMPT = (
+            "/goal execute o tasklist, faça uma task, chame o "
+            "/skill:mcp-codex para revisão adversarial, corrija o que for "
+            "sugerido e for congruente, marque a task como concluida no "
+            "progress.md e parte para a próxima. execute até acabar a "
+            "tasklist."
+        )
+        _exec_tasks_btn = QPushButton("executar-tasks")
+        _exec_tasks_btn.setProperty("testid", "queue-btn-executar-tasks")
+        _exec_tasks_btn.setFixedHeight(32)
+        _exec_tasks_btn.setMinimumWidth(90)
+        _exec_tasks_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _exec_tasks_btn.setToolTip(
+            "Cola no terminal um prompt de loop: executa o tasklist task a\n"
+            "task, revisao adversarial via /skill:mcp-codex, corrige o que\n"
+            "for congruente, marca no progress.md e segue ate acabar."
+        )
+        _exec_tasks_btn.setStyleSheet(
+            "QPushButton { background-color: #16A34A; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "QPushButton:hover { background-color: #15803D; }"
+            "QPushButton:pressed { background-color: #166534; }"
+        )
+        _exec_tasks_btn.clicked.connect(
+            lambda _c=False: self._publish_to_terminal(_EXECUTAR_TASKS_PROMPT)
+        )
+        btns.append(_exec_tasks_btn)
 
         # Botao especial para criar novos prompts seguindo as regras
         _add_btn = QPushButton("+ Add prompt")
