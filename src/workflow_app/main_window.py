@@ -32,7 +32,7 @@ from pathlib import Path
 import yaml
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -763,6 +763,7 @@ _DATATEST_FILTERED_IDS = frozenset({
     "queue-btn-play-next-container",
     "queue-command-list",
     "output-toolbar-left",
+    "output-toolbar-center",
     "terminal-route-toggles",
     "output-toolbar-mcp",
     "output-toolbar-progress-boxes",
@@ -1140,9 +1141,26 @@ class MainWindow(QMainWindow):
         _toolbar_row_layout.setContentsMargins(0, 10, 0, 0)
         _toolbar_row_layout.setSpacing(10)
 
-        # output-toolbar-left (CommandQueue header_widget) agora ocupa toda
-        # a largura disponivel a esquerda — output-toolbar-center deletada.
+        # output-toolbar-left: abas primarias (Pipelines/Workflow/Auxiliar/Daily).
         _toolbar_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
+
+        # output-toolbar-center: controles de inserções (Inserções tab + route-toggles
+        # + gear) + conteúdo da aba Inserções. Separado do left em 2026-05-24.
+        _center_widget = QWidget()
+        _center_widget.setObjectName("OutputToolbarCenter")
+        _center_widget.setProperty("testid", "output-toolbar-center")
+        _center_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _center_widget.setStyleSheet(
+            "QWidget#OutputToolbarCenter { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _center_layout = QVBoxLayout(_center_widget)
+        _center_layout.setContentsMargins(4, 4, 4, 4)
+        _center_layout.setSpacing(0)
+        _center_layout.addWidget(self._command_queue.insertions_bar)
+        _center_layout.addWidget(self._command_queue.insertions_content)
+        _toolbar_row_layout.addWidget(_center_widget)                                 # center
+
         # Coluna MCP: radio Claude/Kimi/Codex + acoes Main MCP/Parallel/Dual.
         # A combinacao aplica o comando legado correto no terminal alvo fixo.
         _mcp_column = self._build_mcp_column(self._mcp_column_btns)
@@ -1445,12 +1463,49 @@ class MainWindow(QMainWindow):
             "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
             "  border-radius: 5px; }"
         )
+        # Refactor 2026-05-24: T1/T2/T3 + Notes T1/T2 numa unica row horizontal
+        # (antes em duas linhas empilhadas).
         _trbl = QHBoxLayout(_terminal_route_box)
-        _trbl.setContentsMargins(10, 0, 10, 0)
+        _trbl.setContentsMargins(10, 2, 10, 2)
         _trbl.setSpacing(8)
         _trbl.addWidget(self._chk_route_t1)
         _trbl.addWidget(self._chk_route_t2)
         _trbl.addWidget(self._chk_route_t3)
+
+        # Linha 2: Notes T1/T2 — quando marcados, texto de prompt vai para o
+        # campo de notas (staging area abaixo) em vez do terminal, para edicao
+        # qualificada antes do envio.
+        self._chk_notes_t1 = QCheckBox("T1")
+        self._chk_notes_t1.setProperty("testid", "terminal-notes-t1")
+        self._chk_notes_t1.setChecked(False)
+        self._chk_notes_t1.setToolTip(
+            "Notes T1: envia texto para campo de notas T1 (abaixo) em vez do\n"
+            "terminal interativo. Edite e use ↑ para enviar ao terminal quando pronto."
+        )
+        self._chk_notes_t1.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
+
+        self._chk_notes_t2 = QCheckBox("T2")
+        self._chk_notes_t2.setProperty("testid", "terminal-notes-t2")
+        self._chk_notes_t2.setChecked(False)
+        self._chk_notes_t2.setToolTip(
+            "Notes T2: envia texto para campo de notas T2 (abaixo) em vez do\n"
+            "terminal workspace. Edite e use ↑ para enviar ao terminal quando pronto."
+        )
+        self._chk_notes_t2.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
+
+        _notes_prefix_lbl = QLabel("Notes:")
+        _notes_prefix_lbl.setStyleSheet(
+            "color: #71717A; font-size: 10px; font-weight: 600; background: transparent;"
+            "border: none;"
+        )
+        _trbl.addWidget(_notes_prefix_lbl)
+        _trbl.addWidget(self._chk_notes_t1)
+        _trbl.addWidget(self._chk_notes_t2)
+        _trbl.addStretch()
+
+        # Inputs de notas removidos da UI — Notes T1/T2 sao apenas checkboxes de
+        # roteamento. Quando marcados, _publish_to_terminal copia o texto para o
+        # clipboard em vez de publicar diretamente no terminal correspondente.
 
         _MCP_TEST_PROMPT = (
             "/mcp:codex ping test — verificar se MCP Codex esta ativo. "
@@ -1686,15 +1741,28 @@ class MainWindow(QMainWindow):
         self._mcp_column_btns = action_widgets[2:11]
         # rules: dcp+cmd+terminal+listeners+indicators+add-rules
         _rules_btns = workflow_app_widgets[1:]
-        # prompts: asq-user (migrado da ex-subtab mcps) + entries .md
-        _prompts_btns = [action_widgets[11]] + self._populate_header_prompts_subtab()
+        # prompts: asq-user (migrado da ex-subtab mcps) + entries .md.
+        # Guardado em self para que rebuild via modal/watcher possa re-prepender.
+        self._asq_user_btn = action_widgets[11]
+        _prompts_btns = [self._asq_user_btn] + self._populate_header_prompts_subtab()
 
         # Linha de baixo da sub-aba paths & IDs: botao 'repo rules'.
         _paths_row2_btns = [self._build_repo_rules_button()]
+
+        # Refactor 2026-05-24: padroniza o padding dos botoes das 3 sub-abas
+        # com o dos botoes de output-toolbar-progress-boxes (0.5px 10px).
+        for _b in (*_paths_btns, *_paths_row2_btns, *_prompts_btns, *_rules_btns):
+            _ss = _b.styleSheet()
+            if "padding: 0 8px" in _ss:
+                _b.setStyleSheet(_ss.replace("padding: 0 8px", "padding: 0.5px 10px"))
+
         self._command_queue.populate_paths_subtab(_paths_btns, _paths_row2_btns)
         self._command_queue.populate_prompts_subtab(_prompts_btns)
         self._command_queue.populate_rules_subtab(_rules_btns)
-        self._command_queue.attach_tab_bar_extras(_terminal_route_box, gear_btn)
+        self._command_queue.attach_tab_bar_extras(_terminal_route_box)
+        # Refactor 2026-05-24: gear migra do insertions_bar para o canto da
+        # tab bar das sub-abas (PATHS/PROMPTS/RULES), na mesma row das abas.
+        self._command_queue.attach_subtab_corner_widget(gear_btn)
 
         # queue-count-label vive em progress-section (refactor 2026-05-18).
         # attach_count_label nao e mais chamado — o label ja esta em ProgressSection.
@@ -1743,13 +1811,28 @@ class MainWindow(QMainWindow):
                 f"diretorio inexistente: {self._BRAINSTORM_SEEDS_RELDIR}"
             )
 
-        paths = sorted(seeds_dir.glob("0[1-9]-*.md"))
-        # Anti-rename silencioso: exigir 9 seeds com prefixo 0[1-9]-.
-        if len(paths) != 9 or not all(
-            re.match(r"^0[1-9]-", p.name) for p in paths
-        ):
+        # Hardening 2026-05-24: o diretorio brainstorm-mcp/ tambem hospeda os
+        # OUTPUTS da acao "Criar arquivo" (ex: 05-24-foot-stock-....md). O
+        # prefixo de data MM- colide com o glob 0[1-9]-*.md e inflava len(paths)
+        # acima de 9 -> a politica fail-fast all-or-nothing fazia a grade INTEIRA
+        # sumir (root cause das duas sumiços observadas em 2026-05-24). Defesa:
+        # exigir slug ALFABETICO logo apos o prefixo 0N- (^0[1-9]-[a-z]...), o que
+        # exclui nomes com data (0N-NN-...) sem tocar nos 9 seeds reais (todos
+        # kebab-alpha: criar-md, pesquisar, controversial, ...).
+        _seed_name_re = re.compile(r"^0[1-9]-[a-z][a-z0-9-]*\.md$")
+        _all_numeric = sorted(seeds_dir.glob("0[1-9]-*.md"))
+        paths = [p for p in _all_numeric if _seed_name_re.match(p.name)]
+        if len(paths) != 9:
+            _ignored = [p.name for p in _all_numeric if p not in paths]
+            _hint = (
+                f"; ignorados por nao casarem 0N-<slug-alpha>.md (provaveis "
+                f"outputs de 'Criar arquivo'): {_ignored}"
+                if _ignored
+                else ""
+            )
             raise _BrainstormSeedError(
-                f"glob retornou {len(paths)} seeds (esperado 9 com prefixo 0[1-9]-)"
+                f"esperado exatamente 9 seeds canonicos (0N-<slug>.md), "
+                f"encontrado {len(paths)}{_hint}"
             )
 
         loaded: list[dict] = []
@@ -1924,7 +2007,7 @@ class MainWindow(QMainWindow):
         tab_bar_layout.setSpacing(3)
 
         self._mcp_tab_buttons: list[QPushButton] = []
-        for label, slug in (("MCPs", "mcps"), ("brainstorm", "brainstorm")):
+        for label, slug in (("MCPs", "mcps"), ("Brainstorm (md)", "brainstorm")):
             btn = QPushButton(label)
             btn.setFixedHeight(22)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2159,8 +2242,9 @@ class MainWindow(QMainWindow):
             btn.setMinimumWidth(76)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(
-                "Publica a acao MCP no terminal do provider selecionado "
-                "(Claude=T1, Kimi=T2, Codex=T3)."
+                "Publica a acao MCP do provider selecionado nos terminais "
+                "marcados em terminal-route-toggles (T1/T2/T3). O radio de "
+                "provider escolhe APENAS o comando, nao o terminal."
             )
             btn.setStyleSheet(
                 "QPushButton { background-color: #334155; color: #FAFAFA;"
@@ -2173,18 +2257,16 @@ class MainWindow(QMainWindow):
             return btn
 
         def _on_mcp_action(action_id: str) -> None:
+            # O radio de provider escolhe APENAS o comando (base_text). O terminal
+            # de destino e decidido por terminal-route-toggles (T1/T2/T3), via
+            # _publish_to_terminal (refactor 2026-05-24). O 2o elemento da tupla
+            # (terminal fixo legado) e ignorado de proposito.
             provider = getattr(self, "_mcp_toolbar_provider", "claude")
             if provider not in mcp_commands:
                 provider = "claude"
                 self._mcp_toolbar_provider = provider
-            base_text, terminal = mcp_commands[provider][action_id]
-            ok = self._publish_to_specific_terminal(
-                _compose_mcp_text(base_text), terminal
-            )
-            if not ok:
-                signal_bus.toast_requested.emit(
-                    "Terminal Codex (T3) indisponivel para publicar MCP.", "warning"
-                )
+            base_text, _legacy_terminal = mcp_commands[provider][action_id]
+            self._publish_to_terminal(_compose_mcp_text(base_text))
 
         for label, action_id in (
             ("Main MCP", "main"),
@@ -3677,8 +3759,9 @@ class MainWindow(QMainWindow):
         ]
         _pset.setValue("prompts_row/entries", _json.dumps(_entries_simple))
 
-        # Reconstruir sub-aba prompts
-        _new_btns = self._populate_header_prompts_subtab()
+        # Reconstruir sub-aba prompts — asq-user sempre prepended (Bug-fix: sem isso
+        # desaparecia apos salvar o modal, pois _populate_header_prompts_subtab nao o inclui).
+        _new_btns = [self._asq_user_btn] + self._populate_header_prompts_subtab()
         self._command_queue.populate_prompts_subtab(_new_btns)
         signal_bus.toast_requested.emit("Prompts atualizados.", "info")
 
@@ -3758,7 +3841,7 @@ class MainWindow(QMainWindow):
             ]),
         )
 
-        _new_btns = self._populate_header_prompts_subtab()
+        _new_btns = [self._asq_user_btn] + self._populate_header_prompts_subtab()
         self._command_queue.populate_prompts_subtab(_new_btns)
         signal_bus.toast_requested.emit(
             f"{len(_new)} novo(s) prompt(s) detectado(s) e adicionado(s).", "info"
@@ -3816,33 +3899,41 @@ class MainWindow(QMainWindow):
             self._xterm_inject_text(text, with_enter=with_enter)
 
     def _publish_to_terminal(self, text: str) -> None:
-        """Task 6 (loop 05-13-workflow-app-layout-2, revisado 2026-05-19):
-        roteia `text` conforme estado dos checkboxes T1/T2/T3.
+        """Roteia `text` conforme estado dos checkboxes T1/T2/T3 e Notes T1/T2.
 
-        Mapping atualizado apos refactor terminal-workspace-splitter (T2/T3 invertidos):
-        - T1 -> terminal-interactive (pyte) via paste_text_in_terminal.
-        - T2 -> terminal-workspace pyte via paste_text_in_workspace_terminal.
-        - T3 -> terminal-workspace xterm via PersistentShell.send_raw.
-                (no-op se XTERM_AVAILABLE=False; checkbox ja vem desabilitado.)
+        Eixo terminal (linha 1): T1/T2/T3 publicam diretamente nos terminais.
+        Eixo notes   (linha 2): Notes T1/T2 desviam o texto para o clipboard
+        em vez de publicar no terminal, para edicao qualificada antes do envio.
 
-        Foco: prioridade T1 > T2 > T3. Nenhum marcado = no-op silencioso
-        (Zero Estados Indefinidos: caso explicito, nao acidente).
+        Nenhum marcado = no-op silencioso (Zero Estados Indefinidos).
         """
         t1 = bool(self._chk_route_t1.isChecked()) if hasattr(self, "_chk_route_t1") else True
         t2 = bool(self._chk_route_t2.isChecked()) if hasattr(self, "_chk_route_t2") else False
         t3 = bool(self._chk_route_t3.isChecked()) if hasattr(self, "_chk_route_t3") else False
+        n1 = bool(self._chk_notes_t1.isChecked()) if hasattr(self, "_chk_notes_t1") else False
+        n2 = bool(self._chk_notes_t2.isChecked()) if hasattr(self, "_chk_notes_t2") else False
         if not (t1 or t2 or t3):
             return
-        if t1:
+        # Notes: copia para clipboard em vez de publicar no terminal.
+        if (t1 and n1) or (t2 and n2):
+            from PySide6.QtWidgets import QApplication as _QApp
+            _QApp.clipboard().setText(text)
+            _notes_label = " + ".join(
+                filter(None, ["T1" if (t1 and n1) else "", "T2" if (t2 and n2) else ""])
+            )
+            signal_bus.toast_requested.emit(
+                f"Notas ({_notes_label}): texto copiado para clipboard.", "info"
+            )
+        if t1 and not n1:
             signal_bus.paste_text_in_terminal.emit(text)
-        if t2:
+        if t2 and not n2:
             signal_bus.paste_text_in_workspace_terminal.emit(text)
         if t3:
             self._xterm_inject_text(text, with_enter=False)
-        # Focus priority: T1 (interactive) > T2 (pyte) > T3 (xterm).
-        if t1:
+        # Focus priority: T1 > T2 > T3 (apenas para roteamento direto ao terminal).
+        if t1 and not n1:
             signal_bus.focus_interactive_terminal.emit()
-        elif t2:
+        elif t2 and not n2:
             try:
                 self._workspace_panel._terminal.setFocus()
             except AttributeError:
@@ -4384,6 +4475,32 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
             "  border-color: #FBBF24; }"
         )
+
+        def _open_notes_modal() -> None:
+            from workflow_app.dialogs.notes_expand_modal import NotesExpandModal
+
+            modal = NotesExpandModal(testid, notes_input.text(), parent=self)
+            if modal.exec() == QDialog.DialogCode.Accepted:
+                notes_input.setText(modal.text())
+                notes_input.setFocus()
+
+        expand_btn = QPushButton()
+        expand_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "expand.svg"
+        expand_icon = self._load_tinted_svg_icon(expand_icon_path, "#FAFAFA")
+        if expand_icon is not None:
+            expand_btn.setIcon(expand_icon)
+            expand_btn.setIconSize(QSize(14, 14))
+        else:
+            expand_btn.setText("⛶")
+        expand_btn.setFixedSize(26, 26)
+        expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        expand_btn.setToolTip("Abrir anotacao em janela ampliada (Ctrl+E)")
+        expand_btn.setStyleSheet(btn_style)
+        expand_btn.clicked.connect(_open_notes_modal)
+        lay.addWidget(expand_btn)
+
+        expand_shortcut = QShortcut(QKeySequence("Ctrl+E"), notes_input)
+        expand_shortcut.activated.connect(_open_notes_modal)
 
         paste_btn = QPushButton()
         arrow_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "arrow-up.svg"
@@ -5730,14 +5847,60 @@ class PromptsConfigDialog(QDialog):
         _hdr_layout = QHBoxLayout(_header)
         _hdr_layout.setContentsMargins(0, 0, 0, 0)
         _hdr_layout.setSpacing(4)
-        for _txt, _stretch in [("Label", 20), ("Path", 50), ("Description", 25)]:
+        for _txt, _stretch in [("Label", 20), ("Path / Ação", 50), ("Description", 25)]:
             _lbl = QLabel(_txt)
             _lbl.setStyleSheet("font-size: 10px; color: #71717A; font-weight: 600;")
             _hdr_layout.addWidget(_lbl, _stretch)
         _hdr_layout.addWidget(QLabel(""), 5)
         outer.addWidget(_header)
 
-        # Lista variavel de entradas (label / path / description / X)
+        # Botões fixos (não editáveis) — aparecem na sub-aba mas sem configuração
+        # de path: asq-user (primeiro) e executar-tasks (último).
+        _FIXED_ROW_STYLE = (
+            "QWidget { background-color: #18181B; border: 1px solid #27272A;"
+            "  border-radius: 4px; }"
+        )
+        _FIXED_LBL_STYLE = (
+            "color: #71717A; font-size: 10px; font-style: italic; background: transparent;"
+            "border: none;"
+        )
+        _fixed_section_lbl = QLabel("Botões fixos (não editáveis via modal):")
+        _fixed_section_lbl.setStyleSheet("font-size: 10px; color: #52525B; font-weight: 600;")
+        outer.addWidget(_fixed_section_lbl)
+
+        _FIXED_ENTRIES = [
+            ("asq-user", "/skill:auq-interview", "Entrevista AUQ guiada — abre no terminal"),
+            ("executar-tasks", "(prompt inline)", "Loop: execute tasklist com revisão adversarial via Codex"),
+            ("+ Add prompt", "(meta-prompt)", "Envia meta-prompt ao terminal para criar novo .md em prompts-subtab"),
+        ]
+        for _flabel, _fpath, _fdesc in _FIXED_ENTRIES:
+            _frow = QWidget()
+            _frow.setStyleSheet(_FIXED_ROW_STYLE)
+            _frow_lay = QHBoxLayout(_frow)
+            _frow_lay.setContentsMargins(6, 3, 6, 3)
+            _frow_lay.setSpacing(4)
+            _fl = QLabel(_flabel)
+            _fl.setStyleSheet(_FIXED_LBL_STYLE)
+            _fp = QLabel(_fpath)
+            _fp.setStyleSheet(_FIXED_LBL_STYLE)
+            _fd = QLabel(_fdesc)
+            _fd.setStyleSheet(_FIXED_LBL_STYLE)
+            _fd.setWordWrap(True)
+            _lock = QLabel("🔒")
+            _lock.setStyleSheet("color: #3F3F46; font-size: 11px; background: transparent; border: none;")
+            _lock.setFixedWidth(22)
+            _frow_lay.addWidget(_fl, 20)
+            _frow_lay.addWidget(_fp, 50)
+            _frow_lay.addWidget(_fd, 25)
+            _frow_lay.addWidget(_lock, 5)
+            outer.addWidget(_frow)
+
+        # Separador entre fixos e configuráveis
+        _sep_lbl = QLabel("Botões configuráveis:")
+        _sep_lbl.setStyleSheet("font-size: 10px; color: #52525B; font-weight: 600; margin-top: 4px;")
+        outer.addWidget(_sep_lbl)
+
+        # Lista variável de entradas configuráveis (label / path / description / X)
         _list_scroll = QScrollArea()
         _list_scroll.setWidgetResizable(True)
         _list_scroll.setFrameShape(QFrame.Shape.NoFrame)

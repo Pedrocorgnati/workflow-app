@@ -127,6 +127,44 @@ def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
         assert s["agent_path"].startswith("agents/")
 
 
+def test_seed_loader_ignores_date_prefixed_output_siblings(tmp_path):
+    """Hardening 2026-05-24: outputs da acao 'Criar arquivo' (ex:
+    05-24-foot-stock-....md) vivem na mesma pasta dos seeds. O prefixo de data
+    MM- casa o glob 0[1-9]-*.md e fazia len(paths) > 9 -> grade inteira sumia.
+
+    O loader deve filtrar esses irmaos (slug nao-alfabetico apos 0N-) e ainda
+    retornar exatamente os 9 seeds canonicos. Regressao das duas sumiços de hoje.
+    """
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    seeds_dir = _materialize_9_seeds(repo_root)
+    # Simula as duas saidas reais que quebraram a grade em 2026-05-24.
+    (seeds_dir / "05-24-foot-stock-ciclo-assinatura-planos.md").write_text(
+        "# output do brainstorm\n", encoding="utf-8"
+    )
+    (seeds_dir / "05-24-foot-stock-bugfix-tasks.md").write_text(
+        "# output do brainstorm\n", encoding="utf-8"
+    )
+    fake = _FakeMainWindow(repo_root)
+    seeds = fake._load_brainstorm_seeds()
+    assert len(seeds) == 9
+    assert [s["slug"] for s in seeds] == [
+        "criar-md", "pesquisar", "controversial", "hardening", "criar-task",
+        "revisar-task", "executar-task", "revisar-execucao", "revisar-qa",
+    ]
+
+
+def test_seed_loader_still_fails_when_a_real_seed_is_missing(tmp_path):
+    """O filtro nao pode mascarar a ausencia de um seed canonico real."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    seeds_dir = _materialize_9_seeds(repo_root)
+    (seeds_dir / "09-revisar-qa.md").unlink()
+    fake = _FakeMainWindow(repo_root)
+    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 9"):
+        fake._load_brainstorm_seeds()
+
+
 def test_picker_md_opens_brainstorm_mcp_dir(tmp_path):
     """Diretorio canonico `blacksmith/brainstorm-mcp/` resolvido pelo helper.
 

@@ -80,9 +80,11 @@ def test_mcp_toolbar_uses_provider_radio_and_three_actions(qtbot):
         assert _button_by_testid(win, testid).text() == label
 
 
-def test_mcp_toolbar_claude_main_publishes_orange_main_to_t1(qtbot):
+def test_mcp_toolbar_claude_main_command_routes_by_toggles_not_provider(qtbot):
+    # Refactor 2026-05-24: o radio de provider escolhe o COMANDO; o terminal e
+    # decidido por terminal-route-toggles. Aqui T1 marcado -> comando vai a T1.
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
+    _set_route(win, t1=True, t2=False, t3=False)
 
     sent_t1: list[str] = []
     sent_t2: list[str] = []
@@ -99,9 +101,30 @@ def test_mcp_toolbar_claude_main_publishes_orange_main_to_t1(qtbot):
     assert sent_t2 == []
 
 
-def test_mcp_toolbar_appends_selected_persona_prompt(qtbot):
+def test_mcp_toolbar_provider_does_not_force_terminal_when_no_toggle(qtbot):
+    # Sem nenhum toggle marcado, a acao MCP e no-op (provider nao força mais
+    # terminal). Garante que a função de roteamento saiu do radio.
     win = _new_window(qtbot)
     _set_route(win, t1=False, t2=False, t3=False)
+
+    sent_t1: list[str] = []
+    sent_t2: list[str] = []
+    signal_bus.paste_text_in_terminal.connect(sent_t1.append)
+    signal_bus.paste_text_in_workspace_terminal.connect(sent_t2.append)
+    try:
+        _radio_by_testid(win, "output-mcp-provider-claude").setChecked(True)
+        _button_by_testid(win, "output-mcp-action-main").click()
+    finally:
+        signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
+        signal_bus.paste_text_in_workspace_terminal.disconnect(sent_t2.append)
+
+    assert sent_t1 == []
+    assert sent_t2 == []
+
+
+def test_mcp_toolbar_appends_selected_persona_prompt(qtbot):
+    win = _new_window(qtbot)
+    _set_route(win, t1=True, t2=False, t3=False)
 
     sent_t1: list[str] = []
     signal_bus.paste_text_in_terminal.connect(sent_t1.append)
@@ -120,7 +143,7 @@ def test_mcp_toolbar_appends_selected_persona_prompt(qtbot):
 
 def test_mcp_toolbar_joins_multiple_persona_prompts_in_ui_order(qtbot):
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
+    _set_route(win, t1=True, t2=False, t3=False)
 
     sent_t1: list[str] = []
     signal_bus.paste_text_in_terminal.connect(sent_t1.append)
@@ -140,9 +163,10 @@ def test_mcp_toolbar_joins_multiple_persona_prompts_in_ui_order(qtbot):
     ]
 
 
-def test_mcp_toolbar_kimi_main_publishes_blue_main_to_t2(qtbot):
+def test_mcp_toolbar_kimi_command_routes_by_toggle(qtbot):
+    # Kimi seleciona o comando /skill:claude; o toggle T2 manda para T2.
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
+    _set_route(win, t1=False, t2=True, t3=False)
 
     sent_t1: list[str] = []
     sent_t2: list[str] = []
@@ -163,7 +187,7 @@ def test_mcp_toolbar_codex_parallel_publishes_purple_parallel_to_t3(
     qtbot, monkeypatch,
 ):
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
+    _set_route(win, t1=False, t2=False, t3=True)
 
     xterm_calls: list[tuple[str, bool]] = []
     monkeypatch.setattr(
@@ -180,7 +204,7 @@ def test_mcp_toolbar_codex_parallel_publishes_purple_parallel_to_t3(
 
 def test_mcp_toolbar_codex_persona_prompt_has_single_spacing(qtbot, monkeypatch):
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
+    _set_route(win, t1=False, t2=False, t3=True)
 
     xterm_calls: list[tuple[str, bool]] = []
     monkeypatch.setattr(

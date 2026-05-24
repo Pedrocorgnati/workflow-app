@@ -1531,7 +1531,7 @@ class TestLegacyToDcpButton:
     """Cobertura do botao `queue-btn-legacy-to-dcp` (pipeline legacy-to-dcp).
 
     Garante:
-      - botao existe em queue-tab-pipelines com testid esperado;
+      - botao existe em queue-tab-auxiliar com testid esperado;
       - sem project.json carregado (Gate 1) emite toast pt-BR e nao enfileira;
       - com project.json valido enfileira a sequencia canonica de 12 specs
         (4 blocos de directives prep + 1 cmd cada, mais bloco final high).
@@ -1548,7 +1548,7 @@ class TestLegacyToDcpButton:
 
     def test_button_exists_with_testid(self, widget):
         btn = self._find_button_by_testid(widget, "queue-btn-legacy-to-dcp")
-        assert btn is not None, "queue-btn-legacy-to-dcp ausente em queue-tab-pipelines"
+        assert btn is not None, "queue-btn-legacy-to-dcp ausente em queue-tab-auxiliar"
 
     def test_button_tooltip_mentions_canonical_loop(self, widget):
         btn = self._find_button_by_testid(widget, "queue-btn-legacy-to-dcp")

@@ -25,7 +25,8 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Final, Mapping
 
-PROMPT_TEMPLATE_VERSION: Final[str] = "2026-05-24-v3"
+PROMPT_TEMPLATE_VERSION: Final[str] = "2026-05-24-v4"
+_FILE_OPS_RULES_PATH: Final[str] = "ai-forge/MCP/agents/brainstorm-file-ops-rules.md"
 
 _PLACEHOLDERS: Final[tuple[str, ...]] = (
     "target-path",
@@ -49,9 +50,11 @@ _MAX_LEN: Final[Mapping[str, int]] = MappingProxyType(
 
 _ACTIONS_RAW: dict[str, str] = {
     "Otimizar": (
-        "melhore este mesmo arquivo, entendendo, otimizando e reescrevendo"
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
+        "depois melhore este mesmo arquivo, entendendo, otimizando e reescrevendo"
     ),
     "Criar tasks": (
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
         "apos analisar bem, crie tasks organizadas, sequenciais e logicas na mesma "
         "pasta deste arquivo .md; as tasks devem ser salvas e mantidas nessa pasta "
         "e voce DEVE prestar maxima atencao a esta pasta como destino de "
@@ -60,6 +63,7 @@ _ACTIONS_RAW: dict[str, str] = {
         "implantado corretamente no codigo"
     ),
     "Revisar tasks": (
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
         "revise as tasks criadas na mesma pasta deste arquivo .md, validando "
         "cobertura integral do conteudo, sequencia logica, dependencias, criterios "
         "de aceite e ausencia de lacunas; corrija os proprios arquivos de tasks "
@@ -67,12 +71,14 @@ _ACTIONS_RAW: dict[str, str] = {
         "implantacao das tasks esta correta e consistente (mesma pasta do .md)"
     ),
     "Executar": (
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
         "execute e implante tudo que constar nas tasks localizadas na mesma pasta "
         "deste arquivo .md, da melhor forma possivel; atencao obrigatoria: use "
         "exatamente esta pasta como destino/base das tasks para implantacao "
         "(NAO desviar para outra pasta)"
     ),
     "Revisar execucao": (
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
         "compare este arquivo com o que foi efetivamente implantado a partir das "
         "tasks da mesma pasta deste arquivo .md; identifique divergencias, lacunas, "
         "regressoes e itens parcialmente executados; reporte e corrija quando "
@@ -80,6 +86,7 @@ _ACTIONS_RAW: dict[str, str] = {
         "a pasta correta das tasks (mesma pasta do .md)"
     ),
     "Criar arquivo": (
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
         "crie um arquivo md em blacksmith/brainstorm-mcp/ com este trabalho feito; "
         "preencha o frontmatter com todos os paths relevantes ao assunto, incluindo "
         "implantation-destiny-path quando aplicavel; use o template "
@@ -87,6 +94,7 @@ _ACTIONS_RAW: dict[str, str] = {
         "usando a data de hoje"
     ),
     "Revisar QA": (
+        f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
         "compare este arquivo com o que foi implantado a partir das tasks da mesma "
         "pasta deste arquivo .md, focando nao apenas se a task foi feita, mas na "
         "qualidade do QA: cobertura de edge cases, testes, validacoes, "

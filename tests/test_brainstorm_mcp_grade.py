@@ -346,7 +346,8 @@ def test_glob_rejects_renamed_seed(tmp_path):
     new = old.parent / "10-revisar-qa.md"
     old.rename(new)
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="glob retornou"):
+    # 09 renomeado para 10 (fora do range 0[1-9]) -> so 8 seeds canonicos.
+    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 9"):
         fake._load_brainstorm_seeds()
 
 

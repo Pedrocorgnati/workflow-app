@@ -1505,10 +1505,9 @@ class CommandQueueWidget(QWidget):
         header_layout.setSpacing(0)
 
         # ── Tab/action row ───────────────────────────────────────────────
-        # Split em dois blocos:
-        # - abas primarias: todas as sections, exceto "Inserções"
-        # - bloco inserções: queue-tab-terminal-insertions + route toggles + gear
-        # Height 38 = 32 (altura dos extras terminal-route-toggles + gear) + margins.
+        # Apenas abas primarias (Workflow, LOOPs, Auxiliar).
+        # insertions_bar (Inserções + route-toggles + gear) migrou para
+        # output-toolbar-center via MainWindow._setup_ui.
         tab_row = QWidget()
         tab_row.setFixedHeight(38)
         tab_row.setStyleSheet("background-color: #1E1E21;")
@@ -1532,32 +1531,34 @@ class CommandQueueWidget(QWidget):
 
         self._sec_tabs: list[QPushButton] = []
         _tab_testids = (
-            "queue-tab-pipelines",
             "queue-tab-workflow",
+            "queue-tab-loops",
             "queue-tab-auxiliar",
             "queue-tab-terminal-insertions",
-            "queue-tab-daily-routine",
         )
         for i, label in enumerate(
-            ("Pipelines", "Workflow", "Auxiliar", "Inserções", "Daily Routine")
+            ("Workflow", "LOOPs", "Auxiliar", "Inserções")
         ):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
-            if _tab_testids[i] == "queue-tab-terminal-insertions":
-                insertions_bar_layout.addWidget(btn)
-            else:
+            if _tab_testids[i] != "queue-tab-terminal-insertions":
                 tab_bar_layout.addWidget(btn, stretch=1)
+            # insertions_btn: kept in _sec_tabs for index alignment (index 3)
+            # but NOT added to any layout — content is always visible in
+            # output-toolbar-center (skipped by _apply_section_styles).
             self._sec_tabs.append(btn)
 
         tab_row_layout.addWidget(tab_bar, stretch=1)
-        tab_row_layout.addWidget(insertions_bar)
+        # insertions_bar NAO entra no tab_row — MainWindow coloca em output-toolbar-center.
 
-        # Exposed so MainWindow can append terminal-route-toggles + gear into
-        # the dedicated insertions block via attach_tab_bar_extras().
+        # Exposed so MainWindow can:
+        #   (a) append terminal-route-toggles + gear via attach_tab_bar_extras();
+        #   (b) place insertions_bar + insertions_content in output-toolbar-center.
         self._tab_bar_layout = tab_bar_layout
         self._insertions_bar_layout = insertions_bar_layout
+        self.insertions_bar = insertions_bar
 
         header_layout.addWidget(tab_row)
 
@@ -1668,26 +1669,35 @@ class CommandQueueWidget(QWidget):
         )
         study_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
-        pipelines_content = self._build_section_grid([
-            daily_btn,
-            daily_loop_btn,
-            loop_btn,
-            study_btn,
-            ("legacy-to-dcp",
-             "Legacy-to-DCP — adequa project.json legado (V3 canonico ou boilerplate convertido) ao canonical loop A..I. "
-             "Pipeline: /legacy:detect (aborta V1/V2 com instrucao manual) -> /delivery:init|migrate -> "
-             "/legacy:modules-from-features -> /dcp:meta-completeness (auto-fix P0, P1+ -> pending-actions) -> "
-             "/legacy:enqueue-all-modules (expande /build-module-pipeline por modulo). "
-             "Le project.json do metrics-project-pill. Idempotente: re-rodar nao quebra modulos ja convertidos. "
-             "Para V1/V2: rodar /project-json manualmente para migrar para V3 antes de reenfileirar. "
-             "Gaps P0 auto-fix, P1+ registrados em pending-actions/{slug}.md.",
-             self._on_legacy_to_dcp_clicked,
-             "queue-btn-legacy-to-dcp"),
-        ])
-        header_layout.addWidget(pipelines_content)
-        self._sec_contents.append(pipelines_content)
+        # Botoes compartilhados construidos antes das secoes (usados em LOOPs
+        # e Auxiliar). Cmd Single: modal simplificado com fixed_flag="cmd-single"
+        # (apenas input de path; monta /loop --cmd-single <path.md>).
+        _cmd_single_btn = DoublePhaseButton(
+            label="Cmd Single",
+            pipeline_name="/loop",
+            argument_hint="",
+            default_md_dir="blacksmith/loop/",
+            radio_summaries={},
+            flags_boolean=[],
+            flags_with_value=[],
+            fixed_flag="cmd-single",
+            pill=None,
+            on_command_ready=self._on_unified_command_ready,
+            parent=self,
+        )
+        _cmd_single_btn.setProperty("testid", "queue-btn-cmd-single")
+        _cmd_single_btn.setToolTip(
+            "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
+            "avulso. Informe o path do .md da spec do comando."
+        )
+        _cmd_single_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
-        # Workflow
+        _maintenance_btn = QPushButton("maintenance")
+        _maintenance_btn.setProperty("testid", "queue-btn-maintenance")
+        _maintenance_btn.setToolTip("Maintenance — placeholder (acao a definir).")
+        _maintenance_btn.setStyleSheet(_SECTION_BTN_STYLE)
+
+        # ── Secao 0: Workflow ─────────────────────────────────────────────
         workflow_content = self._build_section_grid([
             ("json", "/project-json — Cria/atualiza project.json",
              lambda: self._load_quick_template(TEMPLATE_JSON, name="JSON"),
@@ -1706,7 +1716,7 @@ class CommandQueueWidget(QWidget):
             ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
              self._on_modules_clicked,
              "queue-btn-modules"),
-            ("DCP: Build + Load (pipeline)",
+            ("DCP Build",
              "Enfileira pipeline B-dcp completo (5 cmds /dcp:* + carga local de SPECIFIC-FLOW) "
              "em queue-command-list para o modulo atual.\n"
              "Apos o pipeline rodar com sucesso, a fila e substituida pelos comandos do "
@@ -1714,24 +1724,28 @@ class CommandQueueWidget(QWidget):
              "DESTRUTIVO quando SPECIFIC-FLOW.json ja existe (passa --regenerate, salva .bak-{ISO}). "
              "Modal de confirmacao antes da pipeline rodar.",
              self._on_dcp_build_pipeline_clicked, "queue-btn-dcp-build"),
-            ("DCP: Specific-Flow (load)",
+            ("DCP Execute",
              "FALLBACK MANUAL: usar apenas quando o operador editou SPECIFIC-FLOW.json a mao "
-             "apos um build anterior. O caminho default agora e [DCP: Build + Load (pipeline)] "
+             "apos um build anterior. O caminho default agora e [DCP Build] "
              "(queue-btn-dcp-build), que enfileira a pipeline B-dcp completa e ja carrega o "
              "flow gerado no 6o item.\n"
              "Le o SPECIFIC-FLOW.json do modulo atual e carrega os comandos na fila para "
              "execucao manual.\n"
              "ATENCAO: deletes/reorder na fila visual sao TRANSIENT — re-clicar este botao "
              "recarrega do disco e os itens removidos voltam. Para fix permanente, edite "
-             "MODULE-META.json e regenere via [DCP: Build + Load (pipeline)].",
+             "MODULE-META.json e regenere via [DCP Build].",
              self._on_dcp_specific_flow_clicked, "queue-btn-dcp-specific-flow"),
         ])
         self._apply_dcp_reader_gating(workflow_content)
         header_layout.addWidget(workflow_content)
         self._sec_contents.append(workflow_content)
 
-        # Auxiliar
-        auxiliar_content = self._build_section_grid([
+        # ── Secao 1: LOOPs ────────────────────────────────────────────────
+        loops_content = self._build_section_grid([
+            daily_btn,
+            daily_loop_btn,
+            loop_btn,
+            study_btn,
             ("rocksmash",
              "rocksmash — le metrics-project-pill (_LOOP-CONFIG.json kind=daily-loop), "
              "expande para fila /loop-rocksmash:prepare + N pares :do/:review-done + "
@@ -1750,6 +1764,23 @@ class CommandQueueWidget(QWidget):
              "se a pill nao apontar para um JSON valido em disco.",
              self._on_rocksmash_review_clicked,
              "queue-btn-rocksmash-review"),
+            _cmd_single_btn,
+        ])
+        header_layout.addWidget(loops_content)
+        self._sec_contents.append(loops_content)
+
+        # ── Secao 2: Auxiliar ─────────────────────────────────────────────
+        auxiliar_content = self._build_section_grid([
+            ("legacy-to-dcp",
+             "Legacy-to-DCP — adequa project.json legado (V3 canonico ou boilerplate convertido) ao canonical loop A..I. "
+             "Pipeline: /legacy:detect (aborta V1/V2 com instrucao manual) -> /delivery:init|migrate -> "
+             "/legacy:modules-from-features -> /dcp:meta-completeness (auto-fix P0, P1+ -> pending-actions) -> "
+             "/legacy:enqueue-all-modules (expande /build-module-pipeline por modulo). "
+             "Le project.json do metrics-project-pill. Idempotente: re-rodar nao quebra modulos ja convertidos. "
+             "Para V1/V2: rodar /project-json manualmente para migrar para V3 antes de reenfileirar. "
+             "Gaps P0 auto-fix, P1+ registrados em pending-actions/{slug}.md.",
+             self._on_legacy_to_dcp_clicked,
+             "queue-btn-legacy-to-dcp"),
             ("mkt", "Marketing: portfolio, LinkedIn, Instagram",
              lambda: self._load_quick_template(TEMPLATE_MKT, name="Marketing"),
              "queue-btn-mkt"),
@@ -1762,37 +1793,37 @@ class CommandQueueWidget(QWidget):
              ":compose-pages, :build-pdf, :validate). NUNCA enfileira o orquestrador como entrada "
              "unica. NAO le project.json.",
              self._on_book_legacy_clicked, "queue-btn-book-legacy"),
-            # Cmd Single: modal simplificado com fixed_flag="cmd-single".
-            # Mostra apenas o input de path — sem checkbox, sem campo condicional.
-            # Monta automaticamente: /loop --cmd-single <path.md>
-            (lambda btn=None: (
-                btn := DoublePhaseButton(
-                    label="Cmd Single",
-                    pipeline_name="/loop",
-                    argument_hint="",
-                    default_md_dir="blacksmith/loop/",
-                    radio_summaries={},
-                    flags_boolean=[],
-                    flags_with_value=[],
-                    fixed_flag="cmd-single",
-                    pill=None,
-                    on_command_ready=self._on_unified_command_ready,
-                    parent=self,
-                ),
-                btn.setProperty("testid", "queue-btn-cmd-single"),
-                btn.setToolTip(
-                    "Cmd Single — pipeline reduzida para criar/atualizar UM comando "
-                    "avulso. Informe o path do .md da spec do comando."
-                ),
-                btn.setStyleSheet(_SECTION_BTN_STYLE),
-                btn,
-            )[-1])(),
             ("intake-seed", "Intake Seed — prepara base maximamente expandida para o intake-review. Dupla função: (1) /intake:obvious melhora o INTAKE.md original; (2) /intake-review:seed gera INTAKE.seeded.md + MILESTONES.seeded.md consolidando features em docs_root/features/*. Passa project.json da pill.",
              lambda: self._load_quick_template(TEMPLATE_INTAKE_SEED, name="Intake Seed"),
              "queue-btn-intake-seed"),
             ("intake-review", "Intake Review (F9): create-checklist → list-improove → compare → create-gaplist → execute-gaplist-p0 → execute-gaplist-p1 → execute-gaplist-p2 → review-executed → clear",
              lambda: self._load_quick_template(TEMPLATE_INTAKE_REVIEW, name="Intake Review"),
              "queue-btn-intake-review"),
+            ("blog stockpile",
+             "Blog Stockpile — GERA ESTOQUE, NAO PUBLICA. "
+             "Pipeline ATOMIZADA Kimi-friendly (Opcao D, D8 do DECISION-LOG): gera N=3 "
+             "pacotes quad-locale (pt-BR/it-IT/en/es-ES) por clique e faz commit/push "
+             "APENAS do estoque (em .claude/blog/data/stockpile/). O artigo NAO vai ao ar "
+             "com este botao — a publicacao em content/{locale}/blog/ acontece via GitHub "
+             "Actions cron 13h UTC (promote-from-stockpile.yml). Por design (T012), publicar "
+             "e responsabilidade exclusiva do CI. "
+             "Fase 1 (compartilhada): expand-keywords -> cluster -> prioritize -> deduplicate. "
+             "Fase 2 (x3 pacotes, atomica): por pacote, generate-briefs (avanca wave + "
+             "CURRENT-PACKAGE.json) -> write-articles --output-dir stockpile x4 locales -> "
+             "review-seo --mode stockpile x4 locales -> quality-gate --mode stockpile x4 "
+             "locales -> stockpile-finalize-package (Pass 2.4 atomico: monta package.json). "
+             "Fase 3: stockpile-validate (npm run validate:stockpile) -> stockpile-push. "
+             "Cada item da fila e um slash-command atomico ja Kimi-compat (ver kimi_whitelist.py), "
+             "compativel com o seletor 'queue-div-main-llm' (Claude / Codex / Kimi). N editavel "
+             "via _BLOG_STOCKPILE_PACKAGES_PER_CLICK em templates/quick_templates.py.",
+             lambda: self._load_quick_template(
+                 TEMPLATE_BLOG_STOCKPILE,
+                 # T012: o nome vira o label persistente (_template_label) que
+                 # fica VISIVEL na tela apos o clique — nao some como o tooltip.
+                 name="Blog Stockpile (estoque, NAO publica)",
+             ),
+             "queue-btn-blog-stockpile"),
+            _maintenance_btn,
         ])
         header_layout.addWidget(auxiliar_content)
         self._sec_contents.append(auxiliar_content)
@@ -1818,11 +1849,12 @@ class CommandQueueWidget(QWidget):
         self._insertions_subtabs.setProperty("testid", "queue-subtabs-insertions")
         self._insertions_subtabs.setStyleSheet(
             "QTabWidget::pane { border: none; background: transparent; }"
-            "QTabBar::tab { background: #3F3F46; color: #A1A1AA;"
-            "  border: none; border-radius: 4px 4px 0 0;"
-            "  padding: 2px 8px; font-size: 9px; font-weight: 600; margin-right: 5px; }"
-            "QTabBar::tab:selected { background: #52525B; color: #FAFAFA; }"
-            "QTabBar::tab:hover { background: #52525B; color: #FAFAFA; }"
+            "QTabBar::tab { background: transparent; color: #A1A1AA;"
+            "  border: none; border-radius: 3px;"
+            "  padding: 1px 8px; font-size: 10px; font-weight: 700;"
+            "  letter-spacing: 0.5px; margin-right: 3px; }"
+            "QTabBar::tab:selected { background: #FBBF24; color: #18181B; }"
+            "QTabBar::tab:hover { background: #2D2D30; color: #D4D4D8; }"
         )
 
         def _make_subtab(testid: str) -> tuple[QWidget, ResponsiveButtonFlowLayout]:
@@ -1844,9 +1876,9 @@ class CommandQueueWidget(QWidget):
         _prompts_tab, self._subtab_prompts_layout = _make_subtab("queue-subtab-insertions-prompts")
         _rules_tab, self._subtab_rules_layout = _make_subtab("queue-subtab-insertions-rules")
 
-        self._insertions_subtabs.addTab(_paths_tab, "paths & IDs")
-        self._insertions_subtabs.addTab(_prompts_tab, "prompts")
-        self._insertions_subtabs.addTab(_rules_tab, "rules")
+        self._insertions_subtabs.addTab(_paths_tab, "PATHS")
+        self._insertions_subtabs.addTab(_prompts_tab, "PROMPTS")
+        self._insertions_subtabs.addTab(_rules_tab, "RULES")
 
         # Restaurar sub-aba ativa da sessão anterior; persistir ao mudar.
         # Refactor 2026-05-19: sub-aba "cmd & mcp" deletada (botoes migraram para
@@ -1865,53 +1897,14 @@ class CommandQueueWidget(QWidget):
 
         _ti_layout.addWidget(self._insertions_subtabs)
 
-        header_layout.addWidget(terminal_insertions_content)
+        # terminal_insertions_content NAO entra no header_layout — MainWindow
+        # coloca em output-toolbar-center. Permanece em _sec_contents para que
+        # _switch_section controle a visibilidade normalmente.
         self._sec_contents.append(terminal_insertions_content)
+        self.insertions_content = terminal_insertions_content
 
-        # Daily Routine (refactor 2026-05-20): nova aba ao lado de
-        # queue-tab-terminal-insertions. Recebe os botoes blog/blog-stockpile
-        # migrados da aba Pipelines + um botao 'maintenance' placeholder
-        # (sem onClick por enquanto, apenas aparencia).
-        _maintenance_btn = QPushButton("maintenance")
-        _maintenance_btn.setProperty("testid", "queue-btn-maintenance")
-        _maintenance_btn.setToolTip("Maintenance — placeholder (acao a definir).")
-        _maintenance_btn.setStyleSheet(_SECTION_BTN_STYLE)
-        daily_routine_content = self._build_section_grid([
-            ("blog", "Blog SEO: estratégia → keywords → clusters → artigos → deploy",
-             lambda: self._load_quick_template(TEMPLATE_BLOG, name="Blog SEO"),
-             "queue-btn-blog"),
-            ("blog stockpile (gera estoque)",
-             "Blog Stockpile — GERA ESTOQUE, NAO PUBLICA. "
-             "Pipeline ATOMIZADA Kimi-friendly (Opcao D, D8 do DECISION-LOG): gera N=3 "
-             "pacotes quad-locale (pt-BR/it-IT/en/es-ES) por clique e faz commit/push "
-             "APENAS do estoque (em .claude/blog/data/stockpile/). O artigo NAO vai ao ar "
-             "com este botao — a publicacao em content/{locale}/blog/ acontece via GitHub "
-             "Actions cron 13h UTC (promote-from-stockpile.yml). Por design (T012), publicar "
-             "e responsabilidade exclusiva do CI. "
-             "Fase 1 (compartilhada): expand-keywords -> cluster -> prioritize -> deduplicate. "
-             "Fase 2 (x3 pacotes, atomica): por pacote, generate-briefs (avanca wave + "
-             "CURRENT-PACKAGE.json) -> write-articles --output-dir stockpile x4 locales -> "
-             "review-seo --mode stockpile x4 locales -> quality-gate --mode stockpile x4 "
-             "locales -> stockpile-finalize-package (Pass 2.4 atomico: monta package.json). "
-             "Fase 3: stockpile-validate (npm run validate:stockpile) -> stockpile-push. "
-             "Cada item da fila e um slash-command atomico ja Kimi-compat (ver kimi_whitelist.py), "
-             "compativel com o seletor 'queue-div-main-llm' (Claude / Codex / Kimi). N editavel "
-             "via _BLOG_STOCKPILE_PACKAGES_PER_CLICK em templates/quick_templates.py.",
-             lambda: self._load_quick_template(
-                 TEMPLATE_BLOG_STOCKPILE,
-                 # T012: o nome vira o label persistente (_template_label) que
-                 # fica VISIVEL na tela apos o clique — nao some como o tooltip.
-                 # Carrega a mensagem "nao publica" numa superficie persistente.
-                 name="Blog Stockpile (estoque, NAO publica)",
-             ),
-             "queue-btn-blog-stockpile"),
-            _maintenance_btn,
-        ])
-        header_layout.addWidget(daily_routine_content)
-        self._sec_contents.append(daily_routine_content)
-
-        # Default: Workflow active (index 1)
-        self._active_section = 1
+        # Default: Workflow active (index 0)
+        self._active_section = 0
         self._apply_section_styles()
 
         # Exposed so MainWindow can place it as a sibling of output-toolbar.
@@ -2565,6 +2558,10 @@ class CommandQueueWidget(QWidget):
     def _apply_section_styles(self) -> None:
         """Update tab button styles and content visibility."""
         for i, (btn, content) in enumerate(zip(self._sec_tabs, self._sec_contents)):
+            if i == 3:
+                # insertions_content lives in output-toolbar-center — always visible.
+                # insertions_btn is not in any layout. Skip both to avoid toggling.
+                continue
             active = i == self._active_section
             btn.setStyleSheet(_TAB_ACTIVE_STYLE if active else _TAB_INACTIVE_STYLE)
             content.setVisible(active)
@@ -2594,7 +2591,7 @@ class CommandQueueWidget(QWidget):
     def populate_paths_subtab(
         self, widgets: list[QWidget], second_row: list[QWidget] | None = None,
     ) -> None:
-        """Sub-aba 'paths & IDs': JSON, WS, Workflow App + campos basic_flow.
+        """Sub-aba 'Paths': JSON, WS, Workflow App + campos basic_flow.
 
         `second_row` (opcional) e anexado ao mesmo fluxo responsivo — usado
         pelo botao 'repo rules'. O limite de 4 linhas vale para a sub-aba toda.
@@ -2612,12 +2609,23 @@ class CommandQueueWidget(QWidget):
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
         """Anexa widgets ao bloco de inserções, apos a aba Inserções.
 
-        Usado para terminal-route-toggles + toolbar-prompts-config-gear,
-        que ficam agrupados com queue-tab-terminal-insertions e nao disputam
-        espaco com as abas primarias.
+        Usado para terminal-route-toggles, que fica agrupado com
+        queue-tab-terminal-insertions e nao disputa espaco com as abas
+        primarias.
         """
         for w in extras:
             self._insertions_bar_layout.addWidget(w)
+
+    def attach_subtab_corner_widget(self, widget: QWidget) -> None:
+        """Posiciona um widget no canto direito da tab bar das sub-abas de
+        inserções (PATHS/PROMPTS/RULES), na mesma row dos botoes de aba.
+
+        Usado para o toolbar-prompts-config-gear, que passa a viver ao lado
+        das abas em vez de no bloco insertions_bar.
+        """
+        self._insertions_subtabs.setCornerWidget(
+            widget, Qt.Corner.TopRightCorner
+        )
 
     def attach_count_label(self, count_label: QLabel) -> None:
         """Reparenteia o queue-count-label (owned por MetricsBar) para o

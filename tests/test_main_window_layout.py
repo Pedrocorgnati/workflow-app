@@ -83,10 +83,9 @@ def test_output_toolbar_left_splits_insertions_controls(app):
     assert insertions_tab.parentWidget() is insertions
 
     for testid in (
-        "queue-tab-pipelines",
         "queue-tab-workflow",
+        "queue-tab-loops",
         "queue-tab-auxiliar",
-        "queue-tab-daily-routine",
     ):
         tab = _find_widget_by_testid(header, testid)
         assert tab is not None
