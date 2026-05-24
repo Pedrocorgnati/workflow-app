@@ -1,11 +1,24 @@
-"""Unit tests for MCPPromptButton (loop 05-20-mcp-flow-implantation, P1).
+"""Testes basicos de MCPPromptButton: rendering + signals + payload.
 
-Uses pytest-qt for Qt fixtures. Standalone widget — does NOT touch main_window.
+Cobre os criterios 3, 4 e 8 do §10.3 do mcp-flow-implantation.md (mantidos
+da suite original de 4 testes em test_mcp_prompt_button.py, agora
+particionada em 7 arquivos por concerno - hardening T9 §1 do loop
+05-21-implantation-tasklist-aba-brainstorm).
+
+5 testes:
+- test_creation_valid_args (3 button_types canonicos)
+- test_validation_codex_requires_terminal_codex_output (Codex/target invalido)
+- test_validation_invalid_button_type_raises (Gemini, etc)
+- test_signal_emitted_on_click_carries_payload (left-click + payload completo)
+- test_modal_opens_on_right_click (right-click abre MCPPromptConfigModal)
 """
 
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.timeout(5)
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 
@@ -15,45 +28,41 @@ from workflow_app.widgets.mcp_prompt_button import (
 )
 
 
-# ── 1. Creation with valid args ───────────────────────────────────────────
-
-
 def test_creation_valid_args(qtbot):
-    """MCPPromptButton aceita args canonicos para os 3 button_types."""
+    """MCPPromptButton aceita args canonicos para os 3 button_types fixos."""
     btn_claude = MCPPromptButton(
-        label="Claude · Send",
+        label="Claude Send",
         button_type="Claude",
         prompt="Resuma o diff.",
         action="send",
         target_path="terminal-interactive-output",
+        testid_slug="claude-send",
     )
     qtbot.addWidget(btn_claude)
-    assert btn_claude.text() == "Claude · Send"
-    assert btn_claude.property("testid") == "mcp-prompt-button-claude"
+    assert btn_claude.property("testid") == "mcp-prompt-btn-claude-send"
     assert btn_claude.payload()["button_type"] == "Claude"
 
     btn_codex = MCPPromptButton(
-        label="Codex · Review",
+        label="Codex Review",
         button_type="Codex",
         prompt="Adversarial review.",
         action="queue",
         target_path="terminal-codex-output",
+        testid_slug="codex-review",
     )
     qtbot.addWidget(btn_codex)
-    assert btn_codex.property("testid") == "mcp-prompt-button-codex"
+    assert btn_codex.property("testid") == "mcp-prompt-btn-codex-review"
 
     btn_kimi = MCPPromptButton(
-        label="Kimi · Pair",
+        label="Kimi Pair",
         button_type="Kimi",
         prompt="Pair analyse.",
         action="config",
         target_path="terminal-workspace-output",
+        testid_slug="kimi-pair",
     )
     qtbot.addWidget(btn_kimi)
-    assert btn_kimi.property("testid") == "mcp-prompt-button-kimi"
-
-
-# ── 2. Validation: Codex requires terminal-codex-output ───────────────────
+    assert btn_kimi.property("testid") == "mcp-prompt-btn-kimi-pair"
 
 
 def test_validation_codex_requires_terminal_codex_output(qtbot):
@@ -76,10 +85,12 @@ def test_validation_codex_requires_terminal_codex_output(qtbot):
             target_path=None,
         )
 
-    # invalid type
+
+def test_validation_invalid_button_type_raises(qtbot):
+    """button_type fora do catalogo canonico levanta ValueError."""
     with pytest.raises(ValueError, match="button_type"):
         MCPPromptButton(
-            label="x",
+            label="Bad",
             button_type="Gemini",  # type: ignore[arg-type]
             prompt="x",
             action="send",
@@ -87,17 +98,21 @@ def test_validation_codex_requires_terminal_codex_output(qtbot):
         )
 
 
-# ── 3. Signal emitted on click ────────────────────────────────────────────
+def test_signal_emitted_on_click_carries_payload(qtbot, codex_alive_factory):
+    """Left-click emite `prompt_requested` com payload canonico completo.
 
-
-def test_signal_emitted_on_click(qtbot):
-    """Left-click emite `prompt_requested` com payload canonico."""
+    O payload inclui button_id (para roteamento de dispatch_result),
+    label, button_type, prompt_text, action, target_path e testid_slug.
+    """
+    # Garantir que botoes Codex nao sao avaliados aqui (Claude apenas).
+    codex_alive_factory(True)
     btn = MCPPromptButton(
         label="Click me",
         button_type="Claude",
         prompt="hello world",
         action="send",
         target_path="terminal-interactive-output",
+        testid_slug="click-me",
     )
     qtbot.addWidget(btn)
 
@@ -111,9 +126,8 @@ def test_signal_emitted_on_click(qtbot):
     assert payload["prompt_text"] == "hello world"
     assert payload["action"] == "send"
     assert payload["target_path"] == "terminal-interactive-output"
-
-
-# ── 4. Modal opens on right-click ─────────────────────────────────────────
+    assert payload["testid_slug"] == "click-me"
+    assert payload["button_id"] == "mcp-prompt-btn-click-me"
 
 
 def test_modal_opens_on_right_click(qtbot, monkeypatch):
@@ -124,6 +138,7 @@ def test_modal_opens_on_right_click(qtbot, monkeypatch):
         prompt="initial prompt",
         action="config",
         target_path="terminal-workspace-output",
+        testid_slug="cfg",
     )
     qtbot.addWidget(btn)
 
@@ -131,17 +146,16 @@ def test_modal_opens_on_right_click(qtbot, monkeypatch):
 
     def _fake_exec(self) -> int:
         exec_calls.append(self)
-        return QDialog.DialogCode.Rejected  # cancela para nao mutar widget
+        return QDialog.DialogCode.Rejected
 
     monkeypatch.setattr(MCPPromptConfigModal, "exec", _fake_exec)
 
     qtbot.mouseClick(btn, Qt.MouseButton.RightButton)
 
-    assert len(exec_calls) == 1, "Right-click deveria abrir o modal exatamente uma vez"
+    assert len(exec_calls) == 1
     modal = exec_calls[0]
     assert isinstance(modal, MCPPromptConfigModal)
     assert modal.property("testid") == "mcp-prompt-config-modal"
-    # valores iniciais devem refletir o estado do botao
     values = modal.values()
     assert values["label"] == "Configure"
     assert values["prompt"] == "initial prompt"

@@ -64,13 +64,15 @@ class _PtyBridge(QObject):
 
         A collapsed (0-height) QWebEngineView makes xterm.js' FitAddon
         emit degenerate resize events with non-positive dimensions.
-        Forwarding `resize(0, 0)` to the PTY triggers a SIGWINCH storm
-        that makes the shell redraw its prompt continuously, which keeps
-        the Terminal 3 listener from ever settling back to idle. Drop them.
+        Forwarding tiny dimensions (for example `1x1`) also corrupts the
+        shell layout: prompts wrap one glyph per line and stay visually
+        broken until a new valid SIGWINCH arrives. Drop these transient
+        events and keep the last stable geometry.
         """
         if self._shell is None:
             return
-        if cols <= 0 or rows <= 0:
+        # Keep parity with the pyte terminal minimum geometry guards.
+        if cols < 20 or rows < 5:
             return
         self._shell.resize(cols, rows)
 
@@ -85,9 +87,20 @@ class XtermOutputPanel(QWidget):
         self._shell = PersistentShell(
             cwd=_find_systemforge_root(),
             shell=_resolve_zsh(),
+            extra_env={
+                "WF_CHANNEL_OVERRIDE": (
+                    "workspace_xterm" if workspace_mode else "interactive"
+                )
+            },
             parent=self,
         )
         self._view = QWebEngineView(self)
+        self._view.setProperty(
+            "testid",
+            "terminal-workspace-xterm-output"
+            if workspace_mode
+            else "terminal-interactive-xterm-output",
+        )
         self._channel = QWebChannel(self)
         self._bridge = _PtyBridge(shell=self._shell, channel=self._channel_name, parent=self)
         self._shell.output_received.connect(self._bridge.output_received)
@@ -104,11 +117,14 @@ class XtermOutputPanel(QWidget):
         self._idle_timer.setInterval(2_000)
         self._idle_timer.timeout.connect(self._on_idle_timeout)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
+    def ensure_shell_started(self) -> None:
         if not self._shell_started and self._shell is not None:
             self._shell.start()
             self._shell_started = True
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.ensure_shell_started()
 
     @property
     def _terminal(self):

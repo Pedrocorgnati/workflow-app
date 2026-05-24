@@ -527,13 +527,12 @@ class TestKimiBlueArrowDelay:
 
 
 class TestForceKimi:
-    """Cobertura do modo `--force Kimi` (data-testid=queue-div-force-kimi).
+    """Cobertura do modo Main LLM Kimi (testid legado queue-chk-force-kimi).
 
-    Quando ativo: a seta verde despacha para o terminal workspace com
+    Quando ativo: a seta verde despacha para o terminal interactive com
     prefixo /skill:; /model e /effort viram bolinha amarela sem dispatch;
-    /clear vai SO para workspace; seta azul fica oculta; Use Kimi e
-    desabilitado (modos mutuamente exclusivos). Quando inativo: comportamento
-    legado preservado."""
+    /clear vai SO para interactive; seta azul fica oculta. Quando Main LLM
+    Claude esta ativo, comportamento legado preservado."""
 
     @pytest.fixture()
     def task_specs(self) -> list[CommandSpec]:
@@ -562,18 +561,22 @@ class TestForceKimi:
 
     # ---- UI checkbox -----------------------------------------------------
 
-    def test_force_kimi_checkbox_exists_with_testid(self, widget):
+    def test_main_llm_kimi_radio_keeps_force_kimi_testid(self, widget):
         chk = widget._force_kimi_chk
         assert chk is not None
         assert chk.property("testid") == "queue-chk-force-kimi"
-        assert chk.text() == "--force Kimi"
+        assert chk.text() == "kimi"
 
-    def test_force_kimi_container_div_has_testid(self, widget):
+    def test_single_llm_routing_container_has_two_sections(self, widget):
         from PySide6.QtWidgets import QWidget
-        # Procurar o QWidget container marcado com queue-div-force-kimi.
-        found = [w for w in widget.findChildren(QWidget)
-                 if w.property("testid") == "queue-div-force-kimi"]
-        assert len(found) == 1, "queue-div-force-kimi container nao encontrado"
+        found = [
+            w for w in widget.findChildren(QWidget)
+            if w.property("testid") == "queue-div-llm-routing"
+        ]
+        assert len(found) == 1, "queue-div-llm-routing container nao encontrado"
+        assert widget._main_claude_radio.isChecked() is True
+        assert widget._main_codex_radio.text() == "codex"
+        assert widget._use_codex_chk.property("testid") == "queue-chk-use-codex"
 
     # ---- Legacy path (force-kimi OFF) -----------------------------------
 
@@ -593,9 +596,9 @@ class TestForceKimi:
         assert emitted_interactive == ["/create-task"]
         assert emitted_workspace == []
 
-    # ---- Force-kimi ON: /skill: prefix + workspace ----------------------
+    # ---- Main Kimi ON: /skill: prefix + interactive ---------------------
 
-    def test_force_on_per_item_injects_skill_prefix_to_workspace(
+    def test_force_on_per_item_injects_skill_prefix_to_interactive(
         self, force_kimi_widget, task_specs
     ):
         emitted_interactive: list[str] = []
@@ -609,10 +612,10 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
-        assert emitted_interactive == [], "force-kimi NAO pode tocar interactive"
-        assert emitted_workspace == ["/skill:create-task"]
+        assert emitted_interactive == ["/skill:create-task"]
+        assert emitted_workspace == [], "Main LLM Kimi nao deve tocar T2"
 
-    def test_force_on_step_btn_injects_skill_prefix_to_workspace(
+    def test_force_on_step_btn_injects_skill_prefix_to_interactive(
         self, force_kimi_widget, task_specs
     ):
         emitted_interactive: list[str] = []
@@ -626,8 +629,23 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
-        assert emitted_interactive == []
-        assert emitted_workspace == ["/skill:create-task"]
+        assert emitted_interactive == ["/skill:create-task"]
+        assert emitted_workspace == []
+
+    def test_force_on_keeps_colon_namespace_when_injecting_skill_prefix(
+        self, force_kimi_widget
+    ):
+        emitted_interactive: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline([
+                CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)
+            ])
+            force_kimi_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+        assert emitted_interactive == ["/skill:blog:init-strategy"]
 
     # ---- /model e /effort suprimidos -----------------------------------
 
@@ -669,9 +687,9 @@ class TestForceKimi:
         assert not force_kimi_widget._last_cmd_label.isVisible() or \
             force_kimi_widget._last_cmd_label.text().strip() == ""
 
-    # ---- /clear vai SO para workspace -----------------------------------
+    # ---- /clear vai SO para interactive ---------------------------------
 
-    def test_force_on_clear_per_item_goes_only_to_workspace(
+    def test_force_on_clear_per_item_goes_only_to_interactive(
         self, force_kimi_widget, clear_specs
     ):
         emitted_interactive: list[str] = []
@@ -685,10 +703,10 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
-        assert emitted_interactive == [], "/clear nao pode ir para interactive em force-kimi"
-        assert emitted_workspace == ["/clear"]
+        assert emitted_interactive == ["/clear"]
+        assert emitted_workspace == [], "/clear nao pode ir para T2 em Main LLM Kimi"
 
-    def test_force_on_clear_step_btn_goes_only_to_workspace(
+    def test_force_on_clear_step_btn_goes_only_to_interactive(
         self, force_kimi_widget, clear_specs
     ):
         emitted_interactive: list[str] = []
@@ -702,8 +720,8 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
-        assert emitted_interactive == []
-        assert emitted_workspace == ["/clear"]
+        assert emitted_interactive == ["/clear"]
+        assert emitted_workspace == []
 
     # ---- Skill existence validation -------------------------------------
 
@@ -714,8 +732,10 @@ class TestForceKimi:
             type(widget), "_resolve_skill_target",
             classmethod(lambda cls, slug: False),
         )
+        emitted_interactive: list[str] = []
         emitted_workspace: list[str] = []
         toasts: list[tuple] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
         signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
         signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
         try:
@@ -723,10 +743,32 @@ class TestForceKimi:
             widget.load_pipeline(task_specs)
             widget._items[0]._on_run_clicked()
         finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+        assert emitted_interactive == [], "dispatch deve abortar quando skill nao existe"
         assert emitted_workspace == [], "dispatch deve abortar quando skill nao existe"
         assert any("create-task" in m for m, _ in toasts), \
             "toast deve mencionar o slug ausente"
+
+    def test_resolve_skill_target_works_when_cwd_is_nested(self, tmp_path, monkeypatch):
+        """Regression: resolver deve achar skill no parent mesmo com cwd aninhado."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+
+        repo_root = tmp_path / "repo"
+        nested_cwd = repo_root / "ai-forge" / "workflow-app"
+        nested_cwd.mkdir(parents=True)
+        skills_dir = repo_root / ".agents" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "blog:init-strategy.md").write_text("# skill", encoding="utf-8")
+
+        monkeypatch.chdir(nested_cwd)
+        monkeypatch.setattr(
+            CommandQueueWidget,
+            "_SKILL_SEARCH_DIRS",
+            (".agents/skills",),
+            raising=False,
+        )
+        assert CommandQueueWidget._resolve_skill_target("blog:init-strategy") is True
 
     # ---- /skill: prefix idempotente -------------------------------------
 
@@ -739,26 +781,17 @@ class TestForceKimi:
         assert f("") == ""
         assert f("prompt livre sem barra") == "prompt livre sem barra"
 
-    # ---- Mutual exclusivity Use Kimi vs --force Kimi --------------------
+    # ---- Main LLM radio exclusivity ------------------------------------
 
-    def test_force_kimi_disables_use_kimi(self, widget):
+    def test_main_llm_kimi_does_not_disable_parallel_kimi(self, widget):
         widget._use_kimi_chk.setChecked(True)
         widget._force_kimi_chk.setChecked(True)
-        assert widget._use_kimi_chk.isChecked() is False
-        assert widget._use_kimi_chk.isEnabled() is False
-
-    def test_unchecking_force_kimi_reenables_use_kimi(self, widget):
-        widget._force_kimi_chk.setChecked(True)
-        assert widget._use_kimi_chk.isEnabled() is False
-        widget._force_kimi_chk.setChecked(False)
+        assert widget._use_kimi_chk.isChecked() is True
         assert widget._use_kimi_chk.isEnabled() is True
 
-    def test_use_kimi_unchecks_force_kimi(self, widget):
+    def test_selecting_claude_unchecks_main_kimi(self, widget):
         widget._force_kimi_chk.setChecked(True)
-        # Apos force-kimi ligado, Use Kimi esta disabled — habilitar manualmente
-        # para o teste simular o caso em que o usuario alterna entre modos.
-        widget._use_kimi_chk.setEnabled(True)
-        widget._use_kimi_chk.setChecked(True)
+        widget._main_claude_radio.setChecked(True)
         assert widget._force_kimi_chk.isChecked() is False
 
     # ---- Seta azul oculta quando force-kimi ativo -----------------------
@@ -780,7 +813,7 @@ class TestForceKimi:
             if btn is not None:
                 assert btn.isVisible() is False, \
                     "seta azul deve ficar oculta com --force Kimi"
-        widget._force_kimi_chk.setChecked(False)
+        widget._main_claude_radio.setChecked(True)
         # Apos desligar: visibilidade restaurada pelo menos para um item
         # whitelisted (sanity — nao todos podem ser whitelisted).
         if any_visible_before:
@@ -810,6 +843,112 @@ class TestForceKimi:
         # Item deve estar destacado (highlighted) — comparacao internal usa
         # cmd_text original `/create-task`, NAO `/skill:create-task`.
         assert force_kimi_widget._items[0]._highlighted is True
+
+
+class TestCodexLlmRouting:
+    """Main Codex routes to T1; worker Codex routes to Terminal 3."""
+
+    @pytest.fixture()
+    def codex_widget(self, widget, tmp_path, monkeypatch):
+        command_file = tmp_path / ".claude" / "commands" / "blog" / "init-strategy.md"
+        command_file.parent.mkdir(parents=True)
+        command_file.write_text("# init strategy", encoding="utf-8")
+        agent_file = tmp_path / "ai-forge" / "MCP" / "agents" / "executor.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text("# executor", encoding="utf-8")
+        listener_file = tmp_path / "ai-forge" / "rules" / "workflow-app-listeners.md"
+        listener_file.parent.mkdir(parents=True)
+        listener_file.write_text("# listeners", encoding="utf-8")
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: command_file if slug == "blog:init-strategy" else None),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_codex_executor_agent_file",
+            classmethod(lambda cls: agent_file),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_listener_rules_file",
+            classmethod(lambda cls: listener_file),
+        )
+        return widget
+
+    def test_main_codex_step_sends_executor_prompt_to_t1(self, codex_widget):
+        emitted_t1: list[str] = []
+        emitted_t2: list[str] = []
+        emitted_t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        signal_bus.run_command_in_workspace_terminal.connect(emitted_t2.append)
+        signal_bus.run_command_in_workspace_xterm.connect(emitted_t3.append)
+        try:
+            codex_widget._main_codex_radio.setChecked(True)
+            codex_widget.load_pipeline([
+                CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)
+            ])
+            codex_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(emitted_t2.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(emitted_t3.append)
+
+        assert len(emitted_t1) == 1
+        assert emitted_t2 == []
+        assert emitted_t3 == []
+        assert "Command: /blog:init-strategy" in emitted_t1[0]
+        assert "Command markdown:" in emitted_t1[0]
+        assert "Listener rules:" in emitted_t1[0]
+        assert "Expected listener channel: interactive" in emitted_t1[0]
+        assert "execute/preserve it so it notifies channel `interactive`" in emitted_t1[0]
+
+    def test_main_codex_model_effort_are_suppressed(self, codex_widget):
+        emitted_t1: list[str] = []
+        emitted_t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(emitted_t3.append)
+        try:
+            codex_widget._main_codex_radio.setChecked(True)
+            codex_widget.load_pipeline([
+                CommandSpec("/model opus", ModelName.OPUS, position=1),
+                CommandSpec("/effort medium", ModelName.OPUS, position=2),
+            ])
+            codex_widget._on_step_btn_clicked()
+            codex_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(emitted_t3.append)
+
+        assert emitted_t1 == []
+        assert emitted_t3 == []
+        assert codex_widget._items[0].is_pending_run() is False
+        assert codex_widget._items[1].is_pending_run() is False
+
+    def test_parallel_codex_worker_routes_next_eligible_command_to_t3(
+        self, codex_widget
+    ):
+        emitted_t1: list[str] = []
+        emitted_t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(emitted_t3.append)
+        try:
+            codex_widget._main_claude_radio.setChecked(True)
+            codex_widget._use_codex_chk.setChecked(True)
+            codex_widget.load_pipeline([
+                CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)
+            ])
+            codex_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(emitted_t3.append)
+
+        assert emitted_t1 == []
+        assert len(emitted_t3) == 1
+        assert "Command: /blog:init-strategy" in emitted_t3[0]
+        assert "Listener rules:" in emitted_t3[0]
+        assert "Expected listener channel: workspace_xterm" in emitted_t3[0]
+        assert "execute/preserve it so it notifies channel `workspace_xterm`" in emitted_t3[0]
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +1125,7 @@ class TestBugLiteralSlugRegression:
     # ─── Regression: slug derivation from source.md path ────────────────────
     # Bug 2026-05-14: `slug = Path(path_arg).stem` retornava "source" quando
     # o source.md vivia em blacksmith/loop-archives/{loop_name}/source.md.
-    # Hardening per /skill:mcp-codex adversarial review 2026-05-14:
+    # Hardening per /mcp:codex adversarial review 2026-05-14:
     # widget faz APENAS identity lookup (re-entry detection via JSON canonico);
     # canonicalizacao (mm-dd prefix, kebab, stopwords) e autoridade exclusiva
     # do /loop:create-structure markdown spec.

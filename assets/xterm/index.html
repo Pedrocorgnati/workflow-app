@@ -13,9 +13,19 @@
   <script>
     const term = new Terminal({fontFamily: "monospace", fontSize: 13, scrollback: 5000});
     const fit = new FitAddon.FitAddon();
+    let fitTimer = null;
+    function scheduleFit() {
+      if (fitTimer !== null) {
+        clearTimeout(fitTimer);
+      }
+      fitTimer = setTimeout(function () {
+        fit.fit();
+        fitTimer = null;
+      }, 60);
+    }
     term.loadAddon(fit);
     term.open(document.getElementById("term"));
-    fit.fit();
+    scheduleFit();
     window.term = term;
     if (typeof qt !== "undefined" && qt.webChannelTransport) {
       new QWebChannel(qt.webChannelTransport, function(channel){
@@ -26,7 +36,17 @@
         term.onResize(function(size){ py.resize_pty(size.cols, size.rows); });
       });
     }
-    window.addEventListener("resize", function(){ fit.fit(); });
+    window.addEventListener("resize", scheduleFit);
+    window.addEventListener("focus", scheduleFit);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) {
+        scheduleFit();
+      }
+    });
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(scheduleFit);
+      observer.observe(document.getElementById("term"));
+    }
   </script>
 </body>
 </html>

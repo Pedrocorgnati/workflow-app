@@ -7,9 +7,12 @@ sizing dinamico e ausencia de heading redundante.
 from __future__ import annotations
 
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QCheckBox, QLineEdit, QPlainTextEdit
+from PySide6.QtWidgets import QCheckBox, QLineEdit, QPlainTextEdit, QPushButton
 
-from workflow_app.command_queue.double_phase_dialog import DoublePhaseArgumentDialog
+from workflow_app.command_queue.double_phase_dialog import (
+    DoublePhaseArgumentDialog,
+    PathMdFieldWidget,
+)
 from workflow_app.domain import FlagSpec
 
 
@@ -42,6 +45,37 @@ def test_structured_renders_main_plaintextedit(qapp):
     )
     edits = dlg.findChildren(QPlainTextEdit)
     assert len(edits) == 1
+    browse = dlg.findChild(QPushButton, None)
+    assert browse is not None
+    dlg.deleteLater()
+
+
+def test_structured_main_input_has_md_browse_button(qapp):
+    """Input principal path.md/prompt tem lupa 1:1 no fim da row."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/loop",
+        flags_with_value=[FlagSpec(name="task", label="Task", placeholder="tasks.md")],
+    )
+    buttons = [
+        btn for btn in dlg.findChildren(QPushButton)
+        if btn.property("testid") == "double-phase-main-md-browse"
+    ]
+    assert len(buttons) == 1
+    assert buttons[0].text() == "🔍"
+    assert buttons[0].width() == buttons[0].height()
+    dlg.deleteLater()
+
+
+def test_structured_path_flags_use_path_md_widget(qapp):
+    """Flags estruturadas com placeholder .md recebem picker de markdown."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/loop",
+        flags_with_value=[
+            FlagSpec(name="task", label="Task", placeholder="caminho/para/tasklist.md"),
+            FlagSpec(name="name", label="Nome", placeholder="slug"),
+        ],
+    )
+    assert len(dlg.findChildren(PathMdFieldWidget)) == 1
     dlg.deleteLater()
 
 

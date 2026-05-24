@@ -35,6 +35,13 @@ def write_queue_root(path: str | os.PathLike, data: dict) -> None:
     is removed and the original path is left untouched.
     """
     p = Path(path)
+    if p.is_dir():
+        raise IsADirectoryError(
+            f"queue_root resolveu para um diretorio, nao um arquivo: {p}. "
+            "Causa provavel: campo queue_root vazio no config colapsando para "
+            "project_dir. Verifique 'queue_root' em basic_flow ou rode com um "
+            "config que tenha o fallback canonico aplicado."
+        )
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".tmp-")
     try:

@@ -14,6 +14,7 @@ dependencies = [
     "python-statemachine>=2.0.0",
     "pyte>=0.8.0",
     "pydantic>=2.5",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,9 @@ packages = ["src/workflow_app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 cache_dir = ".cache/.pytest_cache"
+# Hardening T9 §7 (criterio 10) do loop 05-21-implantation-tasklist-aba-brainstorm:
+# line + branch coverage combinado >=80% nos modulos do MCPPromptButton.
+addopts = "--cov=workflow_app.widgets.mcp_prompt_button --cov=workflow_app.widgets.mcp_prompt_actions --cov-branch --cov-report=term-missing --cov-fail-under=80"
 
 [tool.hatch.envs.default.scripts]
 db-seed = "python3 scripts/seed.py"

@@ -871,7 +871,7 @@ def build_daily_loop_specs(
 
     do_command = str(daily_loop.get("do_command", "/daily-loop:do")).strip() or "/daily-loop:do"
     # Per-item adversarial audit injected after each :do. Defaults to
-    # /daily-loop:review-done (opus/standard) and runs /skill:double-mcp Level 3
+    # /daily-loop:review-done (opus/standard) and runs /mcp:dual Level 3
     # CROSS_ADVERSARIAL — see .claude/commands/daily-loop/review-done.md.
     review_done_command = str(
         daily_loop.get("review_done_command", "/daily-loop:review-done")

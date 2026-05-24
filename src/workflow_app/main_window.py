@@ -25,10 +25,13 @@ Window: resize(1280, 720), setMinimumSize(1024, 600)
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
+import yaml
+
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +48,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QStackedWidget,
+    QTextEdit,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -76,8 +80,88 @@ from workflow_app.views.module_detail import ModuleDetailView
 from workflow_app.widgets.execution_detail_panel import ExecutionDetailPanel
 from workflow_app.widgets.execution_history_widget import ExecutionHistoryWidget
 from workflow_app.widgets.filter_panel import FilterPanel
+from workflow_app.widgets.mcp_prompt_actions import build_prompt
+from workflow_app.widgets.mcp_prompt_button import (
+    VALID_ACTIONS,
+    VALID_BUTTON_TYPES,
+    VALID_TERMINALS,
+    MCPPromptButton,
+)
 from workflow_app.widgets.toast_notifier import ToastNotifier
 from workflow_app.widgets.version_update_banner import VersionUpdateBanner
+
+
+class _BrainstormSeedError(ValueError):
+    """Seed invalido em blacksmith/brainstorm-mcp/0[1-9]-*.md."""
+
+
+# Mapping canonico slug->display do radio de provider runtime
+# (T3 do loop 05-21-implantation-tasklist-aba-brainstorm).
+# Slugs lowercase sao a source-of-truth interna; o capitalize ocorre
+# apenas no momento de gerar prompt/UI para nao depender de button.text()
+# (fragil a i18n + refactor de label, cf. hardening §1/§2 da task).
+_BRAINSTORM_PROVIDER_LABELS: dict[str, str] = {
+    "claude": "Claude",
+    "kimi": "Kimi",
+    "codex": "Codex",
+}
+_BRAINSTORM_PROVIDER_SLUGS: frozenset[str] = frozenset(_BRAINSTORM_PROVIDER_LABELS)
+
+
+# QSS canonico do gear (reuso do toolbar-prompts-config-gear original em
+# main_window.py:1517-1537). Aplicado pelo `_GearButton` abaixo.
+_GEAR_QSS = (
+    "QPushButton { background-color: #3F3F46;"
+    "  border: 1px solid #52525B; border-radius: 5px; padding: 0; }"
+    "QPushButton:hover { background-color: #52525B; border-color: #71717A; }"
+    "QPushButton:pressed { background-color: #FBBF24; }"
+    "QPushButton:pressed QLabel { color: #18181B; }"
+)
+
+
+class _GearButton(QPushButton):
+    """Botao gear 24x24 reutilizavel.
+
+    Hierarquia `QPushButton + QLabel filho com WA_TransparentForMouseEvents`
+    preserva o click-target (cf. hardening §8 task-005 do loop
+    05-21-implantation-tasklist-aba-brainstorm). QSS compartilhado via
+    `_GEAR_QSS` (mesmo bloco do `toolbar-prompts-config-gear`).
+    """
+
+    def __init__(
+        self,
+        testid: str,
+        tooltip: str,
+        parent: QWidget | None = None,
+        size: int = 24,
+        font_px: int = 12,
+    ) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self.setProperty("testid", testid)
+        self.setStyleSheet(_GEAR_QSS)
+        label = QLabel("⚙", self)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(
+            f"color: #FAFAFA; font-size: {font_px}px;"
+            " background: transparent; border: none;"
+        )
+        label.setGeometry(0, 0, size, size)
+
+
+_SEED_MAX_BYTES = 64 * 1024
+_SEED_REQUIRED_KEYS = {
+    "slug",
+    "button_type",
+    "agent_name",
+    "agent_path",
+    "action",
+    "target_path",
+}
+_SEED_TARGET_TERMINAL_RUNTIME_SENTINEL = "depende-do-radio"
 
 logger = logging.getLogger(__name__)
 
@@ -93,16 +177,16 @@ _SYSTEMFORGE_DIR  = str(Path(__file__).resolve().parents[4])  # .../systemForge
 PROGRESS_PROMPT = """\
 Sistema de Execucao Adversarial com Double-MCP + Codex Review
 Objetivo
-Analise profundamente o problema informado utilizando /skill:double-mcp, defina a melhor solucao tecnica, proponha uma arquitetura adequada e gere uma sequencia de tasks tecnicas executaveis.
+Analise profundamente o problema informado utilizando /mcp:dual, defina a melhor solucao tecnica, proponha uma arquitetura adequada e gere uma sequencia de tasks tecnicas executaveis.
 Apos gerar as tasks:
 Execute-as sequencialmente.
-Faca revisao adversarial obrigatoria via /skill:mcp-codex em cada task.
+Faca revisao adversarial obrigatoria via /mcp:codex em cada task.
 Faca uma revisao holistica final do conjunto completo.
 Mantenha rastreabilidade continua em PROGRESS.md.
 
 FASE 1 — DISCUSSAO E PLANEJAMENTO
 1. Debate tecnico inicial
-Utilize /skill:double-mcp para:
+Utilize /mcp:dual para:
 Identificar a causa raiz do problema.
 Debater alternativas de solucao.
 Avaliar tradeoffs tecnicos.
@@ -141,7 +225,7 @@ Nao introduzir escopo novo sem justificativa explicita.
 
 3. Revisao previa das tasks
 Antes de executar qualquer task:
-Utilize /skill:mcp-codex para revisar toda a lista de tasks em modo adversarial.
+Utilize /mcp:codex para revisar toda a lista de tasks em modo adversarial.
 O review deve validar:
 Ordem logica.
 Cobertura completa do problema.
@@ -210,7 +294,7 @@ Baixo risco de regressao.
 Etapa 3 — Review adversarial obrigatorio
 Atualizar status:
 review
-Invocar /skill:mcp-codex em modo adversarial review passando:
+Invocar /mcp:codex em modo adversarial review passando:
 Descricao completa da task.
 Criterios de aceite.
 Diff gerado.
@@ -237,7 +321,7 @@ Observacoes relevantes.
 
 Se RESSALVAS
 Corrigir problemas.
-Reexecutar /skill:mcp-codex.
+Reexecutar /mcp:codex.
 Maximo de 3 rodadas.
 Se exceder 3 rodadas:
 Marcar como blocked.
@@ -261,7 +345,7 @@ blocked com justificativa explicita registrada.
 
 FASE 4 — REVISAO HOLISTICA FINAL
 Apos todas as tasks:
-Executar /skill:mcp-codex novamente em modo adversarial holistico.
+Executar /mcp:codex novamente em modo adversarial holistico.
 O review final deve validar:
 Cobertura
 Alguma task original ficou parcialmente implementada?
@@ -300,7 +384,7 @@ Estado final do sistema.
 REGRAS GERAIS (INVIOLAVEIS)
 Atualizar PROGRESS.md imediatamente apos cada transicao de status.
 Nunca atualizar status em batch.
-Nunca pular o gate do /skill:mcp-codex.
+Nunca pular o gate do /mcp:codex.
 Nunca ocultar falhas.
 Nunca assumir comportamento implicito sem validacao.
 Em caso de bloqueio critico insoluvel:
@@ -673,30 +757,24 @@ RESUMO FINAL
 
 
 _DATATEST_FILTERED_IDS = frozenset({
-    "main-command-queue",
     "metrics-project-pill",
-    "queue-btn-play-next",
-    "autocast-btn",
-    "output-toolbar-col1-bottom",
-    "output-toolbar-left",
-    "terminal-route-toggles",
     "progress-section",
     "listeners-frame",
-    "queue-progress-ring",
-    "queue-count-toggles-row",
-    "output-toolbar-queue-toggles",
+    "queue-btn-play-next-container",
+    "queue-command-list",
+    "output-toolbar-left",
+    "terminal-route-toggles",
+    "output-toolbar-mcp",
     "output-toolbar-progress-boxes",
     "output-toolbar-test-mode",
-    "queue-command-list",
     "terminal-interactive",
-    "terminal-interactive-output",
-    "terminal-interactive-notes",
-    "terminal-workspace-splitter",
     "terminal-workspace",
-    "terminal-workspace-output",
-    "terminal-workspace-notes",
-    "queue-btn-add-command",
-    "queue-btn-save",
+    # Fix T020 (BLOCKER 2) loop 05-21-implantation-tasklist-aba-brainstorm:
+    # testid canonico do panel xterm e `terminal-codex-output` conforme
+    # mcp-flow-implantation-base-archive.md §10.5. Antes era
+    # `terminal-workspace-xterm` (so casava o nome interno), o que fazia
+    # `_codex_terminal_available()` retornar False sempre.
+    "terminal-codex-output",
 })
 
 _MODAL_TESTIDS = frozenset({
@@ -832,12 +910,57 @@ class DualStatusSection(QWidget):
             self._apply_layout(row=want_row)
 
 
+class _DraggableFloatingPanel(QWidget):
+    """Floating child panel with bounded drag inside its parent widget."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._drag_offset: QPoint | None = None
+        self.was_dragged = False
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_offset is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        top_left_global = event.globalPosition().toPoint() - self._drag_offset
+        top_left = parent.mapFromGlobal(top_left_global)
+        max_x = max(0, parent.width() - self.width())
+        max_y = max(0, parent.height() - self.height())
+        self.move(
+            min(max(0, top_left.x()), max_x),
+            min(max(0, top_left.y()), max_y),
+        )
+        self.was_dragged = True
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
 
     _SETTINGS_GEOMETRY = "MainWindow/geometry"
     _SETTINGS_SPLITTER = "MainWindow/splitterSizes"
     _SETTINGS_LAST_CONFIG = "Project/lastConfigPath"
+
+    # Emitido quando os 9 seeds brainstorm-mcp foram regravados via gear modal
+    # (T4 do loop 05-21-implantation-tasklist-aba-brainstorm). Slot
+    # `_rebuild_brainstorm_grid` reconstroi a grade 3x3 sem mem leak.
+    _brainstorm_grid_invalidated = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -853,6 +976,33 @@ class MainWindow(QMainWindow):
         # Task 3 (loop 05-13-workflow-app-layout-2): modo do test-mode column.
         # "off" preserva o default original (overlay desligado na inicializacao).
         self._datatest_mode = "off"
+        self._datatest_terminal_write_enabled = False
+        self._datatest_panel: _DraggableFloatingPanel | None = None
+        self._datatest_panel_button: QPushButton | None = None
+        self._px_ruler_toasts: list[QLabel] = []
+        self._px_ruler_resize_filter: QObject | None = None
+
+        # Toast dedup para o picker .md da aba brainstorm (T2 do loop
+        # 05-21-implantation-tasklist-aba-brainstorm). Idempotencia por sessao:
+        # "created" e "mkdir_failed" disparam toast exatamente uma vez;
+        # "outside_repo" guarda o ultimo path rejeitado para evitar spam.
+        self._brainstorm_toasts: dict[str, bool | str | None] = {
+            "created": False,
+            "mkdir_failed": False,
+            "outside_repo": None,
+        }
+
+        # T3 (loop 05-21-implantation-tasklist-aba-brainstorm):
+        # slug canonico lowercase do provider ativo para botoes
+        # button_type=type-selector-radio-input. Atualizado pelo radio
+        # instalado em _build_brainstorm_page (via _on_brainstorm_type_changed).
+        # Default canonico = "claude". Display string capitalizada via
+        # _BRAINSTORM_PROVIDER_LABELS no consumer.
+        self._brainstorm_runtime_type: str = "claude"
+        # Debounce do slot _on_mcp_prompt_requested (300ms via QTimer.singleShot).
+        self._prompt_in_flight: bool = False
+        # Lista de MCPPromptButton instanciados pela grade brainstorm seed-driven.
+        self._brainstorm_mcp_btns: list[MCPPromptButton] = []
 
         self._settings = QSettings("SystemForge", "WorkflowApp")
         self._setup_ui()
@@ -890,6 +1040,7 @@ class MainWindow(QMainWindow):
         self._config_bar.hide()
         self._metrics_bar.config_change_requested.connect(self._on_config_change_requested)
         self._metrics_bar.config_unload_requested.connect(self._unload_config)
+        self._metrics_bar.config_reload_requested.connect(self._reload_config)
 
         # ── ViewStack: 3 pages switched by ConfigBar nav buttons ─────── #
         self._view_stack = QStackedWidget()
@@ -992,10 +1143,8 @@ class MainWindow(QMainWindow):
         # output-toolbar-left (CommandQueue header_widget) agora ocupa toda
         # a largura disponivel a esquerda — output-toolbar-center deletada.
         _toolbar_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
-        # Coluna MCP (2026-05-19): entre output-toolbar-left e output-toolbar-progress-boxes.
-        # 3 linhas: mcp-codex/mcp-kimi/double-mcp (orange),
-        #           kimi-claude/kimi-codex/kimi-dual (blue),
-        #           skill-claude/skill-kimi/skill-dual (purple).
+        # Coluna MCP: radio Claude/Kimi/Codex + acoes Main MCP/Parallel/Dual.
+        # A combinacao aplica o comando legado correto no terminal alvo fixo.
         _mcp_column = self._build_mcp_column(self._mcp_column_btns)
         _toolbar_row_layout.addWidget(_mcp_column)                                   # mcp
         # Coluna progress-boxes (entre output-toolbar-mcp e output-toolbar-queue-toggles):
@@ -1008,8 +1157,15 @@ class MainWindow(QMainWindow):
         _queue_toggles_column = self._build_queue_toggles_column()
         _test_mode_column = self._build_test_mode_column()
         _last_column = QWidget()
+        _last_column.setObjectName("OutputToolbarDataTestQueueStack")
+        _last_column.setProperty("testid", "output-toolbar-datatest-queue-stack")
+        _last_column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _last_column.setStyleSheet(
+            "QWidget#OutputToolbarDataTestQueueStack { background-color: #1C1C1F;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
         _last_column_layout = QVBoxLayout(_last_column)
-        _last_column_layout.setContentsMargins(0, 0, 0, 0)
+        _last_column_layout.setContentsMargins(6, 6, 6, 6)
         _last_column_layout.setSpacing(6)
         _last_column_layout.addWidget(_test_mode_column)
         _last_column_layout.addWidget(_queue_toggles_column)
@@ -1020,7 +1176,7 @@ class MainWindow(QMainWindow):
         # idx 0: _pill_row (metrics-project-pill) — primeiro item
         # idx 1: _toolbar_bar (dual-status-section: progress-section + listeners-frame)
         # idx 2: _window_label
-        # idx 3: _toolbar_left_top (output-toolbar-col1-bottom)
+        # idx 3: _toolbar_left_top (output-toolbar-llm-options)
         # _pill_row (idx 0) e _window_label (idx 2) foram inseridos em _setup_ui;
         # dual-status-section entra em idx 1 (entre pill e label) expandindo
         # horizontalmente para preencher a largura do queue.
@@ -1081,7 +1237,11 @@ class MainWindow(QMainWindow):
             self._workspace_panel_xterm = XtermOutputPanel(
                 parent=self._workspace_terminal_splitter, workspace_mode=True
             )
-            self._workspace_panel_xterm.setProperty("testid", "terminal-workspace")
+            # Fix T020 (BLOCKER 2): testid canonico e `terminal-codex-output`
+            # conforme mcp-flow-implantation-base-archive.md §10.5. Antes
+            # `terminal-workspace-xterm` impedia `_codex_terminal_available()`
+            # de detectar T3 e bloqueava todos os botoes Codex silenciosamente.
+            self._workspace_panel_xterm.setProperty("testid", "terminal-codex-output")
             self._workspace_panel_xterm.setProperty("data-engine", "xterm")
             self._workspace_terminal_splitter.addWidget(self._workspace_panel_xterm)
             # Estado inicial fixo: T3 colapsado, T2 (pyte) ocupa 100%
@@ -1191,7 +1351,7 @@ class MainWindow(QMainWindow):
 
         Retorna apenas:
         - `bar` (dual-status-section): hospeda progress-section + listeners-frame.
-        - `left_top` (output-toolbar-col1-bottom): hospeda instance-group abaixo.
+        - `left_top` (output-toolbar-llm-options): hospeda instance-group abaixo.
         """
         from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout
 
@@ -1217,7 +1377,7 @@ class MainWindow(QMainWindow):
         # Posicionado pelo _setup_ui acima de output-toolbar-left.
         left_top = QWidget()
         left_top.setObjectName("OutputToolbarLeftTop")
-        left_top.setProperty("testid", "output-toolbar-col1-bottom")
+        left_top.setProperty("testid", "output-toolbar-llm-options")
         left_top.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         left_top.setStyleSheet(
             "QWidget#OutputToolbarLeftTop { border: 1px solid #3F3F46; border-radius: 6px; }"
@@ -1293,9 +1453,9 @@ class MainWindow(QMainWindow):
         _trbl.addWidget(self._chk_route_t3)
 
         _MCP_TEST_PROMPT = (
-            "/skill:mcp-codex ping test — verificar se MCP Codex esta ativo. "
+            "/mcp:codex ping test — verificar se MCP Codex esta ativo. "
             "Apenas responda: \"MCP Codex OK — modelo gpt-5.5, pronto.\" Nada mais.\n"
-            "/skill:mcp-kimi ping test — verificar se MCP Kimi esta ativo. "
+            "/mcp:kimi ping test — verificar se MCP Kimi esta ativo. "
             "Apenas responda: \"MCP Kimi OK — modelo kimi-code/kimi-for-coding, pronto.\" Nada mais."
         )
         def _prompt_btn(label: str, testid: str, bg: str, hover: str, tooltip: str) -> QPushButton:
@@ -1354,6 +1514,8 @@ class MainWindow(QMainWindow):
              "description": "Triagem DCP: congruence-check, temporality e meta-completeness"},
             {"label": "Codex Hardening", "path": "ai-forge/custom-prompts/prompts-subtab/codex-hardening.md",
              "description": "Review adversarial via Codex + aplica hardenings nao-destrutivos"},
+            {"label": "Study Tasks",     "path": "ai-forge/custom-prompts/prompts-subtab/study-tasklist-codex.md",
+             "description": "Converte estudo simples em tasklist revisada"},
         ]
 
         _pset = QSettings("systemForge", "workflow-app")
@@ -1518,9 +1680,9 @@ class MainWindow(QMainWindow):
 
         # paths & IDs: JSON, WS, Workflow App + 6 campos basic_flow
         _paths_btns = [action_widgets[0], action_widgets[1], workflow_app_widgets[0]] + paths_extras
-        # MCP column (output-toolbar-mcp): 9 botoes (3 orange + 3 blue + 3 purple).
-        # Consumido por _setup_ui via self._mcp_column_btns. Sub-aba
-        # `queue-subtab-insertions-mcps` foi deletada em 2026-05-19.
+        # MCP column (output-toolbar-mcp): os 9 botoes legados continuam sendo
+        # criados para preservar o contrato de action_widgets, mas a aba MCPs
+        # renderiza radio Claude/Kimi/Codex + 3 acoes.
         self._mcp_column_btns = action_widgets[2:11]
         # rules: dcp+cmd+terminal+listeners+indicators+add-rules
         _rules_btns = workflow_app_widgets[1:]
@@ -1542,36 +1704,13 @@ class MainWindow(QMainWindow):
 
         return bar, left_top
 
-    # Aba `brainstorm`: grade 3x3. Colunas = cor (laranja / azul / roxo),
-    # linhas = label. Cada botao publica "<label> <path-do-md>" no terminal.
-    _BRAINSTORM_COL_STYLES = (
-        # (bg, hover, color_slug) — coluna 1 laranja, 2 azul, 3 roxo
-        ("#EA580C", "#C2410C", "orange"),
-        ("#2563EB", "#1D4ED8", "blue"),
-        ("#7C3AED", "#6D28D9", "purple"),
-    )
-    _BRAINSTORM_ROW_LABELS = ("study", "controversial", "hardening")
-    # Mapeia o label da linha -> (persona, nome do arquivo de regras).
-    # O nome resolve para um path absoluto via `_agents_prompt_dir()` — os
-    # prompts vivem sempre em `ai-forge/custom-prompts/agents/`, raiz fixa.
-    _BRAINSTORM_AGENTS = {
-        "study": (
-            "pesquisador profissional",
-            "study-researcher-rules.md",
-        ),
-        "controversial": (
-            "critico controversial / advogado do diabo",
-            "controversial-devils-advocate-rules.md",
-        ),
-        "hardening": (
-            "engenheiro de hardening",
-            "hardening-engineer-rules.md",
-        ),
-    }
+    # Aba `brainstorm`: grade 3x3 seed-driven (T2 loop
+    # 05-21-implantation-tasklist-aba-brainstorm). 9 botoes MCPPromptButton
+    # carregados de blacksmith/brainstorm-mcp/0[1-9]-*.md.
+    # Constantes legacy (hardcoded col styles, row labels, agents map,
+    # agents prompt dir, slot por cor) removidas em T2.
 
-    # Path canonico dos prompts de agente, relativo a raiz do SystemForge.
-    # O terminal roda sempre nessa raiz, entao este path resolve direto la.
-    _AGENTS_PROMPT_RELDIR = "ai-forge/custom-prompts/agents"
+    _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
 
     @staticmethod
     def _systemforge_root() -> Path:
@@ -1583,9 +1722,145 @@ class MainWindow(QMainWindow):
         """
         return Path(__file__).resolve().parents[4]
 
-    def _agents_prompt_dir(self) -> Path:
-        """Diretorio absoluto dos prompts de agente — so para checar existencia."""
-        return self._systemforge_root() / self._AGENTS_PROMPT_RELDIR
+    def _brainstorm_seeds_dir(self) -> Path:
+        """Diretorio absoluto dos seeds da grade brainstorm."""
+        return self._systemforge_root() / self._BRAINSTORM_SEEDS_RELDIR
+
+    def _load_brainstorm_seeds(self) -> list[dict]:
+        """Carrega e valida os 9 seeds da grade brainstorm.
+
+        Glob `blacksmith/brainstorm-mcp/0[1-9]-*.md`, parse yaml frontmatter,
+        valida schema fechado + resolvability de agent_path (gate G6),
+        retorna lista ordenada por nome de arquivo.
+
+        Raise `_BrainstormSeedError` em qualquer falha (fail-fast all-or-nothing).
+        Caller (`_build_brainstorm_page`) e responsavel pelo toast.
+        """
+        root = self._systemforge_root().resolve()
+        seeds_dir = self._brainstorm_seeds_dir()
+        if not seeds_dir.is_dir():
+            raise _BrainstormSeedError(
+                f"diretorio inexistente: {self._BRAINSTORM_SEEDS_RELDIR}"
+            )
+
+        paths = sorted(seeds_dir.glob("0[1-9]-*.md"))
+        # Anti-rename silencioso: exigir 9 seeds com prefixo 0[1-9]-.
+        if len(paths) != 9 or not all(
+            re.match(r"^0[1-9]-", p.name) for p in paths
+        ):
+            raise _BrainstormSeedError(
+                f"glob retornou {len(paths)} seeds (esperado 9 com prefixo 0[1-9]-)"
+            )
+
+        loaded: list[dict] = []
+        for p in paths:
+            try:
+                if p.stat().st_size > _SEED_MAX_BYTES:
+                    raise _BrainstormSeedError(
+                        f"{p.name}: tamanho > {_SEED_MAX_BYTES} bytes"
+                    )
+                text = p.read_text(encoding="utf-8-sig")
+                m = re.match(r"^\s*---\n(.*?)\n---\n?", text, re.S)
+                raw = m.group(1) if m else text
+                data = yaml.safe_load(raw) or {}
+                if not isinstance(data, dict):
+                    raise _BrainstormSeedError(
+                        f"{p.name}: root yaml nao e mapping"
+                    )
+            except yaml.YAMLError as exc:
+                raise _BrainstormSeedError(f"{p.name}: yaml malformado: {exc}") from exc
+            except OSError as exc:
+                raise _BrainstormSeedError(f"{p.name}: erro de leitura: {exc}") from exc
+
+            missing = _SEED_REQUIRED_KEYS - data.keys()
+            if missing:
+                raise _BrainstormSeedError(
+                    f"{p.name}: campos obrigatorios ausentes: {sorted(missing)}"
+                )
+
+            slug = str(data["slug"]).strip()
+            button_type = str(data["button_type"]).strip()
+            action = str(data["action"]).strip()
+            agent_name = str(data["agent_name"]).strip()
+            agent_path = str(data["agent_path"]).strip()
+
+            # Compat layer target_path: bool (seed) -> target_path_edit_inplace
+            #                          + target_terminal (string) -> terminal widget.
+            target_path_raw = data["target_path"]
+            target_path_edit_inplace = bool(target_path_raw) if isinstance(
+                target_path_raw, bool
+            ) else str(target_path_raw).strip().lower() in ("true", "1", "yes")
+
+            target_terminal = data.get("target_terminal")
+            if target_terminal == _SEED_TARGET_TERMINAL_RUNTIME_SENTINEL:
+                # Resolvido em runtime pelo radio (T3). Default Claude->T1.
+                target_terminal_resolved: str | None = None
+            else:
+                target_terminal_resolved = (
+                    str(target_terminal).strip() if target_terminal else None
+                )
+
+            if button_type not in VALID_BUTTON_TYPES:
+                raise _BrainstormSeedError(
+                    f"{p.name}: button_type invalido: {button_type!r}"
+                )
+            if action not in VALID_ACTIONS:
+                raise _BrainstormSeedError(
+                    f"{p.name}: action invalida: {action!r}"
+                )
+            if (
+                target_terminal_resolved is not None
+                and target_terminal_resolved not in VALID_TERMINALS
+            ):
+                raise _BrainstormSeedError(
+                    f"{p.name}: target_terminal invalido: {target_terminal_resolved!r}"
+                )
+
+            # G6: agent_path obrigatorio, sem TODO, resolvivel e dentro do repo.
+            if "TODO" in agent_path or "TODO" in agent_name:
+                raise _BrainstormSeedError(
+                    f"{p.name}: G6 violado: TODO em agent_name/agent_path"
+                )
+            agent_abs = (root / agent_path).resolve()
+            if not agent_abs.is_file():
+                raise _BrainstormSeedError(
+                    f"{p.name}: G6 violado: agent_path {agent_path} inexistente"
+                )
+            try:
+                agent_abs.relative_to(root)
+            except ValueError as exc:
+                raise _BrainstormSeedError(
+                    f"{p.name}: G6 violado: agent_path {agent_path} fora do repo"
+                ) from exc
+
+            # Label canonico (fix T021): extrai do title removendo o prefixo
+            # "Seed - Botao N - " (regex que tolera espacos extras), conforme
+            # mcp-flow-implantation-base-archive.md §4 (labels: "Criar md",
+            # "Pesquisar", ..., "Revisar QA" - sem numero prefixo).
+            raw_title = str(data.get("title") or slug).strip()
+            canonical_label = re.sub(
+                r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
+            ).strip() or slug
+
+            loaded.append({
+                "slug": slug,
+                "label": canonical_label,
+                "button_type": button_type,
+                "action": action,
+                "agent_name": agent_name,
+                "agent_path": agent_path,
+                "target_terminal": target_terminal_resolved,
+                "target_path_edit_inplace": target_path_edit_inplace,
+                "seed_path": p,
+            })
+
+        # Garantia final: 9 slugs unicos.
+        slugs = [s["slug"] for s in loaded]
+        if len(set(slugs)) != 9:
+            raise _BrainstormSeedError(
+                f"slugs nao unicos: {slugs}"
+            )
+        return loaded
 
     def _rel_to_root(self, abs_path: str) -> str:
         """Converte um path absoluto para relativo a raiz do SystemForge.
@@ -1604,8 +1879,9 @@ class MainWindow(QMainWindow):
         """Coluna entre output-toolbar-left e output-toolbar-progress-boxes.
 
         2 tabs + stacked pages:
-        - Tab `MCPs`:      9 botoes MCP em 3 linhas (linha 1 laranja `/skill:mcp-*`,
-          linha 2 azul `/skill:*` Kimi-side, linha 3 roxa `Use skill-* ...` Codex-side).
+        - Tab `MCPs`: radio Claude/Kimi/Codex + 3 botoes Main MCP/Parallel/Dual.
+          A combinacao substitui a antiga matriz 3x3:
+          Claude -> T1/linha laranja, Kimi -> T2/linha azul, Codex -> T3/linha roxa.
         - Tab `brainstorm`: picker de .md + grade 3x3 de botoes que publicam
           "<label> <path-do-md>" no terminal roteado (T1/T2/T3).
 
@@ -1619,9 +1895,11 @@ class MainWindow(QMainWindow):
                 f"recebeu {len(mcp_btns)}. Verifique _populate_header_actions."
             )
         from PySide6.QtWidgets import (
+            QButtonGroup,
             QFileDialog,
             QGridLayout,
             QHBoxLayout,
+            QRadioButton,
             QStackedWidget,
             QVBoxLayout,
         )
@@ -1656,23 +1934,270 @@ class MainWindow(QMainWindow):
 
         col_layout.addWidget(tab_bar)
 
-        def _row(btns: list[QPushButton]) -> QWidget:
-            row_widget = QWidget()
-            row = QHBoxLayout(row_widget)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(4)
-            for b in btns:
-                row.addWidget(b)
-            return row_widget
-
-        # Page 0 — MCPs: 9 botoes em 3 linhas (linha 1 laranja, linha 2 azul, linha 3 roxa).
+        # Page 0 - MCPs: radio de provider + 3 acoes. Os 9 botoes legados
+        # ficam parented em holder oculto para evitar coleta prematura pelo Qt.
         mcps_page = QWidget()
         mcps_layout = QVBoxLayout(mcps_page)
         mcps_layout.setContentsMargins(0, 0, 0, 0)
         mcps_layout.setSpacing(4)
-        mcps_layout.addWidget(_row(mcp_btns[:3]))   # linha 1: laranja (Claude-side)
-        mcps_layout.addWidget(_row(mcp_btns[3:6]))  # linha 2: azul (Kimi-side)
-        mcps_layout.addWidget(_row(mcp_btns[6:9]))  # linha 3: roxo (Codex-side)
+
+        legacy_holder = QWidget(mcps_page)
+        legacy_holder.setProperty("testid", "output-mcp-legacy-buttons-holder")
+        legacy_holder.hide()
+        for btn in mcp_btns:
+            try:
+                btn.clicked.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            btn.setParent(legacy_holder)
+            btn.hide()
+        self._mcp_legacy_buttons_holder = legacy_holder
+
+        mcp_commands: dict[str, dict[str, tuple[str, int]]] = {
+            "claude": {
+                "main": ("/mcp:codex", 1),
+                "parallel": ("/mcp:kimi", 1),
+                "dual": ("/mcp:dual", 1),
+            },
+            "kimi": {
+                "main": ("/skill:claude", 2),
+                "parallel": ("/skill:codex", 2),
+                "dual": ("/skill:dual", 2),
+            },
+            "codex": {
+                "main": ("Use skill-claude. Output JSON. Prompt: ", 3),
+                "parallel": ("Use skill-kimi. Output JSON. Prompt: ", 3),
+                "dual": ("Use skill-dual. Output JSON. Mode: stereo. Prompt: ", 3),
+            },
+        }
+        self._mcp_toolbar_commands = mcp_commands
+        self._mcp_toolbar_provider = getattr(self, "_mcp_toolbar_provider", "claude")
+        if self._mcp_toolbar_provider not in mcp_commands:
+            self._mcp_toolbar_provider = "claude"
+
+        existing_group = getattr(self, "_mcp_toolbar_provider_group", None)
+        if existing_group is not None:
+            try:
+                existing_group.buttonToggled.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            existing_group.deleteLater()
+
+        provider_row = QWidget()
+        provider_row.setObjectName("McpProviderRow")
+        provider_row.setProperty("testid", "output-mcp-provider-radio-input")
+        provider_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        provider_row.setStyleSheet(
+            "QWidget#McpProviderRow { background-color: #27272A;"
+            "  border: 1px solid #3F3F46; border-radius: 5px; }"
+        )
+        provider_layout = QHBoxLayout(provider_row)
+        provider_layout.setContentsMargins(8, 0, 8, 0)
+        provider_layout.setSpacing(8)
+        provider_row.setFixedHeight(26)
+
+        self._mcp_toolbar_provider_group = QButtonGroup(self)
+        self._mcp_toolbar_provider_group.setExclusive(True)
+        radio_style = (
+            "QRadioButton { color: #FAFAFA; font-size: 11px;"
+            "  font-weight: 700; background: transparent; border: none; }"
+            "QRadioButton::indicator { width: 12px; height: 12px; }"
+            "QRadioButton::indicator:unchecked { background-color: #18181B;"
+            "  border: 1px solid #52525B; border-radius: 6px; }"
+            "QRadioButton::indicator:checked { background-color: #FBBF24;"
+            "  border: 1px solid #FBBF24; border-radius: 6px; }"
+            "QRadioButton::indicator:hover { border-color: #FDE68A; }"
+        )
+
+        for label, provider_id in (
+            ("Claude", "claude"),
+            ("Kimi", "kimi"),
+            ("Codex", "codex"),
+        ):
+            rb = QRadioButton(label)
+            rb.setProperty("provider_id", provider_id)
+            rb.setProperty("testid", f"output-mcp-provider-{provider_id}")
+            rb.setAccessibleName(f"Selecionar provider MCP {label}")
+            rb.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            rb.setStyleSheet(radio_style)
+            rb.setChecked(provider_id == self._mcp_toolbar_provider)
+            self._mcp_toolbar_provider_group.addButton(rb)
+            provider_layout.addWidget(rb)
+        provider_layout.addStretch(1)
+
+        def _on_mcp_provider_changed(button, checked: bool) -> None:
+            if not checked:
+                return
+            provider_id = button.property("provider_id")
+            provider = str(provider_id or "").strip().lower()
+            self._mcp_toolbar_provider = provider if provider in mcp_commands else "claude"
+
+        self._mcp_toolbar_provider_group.buttonToggled.connect(
+            _on_mcp_provider_changed
+        )
+        mcps_layout.addWidget(provider_row)
+
+        persona_specs = (
+            (
+                "researcher",
+                "output-mcp-persona-researcher",
+                "no papel de researcher, conforme regras em "
+                "ai-forge/MCP/agents/study-researcher-rules.md",
+            ),
+            (
+                "controversial",
+                "output-mcp-persona-controversial",
+                "no papel de controversial, conforme regras em "
+                "ai-forge/MCP/agents/controversial-devils-advocate-rules.md",
+            ),
+            (
+                "hardening",
+                "output-mcp-persona-hardening",
+                "no papel de engenheiro de hardening, conforme regras em "
+                "ai-forge/MCP/agents/hardening-engineer-rules.md",
+            ),
+        )
+        persona_row = QWidget()
+        persona_row.setObjectName("McpPersonaRow")
+        persona_row.setProperty("testid", "output-mcp-persona-checkboxes")
+        persona_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        persona_row.setStyleSheet(
+            "QWidget#McpPersonaRow { background-color: #202027;"
+            "  border: 1px solid #3F3F46; border-radius: 5px; }"
+        )
+        persona_layout = QHBoxLayout(persona_row)
+        persona_layout.setContentsMargins(8, 0, 8, 0)
+        persona_layout.setSpacing(7)
+        persona_row.setFixedHeight(26)
+        checkbox_style = (
+            "QCheckBox { color: #D4D4D8; font-size: 10px;"
+            "  font-weight: 700; background: transparent; border: none; }"
+            "QCheckBox::indicator { width: 11px; height: 11px; }"
+            "QCheckBox::indicator:unchecked { background-color: #18181B;"
+            "  border: 1px solid #52525B; border-radius: 3px; }"
+            "QCheckBox::indicator:checked { background-color: #22C55E;"
+            "  border: 1px solid #22C55E; border-radius: 3px; }"
+            "QCheckBox::indicator:hover { border-color: #86EFAC; }"
+        )
+        self._mcp_persona_checkboxes: list[QCheckBox] = []
+        for label, testid, prompt in persona_specs:
+            chk = QCheckBox(label)
+            chk.setProperty("testid", testid)
+            chk.setProperty("persona_prompt", prompt)
+            chk.setToolTip(prompt)
+            chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            chk.setStyleSheet(checkbox_style)
+            persona_layout.addWidget(chk)
+            self._mcp_persona_checkboxes.append(chk)
+        persona_layout.addStretch(1)
+        mcps_layout.addWidget(persona_row)
+
+        persona_specs_2 = (
+            (
+                "criar-task",
+                "output-mcp-persona-criar-task",
+                "no papel de criador de tasks, conforme regras em "
+                "ai-forge/MCP/agents/criar-task-rules.md",
+            ),
+            (
+                "executor",
+                "output-mcp-persona-executor",
+                "no papel de executor de tasks, conforme regras em "
+                "ai-forge/MCP/agents/executar-task-rules.md",
+            ),
+            (
+                "rev-exec",
+                "output-mcp-persona-rev-exec",
+                "no papel de revisor de execucao, conforme regras em "
+                "ai-forge/MCP/agents/revisar-execucao-rules.md",
+            ),
+        )
+        persona_row_2 = QWidget()
+        persona_row_2.setObjectName("McpPersonaRow2")
+        persona_row_2.setProperty("testid", "output-mcp-persona-checkboxes-2")
+        persona_row_2.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        persona_row_2.setStyleSheet(
+            "QWidget#McpPersonaRow2 { background-color: #202027;"
+            "  border: 1px solid #3F3F46; border-radius: 5px; }"
+        )
+        persona_layout_2 = QHBoxLayout(persona_row_2)
+        persona_layout_2.setContentsMargins(8, 0, 8, 0)
+        persona_layout_2.setSpacing(7)
+        persona_row_2.setFixedHeight(26)
+        for label, testid, prompt in persona_specs_2:
+            chk = QCheckBox(label)
+            chk.setProperty("testid", testid)
+            chk.setProperty("persona_prompt", prompt)
+            chk.setToolTip(prompt)
+            chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            chk.setStyleSheet(checkbox_style)
+            persona_layout_2.addWidget(chk)
+            self._mcp_persona_checkboxes.append(chk)
+        persona_layout_2.addStretch(1)
+        mcps_layout.addWidget(persona_row_2)
+
+        def _compose_mcp_text(base_text: str) -> str:
+            prompts = [
+                str(chk.property("persona_prompt"))
+                for chk in self._mcp_persona_checkboxes
+                if chk.isChecked()
+            ]
+            if not prompts:
+                return base_text
+            return f"{base_text.rstrip()} {'; e depois disso '.join(prompts)}"
+
+        action_row = QWidget()
+        action_row.setProperty("testid", "output-mcp-action-row")
+        action_layout = QHBoxLayout(action_row)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(4)
+
+        def _make_mcp_action_btn(label: str, action_id: str) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", f"output-mcp-action-{action_id}")
+            btn.setFixedHeight(28)
+            btn.setMinimumWidth(76)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(
+                "Publica a acao MCP no terminal do provider selecionado "
+                "(Claude=T1, Kimi=T2, Codex=T3)."
+            )
+            btn.setStyleSheet(
+                "QPushButton { background-color: #334155; color: #FAFAFA;"
+                "  border: 1px solid #475569; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 800; padding: 0 8px; }"
+                "QPushButton:hover { background-color: #3F4F66; border-color: #64748B; }"
+                "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
+                "  border-color: #FBBF24; }"
+            )
+            return btn
+
+        def _on_mcp_action(action_id: str) -> None:
+            provider = getattr(self, "_mcp_toolbar_provider", "claude")
+            if provider not in mcp_commands:
+                provider = "claude"
+                self._mcp_toolbar_provider = provider
+            base_text, terminal = mcp_commands[provider][action_id]
+            ok = self._publish_to_specific_terminal(
+                _compose_mcp_text(base_text), terminal
+            )
+            if not ok:
+                signal_bus.toast_requested.emit(
+                    "Terminal Codex (T3) indisponivel para publicar MCP.", "warning"
+                )
+
+        for label, action_id in (
+            ("Main MCP", "main"),
+            ("Parallel", "parallel"),
+            ("Dual", "dual"),
+        ):
+            btn = _make_mcp_action_btn(label, action_id)
+            btn.clicked.connect(
+                lambda _checked=False, aid=action_id: _on_mcp_action(aid)
+            )
+            action_layout.addWidget(btn, stretch=1)
+        mcps_layout.addWidget(action_row)
+        mcps_layout.addStretch(1)
 
         # Page 1 — brainstorm: picker .md + grade 3x3.
         brainstorm_page = self._build_brainstorm_page(QFileDialog, QGridLayout)
@@ -1697,6 +2222,65 @@ class MainWindow(QMainWindow):
 
         return column
 
+    def _codex_terminal_available(self) -> bool:
+        """True quando existe um widget canonico T3 com testid
+        `terminal-codex-output` ativo: ou QPlainTextEdit/QTextEdit (legacy)
+        ou widget xterm-duck (atributo `_shell.send_raw` callable).
+
+        Pre-requisito do Gate G4 do mcp-flow-implantation.md §10.3
+        (T3 da task-004 do loop 05-21-implantation-tasklist-aba-brainstorm).
+        Usado tanto pelo radio (para desabilitar `rb_codex` quando o
+        terminal Codex nao existe) quanto pelo `_on_mcp_prompt_requested`
+        (para bloquear publicacao silenciosa).
+
+        Hardening T026 (2026-05-22 — Codex adversarial pass 2): predicado
+        funcional EQUIVALENTE ao de `MCPPromptButton._codex_target_alive()`
+        em `widgets/mcp_prompt_button.py:530-580`. Antes este aceitava
+        qualquer QWidget com o testid, permitindo que um placeholder
+        QLabel emitisse `codex_availability_changed(True)` e envenenasse
+        o cache do botao (`_on_codex_availability_changed` escreve direto
+        em `_codex_alive_cache`). Agora gate e cache convergem.
+        """
+        for w in self.findChildren(QWidget):
+            if w.property("testid") != "terminal-codex-output":
+                continue
+            if isinstance(w, (QPlainTextEdit, QTextEdit)):
+                return True
+            shell = getattr(w, "_shell", None)
+            if shell is not None and callable(getattr(shell, "send_raw", None)):
+                return True
+        return False
+
+    def _get_brainstorm_runtime_provider(self) -> str:
+        """Getter canonico do provider runtime do radio brainstorm (T7).
+
+        Retorna nome capitalizado ("Claude"/"Kimi"/"Codex") que bate com
+        o contrato esperado por `MCPPromptButton._resolve_provider` para
+        botoes button_type=type-selector-radio-input. Default "Claude"
+        quando atributo ausente (defensive).
+        """
+        slug = (getattr(self, "_brainstorm_runtime_type", None) or "claude")
+        slug_norm = str(slug).strip().lower()
+        if slug_norm in _BRAINSTORM_PROVIDER_LABELS:
+            return _BRAINSTORM_PROVIDER_LABELS[slug_norm]
+        return "Claude"
+
+    def _on_brainstorm_type_changed(self, button, checked: bool) -> None:
+        """Slot do `_brainstorm_type_group.buttonToggled`.
+
+        Atualiza `self._brainstorm_runtime_type` com o slug canonico
+        lowercase do provider (lido via property `provider_id`, NUNCA
+        via `button.text()` - hardening §1 da task-004 do loop
+        05-21-implantation-tasklist-aba-brainstorm). Guard clause
+        ignora a metade `checked=False` que o `buttonToggled` dispara
+        em cada troca (hardening §4).
+        """
+        if not checked:
+            return
+        provider_id = button.property("provider_id")
+        if provider_id in _BRAINSTORM_PROVIDER_SLUGS:
+            self._brainstorm_runtime_type = provider_id
+
     def _build_brainstorm_page(self, q_file_dialog, q_grid_layout) -> QWidget:
         """Page da aba `brainstorm` da coluna MCP.
 
@@ -1708,7 +2292,12 @@ class MainWindow(QMainWindow):
         3 colunas (laranja / azul / roxo). Cada botao publica
         "<label> <path-do-md>" no terminal roteado via `_publish_to_terminal`.
         """
-        from PySide6.QtWidgets import QPushButton, QVBoxLayout
+        from PySide6.QtWidgets import (
+            QButtonGroup,
+            QPushButton,
+            QRadioButton,
+            QVBoxLayout,
+        )
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
@@ -1725,275 +2314,857 @@ class MainWindow(QMainWindow):
             "Abrir e selecionar um arquivo .md para os botoes de brainstorm"
         )
         md_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #FBBF24;"
+            "QPushButton { background-color: #27272A; color: #FBBF24;"
             "  border: 1px solid #FBBF24; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 600; padding: 0 10px; }"
-            "QPushButton:hover { background: rgba(251, 191, 36, 0.12); }"
+            "  font-size: 11px; font-weight: 700; padding: 0 10px; }"
+            "QPushButton:hover { background-color: #3F3F46; border-color: #FDE68A; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
         )
         self._brainstorm_md_btn = md_btn
 
         def _pick_md(_checked: bool = False) -> None:
+            # Diretorio canonico: blacksmith/brainstorm-mcp/ relativo a raiz
+            # do SystemForge. Fallback: blacksmith/ (cf. mcp-flow-implantation.md
+            # §7.5 + §10.3 item #1; T1 do loop 05-21-implantation-...).
+            root = self._systemforge_root().resolve()
+            canonical = root / "blacksmith" / "brainstorm-mcp"
+            initial_dir = canonical
+            created_now = False
+            try:
+                canonical.mkdir(parents=True, exist_ok=False)
+                created_now = True
+            except FileExistsError:
+                pass  # canonico ja existe -> initial_dir = canonical mantido
+            except (PermissionError, OSError) as exc:
+                initial_dir = root / "blacksmith"
+                if not self._brainstorm_toasts["mkdir_failed"]:
+                    signal_bus.toast_requested.emit(
+                        f"Diretorio canonico indisponivel: {exc.strerror or exc}",
+                        "warning",
+                    )
+                    self._brainstorm_toasts["mkdir_failed"] = True
+            if created_now and not self._brainstorm_toasts["created"]:
+                signal_bus.toast_requested.emit(
+                    "Diretorio criado: blacksmith/brainstorm-mcp/",
+                    "info",
+                )
+                self._brainstorm_toasts["created"] = True
+
             path, _ = q_file_dialog.getOpenFileName(
-                self, "Selecionar arquivo .md", str(Path.cwd()),
+                self, "Selecionar arquivo .md", str(initial_dir),
                 "Markdown (*.md);;All Files (*)",
             )
             if not path:
+                return  # cancelamento preserva estado anterior intacto
+            # Symlink hardening: resolve() em ambos os lados antes de relative_to.
+            candidate = Path(path).resolve(strict=False)
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                if self._brainstorm_toasts["outside_repo"] != str(candidate):
+                    signal_bus.toast_requested.emit(
+                        "Arquivo fora do repositorio SystemForge - selecao rejeitada.",
+                        "warning",
+                    )
+                    self._brainstorm_toasts["outside_repo"] = str(candidate)
                 return
+            # Atomicidade: atribuir somente apos TODAS as validacoes passarem.
             self._brainstorm_md_path = path
             md_btn.setText(Path(path).name)
             md_btn.setToolTip(path)
 
         md_btn.clicked.connect(_pick_md)
-        page_layout.addWidget(md_btn)
 
-        # Grade 3x3 — linhas = label, colunas = cor.
+        # T4 (loop 05-21-implantation-tasklist-aba-brainstorm): row container
+        # com `md_btn` (stretch=1) + `gear_btn_brainstorm` (24x24, _GearButton
+        # extraido). Testid canonico `brainstorm-mcp-config-gear`. Clique abre
+        # BrainstormMcpConfigDialog (modulo separado, import sob demanda no
+        # handler para nao impactar cold start).
+        row_container = QWidget()
+        row_container.setProperty("testid", "brainstorm-md-picker-row")
+        row_container.setStyleSheet("background: transparent; border: none;")
+        row_layout = QHBoxLayout(row_container)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        row_layout.addWidget(md_btn, stretch=1)
+        gear_btn_brainstorm = _GearButton(
+            testid="brainstorm-mcp-config-gear",
+            tooltip="Configurar 9 seeds brainstorm-mcp (label, prompt, agent, action, target)",
+        )
+        gear_btn_brainstorm.clicked.connect(self._open_brainstorm_mcp_config_dialog)
+        self._brainstorm_mcp_config_gear = gear_btn_brainstorm
+        row_layout.addWidget(gear_btn_brainstorm, 0, Qt.AlignmentFlag.AlignVCenter)
+        page_layout.addWidget(row_container)
+
+        # Cache do handle do page para rebuild via signal (T4 hardening §9).
+        # Conexao defensiva (`UniqueConnection` impede duplicate em rebuild).
+        self._brainstorm_page = page
+        self._brainstorm_q_file_dialog = q_file_dialog
+        self._brainstorm_q_grid_layout = q_grid_layout
+        try:
+            self._brainstorm_grid_invalidated.connect(
+                self._rebuild_brainstorm_grid,
+                Qt.ConnectionType.UniqueConnection,
+            )
+        except (RuntimeError, TypeError):
+            pass  # ja conectado em rebuild anterior - idempotente.
+
+        # Radio row dedicada de provider runtime (T3 do loop
+        # 05-21-implantation-tasklist-aba-brainstorm). Consumida por
+        # _on_mcp_prompt_requested apenas quando o botao clicado tem
+        # button_type=type-selector-radio-input. Botoes button_type fixo
+        # (Claude/Kimi/Codex) IGNORAM o radio. Source-of-truth via
+        # property `provider_id` (slug lowercase), NUNCA via button.text().
+        # Cleanup explicito de QButtonGroup antigo evita signals
+        # duplicados em rebuild (hardening §6).
+        existing_group = getattr(self, "_brainstorm_type_group", None)
+        if existing_group is not None:
+            try:
+                existing_group.buttonToggled.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            existing_group.deleteLater()
+            self._brainstorm_type_group = None
+
+        radio_row = QWidget()
+        radio_row.setObjectName("BrainstormProviderRow")
+        radio_row.setProperty("testid", "type-selector-radio-input")
+        radio_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        radio_row.setStyleSheet(
+            "QWidget#BrainstormProviderRow { background-color: #27272A;"
+            "  border: 1px solid #3F3F46; border-radius: 5px; }"
+        )
+        radio_row_layout = QHBoxLayout(radio_row)
+        radio_row_layout.setContentsMargins(8, 0, 8, 0)
+        radio_row_layout.setSpacing(8)
+        radio_row.setFixedHeight(26)
+
+        rb_claude = QRadioButton("Claude")
+        rb_kimi = QRadioButton("Kimi")
+        rb_codex = QRadioButton("Codex")
+
+        codex_available = self._codex_terminal_available()
+        # Cache do estado de T3 para emit cross-widget apos a montagem do
+        # radio (T7 task-008): MCPPromptButton instancias antigas sincronizam
+        # via signal codex_availability_changed.
+        self._brainstorm_codex_available = codex_available
+        radio_specs = (
+            (rb_claude, "claude", "Selecionar provedor Claude", True),
+            (rb_kimi, "kimi", "Selecionar provedor Kimi", True),
+            # Codex sempre selecionavel no radio: fallback de runtime
+            # garante T3->T2 quando o xterm nao estiver disponivel.
+            (rb_codex, "codex", "Selecionar provedor Codex", True),
+        )
+
+        self._brainstorm_type_group = QButtonGroup(self)
+        self._brainstorm_type_group.setExclusive(True)
+
+        for rb, provider_id, accessible_name, enabled in radio_specs:
+            rb.setProperty("provider_id", provider_id)
+            rb.setProperty("testid", f"type-selector-radio-{provider_id}")
+            rb.setAccessibleName(accessible_name)
+            rb.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            rb.setStyleSheet(
+                "QRadioButton { color: #FAFAFA; font-size: 11px;"
+                "  font-weight: 600; background: transparent; border: none; }"
+                "QRadioButton::indicator { width: 12px; height: 12px; }"
+                "QRadioButton::indicator:unchecked { background-color: #18181B;"
+                "  border: 1px solid #52525B; border-radius: 6px; }"
+                "QRadioButton::indicator:checked { background-color: #FBBF24;"
+                "  border: 1px solid #FBBF24; border-radius: 6px; }"
+                "QRadioButton::indicator:hover { border-color: #FDE68A; }"
+                "QRadioButton:disabled { color: #52525B; }"
+                "QRadioButton::indicator:disabled { background-color: #27272A;"
+                "  border-color: #3F3F46; }"
+            )
+            rb.setEnabled(enabled)
+            self._brainstorm_type_group.addButton(rb)
+            radio_row_layout.addWidget(rb)
+
+        if not codex_available:
+            rb_codex.setToolTip(
+                "Terminal Codex (T3) indisponivel no momento: envios Codex "
+                "farao fallback automatico para T2."
+            )
+
+        radio_row_layout.addStretch(1)
+
+        # Ordem de sinais (hardening §5): conectar slot ANTES do setChecked
+        # inicial, mas com blockSignals para nao disparar callback espurio.
+        self._brainstorm_type_group.buttonToggled.connect(
+            self._on_brainstorm_type_changed
+        )
+        rb_claude.blockSignals(True)
+        rb_claude.setChecked(True)
+        rb_claude.blockSignals(False)
+        # Inicializacao deterministica do atributo runtime (hardening §3):
+        # garante valor canonico mesmo se buttonToggled nao disparar.
+        self._brainstorm_runtime_type = "claude"
+
+        page_layout.addWidget(radio_row)
+
+        # Grade 3x3 seed-driven (T2 loop 05-21-implantation-tasklist-aba-brainstorm).
+        # 9 MCPPromptButton, 1 por seed em blacksmith/brainstorm-mcp/0[1-9]-*.md,
+        # ordem deterministica por nome de arquivo.
         grid_widget = QWidget()
+        grid_widget.setObjectName("BrainstormGrid")
+        grid_widget.setProperty("testid", "brainstorm-buttons-grid")
+        grid_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        grid_widget.setStyleSheet(
+            "QWidget#BrainstormGrid { background-color: #18181B;"
+            "  border: 1px solid #3F3F46; border-radius: 5px; }"
+        )
         grid = q_grid_layout(grid_widget)
-        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setContentsMargins(6, 6, 6, 6)
         grid.setHorizontalSpacing(4)
         grid.setVerticalSpacing(4)
 
-        self._brainstorm_btns: list[QPushButton] = []
-        for r, label in enumerate(self._BRAINSTORM_ROW_LABELS):
-            for c, (bg, hover, color_slug) in enumerate(self._BRAINSTORM_COL_STYLES):
-                b = QPushButton(label)
-                b.setProperty("testid", f"brainstorm-btn-{label}-{color_slug}")
-                b.setFixedHeight(22)
-                b.setMinimumWidth(60)
-                b.setCursor(Qt.CursorShape.PointingHandCursor)
-                b.setStyleSheet(
-                    f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
-                    "  border: none; border-radius: 5px;"
-                    "  font-size: 10px; font-weight: 700; padding: 0 6px; }}"
-                    f"QPushButton:hover {{ background-color: {hover}; }}"
-                    f"QPushButton:pressed {{ background-color: {hover}; }}"
+        self._brainstorm_mcp_btns = []
+        try:
+            seeds = self._load_brainstorm_seeds()
+        except _BrainstormSeedError as exc:
+            signal_bus.toast_requested.emit(
+                f"Grade brainstorm bloqueada: {exc}",
+                "error",
+            )
+            page_layout.addWidget(grid_widget)
+            page_layout.addStretch(1)
+            return page
+
+        # Atomic widget construction: ou os 9 sobem, ou nenhum.
+        built: list[MCPPromptButton] = []
+        try:
+            for seed in seeds:
+                target_terminal = (
+                    seed["target_terminal"] or "terminal-interactive-output"
                 )
-                b.clicked.connect(
-                    lambda _c=False, lbl=label, cs=color_slug:
-                        self._on_brainstorm_btn_clicked(lbl, cs)
+                # Codex exige terminal-codex-output (regra do widget).
+                if seed["button_type"] == "Codex":
+                    target_terminal = "terminal-codex-output"
+                btn = MCPPromptButton(
+                    label=seed["label"],
+                    button_type=seed["button_type"],
+                    prompt=seed["seed_path"],
+                    agent_name=seed["agent_name"],
+                    agent_path=seed["agent_path"],
+                    action=seed["action"],
+                    target_path=target_terminal,
+                    testid_slug=seed["slug"],
+                    target_path_edit_inplace=seed["target_path_edit_inplace"],
+                    radio_state_getter=self._get_brainstorm_runtime_provider,
                 )
-                grid.addWidget(b, r, c)
-                self._brainstorm_btns.append(b)
+                btn.setFixedHeight(22)
+                btn.setMinimumWidth(60)
+                btn.prompt_requested.connect(self._on_mcp_prompt_requested)
+                built.append(btn)
+        except Exception as exc:  # noqa: BLE001
+            for w in built:
+                w.deleteLater()
+            signal_bus.toast_requested.emit(
+                f"Grade brainstorm falhou: {exc}",
+                "error",
+            )
+            page_layout.addWidget(grid_widget)
+            page_layout.addStretch(1)
+            return page
+
+        for i, btn in enumerate(built):
+            grid.addWidget(btn, i // 3, i % 3)
+        self._brainstorm_mcp_btns = built
+        # Cache refs para rebuild via _rebuild_brainstorm_grid (T4 hardening §9).
+        self._brainstorm_grid_widget = grid_widget
+        self._brainstorm_grid_layout = grid
 
         page_layout.addWidget(grid_widget)
         page_layout.addStretch(1)
+        # T7 (task-008): publica estado inicial de T3 para que botoes Codex
+        # fixos sincronizem o cache via signal logo apos a montagem da grade.
+        signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
         return page
 
-    def _on_brainstorm_btn_clicked(self, label: str, color_slug: str) -> None:
-        """Publica o prompt do agente no terminal fixo pela cor do botao.
+    def _open_brainstorm_mcp_config_dialog(self) -> None:
+        """Abre o modal de configuracao dos 9 seeds brainstorm-mcp (T4).
 
-        A mensagem publicada referencia DOIS arquivos:
-        - o .md anexado via picker (`self._brainstorm_md_path`);
-        - o arquivo de regras do agente em `ai-forge/custom-prompts/agents/`,
-          escolhido pelo label da linha (`_BRAINSTORM_AGENTS`).
-
-        Roteamento por cor (ignora os checkboxes T1/T2/T3):
-        - laranja (orange) -> Terminal 1 (interativo)
-        - azul   (blue)    -> Terminal 2 (workspace pyte)
-        - roxo   (purple)  -> Terminal 3 (workspace xterm)
-
-        Zero Silencio: sem .md selecionado, emite toast warning ao inves de
-        publicar uma mensagem incompleta.
+        Lifecycle hardened (cf. hardening §5 task-005 loop
+        05-21-implantation-tasklist-aba-brainstorm):
+        - Single-open guard: se ja visivel, raise+activate e retorna.
+        - `WA_DeleteOnClose` libera memoria ao fechar.
+        - `repo_root` injetado no construtor (resolve falha de validacao
+          contra `Path.cwd()` quando o app roda em outro diretorio).
+        - Import sob demanda do dialog (modulo separado) para nao
+          impactar cold start do main_window.
         """
-        md_path = (self._brainstorm_md_path or "").strip()
-        if not md_path:
-            signal_bus.toast_requested.emit(
-                "Nenhum arquivo .md selecionado. Clique em 'Selecionar .md' primeiro.",
-                "warning",
-            )
-            return
-        persona, rules_file = self._BRAINSTORM_AGENTS.get(
-            label, ("profissional", ""),
-        )
-        # Zero Silencio: nao publica path quebrado se o arquivo de regras
-        # tiver sido movido/renomeado.
-        if rules_file and not (self._agents_prompt_dir() / rules_file).is_file():
-            signal_bus.toast_requested.emit(
-                f"Arquivo de regras nao encontrado: "
-                f"{self._AGENTS_PROMPT_RELDIR}/{rules_file}",
-                "warning",
-            )
-            return
-        rules_path = (
-            f"{self._AGENTS_PROMPT_RELDIR}/{rules_file}" if rules_file else ""
-        )
-        # Tudo relativo a raiz do SystemForge (cwd do terminal).
-        md_ref = self._rel_to_root(md_path)
-        msg = (
-            f"Analise este {md_ref} como se voce fosse um {persona} "
-            f"seguindo estas regras {rules_path}, faca uma analise muito "
-            "bem feita e edite este mesmo arquivo."
-        )
-        terminal = {"orange": 1, "blue": 2, "purple": 3}.get(color_slug, 1)
-        self._publish_to_specific_terminal(msg, terminal)
+        dlg = getattr(self, "_brainstorm_mcp_dialog", None)
+        if dlg is not None:
+            try:
+                if dlg.isVisible():
+                    dlg.raise_()
+                    dlg.activateWindow()
+                    return
+            except RuntimeError:
+                # Widget ja deletado pelo Qt; segue para criar um novo.
+                self._brainstorm_mcp_dialog = None
 
-    def _publish_to_specific_terminal(self, text: str, terminal: int) -> None:
+        from workflow_app.widgets.brainstorm_mcp_config_dialog import (
+            BrainstormMcpConfigDialog,
+        )
+
+        repo_root = self._systemforge_root().resolve()
+        dlg = BrainstormMcpConfigDialog(self, repo_root=repo_root)
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.finished.connect(
+            lambda _result: setattr(self, "_brainstorm_mcp_dialog", None),
+        )
+        dlg.saved.connect(self._brainstorm_grid_invalidated.emit)
+        self._brainstorm_mcp_dialog = dlg
+        dlg.open()
+
+    def _rebuild_brainstorm_grid(self) -> None:
+        """Reconstroi a grade 3x3 apos save do modal de config (T4).
+
+        Atomic: ou os 9 botoes sobem, ou a grade fica vazia com toast erro
+        (mesma politica do build inicial em `_build_brainstorm_page`).
+        Desconecta signals e chama `deleteLater()` em cada botao antigo
+        para evitar slots disparando em widgets em destruicao.
+        """
+        grid = getattr(self, "_brainstorm_grid_layout", None)
+        if grid is None:
+            return
+
+        # 1) Tear down dos botoes antigos.
+        for btn in list(getattr(self, "_brainstorm_mcp_btns", []) or []):
+            try:
+                btn.prompt_requested.disconnect(self._on_mcp_prompt_requested)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                grid.removeWidget(btn)
+            except Exception:  # noqa: BLE001
+                pass
+            btn.deleteLater()
+        self._brainstorm_mcp_btns = []
+
+        # 2) Reload seeds (fail-fast all-or-nothing).
+        try:
+            seeds = self._load_brainstorm_seeds()
+        except _BrainstormSeedError as exc:
+            signal_bus.toast_requested.emit(
+                f"Grade brainstorm bloqueada apos save: {exc}",
+                "error",
+            )
+            return
+
+        built: list[MCPPromptButton] = []
+        try:
+            for seed in seeds:
+                target_terminal = (
+                    seed["target_terminal"] or "terminal-interactive-output"
+                )
+                if seed["button_type"] == "Codex":
+                    target_terminal = "terminal-codex-output"
+                btn = MCPPromptButton(
+                    label=seed["label"],
+                    button_type=seed["button_type"],
+                    prompt=seed["seed_path"],
+                    agent_name=seed["agent_name"],
+                    agent_path=seed["agent_path"],
+                    action=seed["action"],
+                    target_path=target_terminal,
+                    testid_slug=seed["slug"],
+                    target_path_edit_inplace=seed["target_path_edit_inplace"],
+                    radio_state_getter=self._get_brainstorm_runtime_provider,
+                )
+                btn.setFixedHeight(22)
+                btn.setMinimumWidth(60)
+                btn.prompt_requested.connect(self._on_mcp_prompt_requested)
+                built.append(btn)
+        except Exception as exc:  # noqa: BLE001
+            for w in built:
+                w.deleteLater()
+            signal_bus.toast_requested.emit(
+                f"Grade brainstorm falhou apos save: {exc}",
+                "error",
+            )
+            return
+
+        for i, btn in enumerate(built):
+            grid.addWidget(btn, i // 3, i % 3)
+        self._brainstorm_mcp_btns = built
+        # T7 (task-008): publica estado de T3 apos rebuild para resync de
+        # cache em botoes Codex fixos recem-criados.
+        signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
+        signal_bus.toast_requested.emit(
+            "Seeds brainstorm-mcp atualizados.", "info",
+        )
+
+    def _on_mcp_prompt_requested(self, payload: dict) -> None:
+        """Slot canonico para clicks em MCPPromptButton da grade brainstorm.
+
+        Monta o template hardened (§6.5 task-008 do mcp-flow-implantation.md
+        linhas 719-728) e publica no terminal canonico segundo o `target_path`
+        do payload. Debounce de 300ms (anti double-click).
+
+        Gate Zero Silencio: se `target_path_edit_inplace` e nao ha .md
+        selecionado pelo picker, emite toast warning e aborta.
+        """
+        if getattr(self, "_prompt_in_flight", False):
+            return
+        self._prompt_in_flight = True
+        # button_id propagado por MCPPromptButton.payload() (T7); usado
+        # para direcionar signal_bus.dispatch_result ao widget de origem.
+        # Fallback "" filtra sem efeito caso payload legado nao traga.
+        button_id = str(payload.get("button_id") or "")
+        try:
+            edit_inplace = bool(payload.get("target_path_edit_inplace"))
+            md_path = (getattr(self, "_brainstorm_md_path", None) or "").strip()
+            if edit_inplace and not md_path:
+                signal_bus.toast_requested.emit(
+                    "Selecione .md primeiro",
+                    "warning",
+                )
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
+
+            label = str(payload.get("label", ""))
+            action = str(payload.get("action", ""))
+            agent_name = str(payload.get("agent_name") or "")
+            agent_path = str(payload.get("agent_path") or "")
+            button_type = str(payload.get("button_type", "Claude"))
+
+            # Runtime resolution: button_type=type-selector-radio-input
+            # consulta self._brainstorm_runtime_type instalado pelo radio
+            # de T3. Snapshot local imediato (hardening §9 da task-004 do
+            # loop 05-21-implantation-tasklist-aba-brainstorm) protege
+            # contra mutacao concorrente durante a montagem do prompt.
+            if button_type == "type-selector-radio-input":
+                runtime_snapshot = getattr(
+                    self, "_brainstorm_runtime_type", "claude"
+                ) or "claude"
+                resolved_slug = str(runtime_snapshot).lower()
+            else:
+                resolved_slug = str(button_type).lower()
+
+            resolved_type = _BRAINSTORM_PROVIDER_LABELS.get(
+                resolved_slug, str(button_type)
+            )
+
+            md_ref = self._rel_to_root(md_path) if md_path else None
+            seed_meta: dict[str, object] = {
+                "agent_name": agent_name,
+                "agent_path": agent_path,
+                "action": action,
+                "target_path": edit_inplace,
+            }
+            for k in ("agent2_name", "agent2_path", "action2"):
+                v = payload.get(k)
+                if v:
+                    seed_meta[k] = v
+
+            try:
+                repo_root = self._systemforge_root().resolve()
+                prompt_final = build_prompt(seed_meta, md_ref, repo_root)
+            except ValueError as exc:
+                signal_bus.toast_requested.emit(str(exc), "warning")
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
+            except TypeError as exc:
+                signal_bus.toast_requested.emit(
+                    f"Erro montando prompt: {exc}", "error"
+                )
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
+
+            # Roteamento: target_path do payload mapeia para terminal index.
+            terminal_map = {
+                "terminal-interactive-output": 1,
+                "terminal-workspace-output": 2,
+                "terminal-codex-output": 3,
+            }
+            target_terminal = payload.get("target_path")
+            # Para type-selector-radio-input, o radio é autoridade: sempre
+            # sobrescrever target_terminal independente do default T1 que o
+            # construtor do botao injeta em target_path (Claude->T1, Kimi->T2,
+            # Codex->T3). Sem esse override o ramo `if not target_terminal`
+            # nunca alcanca porque o payload ja traz "terminal-interactive-output".
+            if button_type == "type-selector-radio-input":
+                target_terminal = {
+                    "claude": "terminal-interactive-output",
+                    "kimi": "terminal-workspace-output",
+                    "codex": "terminal-codex-output",
+                }.get(resolved_slug, "terminal-interactive-output")
+            elif not target_terminal:
+                # Botoes fixos (Claude/Kimi/Codex) sem target_path declarado.
+                target_terminal = (
+                    "terminal-interactive-output"
+                    if resolved_type == "Claude"
+                    else "terminal-workspace-output"
+                )
+            # Fallback operacional pedido: se provider/target efetivo for
+            # Codex (T3), mas T3 nao estiver disponivel, redireciona para T2.
+            codex_effective = (
+                resolved_slug == "codex"
+                or str(target_terminal).strip() == "terminal-codex-output"
+            )
+            if codex_effective and not self._codex_terminal_available():
+                target_terminal = "terminal-workspace-output"
+                signal_bus.toast_requested.emit(
+                    "Codex selecionado, mas T3 indisponivel. Prompt enviado no T2.",
+                    "warning",
+                )
+            terminal_idx = terminal_map.get(target_terminal, 1)
+            try:
+                published_ok = self._publish_to_specific_terminal(
+                    prompt_final, terminal_idx
+                )
+            except Exception as exc:  # noqa: BLE001
+                signal_bus.toast_requested.emit(
+                    f"Falha ao publicar prompt: {exc}", "error"
+                )
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
+            # Fix T020 (BLOCKER 1): antes, T3 com falha silenciosa
+            # (XTERM_AVAILABLE=False, shell nao iniciado, send_raw exception)
+            # emitia dispatch_result(True) mascarando incidente. Agora o
+            # caller propaga toast de erro e dispatch_result(False) quando
+            # `_publish_to_specific_terminal` retorna False (apenas T3 pode
+            # falhar — T1/T2 sao fire-and-forget e sempre retornam True).
+            if not published_ok:
+                canonical_t3_err = (
+                    "Falha ao injetar prompt no terminal Codex (T3): xterm "
+                    "indisponivel ou shell nao iniciado. Publicacao abortada "
+                    "para evitar perda silenciosa do prompt. Verifique se o "
+                    "PySide6-WebEngine esta instalado e se o terminal "
+                    "workspace-xterm esta ativo."
+                )
+                signal_bus.toast_requested.emit(canonical_t3_err, "error")
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "t3_publish_failed",
+                    extra={
+                        "button_id": button_id or "unknown",
+                        "seed_slug": str(payload.get("testid_slug") or ""),
+                        "terminal_idx": terminal_idx,
+                        "reason": "xterm_inject_returned_false",
+                    },
+                )
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
+            # Sucesso real: marca checkbox do botao de origem via signal_bus.
+            signal_bus.dispatch_result.emit(button_id, True)
+        finally:
+            QTimer.singleShot(300, lambda: setattr(self, "_prompt_in_flight", False))
+
+    def _publish_to_specific_terminal(self, text: str, terminal: int) -> bool:
         """Publica `text` num terminal especifico (1/2/3), ignorando T1/T2/T3.
+
+        Retorna True quando a publicacao foi confirmada, False quando o sink
+        nao recebeu os bytes (apenas T3: xterm ausente, shell nao iniciado,
+        send_raw falhou). T1 e T2 sao fire-and-forget via signal_bus, retornam
+        True incondicionalmente (semantica historica preservada).
 
         Espelha o mapping de `_publish_to_terminal` sem consultar os
         checkboxes `terminal-route-toggles`:
         - 1 -> terminal-interactive (pyte) via paste_text_in_terminal.
         - 2 -> terminal-workspace pyte via paste_text_in_workspace_terminal.
-        - 3 -> terminal-workspace xterm via _xterm_inject_text
-               (no-op silencioso se XTERM_AVAILABLE=False).
+        - 3 -> terminal-workspace xterm via _xterm_inject_text (retorna bool).
+
+        Fix T020 (BLOCKER 1) loop 05-21-implantation-tasklist-aba-brainstorm:
+        antes, T3 com falha (XTERM_AVAILABLE=False, shell nao iniciado) emitia
+        sucesso fantasma; caller agora propaga toast de erro quando falha.
         """
         if terminal == 1:
             signal_bus.paste_text_in_terminal.emit(text)
             signal_bus.focus_interactive_terminal.emit()
+            return True
         elif terminal == 2:
             signal_bus.paste_text_in_workspace_terminal.emit(text)
             try:
                 self._workspace_panel._terminal.setFocus()
             except AttributeError:
                 pass
+            return True
         elif terminal == 3:
-            self._xterm_inject_text(text, with_enter=False)
+            ok = self._xterm_inject_text(text, with_enter=False)
             if hasattr(self, "_workspace_panel_xterm"):
                 try:
                     self._workspace_panel_xterm._terminal.setFocus()
                 except AttributeError:
                     pass
+            return bool(ok)
+        return False
 
-    # Task 3 (loop 05-13-workflow-app-layout-2): nova coluna test-mode com toggle radio-like.
-    _TEST_MODE_BTN_STYLE = (
-        "QPushButton { background-color: transparent; color: #A1A1AA;"
+    _PX_RULER_WIDTHS = (10, 50, 100)
+    _DATATEST_LAUNCHER_STYLE = (
+        "QPushButton { background-color: #27272A; color: #FAFAFA;"
         "  border: 1px solid #52525B; border-radius: 6px;"
-        "  font-size: 11px; font-weight: 600; padding: 0 6px; }"
-        "QPushButton:hover { color: #FAFAFA; background-color: #3F3F46;"
-        "  border-color: #71717A; }"
+        "  font-size: 11px; font-weight: 700; padding: 0 8px; }"
+        "QPushButton:hover { background-color: #3F3F46; border-color: #71717A; }"
+        "QPushButton:checked { background-color: #FBBF24; color: #18181B;"
+        "  border-color: #FBBF24; }"
+    )
+    _TEST_MODE_BTN_STYLE_MAIN = (
+        "QPushButton { background-color: transparent; color: #4ADE80;"
+        "  border: 1px solid #16A34A; border-radius: 6px;"
+        "  font-size: 11px; font-weight: 600; padding: 0 8px; }"
+        "QPushButton:hover { color: #FAFAFA; background-color: #166534;"
+        "  border-color: #22C55E; }"
+        "QPushButton:checked { background-color: #16A34A; color: #FAFAFA;"
+        "  border-color: #16A34A; font-weight: 700; }"
+    )
+    _TEST_MODE_BTN_STYLE_BODY = (
+        "QPushButton { background-color: transparent; color: #F87171;"
+        "  border: 1px solid #DC2626; border-radius: 6px;"
+        "  font-size: 11px; font-weight: 600; padding: 0 8px; }"
+        "QPushButton:hover { color: #FAFAFA; background-color: #7F1D1D;"
+        "  border-color: #EF4444; }"
         "QPushButton:checked { background-color: #DC2626; color: #FAFAFA;"
         "  border-color: #DC2626; font-weight: 700; }"
     )
-    _TEST_MODE_BTN_STYLE_BODY = (
+    _TEST_MODE_BTN_STYLE_BTN = (
         "QPushButton { background-color: transparent; color: #60A5FA;"
         "  border: 1px solid #2563EB; border-radius: 6px;"
-        "  font-size: 11px; font-weight: 600; padding: 0 6px; }"
+        "  font-size: 11px; font-weight: 600; padding: 0 8px; }"
         "QPushButton:hover { color: #FAFAFA; background-color: #1E3A8A;"
         "  border-color: #3B82F6; }"
         "QPushButton:checked { background-color: #2563EB; color: #FAFAFA;"
         "  border-color: #2563EB; font-weight: 700; }"
     )
-    _TEST_MODE_BTN_STYLE_BTN = (
-        "QPushButton { background-color: transparent; color: #FACC15;"
-        "  border: 1px solid #EAB308; border-radius: 6px;"
-        "  font-size: 11px; font-weight: 600; padding: 0 6px; }"
-        "QPushButton:hover { color: #18181B; background-color: #CA8A04;"
-        "  border-color: #FACC15; }"
-        "QPushButton:checked { background-color: #EAB308; color: #18181B;"
-        "  border-color: #EAB308; font-weight: 700; }"
+    _TEST_MODE_BTN_STYLE_PX = (
+        "QPushButton { background-color: transparent; color: #FBBF24;"
+        "  border: 1px solid #D97706; border-radius: 6px;"
+        "  font-size: 11px; font-weight: 600; padding: 0 8px; }"
+        "QPushButton:hover { color: #18181B; background-color: #F59E0B;"
+        "  border-color: #FBBF24; }"
+        "QPushButton:checked { background-color: #FBBF24; color: #18181B;"
+        "  border-color: #FBBF24; font-weight: 700; }"
     )
 
     def _build_test_mode_column(self) -> QWidget:
-        """4a div irma de _toolbar_row com 4 botoes test-mode em grid 2x2.
-
-        Layout:
-            +-------+-------+
-            |  All  |  Key  |
-            +-------+-------+
-            | Body  |  Btn  |
-            +-------+-------+
-
-        Modos (radio-like, no maximo 1 ativo):
-        - All: renderiza TODOS os testids (sem filtro).
-        - Key: subset curado (`_DATATEST_FILTERED_IDS`) com os IDs principais.
-        - Body: todos EXCETO QAbstractButton.
-        - Btn:  APENAS QAbstractButton.
-
-        Re-click no botao ativo desliga (-> "off"). Click em outro reseta o
-        anterior. Estado inicial: nenhum checado.
-        """
-        from PySide6.QtWidgets import (
-            QButtonGroup,
-            QCheckBox,
-            QGridLayout,
-            QHBoxLayout,  # noqa: F401 — referenced only in _build_output_toolbar
-            QPushButton,
-        )
+        """Coluna compacta: apenas o launcher DataTest da janela flutuante."""
 
         column = QWidget()
         column.setObjectName("OutputToolbarTestMode")
         column.setProperty("testid", "output-toolbar-test-mode")
         column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         column.setStyleSheet(
-            "QWidget#OutputToolbarTestMode { background-color: #1C1C1F;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+            "QWidget#OutputToolbarTestMode { background-color: transparent;"
+            "  border: none; }"
         )
-        col_layout = QGridLayout(column)
+        col_layout = QVBoxLayout(column)
         col_layout.setContentsMargins(6, 6, 6, 6)
-        col_layout.setHorizontalSpacing(6)
-        col_layout.setVerticalSpacing(6)
+        col_layout.setSpacing(0)
 
-        # All: checkbox para renderizar 100% dos testids (sem filtro).
-        chk_all = QCheckBox("")
-        _test_mode_btn_w = 56
-        _test_mode_btn_h = 32
-        chk_all.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
-        chk_all.setToolTip("Exibir TODOS os data-testid (sem filtro)")
-        chk_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        chk_all.setStyleSheet(
-            "QCheckBox { color: #A1A1AA; font-size: 11px; font-weight: 700;"
-            "  background: transparent; border: 1px solid #52525B; border-radius: 6px;"
-            "  padding: 0; spacing: 0; }"
-            "QCheckBox:hover { color: #FAFAFA; background-color: #3F3F46;"
-            "  border-color: #71717A; }"
-            "QCheckBox::indicator { width: 10px; height: 10px;"
-            "  border: 1px solid #71717A; border-radius: 2px; background-color: transparent;"
-            "  subcontrol-position: center; }"
-            "QCheckBox::indicator:checked { background-color: #DC2626; border-color: #DC2626; }"
-            "QCheckBox:checked { background-color: #DC2626; color: #FAFAFA;"
-            "  border-color: #DC2626; }"
+        self._build_datatest_floating_panel()
+        btn = QPushButton("DataTest")
+        btn.setProperty("testid", "output-toolbar-datatest-toggle")
+        btn.setFixedSize(74, 32)
+        btn.setCheckable(True)
+        btn.setToolTip("Abrir controles DataTest")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(self._DATATEST_LAUNCHER_STYLE)
+        btn.toggled.connect(self._toggle_datatest_panel)
+        self._datatest_panel_button = btn
+        col_layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        return column
+
+    def _build_datatest_floating_panel(self) -> None:
+        if self._datatest_panel is not None:
+            return
+        from PySide6.QtWidgets import QButtonGroup
+
+        parent = self.centralWidget()
+        panel = _DraggableFloatingPanel(parent)
+        panel.setObjectName("DataTestFloatingPanel")
+        panel.setProperty("testid", "datatest-floating-panel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        panel.setFixedHeight(52)
+        panel.setStyleSheet(
+            "QWidget#DataTestFloatingPanel { background-color: #1C1C1F;"
+            "  border: 1px solid #52525B; border-radius: 8px; }"
         )
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
-        # Key: reusa o botao ja criado pelo MetricsBar (var `_btn_datatest`).
-        # Texto/tooltip ja atualizados no MetricsBar; reparent automatico ao
-        # adicionar em outro layout.
-        btn_key = self._metrics_bar._btn_datatest
+        terminal_checkbox = QCheckBox(panel)
+        terminal_checkbox.setObjectName("DataTestTerminalWriteToggle")
+        terminal_checkbox.setProperty("testid", "datatest-terminal-write-toggle")
+        terminal_checkbox.setFixedSize(18, 32)
+        terminal_checkbox.setToolTip(
+            "Ao clicar no overlay, envia o seletor para o terminal roteado"
+        )
+        terminal_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        terminal_checkbox.setStyleSheet(
+            "QCheckBox::indicator { width: 12px; height: 12px; border-radius: 3px;"
+            " border: 1px solid #9CA3AF; background-color: #27272A; }"
+            "QCheckBox::indicator:checked {"
+            " border: 1px solid #FBBF24; background-color: #FBBF24; }"
+        )
+        terminal_checkbox.toggled.connect(self._set_datatest_terminal_write_enabled)
+        layout.addWidget(terminal_checkbox, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Body e Btn: mesmo perfil; cores distintas.
-        btn_body = QPushButton("Body")
-        btn_key.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
-        btn_body.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
+        btn_main = QPushButton("Main", panel)
+        btn_main.setFixedSize(64, 32)
+        btn_main.setCheckable(True)
+        btn_main.setToolTip("Exibir apenas os principais blocos do app")
+        btn_main.setStyleSheet(self._TEST_MODE_BTN_STYLE_MAIN)
+        btn_main.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        btn_body = QPushButton("Body", panel)
+        btn_body.setFixedSize(64, 32)
         btn_body.setCheckable(True)
-        btn_body.setToolTip("Exibir testids EXCETO em botoes")
+        btn_body.setToolTip("Exibir data-testid EXCETO em botoes")
         btn_body.setStyleSheet(self._TEST_MODE_BTN_STYLE_BODY)
         btn_body.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        btn_btn = QPushButton("Btn")
-        btn_btn.setFixedSize(_test_mode_btn_w, _test_mode_btn_h)
+        btn_btn = QPushButton("Btn", panel)
+        btn_btn.setFixedSize(64, 32)
         btn_btn.setCheckable(True)
-        btn_btn.setToolTip("Exibir testids APENAS em botoes")
+        btn_btn.setToolTip("Exibir data-testid APENAS em botoes")
         btn_btn.setStyleSheet(self._TEST_MODE_BTN_STYLE_BTN)
         btn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        # Grid 2x2 — (0,0)=All (checkbox) (0,1)=Key (1,0)=Body (1,1)=Btn.
-        col_layout.addWidget(chk_all,  0, 0)
-        col_layout.addWidget(btn_key,  0, 1)
-        col_layout.addWidget(btn_body, 1, 0)
-        col_layout.addWidget(btn_btn,  1, 1)
+        btn_px = QPushButton("px ruler", panel)
+        btn_px.setProperty("testid", "datatest-px-ruler-toggle")
+        btn_px.setFixedSize(76, 32)
+        btn_px.setCheckable(True)
+        btn_px.setToolTip("Mostrar regua de largura em pixels")
+        btn_px.setStyleSheet(self._TEST_MODE_BTN_STYLE_PX)
+        btn_px.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_px.toggled.connect(self._toggle_px_ruler)
 
-        # Toggle radio-like: zero ou um selecionado. PySide6 6.7 nao expoe
-        # `setExclusionPolicy`, entao usamos `exclusive=False` + logica manual
-        # no handler para desligar os outros tres quando um eh ativado.
+        for btn in (btn_main, btn_body, btn_btn, btn_px):
+            layout.addWidget(btn)
+
         self._test_mode_group = QButtonGroup(self)
         self._test_mode_group.setExclusive(False)
-        self._test_mode_group.addButton(chk_all)
-        self._test_mode_group.addButton(btn_key)
-        self._test_mode_group.addButton(btn_body)
-        self._test_mode_group.addButton(btn_btn)
+        for btn in (btn_main, btn_body, btn_btn):
+            self._test_mode_group.addButton(btn)
 
-        # Estado inicial: nenhum checado.
         self._test_mode_buttons = {
-            "all": chk_all,
-            "key": btn_key,
+            "main": btn_main,
             "body": btn_body,
             "buttons": btn_btn,
         }
-        # Flag reentrancia para evitar loop em setChecked(False) cascata.
         self._test_mode_syncing = False
-        for b in self._test_mode_buttons.values():
-            b.toggled.connect(self._on_test_mode_button_toggled)
+        for btn in self._test_mode_buttons.values():
+            btn.toggled.connect(self._on_test_mode_button_toggled)
 
-        return column
+        panel.hide()
+        self._datatest_panel = panel
+        self._position_datatest_panel()
+
+    def _toggle_datatest_panel(self, checked: bool) -> None:
+        panel = self._datatest_panel
+        if panel is None:
+            return
+        if checked:
+            self._position_datatest_panel()
+            panel.show()
+            panel.raise_()
+        else:
+            panel.hide()
+
+    def _position_datatest_panel(self) -> None:
+        panel = self._datatest_panel
+        parent = self.centralWidget()
+        if panel is None or parent is None:
+            return
+        panel.adjustSize()
+        margin = 12
+        if not panel.was_dragged:
+            panel.move(
+                max(margin, parent.width() - panel.width() - margin),
+                max(margin, parent.height() - panel.height() - margin),
+            )
+            return
+        panel.move(
+            min(max(0, panel.x()), max(0, parent.width() - panel.width())),
+            min(max(0, panel.y()), max(0, parent.height() - panel.height())),
+        )
+
+    def _set_datatest_terminal_write_enabled(self, enabled: bool) -> None:
+        self._datatest_terminal_write_enabled = bool(enabled)
+
+    def _toggle_px_ruler(self, checked: bool) -> None:
+        if checked:
+            self._show_px_ruler_toasts()
+        else:
+            self._hide_px_ruler_toasts()
+
+    def _show_px_ruler_toasts(self) -> None:
+        host = self.centralWidget()
+        if host is None:
+            return
+        self._hide_px_ruler_toasts()
+        for width_px in self._PX_RULER_WIDTHS:
+            toast = QLabel(f"{width_px}px", host)
+            toast.setObjectName(f"WorkflowPxRulerToast{width_px}")
+            toast.setProperty("testid", f"px-ruler-toast-{width_px}")
+            toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            toast.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            toast.setFixedWidth(width_px)
+            toast.setFixedHeight(20)
+            toast.setStyleSheet(
+                "background-color: rgba(34, 197, 94, 0.95);"
+                "color: #FFFFFF;"
+                "font-size: 10px;"
+                "font-weight: 700;"
+                "border-radius: 3px;"
+            )
+            toast.show()
+            toast.raise_()
+            self._px_ruler_toasts.append(toast)
+        self._ensure_px_ruler_resize_filter(host)
+        self._reposition_px_ruler_toasts()
+
+    def _hide_px_ruler_toasts(self) -> None:
+        for toast in self._px_ruler_toasts:
+            toast.hide()
+            toast.deleteLater()
+        self._px_ruler_toasts.clear()
+        self._remove_px_ruler_resize_filter()
+
+    def _reposition_px_ruler_toasts(self) -> None:
+        if not self._px_ruler_toasts:
+            return
+        host = self._px_ruler_toasts[0].parentWidget()
+        if host is None:
+            return
+        margin = 12
+        gap = 6
+        y = host.height() - margin
+        for toast in reversed(self._px_ruler_toasts):
+            y -= toast.height()
+            toast.move(margin, max(0, y))
+            toast.raise_()
+            y -= gap
+
+    def _ensure_px_ruler_resize_filter(self, host: QWidget) -> None:
+        class _ResizeFilter(QObject):
+            def __init__(self, owner: MainWindow, parent: QObject | None = None) -> None:
+                super().__init__(parent)
+                self._owner = owner
+
+            def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+                if event.type() == QEvent.Type.Resize:
+                    self._owner._reposition_px_ruler_toasts()
+                return False
+
+        self._remove_px_ruler_resize_filter()
+        self._px_ruler_resize_filter = _ResizeFilter(self, host)
+        host.installEventFilter(self._px_ruler_resize_filter)
+
+    def _remove_px_ruler_resize_filter(self) -> None:
+        filter_obj = self._px_ruler_resize_filter
+        if filter_obj is None:
+            return
+        host = filter_obj.parent()
+        if isinstance(host, QWidget):
+            host.removeEventFilter(filter_obj)
+        self._px_ruler_resize_filter = None
 
     _PROGRESS_BOX_BTN_STYLE_TPL = (
         "QPushButton {{ background-color: {bg}; color: #FAFAFA;"
@@ -2272,24 +3443,27 @@ class MainWindow(QMainWindow):
         2026-05-19; pyte virou T3 controlado pelo arrow no label bar do
         terminal-workspace-splitter.
         """
-        from PySide6.QtWidgets import QVBoxLayout
+        from PySide6.QtWidgets import QBoxLayout, QVBoxLayout
 
         column = QWidget()
         column.setObjectName("OutputToolbarQueueToggles")
         column.setProperty("testid", "output-toolbar-queue-toggles")
         column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         column.setStyleSheet(
-            "QWidget#OutputToolbarQueueToggles { background-color: #1C1C1F;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+            "QWidget#OutputToolbarQueueToggles { background-color: transparent;"
+            "  border: none; }"
         )
         col_layout = QVBoxLayout(column)
-        col_layout.setContentsMargins(6, 16, 6, 6)
+        col_layout.setContentsMargins(6, 6, 6, 6)
         col_layout.setSpacing(6)
 
         # queue-count-toggles-row (reparent de metrics_bar — widget orfao)
         toggles_row = getattr(self._metrics_bar, "_queue_count_toggles_row", None)
         if toggles_row is not None:
             toggles_row.setParent(column)
+            toggles_layout = toggles_row.layout()
+            if isinstance(toggles_layout, QBoxLayout):
+                toggles_layout.setDirection(QBoxLayout.Direction.TopToBottom)
             col_layout.addWidget(
                 toggles_row, alignment=Qt.AlignmentFlag.AlignHCenter,
             )
@@ -2406,7 +3580,7 @@ class MainWindow(QMainWindow):
         # terminal via _publish_to_terminal (roteamento T1/T2/T3).
         _EXECUTAR_TASKS_PROMPT = (
             "/goal execute o tasklist, faça uma task, chame o "
-            "/skill:mcp-codex para revisão adversarial, corrija o que for "
+            "/mcp:codex para revisão adversarial, corrija o que for "
             "sugerido e for congruente, marque a task como concluida no "
             "progress.md e parte para a próxima. execute até acabar a "
             "tasklist."
@@ -2418,7 +3592,7 @@ class MainWindow(QMainWindow):
         _exec_tasks_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _exec_tasks_btn.setToolTip(
             "Cola no terminal um prompt de loop: executa o tasklist task a\n"
-            "task, revisao adversarial via /skill:mcp-codex, corrige o que\n"
+            "task, revisao adversarial via /mcp:codex, corrige o que\n"
             "for congruente, marca no progress.md e segue ate acabar."
         )
         _exec_tasks_btn.setStyleSheet(
@@ -2605,6 +3779,16 @@ class MainWindow(QMainWindow):
         if shell is None:
             return False
         try:
+            ensure_started = getattr(
+                self._workspace_panel_xterm,
+                "ensure_shell_started",
+                None,
+            )
+            if callable(ensure_started):
+                ensure_started()
+            if getattr(shell, "_master_fd", None) is None:
+                logger.warning("xterm shell is not started; injection skipped")
+                return False
             shell.send_raw(text.encode("utf-8", errors="replace"))
             if with_enter:
                 QTimer.singleShot(80, lambda: shell.send_raw(b"\r"))
@@ -2763,26 +3947,26 @@ class MainWindow(QMainWindow):
         mcp_codex_btn = _make_action_btn(
             "codex", "output-btn-mcp-codex",
             *_ANTHROPIC_ORANGE,
-            "/skill:mcp-codex \u2014 Pair programming com Codex MCP",
+            "/mcp:codex \u2014 Pair programming com Codex MCP",
         )
         mcp_codex_btn.setFixedWidth(_MCP_BTN_WIDTH)
-        mcp_codex_btn.clicked.connect(_paste_cmd("/skill:mcp-codex"))
+        mcp_codex_btn.clicked.connect(_paste_cmd("/mcp:codex"))
 
         mcp_kimi_btn = _make_action_btn(
             "kimi", "output-btn-mcp-kimi",
             *_ANTHROPIC_ORANGE,
-            "/skill:mcp-kimi \u2014 Persona-aware Kimi orchestrator",
+            "/mcp:kimi \u2014 Persona-aware Kimi orchestrator",
         )
         mcp_kimi_btn.setFixedWidth(_MCP_BTN_WIDTH)
-        mcp_kimi_btn.clicked.connect(_paste_cmd("/skill:mcp-kimi"))
+        mcp_kimi_btn.clicked.connect(_paste_cmd("/mcp:kimi"))
 
         double_mcp_btn = _make_action_btn(
             "dual", "output-btn-double-mcp",
             *_ANTHROPIC_ORANGE,
-            "/skill:double-mcp \u2014 Co-execucao paralela Codex+Kimi",
+            "/mcp:dual \u2014 Co-execucao paralela Codex+Kimi",
         )
         double_mcp_btn.setFixedWidth(_MCP_BTN_WIDTH)
-        double_mcp_btn.clicked.connect(_paste_cmd("/skill:double-mcp"))
+        double_mcp_btn.clicked.connect(_paste_cmd("/mcp:dual"))
 
         skill_claude_btn = _make_action_btn(
             "claude", "output-btn-skill-claude",
@@ -3600,7 +4784,7 @@ class MainWindow(QMainWindow):
         signal_bus.history_panel_toggled.connect(self._switch_to_history_tab)
         signal_bus.pipeline_started.connect(self._switch_to_output_tab)
         # Task 3 (loop 05-13-workflow-app-layout-2): migrado para signal granular
-        # com modos `off`/`all`/`body`/`buttons`. `datatest_toggled` mantido em
+        # com modos `off`/`main`/`body`/`buttons`. `datatest_toggled` mantido em
         # signal_bus por compat mas nao mais emitido pela UI.
         signal_bus.datatest_mode_changed.connect(self._on_datatest_mode_changed)
         signal_bus.focus_interactive_terminal.connect(self._on_focus_interactive_terminal)
@@ -3796,22 +4980,24 @@ class MainWindow(QMainWindow):
         """Compat legado: roteia para o novo handler de modo.
 
         Mantido caso codigo externo ainda emita `signal_bus.datatest_toggled`.
-        Mapeia `True` para `"key"` (subset curado) — comportamento original
+        Mapeia `True` para `"main"` (subset curado) — comportamento original
         do antigo botao DataTest (que filtrava por _DATATEST_FILTERED_IDS).
         """
-        self._on_datatest_mode_changed("key" if enabled else "off")
+        self._on_datatest_mode_changed("main" if enabled else "off")
 
     def _on_datatest_mode_changed(self, mode: str) -> None:
         """Handler de modo test-mode.
 
         Modos validos:
         - `off`     : sem overlays.
-        - `all`     : todos os testids (sem filtro).
-        - `key`     : subset curado em `_DATATEST_FILTERED_IDS`.
+        - `main`    : subset curado em `_DATATEST_FILTERED_IDS`.
+        - `key`     : alias legado de `main`.
         - `body`    : tudo MENOS QAbstractButton.
         - `buttons` : APENAS QAbstractButton.
         """
-        if mode not in ("off", "all", "key", "body", "buttons"):
+        if mode == "key":
+            mode = "main"
+        if mode not in ("off", "main", "body", "buttons"):
             mode = "off"
         self._datatest_mode = mode
         self._datatest_active = mode != "off"
@@ -3836,8 +5022,13 @@ class MainWindow(QMainWindow):
         central = self.centralWidget()
         used_positions: list[tuple[int, int, int, int]] = []  # x, y, w, h
 
-        _STYLE_NORMAL = (
+        _STYLE_NORMAL_BODY = (
             "background-color: rgba(220, 38, 38, 0.9); color: white;"
+            " font-size: 11px; font-weight: 700; padding: 3px 6px;"
+            " border-radius: 3px; border: none;"
+        )
+        _STYLE_NORMAL_BUTTON = (
+            "background-color: rgba(37, 99, 235, 0.9); color: white;"
             " font-size: 11px; font-weight: 700; padding: 3px 6px;"
             " border-radius: 3px; border: none;"
         )
@@ -3859,7 +5050,7 @@ class MainWindow(QMainWindow):
         # Task 3 (loop 05-13-workflow-app-layout-2): filtragem por modo test-mode.
         from PySide6.QtWidgets import QAbstractButton as _AbsBtn
 
-        _mode = getattr(self, "_datatest_mode", "all")
+        _mode = getattr(self, "_datatest_mode", "main")
         for widget in scan_widgets:
             testid = widget.property("testid")
             if not testid or widget.property("_is_testid_overlay"):
@@ -3874,9 +5065,9 @@ class MainWindow(QMainWindow):
                 if not widget.isVisible() or not widget.isVisibleTo(central):
                     continue
                 testid_str = str(testid)
-                # Modo "key" = subset curado; "all"/"body"/"buttons" sem filtro
+                # Modo "main" = subset curado; "body"/"buttons" sem filtro
                 # adicional alem do _is_btn ja aplicado acima.
-                if _mode == "key" and testid_str not in _DATATEST_FILTERED_IDS:
+                if _mode == "main" and testid_str not in _DATATEST_FILTERED_IDS:
                     continue
 
                 # Map widget position to central widget coordinates
@@ -3893,23 +5084,23 @@ class MainWindow(QMainWindow):
                         y = uy + uh + 2
 
                 overlay = _Lbl(testid_str, central)
-                overlay.setStyleSheet(_STYLE_NORMAL)
+                normal_style = _STYLE_NORMAL_BUTTON if _is_btn else _STYLE_NORMAL_BODY
+                overlay.setStyleSheet(normal_style)
                 overlay.setProperty("_is_testid_overlay", True)
                 overlay.setCursor(Qt.CursorShape.PointingHandCursor)
                 overlay.setToolTip(f"Clique para copiar: {testid_str}")
 
                 # Click to copy to clipboard with visual feedback
-                def _make_click(lbl, text):
+                def _make_click(lbl, text, style):
                     def _handler(_event):
                         _QApp.clipboard().setText(f'data-testid="{text}"')
-                        _all_mode_btn = getattr(self, "_test_mode_buttons", {}).get("all")
-                        if _all_mode_btn is not None and _all_mode_btn.isChecked():
+                        if self._datatest_terminal_write_enabled:
                             self._send_testid_probe_to_selected_terminal(text)
                         lbl.setStyleSheet(_STYLE_COPIED)
-                        QTimer.singleShot(600, lambda: lbl.setStyleSheet(_STYLE_NORMAL))
+                        QTimer.singleShot(600, lambda: lbl.setStyleSheet(style))
                     return _handler
 
-                overlay.mousePressEvent = _make_click(overlay, testid_str)
+                overlay.mousePressEvent = _make_click(overlay, testid_str, normal_style)
 
                 overlay.adjustSize()
                 overlay.move(x, y)
@@ -3926,10 +5117,10 @@ class MainWindow(QMainWindow):
         self._testid_overlays.clear()
 
     def _reposition_modal_test_btn(self) -> None:
-        central = self.centralWidget()
-        if central and self._modal_test_btn:
+        parent = self._active_modal_dialog or self.centralWidget()
+        if parent and self._modal_test_btn:
             btn_w = self._modal_test_btn.width() or 80
-            self._modal_test_btn.move(central.width() - btn_w - 8, 8)
+            self._modal_test_btn.move(parent.width() - btn_w - 8, 8)
 
     def _on_modal_test_toggled(self, checked: bool) -> None:
         if checked:
@@ -3945,7 +5136,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QApplication as _QApp
         from PySide6.QtWidgets import QLabel as _Lbl
 
-        central = self.centralWidget()
+        dlg = self._active_modal_dialog
+        overlay_parent = dlg
         used_positions: list[tuple[int, int, int, int]] = []
 
         _STYLE_NORMAL = (
@@ -3959,7 +5151,6 @@ class MainWindow(QMainWindow):
             " border-radius: 3px; border: none;"
         )
 
-        dlg = self._active_modal_dialog
         scan_widgets: list = [dlg]
         scan_widgets.extend(dlg.findChildren(QWidget))
 
@@ -3973,14 +5164,14 @@ class MainWindow(QMainWindow):
             if not widget.isVisible():
                 continue
             try:
-                pos = widget.mapTo(central, QPoint(0, 0))
+                pos = widget.mapTo(overlay_parent, QPoint(0, 0))
             except RuntimeError:
                 continue
             x, y = pos.x(), pos.y() - 14
             for ux, uy, uw, uh in used_positions:
                 if abs(x - ux) < max(uw, 30) and abs(y - uy) < max(uh, 18):
                     y = uy + uh + 2
-            overlay = _Lbl(testid_str, central)
+            overlay = _Lbl(testid_str, overlay_parent)
             overlay.setStyleSheet(_STYLE_NORMAL)
             overlay.setProperty("_is_testid_overlay", True)
             overlay.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4000,6 +5191,7 @@ class MainWindow(QMainWindow):
             overlay.raise_()
             used_positions.append((x, y, overlay.width(), overlay.height()))
             self._modal_test_overlays.append(overlay)
+        self._modal_test_btn.raise_()
 
     def _hide_modal_testid_overlays(self) -> None:
         for overlay in self._modal_test_overlays:
@@ -4017,6 +5209,8 @@ class MainWindow(QMainWindow):
         if active is not self._active_modal_dialog:
             self._active_modal_dialog = active
             if active:
+                if self._modal_test_btn.parent() is not active:
+                    self._modal_test_btn.setParent(active)
                 self._modal_test_btn.setVisible(True)
                 self._reposition_modal_test_btn()
                 self._modal_test_btn.raise_()
@@ -4026,11 +5220,20 @@ class MainWindow(QMainWindow):
                 self._modal_test_btn.setVisible(False)
                 self._modal_test_btn.setChecked(False)
                 self._hide_modal_testid_overlays()
+                central = self.centralWidget()
+                if central and self._modal_test_btn.parent() is not central:
+                    self._modal_test_btn.setParent(central)
+        elif active:
+            self._reposition_modal_test_btn()
+            self._modal_test_btn.raise_()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if hasattr(self, '_modal_test_btn') and self._modal_test_btn.isVisible():
             self._reposition_modal_test_btn()
+        if self._datatest_panel is not None and self._datatest_panel.isVisible():
+            self._position_datatest_panel()
+        self._reposition_px_ruler_toasts()
 
     def _on_permission_request(self, request_data: dict) -> None:
         """Show PermissionRequestDialog when the SDK needs user approval."""
@@ -4390,6 +5593,25 @@ class MainWindow(QMainWindow):
         signal_bus.config_unloaded.emit()
         signal_bus.toast_requested.emit("Projeto desvinculado", "info")
 
+    def _reload_config(self, path: str) -> None:
+        """Recarrega o config atual simulando unload/load sem abrir dialog."""
+        if not path:
+            signal_bus.toast_requested.emit(
+                "Nenhum projeto carregado para atualizar.", "warning"
+            )
+            return
+        app_state.clear_config()
+        self._settings.remove(self._SETTINGS_LAST_CONFIG)
+        self._update_title(project_name=None)
+        self._kanban_view.clear()
+        self._module_detail_view.clear()
+        signal_bus.config_unloaded.emit()
+        self._load_config(path)
+        if app_state.has_config and app_state.config and app_state.config.config_path == path:
+            signal_bus.toast_requested.emit(
+                f"Projeto atualizado: {app_state.project_name}", "success"
+            )
+
     # ─────────────────────────────────────────────── Kanban (T-036) ──── #
 
     def _load_kanban_from_config(self, config) -> None:
@@ -4591,6 +5813,26 @@ class PromptsConfigDialog(QDialog):
         le_path.setProperty("testid", f"prompts-config-path-{i}")
         le_path.setPlaceholderText("ai-forge/custom-prompts/prompts-subtab/<arquivo>.md")
 
+        path_picker = QPushButton("🔍")
+        path_picker.setProperty("testid", f"prompts-config-path-browse-{i}")
+        path_picker.setFixedSize(24, 24)
+        path_picker.setCursor(Qt.CursorShape.PointingHandCursor)
+        path_picker.setToolTip("Selecionar arquivo .md")
+        path_picker.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #D4D4D8;"
+            "  border: 1px solid #52525B; border-radius: 4px;"
+            "  font-size: 11px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
+        )
+        path_picker.clicked.connect(lambda _checked=False, le=le_path: self._browse_prompt_md(le))
+
+        path_cell = QWidget()
+        path_layout = QHBoxLayout(path_cell)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(4)
+        path_layout.addWidget(le_path, 1)
+        path_layout.addWidget(path_picker)
+
         le_desc = QLineEdit(description)
         le_desc.setProperty("testid", f"prompts-config-description-{i}")
         le_desc.setPlaceholderText("Descricao curta (exibida como tooltip)")
@@ -4610,7 +5852,7 @@ class PromptsConfigDialog(QDialog):
         )
 
         row_layout.addWidget(le_label, 20)
-        row_layout.addWidget(le_path, 50)
+        row_layout.addWidget(path_cell, 50)
         row_layout.addWidget(le_desc, 25)
         row_layout.addWidget(del_btn, 5)
 
@@ -4631,6 +5873,30 @@ class PromptsConfigDialog(QDialog):
             signal_bus.toast_requested.emit("Entrada removida.", "info")
 
         del_btn.clicked.connect(_on_delete)
+
+    @staticmethod
+    def _prompt_md_start_dir() -> str:
+        cur = Path.cwd().resolve()
+        while cur != cur.parent:
+            brainstorm = cur / "brainstorm"
+            if brainstorm.is_dir():
+                return str(brainstorm)
+            if (cur / "ai-forge" / "workflow-app").is_dir():
+                break
+            cur = cur.parent
+        return str(Path.cwd())
+
+    def _browse_prompt_md(self, line_edit: QLineEdit) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar arquivo .md",
+            self._prompt_md_start_dir(),
+            "Markdown (*.md);;All Files (*)",
+        )
+        if path:
+            line_edit.setText(path)
 
     def _on_add_row(self) -> None:
         self._add_row()

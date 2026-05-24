@@ -5,7 +5,7 @@
 # deterministica a este script, eliminando a fragilidade de extracao de markdown
 # por LLM e centralizando proof-of-completion + dedupe + state machine.
 #
-# Hardening (review adversarial 2026-05-13 via /skill:mcp-codex):
+# Hardening (review adversarial 2026-05-13 via /mcp:codex):
 #   - Lock atomico via mkdir per-(kind,item) — serializa invocacoes concorrentes.
 #   - Stale lock auto-recovery (>60s).
 #   - Dedupe via .notified marker recente (<30s) — bloqueia re-invocacao
@@ -24,7 +24,7 @@
 #                            item state ([x]=DONE, [!]=FAILED, [>]=SKIPPED).
 #   --verdict <V>            opcional, so usado em --kind review-done.
 #   --run-id <ID>            opcional, gerado se ausente (uuid hex 16-char).
-#   <channel>                positional, opcional ('interactive'|'workspace').
+#   <channel>                positional, opcional ('interactive'|'workspace'|'workspace_xterm').
 #                            Override via WF_CHANNEL_OVERRIDE env > arg > default.
 #
 # Marker path:
@@ -112,7 +112,7 @@ while [ $# -gt 0 ]; do
     --verdict=*) verdict="${1#--verdict=}"; shift ;;
     --run-id) run_id="${2:-}"; shift 2 || shift ;;
     --run-id=*) run_id="${1#--run-id=}"; shift ;;
-    interactive|workspace) channel_arg="$1"; shift ;;
+    interactive|workspace|workspace_xterm) channel_arg="$1"; shift ;;
     *) shift ;;
   esac
 done

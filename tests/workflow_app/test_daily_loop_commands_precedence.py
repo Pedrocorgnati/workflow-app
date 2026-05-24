@@ -201,7 +201,7 @@ class TestBuildDailyLoopSpecsPrecedence:
                     "id": "001",
                     "commands": [
                         "/cmd:update --target foo",
-                        "/skill:double-mcp --level 3",
+                        "/mcp:dual --level 3",
                     ],
                 }
             ],
@@ -209,7 +209,7 @@ class TestBuildDailyLoopSpecsPrecedence:
         specs = build_daily_loop_specs(cfg, loop_root)
         names = _names(specs)
         assert "/cmd:update --target foo" in names
-        assert "/skill:double-mcp --level 3" in names
+        assert "/mcp:dual --level 3" in names
         assert all(
             "--slug test-slug --item 001" not in n
             for n in names

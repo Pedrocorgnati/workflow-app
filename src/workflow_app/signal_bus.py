@@ -65,6 +65,24 @@ class SignalBus(QObject):
     # --- Notifications ---
     toast_requested = Signal(str, str)    # message, type ("info"|"success"|"error"|"warning")
 
+    # --- MCP Prompt dispatch result (T7 loop 05-21-implantation-tasklist-aba-brainstorm) ---
+    # Emitido apos cada tentativa de publicacao do prompt no terminal canonico.
+    # Consumido por MCPPromptButton._on_dispatch_result para marcar/limpar o
+    # checkbox embutido conforme resultado real do disparo (gate "marca apos
+    # sucesso real" - §7.3 do mcp-flow-implantation.md). Filtro por button_id
+    # garante que cada widget reage apenas ao proprio resultado.
+    dispatch_result = Signal(str, bool)   # (button_id, success)
+
+    # --- Codex availability (T7 task-008 loop 05-21-implantation-tasklist-aba-brainstorm) ---
+    # Emitido sempre que o estado do terminal Codex (testid
+    # `terminal-codex-output`) muda em runtime: T3 montado/desmontado, rebuild
+    # da grade brainstorm, mudanca de aba que materializa o widget. Consumido
+    # por MCPPromptButton._on_codex_availability_changed para atualizar o
+    # cache local e re-aplicar setEnabled em botoes button_type=Codex fixos.
+    # Auto-cura: quando T3 surgir no futuro, basta emitir com True para
+    # destravar todos os botoes Codex sem reiniciar a aplicacao.
+    codex_availability_changed = Signal(bool)
+
     # --- History ---
     history_panel_toggled = Signal()
 
@@ -176,10 +194,10 @@ class SignalBus(QObject):
     # --- DataTest debug mode ---
     datatest_toggled = Signal(bool)        # legado: True=show testid overlays, False=hide (mantido por compat; nao mais emitido pela UI)
     # Task 3 (loop 05-13-workflow-app-layout-2): toggle radio-like com 3 modos.
-    # Modos: "off" (sem overlays), "all" (todos os testids, SEM filtro),
-    # "key" (subset curado em _DATATEST_FILTERED_IDS — IDs principais),
+    # Modos: "off" (sem overlays),
+    # "main" (subset curado em _DATATEST_FILTERED_IDS — IDs principais),
     # "body" (todos MENOS QAbstractButton), "buttons" (APENAS QAbstractButton).
-    # Emitido pelos botoes All/Key/Body/Btn da test-mode column.
+    # Emitido pelos botoes Main/Body/Btn da janela DataTest.
     datatest_mode_changed = Signal(str)
 
     # --- Terminal focus (switch to output + focus terminal widget) ---

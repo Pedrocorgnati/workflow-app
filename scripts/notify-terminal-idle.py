@@ -4,7 +4,7 @@
 v2 contract (ai-forge/rules/workflow-app-listeners.md §2.3 + §9):
 
   - Aceita um payload completo via flags nomeadas:
-      --channel  interactive | workspace
+      --channel  interactive | workspace | workspace_xterm
       --status   success | failure | awaiting_user
       --reason   (canonical enum quando status=failure; vazio caso contrario)
       --exit-code  int (default: 0 em success / awaiting_user, 1 em failure)
@@ -55,7 +55,7 @@ from pathlib import Path
 
 _DIR = Path.home() / ".workflow-app"
 
-_VALID_CHANNELS = ("interactive", "workspace")
+_VALID_CHANNELS = ("interactive", "workspace", "workspace_xterm")
 _VALID_STATUS = ("success", "failure", "awaiting_user")
 _VALID_REASONS = (
     "VERIFY_FAILED", "BLOCKED", "RESSALVAS",
@@ -66,6 +66,11 @@ _STATUS_TO_STATE = {
     "failure": "failed",
     "awaiting_user": "awaiting_user",
 }
+
+
+def _notify_file_name(channel: str) -> str:
+    """Return the IPC filename suffix used by MetricsBar watchers."""
+    return channel.replace("_", "-")
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -157,7 +162,7 @@ def main(argv: list[str]) -> int:
     }
     payload = json.dumps(payload_dict)
 
-    target = _DIR / f"terminal-notify-{args.channel}.json"
+    target = _DIR / f"terminal-notify-{_notify_file_name(args.channel)}.json"
     try:
         _atomic_write(target, payload)
     except OSError as exc:

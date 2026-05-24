@@ -163,9 +163,17 @@ def parse_config(path: str) -> PipelineConfig:
                 language = lang_key
                 break
 
-    # Fallback queue_root: derive canonical path from project slug
-    if not queue_root and not is_loop_json:
-        queue_root = f"output/wbs/pipeline-position/{resolved.stem}.json"
+    # Fallback queue_root: derive canonical path from project slug.
+    # Loop configs (V3 + iteration_template/items/finalization) NAO tinham
+    # fallback antes — queue_root ficava "" e colapsava para project_dir (um
+    # diretorio), quebrando write_queue_root com [Errno 21] Is a directory.
+    # project_dir de um loop resolve para o pai de blacksmith/loop-archives;
+    # {project_name}/ aterriza o arquivo de estado dentro do proprio loop_root.
+    if not queue_root:
+        if is_loop_json:
+            queue_root = f"{project_name}/_QUEUE-STATE.json"
+        else:
+            queue_root = f"output/wbs/pipeline-position/{resolved.stem}.json"
 
     # Fallback dcp_root: ADDITION compativel para V3 pre-migracao + V2 + V1.
     # Mantem path operacional (ORCH) sob output/workspace/dcp/{slug}, irmao

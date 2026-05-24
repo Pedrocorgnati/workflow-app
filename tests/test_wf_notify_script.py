@@ -5,7 +5,8 @@ Cobre as quatro fragilidades resolvidas pelo wrapper:
 - WF_CHANNEL bleed: env var WF_CHANNEL e ignorada (wrapper aceita so arg
   posicional ou WF_CHANNEL_OVERRIDE)
 - script ausente / python ausente: erro visivel em stderr, exit nao zero
-- override Kimi: WF_CHANNEL_OVERRIDE=workspace vence default interactive
+- override Kimi/Codex: WF_CHANNEL_OVERRIDE=workspace/workspace_xterm vence
+  default interactive
 """
 from __future__ import annotations
 
@@ -118,6 +119,24 @@ def test_wf_channel_override_wins(base_env, isolated_home):
     assert workspace["channel"] == "workspace"
 
 
+def test_wf_channel_override_workspace_xterm_writes_t3(base_env, isolated_home):
+    """WF_CHANNEL_OVERRIDE=workspace_xterm escreve o arquivo IPC do T3."""
+    env = dict(base_env)
+    env["WF_CHANNEL"] = "interactive"
+    env["WF_CHANNEL_OVERRIDE"] = "workspace_xterm"
+    proc = _run([], cwd=REPO_ROOT, env=env)
+    assert proc.returncode == 0, proc.stderr
+    t3_payload = _read_notify_payload(
+        "workspace-xterm", isolated_home / ".workflow-app"
+    )
+    assert t3_payload is not None
+    assert t3_payload["channel"] == "workspace_xterm"
+    assert t3_payload["state"] == "idle"
+    assert not (
+        isolated_home / ".workflow-app" / "terminal-notify-workspace_xterm.json"
+    ).exists()
+
+
 def test_explicit_arg_overrides_override_env(base_env, isolated_home):
     """Arg posicional > WF_CHANNEL_OVERRIDE > default."""
     env = dict(base_env)
@@ -186,7 +205,7 @@ elif ! "${BASH:-bash}" "$wf_root/ai-forge/workflow-app/scripts/wf-notify.sh" "$w
 fi
 '''
     # Caso A: cwd dentro do repo (subpath profundo) -> walk-up acha root
-    deep_in_repo = REPO_ROOT / "output" / "daily-loop"
+    deep_in_repo = REPO_ROOT / "ai-forge" / "workflow-app" / "scripts"
     proc = subprocess.run(
         ["bash", "-c", block],
         cwd=str(deep_in_repo),

@@ -15,6 +15,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QWidget
 
 from workflow_app.output_panel.persistent_shell import PersistentShell
 from workflow_app.output_panel.xterm_output_panel import _PtyBridge
@@ -131,3 +133,114 @@ def test_bridge_starts_session_on_submitted_line(qapp):
 
     assert started == ["workspace_xterm"]
     mock_shell.send_raw.assert_called_once_with(b"\r")
+
+
+def test_workspace_xterm_panel_binds_workspace_xterm_channel(qapp, monkeypatch):
+    """T3 must export WF_CHANNEL_OVERRIDE=workspace_xterm to its PTY."""
+    from workflow_app.output_panel import xterm_output_panel as xterm_module
+
+    class FakePage:
+        def setWebChannel(self, _channel):
+            self.web_channel = _channel
+
+        def runJavaScript(self, _script):
+            pass
+
+    class FakeWebEngineView(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._page = FakePage()
+
+        def page(self):
+            return self._page
+
+        def load(self, _url):
+            pass
+
+    class FakeWebChannel(QObject):
+        def registerObject(self, name, obj):
+            self.registered = (name, obj)
+
+    class FakeShell(QObject):
+        output_received = Signal(str)
+
+        def __init__(self, *args, extra_env=None, parent=None, **kwargs):
+            super().__init__(parent)
+            self._extra_env = dict(extra_env or {})
+
+        def start(self):
+            pass
+
+        def send_raw(self, _data):
+            pass
+
+        def resize(self, _cols, _rows):
+            pass
+
+    monkeypatch.setattr(xterm_module, "QWebEngineView", FakeWebEngineView)
+    monkeypatch.setattr(xterm_module, "QWebChannel", FakeWebChannel)
+    monkeypatch.setattr(xterm_module, "PersistentShell", FakeShell)
+
+    panel = xterm_module.XtermOutputPanel(workspace_mode=True)
+    try:
+        assert panel._shell._extra_env["WF_CHANNEL_OVERRIDE"] == "workspace_xterm"
+        assert panel._channel_name == "workspace_xterm"
+    finally:
+        panel.deleteLater()
+
+
+def test_xterm_panel_ensure_shell_started_is_idempotent(qapp, monkeypatch):
+    """Parallel T3 dispatch may happen while the panel is collapsed."""
+    from workflow_app.output_panel import xterm_output_panel as xterm_module
+
+    class FakePage:
+        def setWebChannel(self, _channel):
+            pass
+
+    class FakeWebEngineView(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._page = FakePage()
+
+        def page(self):
+            return self._page
+
+        def load(self, _url):
+            pass
+
+    class FakeWebChannel(QObject):
+        def registerObject(self, _name, _obj):
+            pass
+
+    class FakeShell(QObject):
+        output_received = Signal(str)
+
+        def __init__(self, *args, extra_env=None, parent=None, **kwargs):
+            super().__init__(parent)
+            self._extra_env = dict(extra_env or {})
+            self.starts = 0
+            self._master_fd = None
+
+        def start(self):
+            self.starts += 1
+            self._master_fd = 123
+
+        def send_raw(self, _data):
+            pass
+
+        def resize(self, _cols, _rows):
+            pass
+
+    monkeypatch.setattr(xterm_module, "QWebEngineView", FakeWebEngineView)
+    monkeypatch.setattr(xterm_module, "QWebChannel", FakeWebChannel)
+    monkeypatch.setattr(xterm_module, "PersistentShell", FakeShell)
+
+    panel = xterm_module.XtermOutputPanel(workspace_mode=True)
+    try:
+        panel.ensure_shell_started()
+        panel.ensure_shell_started()
+        assert panel._shell.starts == 1
+        assert panel._shell_started is True
+        assert panel._shell._master_fd == 123
+    finally:
+        panel.deleteLater()

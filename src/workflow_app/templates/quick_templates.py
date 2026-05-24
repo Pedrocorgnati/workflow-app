@@ -464,7 +464,7 @@ TEMPLATE_CREATE_DAILY_LOOP: list[CommandSpec] = [
 # preparar uma base maximamente expandida para /intake-review:create-checklist.
 #
 # Codex wiring: tanto /intake:obvious quanto /intake-review:seed ja invocam
-# /skill:mcp-codex internamente (seed: FASE 1.1 Level 2 + FASE 2.5.5 Level 1).
+# /mcp:codex internamente (seed: FASE 1.1 Level 2 + FASE 2.5.5 Level 1).
 # Nao adicionamos gates externos para evitar redundancia.
 
 TEMPLATE_INTAKE_SEED: list[CommandSpec] = [
@@ -522,7 +522,7 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
 
     # Bloco 2.5: Codex adversarial review da gaplist (programatico, skip_prompt)
     _spec(
-        "/skill:mcp-codex revisar a gaplist gerada por /intake-review:create-gaplist "
+        "/mcp:codex revisar a gaplist gerada por /intake-review:create-gaplist "
         "(output/wbs/{slug}/intake-review/gaplist.md). Topic_type=decision. Level 2 "
         "primary+secondary (senior-qa-architect + senior-adversarial). Identifique: "
         "(a) gaps do INTAKE que ficaram fora da gaplist, (b) priorizacao P0/P1/P2 "
@@ -564,7 +564,7 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
 
     # Bloco 3.5: Codex adversarial review pos-execucao (programatico)
     _spec(
-        "/skill:mcp-codex revisar o estado do workspace apos execucao completa da "
+        "/mcp:codex revisar o estado do workspace apos execucao completa da "
         "gaplist (P0+P1+P2). Topic_type=decision. Level 2 primary+secondary "
         "(senior-qa-architect + senior-adversarial). Identifique: (a) regressoes "
         "introduzidas, (b) INTAKE items ainda nao cobertos no codigo, (c) testes "
@@ -595,7 +595,7 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
 # (excecao do /intake-review:clear final — mantido Sonnet/LOW por instrucao direta).
 #
 # Ajustes sobre o clone naive (analise Level 2 primary+secondary):
-#  - /skill:mcp-codex recebe argumento explicito (skip_prompt implicito via topic),
+#  - /mcp:codex recebe argumento explicito (skip_prompt implicito via topic),
 #    caso contrario entraria em modo interativo e quebraria a fila.
 #  - list-improove em HIGH (satura antes do MAX — comando criativo/inferencial).
 #
@@ -642,7 +642,7 @@ TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
 
     # Bloco 2.5: Codex adversarial review da gaplist (programatico, skip_prompt)
     _spec(
-        "/skill:mcp-codex revisar a gaplist gerada por /intake-review:create-gaplist "
+        "/mcp:codex revisar a gaplist gerada por /intake-review:create-gaplist "
         "(output/wbs/{slug}/intake-review/gaplist.md). Topic_type=decision. Level 2 "
         "primary+secondary (senior-qa-architect + senior-adversarial). Identifique: "
         "(a) gaps do INTAKE que ficaram fora da gaplist, (b) priorizacao P0/P1/P2 "
@@ -676,7 +676,7 @@ TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
 
     # Bloco 3.5: Codex adversarial review pos-execucao (programatico)
     _spec(
-        "/skill:mcp-codex revisar o estado do workspace apos execucao completa da "
+        "/mcp:codex revisar o estado do workspace apos execucao completa da "
         "gaplist (P0+P1+P2). Topic_type=decision. Level 2 primary+secondary "
         "(senior-qa-architect + senior-adversarial). Identifique: (a) regressoes "
         "introduzidas, (b) INTAKE items ainda nao cobertos no codigo, (c) testes "
@@ -991,13 +991,78 @@ TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
 # Promote para content/{locale}/blog/ e hreflang: GitHub Actions cron 13h UTC
 # (promote-from-stockpile.yml), NAO desta pipeline local.
 
-TEMPLATE_BLOG_STOCKPILE: list[CommandSpec] = _inject_clears([
-    # Gera 1 pacote completo (topicos -> briefs -> artigos -> review -> quality-gate
-    # -> package.json -> validate:stockpile). Output: packages/{uuid}/.
-    _spec("/blog:stockpile-generate --max-packages 1",           _S, _A,  1),
-    # Commit + push idempotente do diretorio stockpile/ para main remoto.
-    _spec("/blog:stockpile-push",                                _S, _A,  2),
-])
+# ─── Blog Stockpile — Opcao D (2026-05-22) ──────────────────────────────────── #
+# Pipeline ATOMIZADA Kimi-friendly. Substitui o orquestrador centralizado
+# /blog:stockpile-generate --max-packages N (que e dificil para Kimi por
+# orquestracao recursiva interna) por uma fila plana de slash-commands ja
+# whitelisted em kimi_whitelist.py. Decisao registrada como D8 em
+# blacksmith/05-21-auto-blog/DECISION-LOG.md (supersedes D1/Opcao B).
+#
+# Topologia:
+#   Fase 1 (compartilhada — 4 itens): expand -> cluster -> prioritize -> dedupe
+#   Fase 2 (por pacote, ×N — 14 itens cada): generate-briefs -> write×4 ->
+#                                    review×4 -> gate×4 -> finalize
+#   Fase 3 (final — 2 itens): validate + push
+#
+# Reaproveitamento de estado entre items: CURRENT-PACKAGE.json (escrito pelo
+# /blog:generate-briefs no Passo 2.5 e lido pelos demais comandos de stockpile).
+# Cada chamada de generate-briefs avanca para a proxima `wave_alvo` pendente.
+#
+# Total: 4 + 14×N + 2 itens. Com N=3 default: 48 itens. Cada item e um slash-
+# command atomico Kimi-compat — o seletor "queue-div-main-llm" (Claude/Codex/Kimi)
+# do widget despacha um a um sem que nenhum item recursivamente orquestre N etapas.
+#
+# N e editavel via constante abaixo. Subir N aumenta linearmente a fila e o
+# tempo total; baixar reduz o pacote produzido por clique (e o "estoque" gerado).
+
+_BLOG_STOCKPILE_PACKAGES_PER_CLICK: int = 3
+
+_BLOG_STOCKPILE_LOCALES: tuple[str, ...] = ("pt-BR", "it-IT", "en", "es-ES")
+
+
+def _build_blog_stockpile_template() -> list[CommandSpec]:
+    """Constroi TEMPLATE_BLOG_STOCKPILE atomizado.
+
+    Cada item e uma chamada deterministica a um slash-command ja Kimi-compat
+    (KIMI_COMPATIBLE_COMMANDS em kimi_whitelist.py). O agrupamento por wave +
+    locale acontece em runtime via CURRENT-PACKAGE.json — nenhum item precisa
+    saber UUID estaticamente.
+    """
+    pos = 0
+    specs: list[CommandSpec] = []
+
+    def add(cmd: str) -> None:
+        nonlocal pos
+        pos += 1
+        specs.append(_spec(cmd, _S, _A, pos))
+
+    # Fase 1: descoberta de topicos (compartilhada para todos os N pacotes)
+    add("/blog:expand-keywords")
+    add("/blog:cluster-keywords")
+    add("/blog:prioritize-topics")
+    add("/blog:deduplicate-topics")
+
+    # Fase 2: por pacote (×N). Cada generate-briefs avanca a wave_alvo e
+    # (re)escreve CURRENT-PACKAGE.json com o equivalence_id daquele pacote.
+    # Os comandos seguintes (write/review/gate/finalize) leem o UUID atual.
+    for _k in range(_BLOG_STOCKPILE_PACKAGES_PER_CLICK):
+        add("/blog:generate-briefs")
+        for locale in _BLOG_STOCKPILE_LOCALES:
+            add(f"/blog:write-articles --output-dir stockpile {locale}")
+        for locale in _BLOG_STOCKPILE_LOCALES:
+            add(f"/blog:review-seo --mode stockpile {locale}")
+        for locale in _BLOG_STOCKPILE_LOCALES:
+            add(f"/blog:quality-gate --mode stockpile {locale}")
+        add("/blog:stockpile-finalize-package")
+
+    # Fase 3: validacao agregada + commit/push idempotente do diretorio stockpile/.
+    add("/blog:stockpile-validate")
+    add("/blog:stockpile-push")
+
+    return _inject_clears(specs)
+
+
+TEMPLATE_BLOG_STOCKPILE: list[CommandSpec] = _build_blog_stockpile_template()
 
 
 # ─── Boilerplate (from .claude/commands/boilerplate/) ───────────────────────── #

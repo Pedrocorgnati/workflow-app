@@ -88,14 +88,17 @@ assert_loop_root_relative_path(value, loop_root, label="progress_path")
 
 Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader.py`. Testes em `tests/workflow_app/test_daily_loop_loader.py` (classes `TestDiagnoseWorkspaceDoubledPath`, `TestAssertLoopRootRelativePath`).
 
-**Gates que enforcam esta regra:**
+**Gates que enforcam esta regra (numeros reconciliados 2026-05-22 — antes citavam C15/W10 por engano, que sao os gates do par Kimi):**
 
-- Producers (`/loop:create-structure`, `/loop:integration`): documentam o contrato em "CONTRATO DE PATHS" e DEVEM nao gerar workspace-relative.
-- Validator estrutural (`/loop:review` C15): detecta + auto-fixa (`fix_action: edit-json`).
-- Validator pre-runtime (`/loop:workflow-app` W10): detecta + bloqueia veredict APROVADO; `auto_fixable: false` (correcao via re-rodar `/loop:integration` ou via C15 do `/loop:review`).
+- Producer (`/loop:create-structure`): secao "Contrato T0 obrigatorio para os PATHS de `daily_loop`" documenta o shape filename-only + self-test antes de gravar o JSON; DEVE nao gerar workspace-relative.
+- Producer (`/loop:integration`): re-materializa `items[].commands` mas NAO reescreve `progress_path`/`tasks_dir`/`log_path`; preserva o shape gravado por `/loop:create-structure`.
+- Validator estrutural (`/loop:review` **C16**): detecta + auto-fixa (`fix_action: edit-json`, substitui pelo basename canonico) os campos `progress_path`/`tasks_dir`/`log_path` com segmento embutido; tambem valida resolucao efetiva contra `loop_root` fisico.
+- Validator pre-runtime (`/loop:workflow-app` **W12**): detecta + bloqueia veredict APROVADO; `auto_fixable: false` (correcao via re-rodar `/loop:create-structure` ou via C16 do `/loop:review`). Inclui W12.b — resolucao efetiva do path contra `loop_root` fisico.
 - Runtime defense (`loader.py::build_daily_loop_specs` e `build_loop_specs`): mensagens de erro enriquecidas com sugestao via `diagnose_workspace_doubled_path` quando `PROGRESS.md nao encontrado` por path doubling.
 
-**Bug-fix referencia:** `blacksmith/loop-archives/05-19-gap-tasklist/_HANDOFF.md` (Onda 9, 2026-05-19). Loop quebrou em runtime porque 6 campos foram gravados workspace-relative pelo `/loop:create-structure`. Fix aplicado: normalizacao manual + hardening em todas as 4 camadas listadas acima.
+> **Nota:** `/loop:review` C15 e `/loop:workflow-app` W10 sao os gates do **par Kimi** (adjacencia/contencao de `/cmd:kimi-pair-*`), NAO desta regra de path. Esta secao citava esses numeros por engano ate 2026-05-22 — corrigido para C16/W12 no hardening `blacksmith/loop/05-22-loop-path-hardening.md`.
+
+**Bug-fix referencia:** (a) `blacksmith/loop-archives/05-19-gap-tasklist/_HANDOFF.md` (Onda 9, 2026-05-19) — loop quebrou em runtime porque 6 campos foram gravados workspace-relative pelo `/loop:create-structure`. (b) `blacksmith/loop-archives/05-21-implantation-tasklist-aba-brainstorm` (corrigido 2026-05-22) — `progress_path`/`tasks_dir` workspace-relative com slug embutido; correcao + criacao dos gates C16/W12 documentada em `blacksmith/loop/05-22-loop-path-hardening.md`.
 
 ### 2.3 Top-level `mode` discriminator + rocksmash 4-command iteration (adicionado 2026-05-19 — B6 rocksmash quad-loop integration)
 
@@ -136,6 +139,14 @@ Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader
 **Migracao:** loops V3 sem `mode` (pre-2026-05-19) sao tratados como `"normal"` automaticamente, sem warning. Loops rocksmash legacy (com `daily_loop.rocksmash_legacy_two_step: true`) continuam emitindo 2 comandos por iteracao no expander; o backfill B12 promove para 4 comandos quando o operador estiver pronto.
 
 **Gate de runtime:** `assert_rocksmash_iteration_shape` rejeita com `DailyLoopConfigError` quando o shape diverge dos 4 tokens canonicos. Falha apresenta o `id` do item, a sequencia observada e a sequencia esperada — Zero Silencio. Para itens com `commands == []` em estado pre-integration (`metadata.integration_completed_at` ausente), o validator tolera o placeholder (alinha com a tabela da secao 2: shape `{"id":"NNN","commands":[]}` e legitimo pre-`/loop:integration`).
+
+### 2.4 Chaves top-level prefixadas com `_` — namespace advisory reservado (adicionado 2026-05-21 — T-05 R5 stale-marking)
+
+**Regra de ouro:** chaves top-level de `_LOOP-CONFIG.json` cujo nome comeca com underscore (`_comment`, `_fixture_scope`, `_stale_suspect`, ...) sao **namespace advisory reservado**: carregam metadados para humanos ou ferramentas auxiliares e o loader DEVE ignora-las. `config_parser.parse_config()` e `build_*_specs` extraem apenas campos conhecidos por nome (`kind`, `daily_loop`, `basic_flow`, `mode`, ...) e nao falham diante de chaves extras; `validate-loop-config.py` (W9) exige apenas `kind` + `daily_loop` e nao enforca `additionalProperties: false`. Logo, escrever uma chave `_*` no topo e seguro e nao quebra runtime nem auditoria.
+
+Produtores podem usar esse namespace para sinalizacao que nao deve influenciar a fila. Exemplo canonico: `_stale_suspect` (gravado por T-05 / risco R5) marca loops nao executados gerados na janela de um bug de integracao — ver `blacksmith/05-21-brainstorm/T-05-marcacao-stale.md`. A marca e advisory: nao bloqueia o loader; um gate de runtime que recuse importar loop com `_stale_suspect` presente seria hardening adicional, fora deste contrato hoje.
+
+Qualquer futura adocao de JSON Schema com `additionalProperties: false` para `_LOOP-CONFIG.json` DEVE whitelistar o prefixo `_` (pattern property `^_`) para preservar este namespace.
 
 ---
 

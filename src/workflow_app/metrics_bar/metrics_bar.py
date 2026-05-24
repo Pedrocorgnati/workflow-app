@@ -368,6 +368,7 @@ class MetricsBar(QWidget):
     view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Kanban
     config_change_requested = Signal(str)   # path of selected .json
     config_unload_requested = Signal()      # user clicked ✕ on project pill
+    config_reload_requested = Signal(str)   # user clicked refresh on project pill
 
     def __init__(self, signal_bus=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -453,6 +454,20 @@ class MetricsBar(QWidget):
             " border: none; background: transparent; padding: 0; margin: 0;"
         )
         _pl.addWidget(self._project_name_lbl)
+        self._proj_refresh = QPushButton("↻")
+        self._proj_refresh.setObjectName("ProjRefreshBtn")
+        self._proj_refresh.setProperty("testid", "metrics-btn-proj-refresh")
+        self._proj_refresh.setFixedSize(20, 20)
+        self._proj_refresh.setToolTip("Recarregar projeto")
+        self._proj_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._proj_refresh.setStyleSheet(
+            "QPushButton#ProjRefreshBtn { background: transparent; border: none;"
+            "  color: #22C55E; font-size: 15px; font-weight: 700;"
+            "  min-width: 20px; min-height: 20px; padding: 0; margin: 0; }"
+            "QPushButton#ProjRefreshBtn:hover { color: #86EFAC; background: rgba(34, 197, 94, 0.14); border-radius: 3px; }"
+        )
+        self._proj_refresh.clicked.connect(self._on_proj_refresh)
+        _pl.addWidget(self._proj_refresh)
         self._proj_x = QPushButton("✕")
         self._proj_x.setObjectName("ProjCloseBtn")
         self._proj_x.setProperty("testid", "metrics-btn-proj-unload")
@@ -461,9 +476,9 @@ class MetricsBar(QWidget):
         self._proj_x.setCursor(Qt.CursorShape.PointingHandCursor)
         self._proj_x.setStyleSheet(
             "QPushButton#ProjCloseBtn { background: transparent; border: none;"
-            "  color: #FAFAFA; font-size: 14px; font-weight: 700;"
+            "  color: #EF4444; font-size: 14px; font-weight: 700;"
             "  min-width: 20px; min-height: 20px; padding: 0; margin: 0; }"
-            "QPushButton#ProjCloseBtn:hover { color: #FFFFFF; background: rgba(255, 255, 255, 0.12); border-radius: 3px; }"
+            "QPushButton#ProjCloseBtn:hover { color: #F87171; background: rgba(239, 68, 68, 0.14); border-radius: 3px; }"
         )
         self._proj_x.clicked.connect(self._on_proj_unload)
         _pl.addWidget(self._proj_x)
@@ -721,9 +736,9 @@ class MetricsBar(QWidget):
         self._btn_workflow.hide()
         self._btn_comandos.hide()
 
-        # ── Key toggle (renomeado de DataTest; modo "key" = subset curado) ── #
+        # ── Main toggle legado (subset curado) ───────────────────────────── #
         # Var name `_btn_datatest` preservado para compat com MainWindow.
-        self._btn_datatest = QPushButton("Key")
+        self._btn_datatest = QPushButton("Main")
         self._btn_datatest.setFixedSize(56, 32)
         self._btn_datatest.setCheckable(True)
         self._btn_datatest.setToolTip("Exibir apenas os data-testid principais (subset curado)")
@@ -1343,6 +1358,17 @@ class MetricsBar(QWidget):
     def _on_proj_unload(self) -> None:
         self.config_unload_requested.emit()
 
+    def _on_proj_refresh(self) -> None:
+        """Recarrega o JSON ativo sem abrir o seletor."""
+        from workflow_app.config.app_state import app_state
+
+        if not app_state.has_config or not app_state.config:
+            self._signal_bus.toast_requested.emit(
+                "Nenhum projeto carregado para atualizar.", "warning"
+            )
+            return
+        self.config_reload_requested.emit(app_state.config.config_path)
+
     def _on_proj_open(self) -> None:
         """Seleciona pasta de projeto, carrega-o e abre no file manager.
 
@@ -1507,6 +1533,7 @@ class MetricsBar(QWidget):
         self._project_name_lbl.setText(name)
         self._project_pill.show()
         self._project_name_lbl.show()
+        self._proj_refresh.show()
         self._proj_x.show()
         self._proj_select_btn.hide()
         self._loop_select_btn.hide()
@@ -1905,7 +1932,7 @@ class MetricsBar(QWidget):
         session state. Auto-idle waits 1s/2s post-dispatch then arms
         hardening WITH a 5s hardcap. The hardcap guarantees the dot turns
         green even if Kimi's TUI keeps emitting invisible cursor/CPR
-        chunks (Codex/Kimi /skill:double-mcp consensus: option B).
+        chunks (Codex/Kimi /mcp:dual consensus: option B).
 
         Race protection: helper at t=0, real command at t=0.5 → at t=1 the
         helper's auto-idle would otherwise hand control over to a stale

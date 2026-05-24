@@ -56,8 +56,58 @@ FREETEXT_MAX_HEIGHT = 240
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 
 
+def _find_repo_root() -> Path:
+    """Resolve a raiz do SystemForge para ancorar atalhos locais."""
+    starts = [Path.cwd().resolve(), Path(__file__).resolve().parent]
+    for start in starts:
+        cur = start
+        while cur != cur.parent:
+            if (cur / "brainstorm").is_dir():
+                return cur
+            if (cur / "ai-forge" / "workflow-app").is_dir():
+                return cur
+            cur = cur.parent
+    return Path.cwd()
+
+
+def _markdown_picker_start_dir(default_md_dir: str = "") -> str:
+    """Brainstorm e apenas atalho inicial; o dialog permite navegar livremente."""
+    repo_root = _find_repo_root()
+    brainstorm = repo_root / "brainstorm"
+    if brainstorm.is_dir():
+        return str(brainstorm)
+
+    from workflow_app.config.app_state import app_state
+
+    base_dir = Path.cwd()
+    if app_state.has_config and app_state.config is not None:
+        base_dir = app_state.config.project_dir
+
+    candidate = Path(default_md_dir) if default_md_dir else None
+    if candidate is not None and not candidate.is_absolute():
+        candidate = base_dir / candidate
+    if candidate is not None and candidate.exists():
+        return str(candidate)
+    return str(base_dir if base_dir.exists() else Path.cwd())
+
+
+def _browse_markdown_file(parent: QWidget, default_md_dir: str = "") -> str:
+    path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "Selecionar arquivo .md",
+        _markdown_picker_start_dir(default_md_dir),
+        "Markdown (*.md);;All Files (*)",
+    )
+    return path or ""
+
+
+def _flag_spec_is_path_md(flag_spec: FlagSpec) -> bool:
+    placeholder = (flag_spec.placeholder or "").lower()
+    return ".md" in placeholder or "<path.md>" in placeholder
+
+
 class PathMdFieldWidget(QWidget):
-    """Campo de path .md: QLineEdit + botao '...' que abre QFileDialog."""
+    """Campo de path .md: QLineEdit + botao de lupa que abre QFileDialog."""
 
     def __init__(
         self,
@@ -80,9 +130,12 @@ class PathMdFieldWidget(QWidget):
             " padding: 4px 8px; font-size: 12px; font-family: monospace;"
         )
         self._line.setPlaceholderText("caminho/para/arquivo.md")
+        self._line.setProperty("testid", "double-phase-path-md-input")
         layout.addWidget(self._line, stretch=1)
 
-        self._btn = QPushButton("...")
+        self._btn = QPushButton("🔍")
+        self._btn.setProperty("testid", "double-phase-path-md-browse")
+        self._btn.setToolTip("Selecionar arquivo .md")
         self._btn.setFixedSize(28, 28)
         self._btn.setStyleSheet(
             "QPushButton { background-color: #3F3F46; color: #D4D4D8;"
@@ -94,26 +147,7 @@ class PathMdFieldWidget(QWidget):
         layout.addWidget(self._btn)
 
     def _browse(self) -> None:
-        from workflow_app.config.app_state import app_state
-
-        base_dir = Path.cwd()
-        if app_state.has_config and app_state.config is not None:
-            base_dir = app_state.config.project_dir
-
-        start_dir = self._default_md_dir
-        candidate = Path(start_dir) if start_dir else None
-        if candidate is not None and not candidate.is_absolute():
-            candidate = base_dir / candidate
-        if candidate is None or not candidate.exists():
-            candidate = base_dir if base_dir.exists() else Path.cwd()
-        start_dir = str(candidate)
-
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Selecionar tasklist",
-            start_dir,
-            "Markdown (*.md)",
-        )
+        path = _browse_markdown_file(self, self._default_md_dir)
         if path:
             self._line.setText(path)
 
@@ -532,7 +566,29 @@ class DoublePhaseArgumentDialog(QDialog):
         font_metrics = self._main_input.fontMetrics()
         line_height = font_metrics.lineSpacing()
         self._main_input.setFixedHeight(line_height * 4 + 8)
-        form_layout.addWidget(self._main_input)
+
+        main_input_row = QWidget()
+        main_input_layout = QHBoxLayout(main_input_row)
+        main_input_layout.setContentsMargins(0, 0, 0, 0)
+        main_input_layout.setSpacing(6)
+        main_input_layout.addWidget(self._main_input, stretch=1)
+
+        self._main_md_btn = QPushButton("🔍")
+        self._main_md_btn.setProperty("testid", "double-phase-main-md-browse")
+        self._main_md_btn.setToolTip("Selecionar arquivo .md")
+        self._main_md_btn.setFixedSize(32, 32)
+        self._main_md_btn.setStyleSheet(
+            "QPushButton { background-color: #3F3F46; color: #D4D4D8;"
+            "  border: 1px solid #52525B; border-radius: 4px;"
+            "  font-size: 13px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
+        )
+        self._main_md_btn.clicked.connect(self._browse_main_markdown)
+        main_input_layout.addWidget(
+            self._main_md_btn,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        form_layout.addWidget(main_input_row)
 
         # Bloco do meio: row unico de checkboxes (omitido quando fixed_flag esta definido)
         all_flags = self._flags_boolean + [f.name for f in self._flags_with_value]
@@ -556,7 +612,7 @@ class DoublePhaseArgumentDialog(QDialog):
             form_layout.addWidget(flags_row)
 
             # Bloco condicional: inputs para flags_with_value
-            self._flag_inputs: dict[str, tuple[QWidget, QLineEdit]] = {}
+            self._flag_inputs: dict[str, tuple[QWidget, QWidget]] = {}
             for flag_spec in self._flags_with_value:
                 container = QWidget()
                 container_layout = QHBoxLayout(container)
@@ -569,13 +625,19 @@ class DoublePhaseArgumentDialog(QDialog):
                 )
                 container_layout.addWidget(flag_label)
 
-                edit = QLineEdit()
-                edit.setPlaceholderText(flag_spec.placeholder or f"valor para --{flag_spec.name}")
-                edit.setStyleSheet(
-                    "background-color: #3F3F46; color: #FAFAFA;"
-                    " border: 1px solid #52525B; border-radius: 4px;"
-                    " padding: 4px 8px; font-size: 12px; font-family: monospace;"
-                )
+                if _flag_spec_is_path_md(flag_spec):
+                    edit = PathMdFieldWidget(self._default_md_dir)
+                    edit.line_edit.setPlaceholderText(
+                        flag_spec.placeholder or f"valor para --{flag_spec.name}"
+                    )
+                else:
+                    edit = QLineEdit()
+                    edit.setPlaceholderText(flag_spec.placeholder or f"valor para --{flag_spec.name}")
+                    edit.setStyleSheet(
+                        "background-color: #3F3F46; color: #FAFAFA;"
+                        " border: 1px solid #52525B; border-radius: 4px;"
+                        " padding: 4px 8px; font-size: 12px; font-family: monospace;"
+                    )
                 container_layout.addWidget(edit, stretch=1)
 
                 container.setVisible(False)
@@ -597,7 +659,10 @@ class DoublePhaseArgumentDialog(QDialog):
                     err.setVisible(False)
                     form_layout.addWidget(err)
                     self._flag_error_labels[flag_spec.name] = err
-                    edit.textChanged.connect(self._on_validate_changed)
+                    if isinstance(edit, PathMdFieldWidget):
+                        edit.line_edit.textChanged.connect(self._on_validate_changed)
+                    else:
+                        edit.textChanged.connect(self._on_validate_changed)
                     if chk is not None:
                         chk.toggled.connect(lambda _c: self._on_validate_changed())
 
@@ -605,6 +670,23 @@ class DoublePhaseArgumentDialog(QDialog):
         scroll.setWidget(form_container)
         main_layout.addWidget(scroll, stretch=1)
         self._build_buttons(main_layout)
+
+    def _browse_main_markdown(self) -> None:
+        path = _browse_markdown_file(self, self._default_md_dir)
+        if path:
+            self._main_input.setPlainText(path)
+
+    @staticmethod
+    def _input_widget_text(widget: QWidget) -> str:
+        if isinstance(widget, PathMdFieldWidget):
+            return widget.text()
+        if isinstance(widget, QLineEdit):
+            return widget.text().strip()
+        return ""
+
+    @staticmethod
+    def _quote_if_needed(value: str) -> str:
+        return f'"{value}"' if any(c in value for c in (" ", "\t")) else value
 
     def _build_buttons(self, main_layout: QVBoxLayout) -> None:
         btn_row = QHBoxLayout()
@@ -653,7 +735,10 @@ class DoublePhaseArgumentDialog(QDialog):
                     widgets.append(chk)
                 container, edit = self._flag_inputs.get(flag_spec.name, (None, None))
                 if container is not None and container.isVisible():
-                    widgets.append(edit)
+                    if isinstance(edit, PathMdFieldWidget):
+                        widgets.append(edit.line_edit)
+                    else:
+                        widgets.append(edit)
         else:
             # Modo legacy: _widgets contem QWidget OU tuple (chk, edit/pw) para
             # checkbox_with_value e checkbox_with_path_md. Desempacotar tuplas
@@ -692,13 +777,17 @@ class DoublePhaseArgumentDialog(QDialog):
             label.setStyleSheet("color: #D4D4D8; font-size: 11px; font-weight: 600;")
             layout.addWidget(label)
 
-            edit = QLineEdit()
-            edit.setStyleSheet(
-                "background-color: #3F3F46; color: #FAFAFA;"
-                " border: 1px solid #52525B; border-radius: 4px;"
-                " padding: 4px 8px; font-size: 12px; font-family: monospace;"
-            )
-            edit.setPlaceholderText(token.label)
+            if ".md" in token.label.lower():
+                edit = PathMdFieldWidget(self._default_md_dir)
+                edit.line_edit.setPlaceholderText(token.label)
+            else:
+                edit = QLineEdit()
+                edit.setStyleSheet(
+                    "background-color: #3F3F46; color: #FAFAFA;"
+                    " border: 1px solid #52525B; border-radius: 4px;"
+                    " padding: 4px 8px; font-size: 12px; font-family: monospace;"
+                )
+                edit.setPlaceholderText(token.label)
             layout.addWidget(edit)
             self._widgets.append(edit)
 
@@ -874,7 +963,7 @@ class DoublePhaseArgumentDialog(QDialog):
             _container, edit = pair
             if edit is None:
                 continue
-            val = edit.text().strip()
+            val = self._input_widget_text(edit)
             if flag_spec.name == "name":
                 if not val or not SLUG_RE.match(val):
                     errors.append(
@@ -965,18 +1054,18 @@ class DoublePhaseArgumentDialog(QDialog):
                     chk = self._flag_checkboxes.get(flag_spec.name)
                     if chk is not None and chk.isChecked():
                         container, edit = self._flag_inputs[flag_spec.name]
-                        val = edit.text().strip()
+                        val = self._input_widget_text(edit)
                         if val:
-                            parts.append(f"--{flag_spec.name} {val}")
+                            parts.append(f"--{flag_spec.name} {self._quote_if_needed(val)}")
 
         else:
             for i, tok in enumerate(self._tokens):
                 widget = self._widgets[i]
                 if tok.kind == "input":
-                    assert isinstance(widget, QLineEdit)
-                    val = widget.text().strip()
+                    assert isinstance(widget, (QLineEdit, PathMdFieldWidget))
+                    val = self._input_widget_text(widget)
                     if val:
-                        parts.append(val)
+                        parts.append(self._quote_if_needed(val))
                 elif tok.kind == "checkbox":
                     assert isinstance(widget, QCheckBox)
                     if widget.isChecked():

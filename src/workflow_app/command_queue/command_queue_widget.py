@@ -21,17 +21,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QTabWidget,
     QVBoxLayout,
@@ -77,6 +81,193 @@ _DROP_INDICATOR_COLOR = QColor("#F59E0B")  # Amber-400
 _DROP_INDICATOR_WIDTH = 2
 
 _WORKFLOW_APP_DIR = Path(__file__).resolve().parents[3]  # .../ai-forge/workflow-app
+
+
+class ResponsiveButtonFlowLayout(QLayout):
+    """Flow layout para botoes compactos das subtabs de insercoes.
+
+    Quebra widgets em linhas conforme a largura disponivel. Quando a linha 5
+    seria necessaria, reduz a largura alocada dos itens para manter no maximo
+    `max_lines` linhas renderizadas.
+    """
+
+    _BUTTON_FLOOR_WIDTH = 44
+    _ABSOLUTE_FLOOR_WIDTH = 8
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        spacing: int = 4,
+        max_lines: int = 4,
+    ) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self._spacing = spacing
+        self._max_lines = max(1, max_lines)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802 - Qt API
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:  # noqa: N802 - Qt API
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:  # noqa: N802 - Qt API
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientations:  # noqa: N802 - Qt API
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt API
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt API
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt API
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(360, self.heightForWidth(360))
+
+    def minimumSize(self) -> QSize:  # noqa: N802 - Qt API
+        left, top, right, bottom = self.getContentsMargins()
+        min_height = 0
+        min_width = self._BUTTON_FLOOR_WIDTH
+        for item in self._visible_items():
+            min_height = max(min_height, item.minimumSize().height(), item.sizeHint().height())
+            min_width = max(min_width, min(item.minimumSize().width(), self._BUTTON_FLOOR_WIDTH))
+        return QSize(min_width + left + right, min_height + top + bottom)
+
+    def _visible_items(self) -> list[QLayoutItem]:
+        visible: list[QLayoutItem] = []
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            visible.append(item)
+        return visible
+
+    def _base_width(self, item: QLayoutItem) -> int:
+        return max(item.sizeHint().width(), item.minimumSize().width(), self._BUTTON_FLOOR_WIDTH)
+
+    def _target_floor_width(self, items: list[QLayoutItem], width: int) -> int:
+        if not items or width <= 0:
+            return self._BUTTON_FLOOR_WIDTH
+        items_per_line = max(1, (len(items) + self._max_lines - 1) // self._max_lines)
+        fit_width = (width - self._spacing * (items_per_line - 1)) // items_per_line
+        return max(self._ABSOLUTE_FLOOR_WIDTH, min(self._BUTTON_FLOOR_WIDTH, fit_width))
+
+    def _floor_width(self, item: QLayoutItem, target_floor: int | None = None) -> int:
+        # Permite compactar botoes alem do minimumWidth explicito quando a 5a
+        # linha seria criada, mas preserva um alvo legivel.
+        floor = self._BUTTON_FLOOR_WIDTH if target_floor is None else target_floor
+        return min(self._base_width(item), floor)
+
+    def _width_for_scale(
+        self, item: QLayoutItem, scale: float, target_floor: int | None = None,
+    ) -> int:
+        base = self._base_width(item)
+        floor = self._floor_width(item, target_floor)
+        return max(floor, int(round(base * scale)))
+
+    def _apply_compact_min_width(self, item: QLayoutItem, width: int) -> None:
+        widget = item.widget()
+        if widget is None:
+            return
+        original = widget.property("_responsive_flow_original_min_width")
+        if not isinstance(original, int):
+            original = widget.minimumWidth()
+            widget.setProperty("_responsive_flow_original_min_width", original)
+        target = min(original, width)
+        if widget.minimumWidth() != target:
+            widget.setMinimumWidth(target)
+
+    def _line_count_for_scale(
+        self,
+        items: list[QLayoutItem],
+        width: int,
+        scale: float,
+        target_floor: int | None = None,
+    ) -> int:
+        if not items:
+            return 0
+        if width <= 0:
+            return len(items)
+        lines = 1
+        x = 0
+        for item in items:
+            item_width = self._width_for_scale(item, scale, target_floor)
+            next_x = item_width if x == 0 else x + self._spacing + item_width
+            if x > 0 and next_x > width:
+                lines += 1
+                x = item_width
+            else:
+                x = next_x
+        return lines
+
+    def _scale_and_floor_for_width(self, items: list[QLayoutItem], width: int) -> tuple[float, int]:
+        target_floor = self._target_floor_width(items, width)
+        if self._line_count_for_scale(items, width, 1.0, target_floor) <= self._max_lines:
+            return 1.0, target_floor
+
+        best = 0.0
+        low, high = 0.0, 1.0
+        for _ in range(14):
+            mid = (low + high) / 2.0
+            if self._line_count_for_scale(items, width, mid, target_floor) <= self._max_lines:
+                best = mid
+                low = mid
+            else:
+                high = mid
+        return best, target_floor
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective = rect.adjusted(left, top, -right, -bottom)
+        items = self._visible_items()
+        if not items:
+            return top + bottom
+
+        width = max(0, effective.width())
+        scale, target_floor = self._scale_and_floor_for_width(items, width)
+        y = effective.y()
+        line_height = 0
+        line_width = 0
+        rendered_lines = 1
+
+        for item in items:
+            item_width = self._width_for_scale(item, scale, target_floor)
+            item_height = item.sizeHint().height()
+            next_line_width = (
+                item_width if line_width == 0
+                else line_width + self._spacing + item_width
+            )
+
+            if line_width > 0 and next_line_width > width and rendered_lines < self._max_lines:
+                y += line_height + self._spacing
+                line_height = 0
+                line_width = 0
+                rendered_lines += 1
+                next_line_width = item_width
+
+            if not test_only:
+                item_x = effective.x() if line_width == 0 else effective.x() + line_width + self._spacing
+                self._apply_compact_min_width(item, item_width)
+                item.setGeometry(QRect(QPoint(item_x, y), QSize(item_width, item_height)))
+            line_width = next_line_width
+            line_height = max(line_height, item_height)
+
+        return y + line_height - rect.y() + bottom
 
 
 class _VisibilitySignalLabel(QLabel):
@@ -646,7 +837,7 @@ class CommandQueueWidget(QWidget):
              + cap 46 chars conforme regex `^\\d{2}-\\d{2}-[a-z0-9]...$`.
 
         Single source of truth ELIMINA drift entre widget e markdown
-        spec (per adversarial review com /skill:mcp-codex 2026-05-14).
+        spec (per adversarial review com /mcp:codex 2026-05-14).
 
         Fallback de seguranca: se subprocess falhar (script ausente,
         erro inesperado), cai em `Path.stem` para evitar travamento da
@@ -1313,15 +1504,31 @@ class CommandQueueWidget(QWidget):
         header_layout.setContentsMargins(4, 14, 4, 4)
         header_layout.setSpacing(0)
 
-        # ── Tab bar (4 buttons in a row) ─────────────────────────────────
-        # Height 38 = 32 (altura dos extras terminal-route-toggles + gear) + 3+3 margins.
-        # Antes era 28 e cortava os extras pelo bottom.
+        # ── Tab/action row ───────────────────────────────────────────────
+        # Split em dois blocos:
+        # - abas primarias: todas as sections, exceto "Inserções"
+        # - bloco inserções: queue-tab-terminal-insertions + route toggles + gear
+        # Height 38 = 32 (altura dos extras terminal-route-toggles + gear) + margins.
+        tab_row = QWidget()
+        tab_row.setFixedHeight(38)
+        tab_row.setStyleSheet("background-color: #1E1E21;")
+        tab_row_layout = QHBoxLayout(tab_row)
+        tab_row_layout.setContentsMargins(4, 1, 4, 1)
+        tab_row_layout.setSpacing(6)
+
         tab_bar = QWidget()
-        tab_bar.setFixedHeight(38)
-        tab_bar.setStyleSheet("background-color: #1E1E21;")
+        tab_bar.setProperty("testid", "output-toolbar-left-primary-tabs")
+        tab_bar.setStyleSheet("background-color: transparent;")
         tab_bar_layout = QHBoxLayout(tab_bar)
-        tab_bar_layout.setContentsMargins(4, 1, 4, 1)
+        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
         tab_bar_layout.setSpacing(3)
+
+        insertions_bar = QWidget()
+        insertions_bar.setProperty("testid", "output-toolbar-left-insertions-controls")
+        insertions_bar.setStyleSheet("background-color: transparent;")
+        insertions_bar_layout = QHBoxLayout(insertions_bar)
+        insertions_bar_layout.setContentsMargins(0, 0, 0, 0)
+        insertions_bar_layout.setSpacing(3)
 
         self._sec_tabs: list[QPushButton] = []
         _tab_testids = (
@@ -1338,14 +1545,21 @@ class CommandQueueWidget(QWidget):
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
-            tab_bar_layout.addWidget(btn, stretch=1)
+            if _tab_testids[i] == "queue-tab-terminal-insertions":
+                insertions_bar_layout.addWidget(btn)
+            else:
+                tab_bar_layout.addWidget(btn, stretch=1)
             self._sec_tabs.append(btn)
 
-        # Exposed so MainWindow can append extras (terminal-route-toggles + gear)
-        # after the 4 section tabs via attach_tab_bar_extras().
-        self._tab_bar_layout = tab_bar_layout
+        tab_row_layout.addWidget(tab_bar, stretch=1)
+        tab_row_layout.addWidget(insertions_bar)
 
-        header_layout.addWidget(tab_bar)
+        # Exposed so MainWindow can append terminal-route-toggles + gear into
+        # the dedicated insertions block via attach_tab_bar_extras().
+        self._tab_bar_layout = tab_bar_layout
+        self._insertions_bar_layout = insertions_bar_layout
+
+        header_layout.addWidget(tab_row)
 
         # ── Section contents (only one visible at a time) ────────────────
         self._sec_contents: list[QWidget] = []
@@ -1388,7 +1602,7 @@ class CommandQueueWidget(QWidget):
             "Execute Daily Loop — expande a fila finita gerada por Create. "
             "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
             "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
-            "/daily-loop:review-done (Opus/standard, /skill:double-mcp Level 3 "
+            "/daily-loop:review-done (Opus/standard, /mcp:dual Level 3 "
             "CROSS_ADVERSARIAL — analogo per-item de /review-executed-task, "
             "reverte+corrige+re-acceptance se achar regressao). Final: "
             "/daily-loop:review global em Opus/HIGH. /clear/model/effort "
@@ -1422,7 +1636,7 @@ class CommandQueueWidget(QWidget):
             "Loop — expande fila finita gerada por /loop (--task|--cmd|--cmd-single|--both). "
             "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
             "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
-            "/daily-loop:review-done (Opus/standard, /skill:double-mcp Level 3 "
+            "/daily-loop:review-done (Opus/standard, /mcp:dual Level 3 "
             "CROSS_ADVERSARIAL). Final: /daily-loop:review global em Opus/HIGH. "
             "/clear/model/effort dedupados entre buckets."
         )
@@ -1611,35 +1825,22 @@ class CommandQueueWidget(QWidget):
             "QTabBar::tab:hover { background: #52525B; color: #FAFAFA; }"
         )
 
-        def _make_subtab(testid: str) -> tuple[QWidget, QHBoxLayout]:
+        def _make_subtab(testid: str) -> tuple[QWidget, ResponsiveButtonFlowLayout]:
             w = QWidget()
             w.setProperty("testid", testid)
-            lay = QHBoxLayout(w)
+            lay = ResponsiveButtonFlowLayout(w, spacing=4, max_lines=4)
             lay.setContentsMargins(0, 2, 0, 2)
-            lay.setSpacing(4)
-            lay.addStretch(1)
             return w, lay
 
-        # paths & IDs usa 2 linhas (QVBoxLayout): row 1 = botoes de path
-        # existentes, row 2 = botoes adicionais (ex: 'repo rules'). As demais
-        # sub-abas seguem com 1 linha via _make_subtab. Refactor 2026-05-19.
+        # paths & IDs agora usa o mesmo flow responsivo das demais subtabs.
+        # `repo rules` entra no mesmo fluxo para o limite de 4 linhas valer
+        # para a sub-aba inteira.
         _paths_tab = QWidget()
         _paths_tab.setProperty("testid", "queue-subtab-insertions-paths")
-        _paths_outer = QVBoxLayout(_paths_tab)
-        _paths_outer.setContentsMargins(0, 2, 0, 2)
-        _paths_outer.setSpacing(4)
-        _paths_row1 = QWidget()
-        self._subtab_paths_layout = QHBoxLayout(_paths_row1)
-        self._subtab_paths_layout.setContentsMargins(0, 0, 0, 0)
-        self._subtab_paths_layout.setSpacing(4)
-        self._subtab_paths_layout.addStretch(1)
-        _paths_row2 = QWidget()
-        self._subtab_paths_layout_row2 = QHBoxLayout(_paths_row2)
-        self._subtab_paths_layout_row2.setContentsMargins(0, 0, 0, 0)
-        self._subtab_paths_layout_row2.setSpacing(4)
-        self._subtab_paths_layout_row2.addStretch(1)
-        _paths_outer.addWidget(_paths_row1)
-        _paths_outer.addWidget(_paths_row2)
+        self._subtab_paths_layout = ResponsiveButtonFlowLayout(
+            _paths_tab, spacing=4, max_lines=4
+        )
+        self._subtab_paths_layout.setContentsMargins(0, 2, 0, 2)
         _prompts_tab, self._subtab_prompts_layout = _make_subtab("queue-subtab-insertions-prompts")
         _rules_tab, self._subtab_rules_layout = _make_subtab("queue-subtab-insertions-rules")
 
@@ -1681,19 +1882,21 @@ class CommandQueueWidget(QWidget):
              "queue-btn-blog"),
             ("blog stockpile (gera estoque)",
              "Blog Stockpile — GERA ESTOQUE, NAO PUBLICA. "
-             "Gera 1 pacote de estoque (stockpile) quad-locale (pt-BR/it-IT/en/es-ES) "
-             "para o blog e faz commit/push APENAS do pacote de estoque "
-             "(em .claude/blog/data/stockpile/) para o repositorio. O artigo NAO vai "
-             "ao ar com este botao. A publicacao em content/{locale}/blog/, o hreflang "
-             "e o deploy acontecem DEPOIS, automaticamente, pelo GitHub Actions "
-             "(cron 13h UTC, promote-from-stockpile.yml) — nao ha botao de 'publicar "
-             "agora' no app por decisao de design (T012): publicar e responsabilidade "
-             "exclusiva do CI, para nao acoplar geracao de estoque a deploy de producao. "
-             "Fase 1: expand-keywords → cluster → prioritize → deduplicate. "
-             "Fase 2: generate-briefs x4 locales (pt-BR cria CURRENT-PACKAGE.json com UUID; demais reutilizam). "
-             "Fase 3: write-articles --output-dir stockpile x4 locales (le UUID de CURRENT-PACKAGE.json). "
-             "Fase 4: review-seo --mode stockpile x4 locales. "
-             "Fase 5: quality-gate --mode stockpile → stockpile-push (commit + push idempotente para main).",
+             "Pipeline ATOMIZADA Kimi-friendly (Opcao D, D8 do DECISION-LOG): gera N=3 "
+             "pacotes quad-locale (pt-BR/it-IT/en/es-ES) por clique e faz commit/push "
+             "APENAS do estoque (em .claude/blog/data/stockpile/). O artigo NAO vai ao ar "
+             "com este botao — a publicacao em content/{locale}/blog/ acontece via GitHub "
+             "Actions cron 13h UTC (promote-from-stockpile.yml). Por design (T012), publicar "
+             "e responsabilidade exclusiva do CI. "
+             "Fase 1 (compartilhada): expand-keywords -> cluster -> prioritize -> deduplicate. "
+             "Fase 2 (x3 pacotes, atomica): por pacote, generate-briefs (avanca wave + "
+             "CURRENT-PACKAGE.json) -> write-articles --output-dir stockpile x4 locales -> "
+             "review-seo --mode stockpile x4 locales -> quality-gate --mode stockpile x4 "
+             "locales -> stockpile-finalize-package (Pass 2.4 atomico: monta package.json). "
+             "Fase 3: stockpile-validate (npm run validate:stockpile) -> stockpile-push. "
+             "Cada item da fila e um slash-command atomico ja Kimi-compat (ver kimi_whitelist.py), "
+             "compativel com o seletor 'queue-div-main-llm' (Claude / Codex / Kimi). N editavel "
+             "via _BLOG_STOCKPILE_PACKAGES_PER_CLICK em templates/quick_templates.py.",
              lambda: self._load_quick_template(
                  TEMPLATE_BLOG_STOCKPILE,
                  # T012: o nome vira o label persistente (_template_label) que
@@ -1901,78 +2104,107 @@ class CommandQueueWidget(QWidget):
         # play_btn (stretch=2) + ac_sched (stretch=3) -> 40/60 split na row.
         play_row_top.addLayout(self._ac_sched_layout, stretch=3)
 
-        # Use Kimi checkbox — quando marcado, [Rodar próximo] (queue-btn-play-next)
-        # clica na seta AZUL (kimi) ao inves da VERDE (claude) para items que
-        # estao na whitelist Kimi (kimi_whitelist.is_kimi_compatible). Items
-        # fora da whitelist seguem rodando no Claude independente do estado do
-        # checkbox. Ocupa o slot que antes era do botão Autocast (removido).
-        _kimi_box = QWidget()
-        _kimi_box.setProperty("testid", "queue-div-use-kimi")
-        _kimi_box.setFixedHeight(32)
-        _kimi_box.setStyleSheet(
+        # LLM routing: one container with the main session selector and
+        # optional worker preference toggles used by [Rodar proximo].
+        _llm_box = QWidget()
+        _llm_box.setProperty("testid", "queue-div-llm-routing")
+        _llm_box.setFixedHeight(78)
+        _llm_box.setStyleSheet(
             "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
             "  border-radius: 5px; }"
         )
-        _kbl = QHBoxLayout(_kimi_box)
-        _kbl.setContentsMargins(10, 0, 10, 0)
-        _kbl.setSpacing(8)
-        self._use_kimi_chk = QCheckBox("Use Kimi")
+        _llm_layout = QVBoxLayout(_llm_box)
+        _llm_layout.setContentsMargins(8, 4, 8, 4)
+        _llm_layout.setSpacing(4)
+
+        _control_qss = (
+            "QRadioButton, QCheckBox { color: #FAFAFA; font-size: 10px;"
+            "  font-weight: 600; background: transparent; border: none;"
+            "  padding: 0; }"
+            "QRadioButton::indicator, QCheckBox::indicator { width: 13px;"
+            "  height: 13px; }"
+            "QRadioButton::indicator:unchecked, QCheckBox::indicator:unchecked {"
+            "  background-color: #3F3F46; border: 1px solid #52525B; }"
+            "QRadioButton::indicator:unchecked { border-radius: 7px; }"
+            "QCheckBox::indicator:unchecked { border-radius: 3px; }"
+            "QRadioButton::indicator:checked, QCheckBox::indicator:checked {"
+            "  background-color: #3B82F6; border: 1px solid #3B82F6; }"
+            "QRadioButton::indicator:checked { border-radius: 7px; }"
+            "QCheckBox::indicator:checked { border-radius: 3px; }"
+            "QRadioButton::indicator:hover, QCheckBox::indicator:hover {"
+            "  border-color: #93C5FD; }"
+        )
+        _section_label_qss = (
+            "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
+            "  text-transform: uppercase; background: transparent; border: none; }"
+        )
+
+        _main_section = QWidget()
+        _main_section.setProperty("testid", "queue-div-main-llm")
+        _main_section.setStyleSheet("background: transparent; border: none;")
+        _main_layout = QHBoxLayout(_main_section)
+        _main_layout.setContentsMargins(0, 0, 0, 0)
+        _main_layout.setSpacing(7)
+        _main_label = QLabel("Main LLM:")
+        _main_label.setStyleSheet(_section_label_qss)
+        _main_options = QWidget()
+        _main_options.setStyleSheet("background: transparent; border: none;")
+        _main_options_layout = QHBoxLayout(_main_options)
+        _main_options_layout.setContentsMargins(0, 0, 0, 0)
+        _main_options_layout.setSpacing(7)
+        self._main_claude_radio = QRadioButton("claude")
+        self._main_claude_radio.setProperty("testid", "queue-radio-main-claude")
+        self._main_claude_radio.setChecked(True)
+        self._main_codex_radio = QRadioButton("codex")
+        self._main_codex_radio.setProperty("testid", "queue-radio-main-codex")
+        self._main_kimi_radio = QRadioButton("kimi")
+        # Compatibility alias: this is the new Main LLM Kimi control.
+        self._main_kimi_radio.setProperty("testid", "queue-chk-force-kimi")
+        self._force_kimi_chk = self._main_kimi_radio
+        self._main_llm_group = QButtonGroup(self)
+        self._main_llm_group.setExclusive(True)
+        for _btn in (
+            self._main_claude_radio,
+            self._main_codex_radio,
+            self._main_kimi_radio,
+        ):
+            _btn.setStyleSheet(_control_qss)
+            self._main_llm_group.addButton(_btn)
+            _main_options_layout.addWidget(_btn)
+        _main_layout.addWidget(_main_label)
+        _main_layout.addWidget(_main_options, stretch=1)
+        _llm_layout.addWidget(_main_section, stretch=1)
+
+        _worker_section = QWidget()
+        _worker_section.setProperty("testid", "queue-div-parallel-worker")
+        _worker_section.setStyleSheet("background: transparent; border: none;")
+        _worker_layout = QHBoxLayout(_worker_section)
+        _worker_layout.setContentsMargins(0, 0, 0, 0)
+        _worker_layout.setSpacing(7)
+        _worker_label = QLabel("Parallel Worker:")
+        _worker_label.setStyleSheet(_section_label_qss)
+        _worker_options = QWidget()
+        _worker_options.setStyleSheet("background: transparent; border: none;")
+        _worker_options_layout = QHBoxLayout(_worker_options)
+        _worker_options_layout.setContentsMargins(0, 0, 0, 0)
+        _worker_options_layout.setSpacing(8)
+        self._use_kimi_chk = QCheckBox("kimi")
         self._use_kimi_chk.setProperty("testid", "queue-chk-use-kimi")
         self._use_kimi_chk.setToolTip(
-            "Quando marcado, [Rodar próximo] dispara via Kimi (seta azul) para\n"
-            "items kimi-compatible. Items fora da whitelist seguem rodando no\n"
-            "Claude (seta verde) — checkbox e ignorado nesse caso."
+            "Quando marcado, [Rodar proximo] usa Kimi para items compativeis."
         )
-        self._use_kimi_chk.setStyleSheet(
-            "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
-            "  background: transparent; border: none; padding: 0; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
-            "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
-            "  border: 1px solid #52525B; border-radius: 3px; }"
-            "QCheckBox::indicator:checked { background-color: #3B82F6;"
-            "  border: 1px solid #3B82F6; border-radius: 3px; }"
-            "QCheckBox::indicator:hover { border-color: #93C5FD; }"
+        self._use_codex_chk = QCheckBox("codex")
+        self._use_codex_chk.setProperty("testid", "queue-chk-use-codex")
+        self._use_codex_chk.setToolTip(
+            "Quando marcado, [Rodar proximo] envia comandos Claude elegiveis ao T3 Codex."
         )
-        _kbl.addWidget(self._use_kimi_chk)
-        play_row_third.addWidget(_kimi_box, stretch=1)
-
-        # --force Kimi checkbox (segunda posicao em play_row_third). Quando
-        # marcado, o fluxo da seta verde (per-item e "Rodar proximo") passa a
-        # cuspir no terminal-workspace-output em vez do interactive, /model e
-        # /effort viram apenas bolinha amarela sem dispatch, /clear vai SO para
-        # o workspace, e cada comando ganha 'skill:' apos a barra inicial
-        # (/create-task -> /skill:create-task). Sem o check, comportamento
-        # permanece identico ao anterior. Copia do layout do queue-div-use-kimi.
-        _force_kimi_box = QWidget()
-        _force_kimi_box.setProperty("testid", "queue-div-force-kimi")
-        _force_kimi_box.setFixedHeight(32)
-        _force_kimi_box.setStyleSheet(
-            "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
-            "  border-radius: 5px; }"
-        )
-        _fkbl = QHBoxLayout(_force_kimi_box)
-        _fkbl.setContentsMargins(10, 0, 10, 0)
-        _fkbl.setSpacing(8)
-        self._force_kimi_chk = QCheckBox("--force Kimi")
-        self._force_kimi_chk.setProperty("testid", "queue-chk-force-kimi")
-        self._force_kimi_chk.setToolTip(
-            "Quando marcado, a seta verde dispara comandos no terminal\n"
-            "workspace com prefixo /skill: ; /model e /effort viram apenas\n"
-            "bolinha amarela; /clear vai so para o workspace. Sem o check,\n"
-            "comportamento permanece identico ao anterior."
-        )
-        self._force_kimi_chk.setStyleSheet(
-            "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
-            "  background: transparent; border: none; padding: 0; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
-            "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
-            "  border: 1px solid #52525B; border-radius: 3px; }"
-            "QCheckBox::indicator:checked { background-color: #3B82F6;"
-            "  border: 1px solid #3B82F6; border-radius: 3px; }"
-            "QCheckBox::indicator:hover { border-color: #93C5FD; }"
-        )
-        _fkbl.addWidget(self._force_kimi_chk)
-        play_row_third.addWidget(_force_kimi_box, stretch=1)
+        for _btn in (self._use_kimi_chk, self._use_codex_chk):
+            _btn.setStyleSheet(_control_qss)
+            _worker_options_layout.addWidget(_btn)
+        _worker_layout.addWidget(_worker_label)
+        _worker_layout.addWidget(_worker_options, stretch=1)
+        _llm_layout.addWidget(_worker_section, stretch=1)
+        play_row_third.addWidget(_llm_box, stretch=1)
 
         # Botao de copiar todos os comandos renderizados em queue-command-list.
         # Posicionado em play_row_third apos --force Kimi.
@@ -2005,11 +2237,13 @@ class CommandQueueWidget(QWidget):
             self._copy_commands_btn, alignment=Qt.AlignmentFlag.AlignVCenter
         )
 
-        # Mutual exclusivity entre Use Kimi e --force Kimi (review MEDIUM 5).
-        # Tambem esconde a seta azul per-item quando --force Kimi esta ativo
-        # (review HIGH 1: spec "seta azul nao usada" interpretada como prescritiva).
+        # Main Kimi preserves the old slash-to-skill conversion and hides the
+        # per-item blue arrows while active. Worker toggles keep the legacy
+        # play-next preference path.
         self._force_kimi_chk.toggled.connect(self._on_force_kimi_toggled)
         self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
+        self._main_codex_radio.toggled.connect(self._on_main_codex_toggled)
+        self._use_codex_chk.toggled.connect(self._on_use_codex_toggled)
 
         main_layout.addWidget(play_bar)
 
@@ -2346,8 +2580,8 @@ class CommandQueueWidget(QWidget):
     # que alimentam as sub-abas do QTabWidget queue-subtabs-insertions.
     # Cada um é idempotente: limpa o layout antes de inserir.
 
-    def _populate_subtab(self, layout: QHBoxLayout, widgets: list[QWidget]) -> None:
-        """Helper interno: limpa layout e insere widgets + stretch final."""
+    def _populate_subtab(self, layout: QLayout, widgets: list[QWidget]) -> None:
+        """Helper interno: limpa layout e insere widgets no flow responsivo."""
         while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
@@ -2355,18 +2589,17 @@ class CommandQueueWidget(QWidget):
                 w.setParent(None)
         for w in widgets:
             layout.addWidget(w)
-        layout.addStretch(1)
+        layout.invalidate()
 
     def populate_paths_subtab(
         self, widgets: list[QWidget], second_row: list[QWidget] | None = None,
     ) -> None:
         """Sub-aba 'paths & IDs': JSON, WS, Workflow App + campos basic_flow.
 
-        `second_row` (opcional) popula a linha de baixo da sub-aba — usada
-        pelo botao 'repo rules'. Ambas as linhas sao idempotentes.
+        `second_row` (opcional) e anexado ao mesmo fluxo responsivo — usado
+        pelo botao 'repo rules'. O limite de 4 linhas vale para a sub-aba toda.
         """
-        self._populate_subtab(self._subtab_paths_layout, widgets)
-        self._populate_subtab(self._subtab_paths_layout_row2, second_row or [])
+        self._populate_subtab(self._subtab_paths_layout, widgets + (second_row or []))
 
     def populate_prompts_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'prompts': botoes de prompt construídos a partir de arquivos .md."""
@@ -2377,14 +2610,14 @@ class CommandQueueWidget(QWidget):
         self._populate_subtab(self._subtab_rules_layout, widgets)
 
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
-        """Anexa widgets ao tab_bar apos as 4 section tabs.
+        """Anexa widgets ao bloco de inserções, apos a aba Inserções.
 
         Usado para terminal-route-toggles + toolbar-prompts-config-gear,
-        que vivem visualmente como "abas extras" mas nao tem section
-        content associado.
+        que ficam agrupados com queue-tab-terminal-insertions e nao disputam
+        espaco com as abas primarias.
         """
         for w in extras:
-            self._tab_bar_layout.addWidget(w)
+            self._insertions_bar_layout.addWidget(w)
 
     def attach_count_label(self, count_label: QLabel) -> None:
         """Reparenteia o queue-count-label (owned por MetricsBar) para o
@@ -5385,31 +5618,25 @@ class CommandQueueWidget(QWidget):
         signal_bus.kimi_blue_arrow_dispatched.emit(kimi_prompt, delay)
 
     def _on_force_kimi_toggled(self, checked: bool) -> None:
-        """Quando --force Kimi liga: desliga Use Kimi e esconde a seta azul
-        em todos os items. Quando desliga: re-habilita seta azul respeitando
-        a regra original de visibilidade (whitelist OU spec.kimi_eligible)."""
-        if checked and self._use_kimi_chk.isChecked():
-            # Bloqueia o handler reverso temporariamente para evitar re-entrancy.
-            self._use_kimi_chk.blockSignals(True)
-            self._use_kimi_chk.setChecked(False)
-            self._use_kimi_chk.blockSignals(False)
-        self._use_kimi_chk.setEnabled(not checked)
+        """Main LLM Kimi preserves the old force-Kimi routing behavior."""
         self._refresh_kimi_btn_visibility()
 
     def _on_use_kimi_toggled(self, checked: bool) -> None:
-        """Quando Use Kimi liga e --force Kimi tambem esta marcado, desmarca
-        este (modos mutuamente exclusivos). Sem efeito caso contrario."""
-        if checked and self._force_kimi_chk.isChecked():
-            self._force_kimi_chk.blockSignals(True)
-            self._force_kimi_chk.setChecked(False)
-            self._force_kimi_chk.blockSignals(False)
-            self._use_kimi_chk.setEnabled(True)
-            self._refresh_kimi_btn_visibility()
+        """Parallel Worker Kimi keeps the legacy play-next preference toggle."""
+        self._refresh_kimi_btn_visibility()
+
+    def _on_main_codex_toggled(self, checked: bool) -> None:
+        """Hook kept explicit for symmetry with Main Kimi."""
+        self._refresh_kimi_btn_visibility()
+
+    def _on_use_codex_toggled(self, checked: bool) -> None:
+        """Parallel Worker Codex has no per-item control to refresh."""
+        return
 
     def _refresh_kimi_btn_visibility(self) -> None:
         """Aplica regra de visibilidade das setas azuis per-item.
 
-        Com --force Kimi marcado, esconde TODAS as setas azuis. Sem o force,
+        Com Main LLM Kimi marcado, esconde TODAS as setas azuis. Sem isso,
         repete a regra original aplicada em CommandItemWidget._setup_ui:
         visivel quando whitelist OR spec.kimi_eligible."""
         force_on = self._force_kimi_chk.isChecked()
@@ -5428,6 +5655,30 @@ class CommandQueueWidget(QWidget):
     # --force Kimi reescreve `/cmd` como `/skill:cmd`. Caches resolvidos uma
     # unica vez por instancia para evitar IO repetido no hot path.
     _SKILL_SEARCH_DIRS = (".claude/commands/skill", ".agents/skills")
+    _CLAUDE_COMMAND_SEARCH_DIRS = (".claude/commands",)
+    _CODEX_EXECUTOR_AGENT_PATH = (
+        "ai-forge/MCP/agents/executor-de-slash-commands-rules.md"
+    )
+    _LISTENER_RULES_PATH = "ai-forge/rules/workflow-app-listeners.md"
+
+    @classmethod
+    def _candidate_search_roots(cls) -> list[Path]:
+        """Repo-root candidates independent of the process cwd."""
+        roots: list[Path] = []
+        seen: set[str] = set()
+
+        def _push_root(p: Path) -> None:
+            key = str(p)
+            if key not in seen:
+                seen.add(key)
+                roots.append(p)
+
+        for anchor in (Path.cwd(), _WORKFLOW_APP_DIR):
+            resolved = anchor.resolve()
+            _push_root(resolved)
+            for parent in resolved.parents:
+                _push_root(parent)
+        return roots
 
     @classmethod
     def _resolve_skill_target(cls, slug: str) -> bool:
@@ -5438,17 +5689,54 @@ class CommandQueueWidget(QWidget):
           - subdir:     qa/trace.md            (.claude/commands/skill/ usa subdiretorios)
           - colon-flat: blog:competitor-spy.md  (.agents/skills/ usa ":" no nome do arquivo)
         """
-        import os
         if not slug:
             return False
         rel_subdir = slug.replace(":", "/") + ".md"  # qa/trace.md
         rel_flat   = slug + ".md"                    # blog:competitor-spy.md
-        for base in cls._SKILL_SEARCH_DIRS:
-            if os.path.exists(os.path.join(base, rel_subdir)):
-                return True
-            if rel_flat != rel_subdir and os.path.exists(os.path.join(base, rel_flat)):
-                return True
+        for root in cls._candidate_search_roots():
+            for base in cls._SKILL_SEARCH_DIRS:
+                subdir_path = root / base / rel_subdir
+                if os.path.exists(subdir_path):
+                    return True
+                if rel_flat != rel_subdir:
+                    flat_path = root / base / rel_flat
+                    if os.path.exists(flat_path):
+                        return True
         return False
+
+    @classmethod
+    def _resolve_claude_command_file(cls, slug: str) -> Path | None:
+        """Return the backing .claude command markdown for a slash slug."""
+        if not slug:
+            return None
+        rel_subdir = slug.replace(":", "/") + ".md"
+        rel_flat = slug + ".md"
+        for root in cls._candidate_search_roots():
+            for base in cls._CLAUDE_COMMAND_SEARCH_DIRS:
+                subdir_path = root / base / rel_subdir
+                if subdir_path.exists():
+                    return subdir_path
+                if rel_flat != rel_subdir:
+                    flat_path = root / base / rel_flat
+                    if flat_path.exists():
+                        return flat_path
+        return None
+
+    @classmethod
+    def _resolve_codex_executor_agent_file(cls) -> Path | None:
+        for root in cls._candidate_search_roots():
+            candidate = root / cls._CODEX_EXECUTOR_AGENT_PATH
+            if candidate.exists():
+                return candidate
+        return None
+
+    @classmethod
+    def _resolve_listener_rules_file(cls) -> Path | None:
+        for root in cls._candidate_search_roots():
+            candidate = root / cls._LISTENER_RULES_PATH
+            if candidate.exists():
+                return candidate
+        return None
 
     @staticmethod
     def _inject_skill_prefix(cmd_text: str) -> str:
@@ -5465,6 +5753,121 @@ class CommandQueueWidget(QWidget):
         leading = cmd_text[: len(cmd_text) - len(stripped)]
         return f"{leading}/skill:{stripped[1:]}"
 
+    @staticmethod
+    def _command_head(cmd_text: str) -> str:
+        return cmd_text.strip().split(None, 1)[0].lower() if cmd_text.strip() else ""
+
+    @classmethod
+    def _build_codex_slash_executor_prompt(
+        cls,
+        cmd_text: str,
+        *,
+        listener_channel: str | None = None,
+    ) -> str | None:
+        """Build the prompt that asks Codex to execute a Claude slash command."""
+        stripped = cmd_text.strip()
+        if not stripped or not stripped.startswith("/"):
+            return cmd_text
+        head, _, args = stripped.partition(" ")
+        slug = head[1:]
+        command_file = cls._resolve_claude_command_file(slug)
+        if command_file is None:
+            return None
+        agent_file = cls._resolve_codex_executor_agent_file()
+        agent_ref = (
+            str(agent_file)
+            if agent_file is not None
+            else cls._CODEX_EXECUTOR_AGENT_PATH
+        )
+        listener_file = cls._resolve_listener_rules_file()
+        listener_ref = (
+            str(listener_file)
+            if listener_file is not None
+            else cls._LISTENER_RULES_PATH
+        )
+        channel = listener_channel or "interactive"
+        return (
+            "Use the SystemForge slash-command executor rules and execute the "
+            "Claude command below with maximum fidelity.\n\n"
+            f"Executor rules: {agent_ref}\n"
+            f"Listener rules: {listener_ref}\n"
+            f"Expected listener channel: {channel}\n"
+            f"Command: {stripped}\n"
+            f"Command markdown: {command_file}\n"
+            f"Arguments: {args.strip() or '(none)'}\n\n"
+            "Protocol:\n"
+            "1. Read the executor rules file first.\n"
+            "2. Read the listener rules file before running any finalization block.\n"
+            "3. Read the command markdown file exactly as the source of truth.\n"
+            "4. Parse frontmatter as execution metadata, then execute the markdown body.\n"
+            "5. Resolve project variables from .claude/project.json and "
+            ".codex/codex-project.json when present.\n"
+            "6. Respect the listener contract: if the command has a "
+            "`## FASE FINAL`, autocast, or wf-notify block, execute/preserve it "
+            f"so it notifies channel `{channel}` via the PTY environment. Do not "
+            "prefix the pasted command with WF_CHANNEL_OVERRIDE and do not hardcode "
+            "a different channel.\n"
+            "7. If a required variable, file, or MCP-only capability is missing, "
+            "stop with BLOCKED and list the missing inputs.\n"
+            "8. Do the work; do not summarize the command instead of executing it."
+        )
+
+    def _dispatch_codex_command(self, cmd_text: str, *, to_t1: bool = False) -> bool:
+        """Dispatch a command to Codex. Returns False when validation aborts."""
+        emit = (
+            signal_bus.run_command_in_terminal.emit
+            if to_t1
+            else signal_bus.run_command_in_workspace_xterm.emit
+        )
+        head = self._command_head(cmd_text)
+        if head.startswith("/model") or head.startswith("/effort"):
+            return True
+        if head == "/clear":
+            emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+        if head.startswith("/"):
+            transformed = self._build_codex_slash_executor_prompt(
+                cmd_text,
+                listener_channel="interactive" if to_t1 else "workspace_xterm",
+            )
+            if transformed is None:
+                slug = head[1:]
+                signal_bus.toast_requested.emit(
+                    f"Main LLM Codex: comando Claude '{slug}' nao encontrado em "
+                    ".claude/commands/ — dispatch abortado.",
+                    "warning",
+                )
+                return False
+        else:
+            transformed = cmd_text
+        emit(transformed)
+        self._on_run_command(cmd_text)
+        return True
+
+    def _dispatch_kimi_main_command(self, cmd_text: str) -> bool:
+        """Dispatch through the Main LLM Kimi path. Returns False on abort."""
+        head = self._command_head(cmd_text)
+        if head.startswith("/model") or head.startswith("/effort"):
+            return True
+        if head == "/clear":
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+        if head.startswith("/"):
+            slug = head[1:].split()[0] if head else ""
+            if slug and not self._resolve_skill_target(slug):
+                signal_bus.toast_requested.emit(
+                    f"Main LLM Kimi: skill '{slug}' nao encontrada em "
+                    ".claude/commands/skill/ nem .agents/skills/ — dispatch abortado.",
+                    "warning",
+                )
+                return False
+        transformed = self._inject_skill_prefix(cmd_text)
+        signal_bus.run_command_in_terminal.emit(transformed)
+        self._on_run_command(cmd_text)
+        return True
+
     def _dispatch_green_arrow(self, cmd_text: str) -> None:
         """Handler unico para `item.run_in_terminal_requested` (seta verde).
 
@@ -5473,43 +5876,22 @@ class CommandQueueWidget(QWidget):
         `/clear`+Use Kimi tambem roda aqui (substitui o slot separado que
         existia antes do refactor).
 
-        --force Kimi path: roteia para terminal workspace com prefixo /skill:;
+        Main LLM Kimi path: roteia para terminal interactive com prefixo /skill:;
         `/model` e `/effort` viram bolinha amarela SEM dispatch nem update de
-        label/highlight (suprimidos pelo modo); `/clear` vai SO para workspace.
+        label/highlight (suprimidos pelo modo); `/clear` vai SO para interactive.
         Comandos sem skill wrapper existente disparam toast e abortam o
         dispatch (issue HIGH 2 do review adversarial)."""
+        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
+            self._dispatch_codex_command(cmd_text, to_t1=True)
+            return
+
         if not getattr(self, "_force_kimi_chk", None) or not self._force_kimi_chk.isChecked():
             # Legacy: dispatch + bookkeeping + mirror /clear quando Use Kimi.
             signal_bus.run_command_in_terminal.emit(cmd_text)
             self._on_run_command(cmd_text)
             self._mirror_clear_to_workspace_if_kimi_checked(cmd_text)
             return
-        head = cmd_text.strip().split(None, 1)[0].lower() if cmd_text.strip() else ""
-        if head.startswith("/model") or head.startswith("/effort"):
-            # Bolinha amarela so — _on_run_clicked do item ja chama _mark_as_sent.
-            # NAO atualizamos label/highlight pois o comando nao foi enviado.
-            return
-        if head == "/clear":
-            signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
-            self._on_run_command(cmd_text)
-            self._last_workspace_dispatch_was_clear = True
-            return
-        # Demais slash commands: injetar /skill: apos validar wrapper.
-        if head.startswith("/"):
-            slug = head[1:].split()[0] if head else ""
-            if slug and not self._resolve_skill_target(slug):
-                signal_bus.toast_requested.emit(
-                    f"--force Kimi: skill '{slug}' nao encontrada em "
-                    ".claude/commands/skill/ nem .agents/skills/ — dispatch abortado.",
-                    "warn",
-                )
-                return
-        transformed = self._inject_skill_prefix(cmd_text)
-        signal_bus.run_command_in_workspace_terminal.emit(transformed)
-        # IMPORTANTE: label/highlight usam SEMPRE a string ORIGINAL para que
-        # _highlight_current_command consiga bater contra item.command_text().
-        # Issue HIGH 3 do review adversarial (highlight quebrado no play-next).
-        self._on_run_command(cmd_text)
+        self._dispatch_kimi_main_command(cmd_text)
 
     def _mirror_clear_to_workspace_if_kimi_checked(self, cmd_text: str) -> None:
         """When /clear is dispatched to interactive AND Use Kimi is checked,
@@ -5526,14 +5908,16 @@ class CommandQueueWidget(QWidget):
         """
         if not cmd_text or not cmd_text.strip():
             return
-        # --force Kimi ja roteou /clear para o workspace via _dispatch_green_arrow.
-        # Sem esta guarda haveria emissao dupla para o workspace terminal.
+        # Main Kimi ja roteou /clear para o T1 via _dispatch_green_arrow.
+        # Sem esta guarda os worker mirrors ainda tentariam disparar em T2/T3.
         if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
             return
         head = cmd_text.strip().split(None, 1)[0].lower()
         if head == "/clear" and self._use_kimi_chk.isChecked():
             signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
             self._last_workspace_dispatch_was_clear = True
+        if head == "/clear" and getattr(self, "_use_codex_chk", None) and self._use_codex_chk.isChecked():
+            signal_bus.run_command_in_workspace_xterm.emit(cmd_text)
 
     # ──────────────────────────────────────── Quick-save helpers ─────── #
 
@@ -5892,7 +6276,7 @@ class CommandQueueWidget(QWidget):
         #     AND item's _kimi_btn is actually visible -> kimi click
         #   - otherwise -> claude (green) click
         # The triple condition guards against whitelist/visibility divergence
-        # (real risk flagged by /skill:mcp-kimi senior-reviewer): if the
+        # (real risk flagged by /mcp:kimi senior-reviewer): if the
         # per-item _kimi_btn was hidden by some future spec mutation while
         # is_kimi_compatible still returns True, fall back to claude rather
         # than dispatch a kimi action with no visual feedback.
@@ -5911,6 +6295,14 @@ class CommandQueueWidget(QWidget):
             and getattr(next_item, "_kimi_btn", None) is not None
             and next_item._kimi_btn.isVisible()
         )
+        use_codex = (
+            getattr(self, "_use_codex_chk", None) is not None
+            and self._use_codex_chk.isChecked()
+            and cmd_head.startswith("/")
+            and not cmd_head.startswith("/model")
+            and not cmd_head.startswith("/effort")
+            and self._resolve_claude_command_file(cmd_head[1:]) is not None
+        )
 
         # ALWAYS cancel any pending modal-confirmation Enter from a previous
         # dispatch. Otherwise a 1s-delayed Enter scheduled by a previous
@@ -5918,56 +6310,38 @@ class CommandQueueWidget(QWidget):
         # and silently select the default option.
         self._cancel_pending_modal_enter()
 
-        # --force Kimi: rota dedicada para o workspace terminal. /model e
-        # /effort viram apenas bolinha amarela (sem dispatch). /clear vai
-        # SO para o workspace. Demais comandos ganham prefixo /skill:. A
-        # seta azul nao participa deste fluxo — checamos antes do branch
-        # use_kimi para garantir precedencia.
+        # Main LLM modes have precedence over optional worker preferences.
+        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
+            if self._dispatch_codex_command(cmd_text, to_t1=True):
+                next_item._mark_as_sent()
+            return
+
         if self._force_kimi_chk.isChecked():
-            if cmd_head.startswith("/model") or cmd_head.startswith("/effort"):
-                # Bolinha amarela so — sem dispatch e sem update de label.
+            if self._dispatch_kimi_main_command(cmd_text):
                 next_item._mark_as_sent()
-                return
-            if cmd_head == "/clear":
-                signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
-                self._on_run_command(cmd_text)
-                next_item._mark_as_sent()
-                self._last_workspace_dispatch_was_clear = True
-                return
-            # Validar skill wrapper antes de despachar (HIGH 2).
-            slug = cmd_head[1:].split()[0] if cmd_head.startswith("/") else ""
-            if slug and not self._resolve_skill_target(slug):
-                signal_bus.toast_requested.emit(
-                    f"--force Kimi: skill '{slug}' nao encontrada em "
-                    ".claude/commands/skill/ nem .agents/skills/ — dispatch abortado.",
-                    "warn",
-                )
-                return
-            transformed = self._inject_skill_prefix(cmd_text)
-            signal_bus.run_command_in_workspace_terminal.emit(transformed)
-            # Bookkeeping com cmd_text ORIGINAL (nao transformado) para que
-            # _highlight_current_command consiga bater contra item.command_text()
-            # — issue HIGH 3 do review adversarial.
-            self._on_run_command(cmd_text)
-            next_item._mark_as_sent()
             return
 
         # Special case: /clear with Use Kimi checkbox active clears BOTH
-        # CLI sessions (interactive + workspace). The two emits drive
-        # MetricsBar's per-channel auto-idle independently, so each dot
-        # turns green on its own 1s timer.
+        # CLI sessions. Parallel Codex mirrors the same helper to T3.
         clear_both = (
-            cmd_head == "/clear" and self._use_kimi_chk.isChecked()
+            cmd_head == "/clear"
+            and (self._use_kimi_chk.isChecked() or self._use_codex_chk.isChecked())
         )
         if clear_both:
             signal_bus.run_command_in_terminal.emit(cmd_text)
-            signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+            if self._use_kimi_chk.isChecked():
+                signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+                self._last_workspace_dispatch_was_clear = True
+            if self._use_codex_chk.isChecked():
+                signal_bus.run_command_in_workspace_xterm.emit(cmd_text)
             self._on_run_command(cmd_text)
             next_item._mark_as_sent()
-            self._last_workspace_dispatch_was_clear = True
         elif use_kimi:
             next_item._on_kimi_clicked()
             self._last_workspace_dispatch_was_clear = False  # consumed by blue arrow
+        elif use_codex:
+            if self._dispatch_codex_command(cmd_text):
+                next_item._mark_as_sent()
         else:
             signal_bus.run_command_in_terminal.emit(cmd_text)
             self._on_run_command(cmd_text)

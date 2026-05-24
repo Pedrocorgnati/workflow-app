@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from workflow_app.config.app_state import app_state
+from workflow_app.config.config_parser import PipelineConfig
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 
 
@@ -204,6 +206,33 @@ class TestMetricsBarProjectPill:
     def test_proj_x_not_hidden_after_project_loaded(self, bar):
         bar._apply_project_loaded("my-project")
         assert not bar._proj_x.isHidden()
+
+    def test_proj_refresh_not_hidden_after_project_loaded(self, bar):
+        bar._apply_project_loaded("my-project")
+        assert not bar._proj_refresh.isHidden()
+
+    def test_proj_x_uses_red_style(self, bar):
+        assert "#EF4444" in bar._proj_x.styleSheet()
+
+    def test_proj_refresh_emits_active_config_path(self, bar, tmp_path):
+        config_path = str(tmp_path / "project.json")
+        emitted: list[str] = []
+        bar.config_reload_requested.connect(emitted.append)
+        app_state.set_config(
+            PipelineConfig(
+                config_path=config_path,
+                project_name="my-project",
+                brief_root="brief",
+                docs_root="docs",
+                wbs_root="wbs",
+                workspace_root="workspace",
+            )
+        )
+        try:
+            bar._on_proj_refresh()
+        finally:
+            app_state.clear_config()
+        assert emitted == [config_path]
 
     def test_project_pill_not_hidden_after_project_loaded(self, bar):
         bar._apply_project_loaded("my-project")

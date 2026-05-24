@@ -19,7 +19,7 @@
 #   --exit-code N  inteiro (opcional). Em success vale 0; em failure vale o
 #                  exit code real do comando. Default: 0/1 conforme status.
 #   --run-id S     string (opcional). Default: ISO-8601 + pid se ausente.
-#   <channel>      posicional: interactive | workspace.
+#   <channel>      posicional: interactive | workspace | workspace_xterm.
 #                  Fallback: WF_CHANNEL_OVERRIDE (env). Default: interactive.
 #
 # Exit codes:
@@ -101,9 +101,9 @@ if [ -z "$channel" ]; then
   channel="${WF_CHANNEL_OVERRIDE:-interactive}"
 fi
 case "$channel" in
-  interactive|workspace) ;;
+  interactive|workspace|workspace_xterm) ;;
   *)
-    wf_err "invalid channel '$channel' (expected: interactive|workspace)"
+    wf_err "invalid channel '$channel' (expected: interactive|workspace|workspace_xterm)"
     exit 2
     ;;
 esac

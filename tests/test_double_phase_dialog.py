@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QLineEdit,
+    QPushButton,
 )
 
 from workflow_app.command_queue.double_phase_dialog import (
@@ -257,13 +258,13 @@ def test_full_study_hint_renders_all_widget_kinds(qapp):
         },
     )
     assert len(dlg.findChildren(AutoGrowTextEdit)) == 1
-    # QLineEdits: input simples ([path.md]) + line interno do PathMdFieldWidget
-    # ([--loop <path.md>]) + line do checkbox_with_value ([--name <slug>]). Total 3.
+    # QLineEdits: line interno de [path.md] + line interno de [--loop <path.md>]
+    # + line do checkbox_with_value ([--name <slug>]). Total 3.
     assert len(dlg.findChildren(QLineEdit)) == 3
     # 2 checkboxes: --loop + --name.
     assert len(dlg.findChildren(QCheckBox)) == 2
-    # 1 PathMdFieldWidget (do [--loop <path.md>]).
-    assert len(dlg.findChildren(PathMdFieldWidget)) == 1
+    # 2 PathMdFieldWidget: [path.md] e [--loop <path.md>].
+    assert len(dlg.findChildren(PathMdFieldWidget)) == 2
     rgs = dlg.findChildren(RadioGroupWithSummary)
     assert len(rgs) == 1
     assert rgs[0].button_group().exclusive() is True
@@ -299,6 +300,44 @@ def test_parser_path_md_legacy_still_works():
     assert len(tokens) == 1
     # [path.md] nao tem '<>' nem '--' prefix -> input simples (regra atual).
     assert tokens[0].kind == "input"
+
+
+def test_render_input_path_md_uses_picker_button(qapp):
+    """[path.md] renderiza row com input e botao de lupa."""
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/study",
+        argument_hint="[path.md]",
+        default_md_dir="",
+        radio_summaries={},
+    )
+    pws = dlg.findChildren(PathMdFieldWidget)
+    assert len(pws) == 1
+    buttons = pws[0].findChildren(QPushButton)
+    assert buttons[0].text() == "🔍"
+    assert buttons[0].property("testid") == "double-phase-path-md-browse"
+    dlg.deleteLater()
+
+
+def test_path_md_browse_starts_in_brainstorm_and_sets_path(qapp, monkeypatch):
+    """Picker abre em brainstorm como atalho, mas continua QFileDialog normal."""
+    captured: dict[str, str] = {}
+
+    def fake_get_open_file_name(parent, title, start_dir, file_filter):
+        captured["start_dir"] = start_dir
+        captured["filter"] = file_filter
+        return ("/tmp/outro-lugar/task.md", "")
+
+    monkeypatch.setattr(
+        "workflow_app.command_queue.double_phase_dialog.QFileDialog.getOpenFileName",
+        fake_get_open_file_name,
+    )
+    pw = PathMdFieldWidget(default_md_dir="")
+    pw._browse()
+
+    assert captured["start_dir"].endswith("brainstorm")
+    assert captured["filter"] == "Markdown (*.md);;All Files (*)"
+    assert pw.text() == "/tmp/outro-lugar/task.md"
+    pw.deleteLater()
 
 
 def test_confirm_checkbox_with_path_md_emits_flag_value(qapp):
