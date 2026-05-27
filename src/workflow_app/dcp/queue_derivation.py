@@ -353,6 +353,10 @@ def derive_queue_from_matrix(
     position = 0
 
     def emit(entry: CommandIndexEntry, *, task: Optional[str] = None) -> None:
+        # D-02: consumer reads `entry.name` only (the producer flip W2 emits it
+        # with placeholders preserved); the audit-only field is the audit
+        # projection and MUST NOT be referenced here (enforced at type level by
+        # CommandIndexRuntimeEntry, which omits it).
         nonlocal position
         rendered = _render(
             entry.name,
@@ -409,6 +413,10 @@ def derive_queue_from_matrix(
     # fold_in_rules: H-commit + I-human-signoff ALWAYS; G-deploy + I-human-mkt
     # only on the last module.
     def emit_fold(rules: Iterable[CommandRef], phase_label: str) -> None:
+        # D-02: same contract as `emit` for fold-in CommandRefs — read `ref.name`
+        # only; the audit-only field (carried by CommandIndexAuditEntry for
+        # validator/telemetry parity, TASK-002) is NEVER referenced here
+        # (executor contract per TASK-016 / I-NN).
         nonlocal position
         for ref in rules:
             rendered = _render(
