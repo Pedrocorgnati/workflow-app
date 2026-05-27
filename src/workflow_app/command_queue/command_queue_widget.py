@@ -392,7 +392,7 @@ _SECTION_HEADER_STYLE = (
 _SECTION_BTN_STYLE = (
     "QPushButton { background-color: #3F3F46; color: #D4D4D8;"
     "  border: 1px solid #52525B; border-radius: 4px;"
-    "  font-size: 10px; font-weight: 600; padding: 2px 3px; }"
+    "  font-size: 10px; font-weight: 600; padding: 1px 3px; }"
     "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
     "QPushButton:pressed { background-color: #FBBF24; color: #18181B; border-color: #FBBF24; }"
 )
@@ -1851,7 +1851,7 @@ class CommandQueueWidget(QWidget):
             "QTabWidget::pane { border: none; background: transparent; }"
             "QTabBar::tab { background: transparent; color: #A1A1AA;"
             "  border: none; border-radius: 3px;"
-            "  padding: 1px 8px; font-size: 10px; font-weight: 700;"
+            "  padding: 6px 8px; font-size: 10px; font-weight: 700;"
             "  letter-spacing: 0.5px; margin-right: 3px; }"
             "QTabBar::tab:selected { background: #FBBF24; color: #18181B; }"
             "QTabBar::tab:hover { background: #2D2D30; color: #D4D4D8; }"
@@ -2510,8 +2510,19 @@ class CommandQueueWidget(QWidget):
         signal_bus.interactive_advance_ready.connect(self._on_interactive_advance_ready)
         signal_bus.instance_selected.connect(self._on_instance_selected)
         signal_bus.autocast_step_requested.connect(self._on_autocast_step_requested)
+        signal_bus.autocast_abort_requested.connect(self._on_autocast_abort_requested)
         signal_bus.interactive_input_requested.connect(self._cancel_pending_modal_enter)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
+
+    def _on_autocast_abort_requested(self, cause: str, channel: str) -> None:
+        """Desliga o botao autocast quando um listener entra em estado failed.
+
+        Emitido por MetricsBar._on_terminal_force_failed apos receber
+        terminal_force_failed (pattern matcher, exit-code watcher ou
+        wf-notify.sh --status failure). Ver workflow-app-listeners.md §3.
+        """
+        if self._btn_autocast.isChecked():
+            self._btn_autocast.setChecked(False)
 
     def _on_autocast_step_requested(self) -> None:
         """Programmatic click on `queue-btn-play-next` driven by the autocast loop.
@@ -4576,7 +4587,14 @@ class CommandQueueWidget(QWidget):
             return
 
         slug = str(raw.get("daily_loop", {}).get("slug", "")) or "daily-loop"
-        item_count = sum(1 for s in specs if s.name.startswith("/daily-loop:do "))
+        # Count real items from buckets[*].items[*] — the legacy heuristic
+        # `name.startswith("/daily-loop:do ")` only matched the fallback wrapper
+        # shape and silently reported 0 for canonical post-/loop:integration
+        # configs where commands are materialized inline.
+        item_count = sum(
+            len(b.get("items", []))
+            for b in raw.get("daily_loop", {}).get("buckets", [])
+        )
         logger.info("[daily-loop] loading %s (%d items, %d specs)", slug, item_count, len(specs))
 
         self._template_label.setText(f"  \U0001f4cb  Daily loop: {slug} ({item_count} itens)")
@@ -4698,7 +4716,14 @@ class CommandQueueWidget(QWidget):
             return
 
         slug = str(raw.get("daily_loop", {}).get("slug", "")) or "loop"
-        item_count = sum(1 for s in specs if s.name.startswith("/daily-loop:do "))
+        # Count real items from buckets[*].items[*] — the legacy heuristic
+        # `name.startswith("/daily-loop:do ")` only matched the fallback wrapper
+        # shape and silently reported 0 for canonical post-/loop:integration
+        # configs where commands are materialized inline.
+        item_count = sum(
+            len(b.get("items", []))
+            for b in raw.get("daily_loop", {}).get("buckets", [])
+        )
         logger.info("[loop] loading %s (%d items, %d specs)", slug, item_count, len(specs))
 
         self._template_label.setText(f"  \U0001f4cb  Loop: {slug} ({item_count} itens)")

@@ -1749,12 +1749,7 @@ class MainWindow(QMainWindow):
         # Linha de baixo da sub-aba paths & IDs: botao 'repo rules'.
         _paths_row2_btns = [self._build_repo_rules_button()]
 
-        # Refactor 2026-05-24: padroniza o padding dos botoes das 3 sub-abas
-        # com o dos botoes de output-toolbar-progress-boxes (0.5px 10px).
-        for _b in (*_paths_btns, *_paths_row2_btns, *_prompts_btns, *_rules_btns):
-            _ss = _b.styleSheet()
-            if "padding: 0 8px" in _ss:
-                _b.setStyleSheet(_ss.replace("padding: 0 8px", "padding: 0.5px 10px"))
+        # Padding das sub-abas ja definido em 4px 8px nas funcoes de criacao.
 
         self._command_queue.populate_paths_subtab(_paths_btns, _paths_row2_btns)
         self._command_queue.populate_prompts_subtab(_prompts_btns)
@@ -2863,42 +2858,65 @@ class MainWindow(QMainWindow):
                 "terminal-workspace-output": 2,
                 "terminal-codex-output": 3,
             }
-            target_terminal = payload.get("target_path")
-            # Para type-selector-radio-input, o radio é autoridade: sempre
-            # sobrescrever target_terminal independente do default T1 que o
-            # construtor do botao injeta em target_path (Claude->T1, Kimi->T2,
-            # Codex->T3). Sem esse override o ramo `if not target_terminal`
-            # nunca alcanca porque o payload ja traz "terminal-interactive-output".
-            if button_type == "type-selector-radio-input":
-                target_terminal = {
-                    "claude": "terminal-interactive-output",
-                    "kimi": "terminal-workspace-output",
-                    "codex": "terminal-codex-output",
-                }.get(resolved_slug, "terminal-interactive-output")
-            elif not target_terminal:
-                # Botoes fixos (Claude/Kimi/Codex) sem target_path declarado.
-                target_terminal = (
-                    "terminal-interactive-output"
-                    if resolved_type == "Claude"
-                    else "terminal-workspace-output"
-                )
-            # Fallback operacional pedido: se provider/target efetivo for
-            # Codex (T3), mas T3 nao estiver disponivel, redireciona para T2.
-            codex_effective = (
-                resolved_slug == "codex"
-                or str(target_terminal).strip() == "terminal-codex-output"
+            # Contrato canonico (mesmo dos comandos da toolbar): os toggles
+            # T1/T2/T3 de `output-toolbar-left-insertions-controls` decidem o
+            # terminal; o radio `type-selector-radio-input` escolhe o comando,
+            # NAO o terminal. Antes o terminal era derivado do provider
+            # (codex->T3) ignorando os toggles, o que publicava no terminal
+            # errado mesmo com T3 marcado.
+            route_t1 = (
+                bool(self._chk_route_t1.isChecked())
+                if hasattr(self, "_chk_route_t1") else False
             )
-            if codex_effective and not self._codex_terminal_available():
-                target_terminal = "terminal-workspace-output"
+            route_t2 = (
+                bool(self._chk_route_t2.isChecked())
+                if hasattr(self, "_chk_route_t2") else False
+            )
+            route_t3 = (
+                bool(self._chk_route_t3.isChecked())
+                if hasattr(self, "_chk_route_t3") else False
+            )
+            targets: list[int] = []
+            if route_t1 or route_t2 or route_t3:
+                if route_t1:
+                    targets.append(1)
+                if route_t2:
+                    targets.append(2)
+                if route_t3:
+                    targets.append(3)
+            else:
+                # Fallback (toggles ausentes/desmarcados): preserva o
+                # comportamento legado baseado no target_path do payload.
+                target_terminal = payload.get("target_path")
+                if button_type == "type-selector-radio-input":
+                    target_terminal = {
+                        "claude": "terminal-interactive-output",
+                        "kimi": "terminal-workspace-output",
+                        "codex": "terminal-codex-output",
+                    }.get(resolved_slug, "terminal-interactive-output")
+                elif not target_terminal:
+                    target_terminal = (
+                        "terminal-interactive-output"
+                        if resolved_type == "Claude"
+                        else "terminal-workspace-output"
+                    )
+                targets.append(terminal_map.get(target_terminal, 1))
+            # Fallback operacional: se T3 e alvo mas o terminal Codex nao
+            # esta disponivel, redireciona para T2 (dedup preservando ordem).
+            if 3 in targets and not self._codex_terminal_available():
+                targets = [2 if t == 3 else t for t in targets]
+                targets = list(dict.fromkeys(targets))
                 signal_bus.toast_requested.emit(
                     "Codex selecionado, mas T3 indisponivel. Prompt enviado no T2.",
                     "warning",
                 )
-            terminal_idx = terminal_map.get(target_terminal, 1)
+            terminal_idx = targets[-1] if targets else 1
             try:
-                published_ok = self._publish_to_specific_terminal(
-                    prompt_final, terminal_idx
-                )
+                published_ok = True
+                for _idx in targets:
+                    if not self._publish_to_specific_terminal(prompt_final, _idx):
+                        published_ok = False
+                        terminal_idx = _idx
             except Exception as exc:  # noqa: BLE001
                 signal_bus.toast_requested.emit(
                     f"Falha ao publicar prompt: {exc}", "error"
@@ -3962,14 +3980,13 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(28)
-            btn.setMinimumWidth(64)
+            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -4152,14 +4169,13 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(28)
-            btn.setMinimumWidth(64)
+            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -4293,14 +4309,13 @@ class MainWindow(QMainWindow):
         def _make_btn(label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(28)
-            btn.setMinimumWidth(56)
+            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #18181B;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; color: #FAFAFA; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; color: #FAFAFA; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -4386,8 +4401,7 @@ class MainWindow(QMainWindow):
         """
         btn = QPushButton("repo rules")
         btn.setProperty("testid", "queue-btn-repo-rules-path")
-        btn.setFixedHeight(28)
-        btn.setMinimumWidth(64)
+        btn.setFixedHeight(34)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip(
             "Cola no terminal o path {workspace_root}/rules do projeto ativo\n"
@@ -4396,7 +4410,7 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet(
             "QPushButton { background-color: #14B8A6; color: #18181B;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
             "QPushButton:hover { background-color: #0D9488; color: #FAFAFA; }"
             "QPushButton:pressed { background-color: #0F766E; color: #FAFAFA; }"
             "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"

@@ -56,7 +56,8 @@ class TestWhitelist:
         # + 1 (/loop-rocksmash:compare, score 85) = 85
         # + 2 (Option D atomization: /blog:stockpile-finalize-package, score 88;
         #      /blog:stockpile-validate, score 90) = 87
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 87
+        # + 1 (/blog:stockpile-push, score 65) = 88
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 88
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):

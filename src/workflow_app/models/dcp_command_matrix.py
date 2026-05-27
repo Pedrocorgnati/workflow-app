@@ -30,6 +30,8 @@ __all__ = [
     "EffortLiteral",
     "InteractionLiteral",
     "TrailGateLiteral",
+    "CommandIndexRuntimeEntry",
+    "CommandIndexAuditEntry",
     "CommandIndexEntry",
     "CommandRef",
     "FilterTrailEntry",
@@ -76,7 +78,17 @@ _BASE_CONFIG = ConfigDict(
 )
 
 
-class CommandIndexEntry(BaseModel):
+class CommandIndexRuntimeEntry(BaseModel):
+    """Runtime projection consumed by the executor (queue derivation).
+
+    Deliberately has NO ``template`` field (D-02): the executor renders the
+    slash-command from ``name`` only, so it must not be able to reference
+    ``.template`` at runtime. A type-check / py_compile against
+    ``CommandIndexRuntimeEntry`` fails if any executor path touches
+    ``.template``. The audit/validator/telemetry view keeps ``template`` via
+    ``CommandIndexAuditEntry``.
+    """
+
     model_config = _BASE_CONFIG
 
     name: str
@@ -91,10 +103,28 @@ class CommandIndexEntry(BaseModel):
     source_ref: Optional[str] = None
 
 
+class CommandIndexAuditEntry(CommandIndexRuntimeEntry):
+    """Audit/validator/telemetry projection: runtime fields plus ``template``.
+
+    ``template`` is the operational projection path consumed by the validator
+    and telemetry; it never reaches the executor (which sees only
+    ``CommandIndexRuntimeEntry``).
+    """
+
+    template: Optional[str] = None
+
+
+# Backward-compat alias. The full matrix store (``DcpCommandMatrix.command_index``)
+# and historical importers keep the audit shape (with ``template``). Consumer
+# migration to ``CommandIndexRuntimeEntry`` is handled by a downstream task.
+CommandIndexEntry = CommandIndexAuditEntry
+
+
 class CommandRef(BaseModel):
     model_config = _BASE_CONFIG
 
     name: str
+    template: Optional[str] = None
     phase: PhaseLiteral
     model: Optional[ModelLiteral] = None
     effort: Optional[EffortLiteral] = None

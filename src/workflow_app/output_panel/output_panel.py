@@ -21,6 +21,8 @@ Input:
 from __future__ import annotations
 
 import pathlib
+import re
+import time
 from typing import Any
 
 import pyte
@@ -59,6 +61,57 @@ DEFAULT_MAX_LINES = 10_000
 
 # Bracketed paste mode bit (DEC 2004)
 _BRACKETED_PASTE_MODE = 2004 << 5
+
+# Catalogo de erros fatais conhecidos do CLI (Claude Code / Anthropic).
+# Quando bate, emitimos terminal_force_failed e o autocast aborta — sem
+# isso, o CLI imprime a mensagem e morre, PTY vai amarelo->verde e o
+# autocast interpreta como "comando completou" e detona a fila inteira.
+# Regex compilado uma vez por modulo, case-insensitive, sem multiline.
+_FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "AUTH_SUBSCRIPTION_DISABLED",
+        re.compile(
+            r"organization has disabled (?:Claude )?subscription access",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "AUTH_API_KEY_REQUIRED",
+        re.compile(r"Use an Anthropic API key instead", re.IGNORECASE),
+    ),
+    (
+        "AUTH_INVALID_API_KEY",
+        re.compile(
+            r"\b(invalid api key|authentication[_ ]error|unauthorized)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "AUTH_LOGIN_EXPIRED",
+        re.compile(
+            r"(login (?:expired|required|to continue)|please (?:run|log) ?in|please log[ -]?in)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "CREDIT_BALANCE_LOW",
+        re.compile(r"credit balance is too low", re.IGNORECASE),
+    ),
+    (
+        "USAGE_LIMIT_REACHED",
+        re.compile(
+            r"(usage limit (?:reached|exceeded)|monthly limit|quota exceeded)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "RATE_LIMIT",
+        re.compile(
+            r"(rate[ _-]?limit(?:ed)?|429 too many requests|too many requests)",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 class OutputPanel(QWidget):
@@ -99,9 +152,7 @@ class OutputPanel(QWidget):
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
         self._idle_timer.setInterval(2_000)
-        self._idle_timer.timeout.connect(
-            lambda: signal_bus.terminal_force_idle.emit(self._channel)
-        )
+        self._idle_timer.timeout.connect(self._on_idle_timeout)
 
         # ── Resize debounce timer ──────────────────────────────────────── #
         self._resize_timer = QTimer(self)
@@ -136,6 +187,20 @@ class OutputPanel(QWidget):
         )
         self._shell.output_received.connect(self._on_chunk)
         self._shell_started: bool = False
+
+        # Pattern matcher de falhas fatais (auth/credit/rate-limit). Guardamos
+        # o ultimo reason emitido para nao disparar terminal_force_failed
+        # repetidamente enquanto o mesmo erro permanecer na tela. Reset em
+        # nova sessao do pipeline (_on_pipeline_started) e ao limpar pyte.
+        self._last_failure_reason: str | None = None
+
+        # Early-exit watcher (Camada 3): quando um dispatch programatico
+        # acontece, registramos o instante e o volume de bytes recebidos
+        # desde entao. Se o PTY vai para idle muito rapido com poucos bytes
+        # — claro sinal de CLI que morreu cedo (auth/credit) sem casar com
+        # nenhum pattern conhecido — dispara terminal_force_failed.
+        self._dispatch_ts: float | None = None
+        self._bytes_since_dispatch: int = 0
 
         self._setup_ui()
         self._connect_signals()
@@ -337,6 +402,11 @@ class OutputPanel(QWidget):
             data = b"\x1b[200~" + data + b"\x1b[201~"
         self._shell.send_raw(data)
         QTimer.singleShot(80, self._send_enter_to_shell)
+        # Camada 3: marca o dispatch para o early-exit watcher. Reset do
+        # ultimo reason tambem — novo dispatch, nova janela de erro.
+        self._dispatch_ts = time.monotonic()
+        self._bytes_since_dispatch = 0
+        self._last_failure_reason = None
 
     def _send_enter_to_shell(self) -> None:
         """Send a bare \r to the persistent shell if it is still alive."""
@@ -454,6 +524,68 @@ class OutputPanel(QWidget):
         if not self._runner_active and self._channel == "interactive":
             self._idle_timer.start()
         signal_bus.terminal_activity.emit(self._channel)
+        if self._dispatch_ts is not None:
+            self._bytes_since_dispatch += len(chunk)
+        self._scan_chunk_for_fatal(chunk)
+
+    # Camada 3: thresholds do early-exit watcher. Calibrados para o caso
+    # "claude code morre por auth/credit em < 1s emitindo ~300 bytes".
+    # Comandos reais do canonical loop (loop, dcp:*, execute-task) emitem
+    # kilobytes ao longo de varios segundos; comandos triviais legitimos
+    # (slash command que so imprime ack) raramente ficam abaixo dos dois
+    # limites simultaneamente. Janela conservadora para minimizar falsos
+    # positivos — se nao bate, idle segue caminho normal.
+    _EARLY_EXIT_BYTES_THRESHOLD = 2048
+    _EARLY_EXIT_TIME_THRESHOLD_S = 8.0
+
+    def _on_idle_timeout(self) -> None:
+        """Callback do _idle_timer (2s de silencio do PTY).
+
+        Caminho normal: emite terminal_force_idle (dot fica verde).
+        Caminho early-exit: se houve um dispatch programatico recente e
+        o PTY emitiu poucos bytes em pouco tempo, e a Camada 1 nao casou
+        nada, emite terminal_force_failed com EARLY_EXIT — rede de
+        seguranca para erros novos do CLI que ainda nao temos pattern.
+        """
+        if (
+            self._dispatch_ts is not None
+            and self._last_failure_reason is None
+            and self._bytes_since_dispatch < self._EARLY_EXIT_BYTES_THRESHOLD
+            and (time.monotonic() - self._dispatch_ts) < self._EARLY_EXIT_TIME_THRESHOLD_S
+        ):
+            self._last_failure_reason = "EARLY_EXIT"
+            self._dispatch_ts = None
+            signal_bus.terminal_force_failed.emit(self._channel, "EARLY_EXIT")
+            return
+        # Consome o dispatch (o comando rodou de verdade — proximo dispatch
+        # reabre a janela). Sem isso, um dispatch antigo + silencio futuro
+        # poderia disparar EARLY_EXIT espuriamente.
+        self._dispatch_ts = None
+        signal_bus.terminal_force_idle.emit(self._channel)
+
+    def _scan_chunk_for_fatal(self, chunk: str) -> None:
+        """Camada 1 do abort de autocast por erro fatal do CLI.
+
+        Varre o chunk do PTY por padroes conhecidos de erro de auth,
+        credito, rate-limit. Quando bate emite terminal_force_failed,
+        que ativa o caminho canonico documentado em
+        ai-forge/rules/workflow-app-listeners.md §3 (dot vermelho +
+        autocast_abort_requested -> CommandQueueWidget desliga o botao).
+
+        Idempotente por chunk: se o mesmo reason ja foi emitido nesta
+        sessao do PTY, ignora — evita re-disparar enquanto a mensagem
+        ainda esta na tela e o PTY emite ANSI repaints.
+        """
+        if not chunk:
+            return
+        for reason, pattern in _FATAL_PATTERNS:
+            if not pattern.search(chunk):
+                continue
+            if self._last_failure_reason == reason:
+                return
+            self._last_failure_reason = reason
+            signal_bus.terminal_force_failed.emit(self._channel, reason)
+            return
 
     def _on_pipeline_chunk(self, chunk: str) -> None:
         """Chunk from the pipeline runner (separate signal from shell)."""
@@ -495,6 +627,7 @@ class OutputPanel(QWidget):
     def _on_pipeline_started(self) -> None:
         self._runner_active = True
         self._idle_timer.stop()
+        self._last_failure_reason = None
         if self._shell is not None:
             try:
                 self._shell.output_received.disconnect(self._on_chunk)

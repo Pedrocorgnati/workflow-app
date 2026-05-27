@@ -104,6 +104,7 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/blog:stockpile-status",         # 100
     "/blog:stockpile-finalize-package",  # 88 (KIMI_PREFERRED — Pass 2.4 deterministico: Read+Write JSON, zero AskUser, zero Codex)
     "/blog:stockpile-validate",       # 90 (KIMI_PREFERRED — wrapper npm + parse stdout, zero AskUser, zero Codex)
+    "/blog:stockpile-push",           # 65 (KIMI_OK — git add/commit/push escopado em stockpile/, idempotente, lock+retry, zero AskUser, zero Codex)
     "/blog:write-articles",           # 54 (bumped to threshold floor; was 48 forced)
     # Brief 78% / Blog 72% / build-programmatic-pages 57 (forced) — threshold lowered (79 -> 78 -> 72 -> 57).
     # /break-intake, /prd-create, /user-stories-create, /hld-create foram

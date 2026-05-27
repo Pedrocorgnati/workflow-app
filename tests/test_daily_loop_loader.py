@@ -35,8 +35,12 @@ import pytest
 
 from workflow_app.daily_loop.loader import (
     DailyLoopConfigError,
+    _resolve_effective_sizing,
+    _resolve_item_model_effort,
+    _resolve_run_default_model_effort,
     build_daily_loop_specs,
 )
+from workflow_app.domain import EffortLevel, ModelName
 
 
 # ---------------------------------------------------------------------------
@@ -416,3 +420,163 @@ def test_expanded_commands_rejects_daily_loop_do_token(tmp_path: Path) -> None:
     assert "/daily-loop:do" in msg, (
         f"Mensagem deveria nomear o token proibido; recebido: {msg!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cenario — propagacao de sizing per-item (fix do bug de bucket-override)
+#
+# Incidente 05-25-rede-micro-sites: bucket T-opus-high, mas a FASE
+# /loop:individual-analysis right-sized o run para sonnet/standard (1 item
+# explicito + N null por compressao de run). O loader ignorava items_index e
+# sempre usava o bucket opus/high -> 156 passos opus desperdiçando limite.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_item_model_effort_explicit_overrides_bucket() -> None:
+    """items_index[id] explicito vence o bucket no resolver de item."""
+    daily_loop = {
+        "items_index": {"002": {"model": "sonnet", "effort": "standard"}},
+        "buckets": [{"id": "B", "model": "opus", "effort": "high", "items": []}],
+    }
+    model, effort = _resolve_item_model_effort(daily_loop, "002")
+    assert model is ModelName.SONNET
+    assert effort is EffortLevel.STANDARD
+
+
+def test_resolve_item_model_effort_null_means_inherit() -> None:
+    """model/effort null (compressao de run) -> (None, None) = herdar."""
+    daily_loop = {
+        "items_index": {"003": {"model": None, "effort": None}},
+        "buckets": [{"id": "B", "model": "opus", "effort": "high", "items": []}],
+    }
+    assert _resolve_item_model_effort(daily_loop, "003") == (None, None)
+
+
+def test_resolve_item_model_effort_invalid_raises() -> None:
+    """valor presente porem nao-mapeavel deve falhar alto, nao silenciar."""
+    daily_loop = {"items_index": {"002": {"model": "gpt", "effort": "standard"}}}
+    with pytest.raises(DailyLoopConfigError):
+        _resolve_item_model_effort(daily_loop, "002")
+
+
+def test_resolve_run_default_picks_first_explicit_anchor() -> None:
+    """run anchor = primeiro par explicito em ordem de id (bookend null antes)."""
+    daily_loop = {
+        "items_index": {
+            "001": {"model": None, "effort": None},  # bookend preparo
+            "002": {"model": "sonnet", "effort": "standard"},  # anchor
+            "003": {"model": None, "effort": None},
+        },
+        "buckets": [{"id": "B", "model": "opus", "effort": "high", "items": []}],
+    }
+    assert _resolve_run_default_model_effort(daily_loop) == (
+        ModelName.SONNET,
+        EffortLevel.STANDARD,
+    )
+
+
+def test_resolve_run_default_none_when_all_null_falls_back_to_bucket() -> None:
+    """sem nenhum sizing explicito -> (None, None); caller usa o bucket."""
+    daily_loop = {
+        "items_index": {"001": {"model": None, "effort": None}},
+        "buckets": [{"id": "B", "model": "opus", "effort": "high", "items": []}],
+    }
+    assert _resolve_run_default_model_effort(daily_loop) == (None, None)
+
+
+def test_resolve_effective_sizing_null_inherits_run_anchor_not_bucket() -> None:
+    """O cerne do fix: item null herda o run anchor (sonnet), NUNCA o bucket (opus).
+
+    Reproduz a forma do incidente: bucket opus/high, anchor sonnet/standard,
+    item null (bookend ou iteracao comprimida). O sizing efetivo deve ser
+    sonnet/standard, jamais opus/high.
+    """
+    daily_loop = {
+        "items_index": {
+            "001": {"model": None, "effort": None},  # bookend preparo (null)
+            "002": {"model": "sonnet", "effort": "standard"},  # anchor
+            "018": {"model": None, "effort": None},  # bookend finalizacao (null)
+        },
+        "buckets": [{"id": "B", "model": "opus", "effort": "high", "items": []}],
+    }
+    bucket = daily_loop["buckets"][0]
+    active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
+
+    # Bookend 001 (null, ANTES do anchor) ja herda o run default.
+    model, effort, active_model, active_effort = _resolve_effective_sizing(
+        daily_loop, "001", bucket, active_model, active_effort
+    )
+    assert model is ModelName.SONNET, "bookend null nao pode pegar opus do bucket"
+    assert effort is EffortLevel.STANDARD
+
+    # Anchor explicito permanece sonnet/standard.
+    model, effort, active_model, active_effort = _resolve_effective_sizing(
+        daily_loop, "002", bucket, active_model, active_effort
+    )
+    assert model is ModelName.SONNET
+    assert effort is EffortLevel.STANDARD
+
+    # Bookend final (null) herda o run ativo (sonnet), nao o bucket opus.
+    model, effort, active_model, active_effort = _resolve_effective_sizing(
+        daily_loop, "018", bucket, active_model, active_effort
+    )
+    assert model is ModelName.SONNET, "finalizacao null nao pode escalar para opus"
+    assert effort is EffortLevel.STANDARD
+
+
+def test_resolve_effective_sizing_legacy_all_null_uses_bucket() -> None:
+    """Retro-compat: config sem sizing per-item cai no bucket (comportamento antigo)."""
+    daily_loop = {
+        "items_index": {"001": {"model": None, "effort": None}},
+        "buckets": [{"id": "B", "model": "opus", "effort": "high", "items": []}],
+    }
+    bucket = daily_loop["buckets"][0]
+    active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
+    model, effort, _, _ = _resolve_effective_sizing(
+        daily_loop, "001", bucket, active_model, active_effort
+    )
+    assert model is ModelName.OPUS
+    assert effort is EffortLevel.HIGH
+
+
+def test_build_specs_per_item_sonnet_never_emits_opus_for_work_items(
+    tmp_path: Path,
+) -> None:
+    """Integracao: bucket opus/high + anchor sonnet -> work items NUNCA viram /model opus.
+
+    O unico opus tolerado e o reviewer final hardcoded (/daily-loop:review-done /
+    :review), que e independente do sizing per-item.
+    """
+    progress = tmp_path / "PROGRESS.md"
+    progress.write_text(
+        "# Progress\n\n"
+        "| ID  | Status | Target     | Bucket | Updated |\n"
+        "|-----|--------|------------|--------|---------|\n"
+        "| 001 | [ ]    | tasks/a.md | B      | -       |\n"
+        "| 002 | [ ]    | tasks/b.md | B      | -       |\n"
+        "| 003 | [ ]    | tasks/c.md | B      | -       |\n",
+        encoding="utf-8",
+    )
+    raw_config = _base_config(
+        items=[
+            {"id": "001", "commands": ["/loop:iteraction:execute-task --task a.md"]},
+            {"id": "002", "commands": ["/loop:iteraction:execute-task --task b.md"]},
+            {"id": "003", "commands": ["/loop:iteraction:execute-task --task c.md"]},
+        ],
+        items_index={
+            "001": {"model": None, "effort": None},
+            "002": {"model": "sonnet", "effort": "standard"},
+            "003": {"model": None, "effort": None},
+        },
+        bucket_model="opus",
+        bucket_effort="high",
+    )
+
+    specs = build_daily_loop_specs(raw_config, tmp_path)
+
+    work_specs = [s for s in specs if s.name.startswith("/loop:iteraction:")]
+    assert work_specs, "deveria ter emitido os execute-task"
+    for s in work_specs:
+        assert s.model is ModelName.SONNET, (
+            f"work item {s.name!r} caiu em {s.model} (bucket leak) — deveria ser sonnet"
+        )

@@ -486,6 +486,31 @@ _FORBIDDEN_MODELS: frozenset[ModelName] = frozenset()
 _FORBIDDEN_EFFORTS: frozenset[EffortLevel] = frozenset({EffortLevel.LOW})
 
 
+def _coerce_floor(
+    model: ModelName, effort: EffortLevel, label: str
+) -> tuple[ModelName, EffortLevel]:
+    """Apply the daily-loop model/effort floor to an already-resolved pair.
+
+    Floor coercion — reject forbidden combos rather than silently accept.
+    Configs legados (gerados antes da regra v1.2 do plan/enumerate) sao
+    promovidos sem perguntar; mensagem visivel via stderr para auditoria.
+
+    `label` identifica a origem do par (bucket id ou item id) na telemetria.
+    """
+    if model in _FORBIDDEN_MODELS:
+        model = _DAILY_LOOP_FLOOR_MODEL
+    if effort in _FORBIDDEN_EFFORTS:
+        import sys
+
+        print(
+            f"[daily-loop] WARN: {label} effort={effort.value!r} "
+            f"violates floor (low banned) -> coerced to {_DAILY_LOOP_FLOOR_EFFORT.value}",
+            file=sys.stderr,
+        )
+        effort = _DAILY_LOOP_FLOOR_EFFORT
+    return model, effort
+
+
 def _bucket_to_model_effort(b: dict[str, Any]) -> tuple[ModelName, EffortLevel]:
     model_key = str(b.get("model", "sonnet")).lower()
     effort_key = str(b.get("effort", "medium")).lower()
@@ -499,20 +524,146 @@ def _bucket_to_model_effort(b: dict[str, Any]) -> tuple[ModelName, EffortLevel]:
         raise DailyLoopConfigError(
             f"bucket {b.get('id')!r} effort invalido: {effort_key!r}"
         )
-    # Floor coercion — reject forbidden combos rather than silently accept.
-    # Configs legados (gerados antes da regra v1.2 do plan/enumerate) sao
-    # promovidos sem perguntar; mensagem visivel via stderr para auditoria.
-    if model in _FORBIDDEN_MODELS:
-        model = _DAILY_LOOP_FLOOR_MODEL
-    if effort in _FORBIDDEN_EFFORTS:
-        import sys
-        print(
-            f"[daily-loop] WARN: bucket {b.get('id')!r} effort={effort_key!r} "
-            f"violates floor (low banned) -> coerced to {_DAILY_LOOP_FLOOR_EFFORT.value}",
-            file=sys.stderr,
-        )
-        effort = _DAILY_LOOP_FLOOR_EFFORT
-    return model, effort
+    return _coerce_floor(model, effort, f"bucket {b.get('id')!r}")
+
+
+def _resolve_item_model_effort(
+    daily_loop: dict[str, Any], item_id: str
+) -> tuple[ModelName | None, EffortLevel | None]:
+    """Resolve per-item model/effort from the canonical sources.
+
+    Fonte primaria V3: ``items_index[item_id].{model,effort}``.
+    Fallback V2: entrada dict correspondente em ``buckets[*].items[*]``.
+
+    Convencao de heranca por run (compressao da FASE /loop:individual-analysis
+    PASSO 3): um item sem sizing explicito grava ``model: null``/``effort: null``
+    e herda o run ativo. Aqui isso vira ``None`` — o caller (`build_loop_specs`)
+    aplica a heranca, NUNCA caindo no default do bucket para itens nulos quando
+    existe um run anchor. Itens com sizing explicito vencem o bucket.
+
+    Returns:
+        ``(model | None, effort | None)`` com enums mapeados. ``None`` significa
+        "herdar o run ativo" (campo ausente ou explicitamente null).
+
+    Raises:
+        DailyLoopConfigError: valor presente porem nao mapeavel
+        (ex: ``model: "gpt"`` ou ``effort: "ultra"``).
+    """
+
+    def _map(raw_model: Any, raw_effort: Any, src: str) -> tuple[
+        ModelName | None, EffortLevel | None
+    ]:
+        model: ModelName | None = None
+        effort: EffortLevel | None = None
+        if raw_model is not None:
+            model = _MODEL_MAP.get(str(raw_model).lower())
+            if model is None:
+                raise DailyLoopConfigError(
+                    f"item {item_id} ({src}) model invalido: {raw_model!r}"
+                )
+        if raw_effort is not None:
+            effort = _EFFORT_MAP.get(str(raw_effort).lower())
+            if effort is None:
+                raise DailyLoopConfigError(
+                    f"item {item_id} ({src}) effort invalido: {raw_effort!r}"
+                )
+        return model, effort
+
+    items_index = daily_loop.get("items_index")
+    if isinstance(items_index, dict):
+        entry = items_index.get(item_id)
+        if isinstance(entry, dict) and ("model" in entry or "effort" in entry):
+            return _map(entry.get("model"), entry.get("effort"), "items_index")
+
+    # Fallback V2: buckets[*].items[*] dict entries.
+    for bucket in daily_loop.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        for entry in bucket.get("items", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("id", "")).strip() != item_id:
+                continue
+            if "model" in entry or "effort" in entry:
+                return _map(entry.get("model"), entry.get("effort"), "buckets.items")
+            return None, None
+    return None, None
+
+
+def _resolve_run_default_model_effort(
+    daily_loop: dict[str, Any],
+) -> tuple[ModelName | None, EffortLevel | None]:
+    """Seed sizing for the run-anchor inheritance chain.
+
+    Varre `items_index` (ou `buckets[*].items[*]`) em ordem de id e devolve o
+    PRIMEIRO par com `model` E `effort` explicitos. Esse par e o "run anchor":
+    itens nulos que aparecem ANTES dele (ex: bookend `preparo`) tambem herdam
+    esse sizing, em vez de cair no default do bucket — evitando que um item
+    no-op rode no modelo caro de um bucket desatualizado (incidente
+    05-25-rede-micro-sites: bucket T-opus-high vs anchor sonnet/standard).
+
+    Returns ``(None, None)`` quando nenhum item carrega sizing explicito
+    (config legado all-null) — ai o caller usa o bucket como seed.
+    """
+    item_ids: list[str] = []
+    items_index = daily_loop.get("items_index")
+    if isinstance(items_index, dict):
+        item_ids = sorted(str(k) for k in items_index)
+    else:
+        seen: set[str] = set()
+        for bucket in daily_loop.get("buckets", []) or []:
+            if not isinstance(bucket, dict):
+                continue
+            for entry in bucket.get("items", []) or []:
+                iid = (
+                    str(entry.get("id", "")).strip()
+                    if isinstance(entry, dict)
+                    else str(entry).strip()
+                )
+                if iid and iid not in seen:
+                    seen.add(iid)
+                    item_ids.append(iid)
+    for iid in item_ids:
+        model, effort = _resolve_item_model_effort(daily_loop, iid)
+        if model is not None and effort is not None:
+            return model, effort
+    return None, None
+
+
+def _resolve_effective_sizing(
+    daily_loop: dict[str, Any],
+    item_id: str,
+    bucket: dict[str, Any],
+    active_model: ModelName | None,
+    active_effort: EffortLevel | None,
+) -> tuple[ModelName, EffortLevel, ModelName, EffortLevel]:
+    """Resolve o (model, effort) efetivo de um item e avanca o run anchor.
+
+    Precedencia (fix do bug de propagacao de bucket — incidente
+    05-25-rede-micro-sites onde o bucket T-opus-high vencia o sizing per-item
+    sonnet/standard calculado pela FASE /loop:individual-analysis):
+
+      1. sizing explicito per-item (items_index / buckets.items) VENCE o bucket;
+      2. sizing null herda o run ativo (`active_*`);
+      3. sem run ativo (item antes do primeiro anchor, config legado) -> bucket.
+
+    Floor coercion (low banido) e aplicada por ultimo. Devolve tambem o novo
+    par `active_*` (atualizado quando o item carrega sizing explicito), para o
+    caller propagar a heranca ao proximo item.
+    """
+    bucket_model, bucket_effort = _bucket_to_model_effort(bucket)
+    pi_model, pi_effort = _resolve_item_model_effort(daily_loop, item_id)
+
+    if pi_model is not None:
+        active_model = pi_model
+    model = active_model if active_model is not None else bucket_model
+
+    if pi_effort is not None:
+        active_effort = pi_effort
+    effort = active_effort if active_effort is not None else bucket_effort
+
+    model, effort = _coerce_floor(model, effort, f"item {item_id!r}")
+    return model, effort, active_model, active_effort
 
 
 def _raise_if_ambiguous(daily_loop: dict[str, Any], item_id: str) -> None:
@@ -908,6 +1059,10 @@ def build_daily_loop_specs(
 
     current_model: ModelName | None = None
     current_effort: EffortLevel | None = None
+    # Run-anchor inheritance (ver _resolve_effective_sizing): seed = primeiro par
+    # explicito do loop, NAO o bucket. Independente da emissao; nao resetado por
+    # /clear (esse reset zera apenas a re-emissao de /model e /effort).
+    active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
 
     for idx, item in enumerate(pending):
         # Opt-in: drop a /clear between items (after the prior :review-done,
@@ -935,7 +1090,9 @@ def build_daily_loop_specs(
             raise DailyLoopConfigError(
                 f"item {item.item_id} referencia bucket inexistente: {item.bucket_id!r}"
             )
-        model, effort = _bucket_to_model_effort(bucket)
+        model, effort, active_model, active_effort = _resolve_effective_sizing(
+            daily_loop, item.item_id, bucket, active_model, active_effort
+        )
 
         if model != current_model:
             specs.append(
@@ -1325,6 +1482,10 @@ def build_loop_specs(
 
     current_model: ModelName | None = None
     current_effort: EffortLevel | None = None
+    # Run-anchor inheritance (ver _resolve_effective_sizing): seed = primeiro par
+    # explicito do loop, NAO o bucket. Independente da emissao; nao resetado por
+    # /clear (esse reset zera apenas a re-emissao de /model e /effort).
+    active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
 
     for idx, item in enumerate(pending):
         if clear_between_items and idx > 0:
@@ -1345,7 +1506,9 @@ def build_loop_specs(
             raise DailyLoopConfigError(
                 f"item {item.item_id} referencia bucket inexistente: {item.bucket_id!r}"
             )
-        model, effort = _bucket_to_model_effort(bucket)
+        model, effort, active_model, active_effort = _resolve_effective_sizing(
+            daily_loop, item.item_id, bucket, active_model, active_effort
+        )
 
         if model != current_model:
             specs.append(

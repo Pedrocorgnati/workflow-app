@@ -356,10 +356,24 @@ class TerminalStatusDot(QWidget):
         tip_map = {
             "idle": "parado",
             "busy": "executando",
-            "failed": "falhou",
-            "awaiting_user": "aguardando usuario",
+            "failed": "falhou — clique para limpar",
+            "awaiting_user": "aguardando usuario — clique para liberar",
         }
         self.setToolTip(f"{self._label}: {tip_map.get(state, 'parado')}")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        # Clique humano limpa estados prioritarios (failed/awaiting_user).
+        # Sintaxe documentada em workflow-app-listeners.md §5: vermelho ->
+        # volta para idle (assume PTY ocioso); azul -> volta para busy
+        # (PTY ainda processando resposta da AUQ).
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._state == "failed":
+                self.set_state("idle")
+                self.busy_changed.emit(self._channel, False)
+            elif self._state == "awaiting_user":
+                self.set_state("busy")
+                self.busy_changed.emit(self._channel, True)
+        super().mousePressEvent(event)
 
 
 class MetricsBar(QWidget):
@@ -1145,6 +1159,20 @@ class MetricsBar(QWidget):
 
     def _on_dot_busy_changed(self, _channel: str, busy: bool) -> None:
         if not self._btn_autocast.isChecked():
+            return
+        # Failure/awaiting guard: enquanto qualquer dot estiver em estado
+        # prioritario (failed=vermelho ou awaiting_user=azul) o gate
+        # verde+verde nao pode disparar o proximo item — autocast pausa
+        # ate clique humano no dot OR signal de clear externo.
+        # Ver ai-forge/rules/workflow-app-listeners.md §3 e §5.
+        if any(
+            d.state in ("failed", "awaiting_user")
+            for d in (
+                self._dot_interactive,
+                self._dot_workspace,
+                self._dot_workspace_xterm,
+            )
+        ):
             return
         if busy:
             # Confirmed a command actually started — leave the awaiting window.
