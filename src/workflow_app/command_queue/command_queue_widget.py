@@ -58,6 +58,11 @@ from workflow_app.domain import (
 from workflow_app.services.delivery_invalid_formatter import (
     format_delivery_invalid_popup,
 )
+from workflow_app.services.matrix_invalid_formatter import (
+    discover_latest_bak,
+    extract_schema_version,
+    format_matrix_invalid_popup,
+)
 from workflow_app.signal_bus import signal_bus
 from workflow_app.templates.quick_templates import (
     COMMAND_FLAG_SPECS,
@@ -642,6 +647,15 @@ class CommandQueueWidget(QWidget):
         # `_handle_dcp_load_specific_flow` (Task 13) to locate the freshly
         # regenerated SPECIFIC-FLOW.json and emit it as the next pipeline.
         self._pending_dcp_load_ctx: Optional[DcpBuildContext] = None
+
+        # task-019 (TASK-018): UI FAIL-CLOSED. Set to ctx.cm_id by
+        # `_derive_queue_from_matrix_inmemory` when DCP-COMMAND-MATRIX.json
+        # exists but fails strict validation. Both `_handle_dcp_load_specific_flow`
+        # (DCP Execute) and `_on_dcp_specific_flow_clicked` (Specific Flow button)
+        # check this attribute to abort instead of falling back to SPECIFIC-FLOW.json.
+        # Cleared on any successful matrix derivation OR after the caller consumes
+        # the abort signal (so a subsequent retry on a fixed matrix rearms cleanly).
+        self._matrix_strict_failed_for_ctx: Optional[str] = None
 
         self._setup_ui()
         self._connect_signals()
@@ -1823,6 +1837,21 @@ class CommandQueueWidget(QWidget):
                  name="Blog Stockpile (estoque, NAO publica)",
              ),
              "queue-btn-blog-stockpile"),
+            ("Publish micro-site (multilingue br/it/es/us)",
+             "Publish micro-site multilingue — para o slug selecionado via input, "
+             "valida deploy-map.json (host nao-reservado), locales-map.json, "
+             "site.json e REVIEW.md status:approved para os 4 locales "
+             "(pt-BR/it-IT/es-ES/en-US) e entao enfileira 7 itens: "
+             "/micro-sites-publish <host> --country br -> /clear -> "
+             "/micro-sites-publish <host> --country it -> /clear -> "
+             "/micro-sites-publish <host> --country es -> /clear -> "
+             "/micro-sites-publish <host> --country us. "
+             "Falha em qualquer validacao -> toast vermelho, nada enfileira. "
+             "Cada invocacao do comando continua independente e idempotente; "
+             "o autocast existente dispara o proximo apos cada termino "
+             "(wf-notify.sh).",
+             self._on_publish_micro_sites_multilingue_clicked,
+             "queue-btn-publish-micro-sites-multilingue"),
             _maintenance_btn,
         ])
         header_layout.addWidget(auxiliar_content)
@@ -3467,13 +3496,20 @@ class CommandQueueWidget(QWidget):
         # as a single info toast for operator awareness.
         self._audit_display_dcp_reports(module_dir, ctx.cm_id)
 
-        # task-027 (st-05): matrix-driven in-memory derivation supersedes the
-        # SPECIFIC-FLOW.json read path. We try the matrix first; on
-        # FileNotFoundError / ValidationError the legacy disk-based path is
-        # used so the widget keeps working in environments where
-        # DCP-COMMAND-MATRIX.json has not yet been generated.
+        # task-027 (st-05): matrix-driven in-memory derivation is the canonical
+        # source for the DCP Execute queue. SPECIFIC-FLOW.json is read only as
+        # a transitional path for projects whose matrix has not yet been
+        # generated (FileNotFoundError). task-019 (TASK-018) made this path
+        # FAIL-CLOSED: when the matrix exists but fails strict validation,
+        # `_matrix_strict_failed_for_ctx` is armed and DCP Execute aborts
+        # without falling back.
         matrix_queue = self._derive_queue_from_matrix_inmemory(ctx, config)
         if matrix_queue is not None:
+            # task-019 (TASK-018): defense-in-depth guard before emit.
+            # Reject bare slash-names (e.g. `/create-task` without args)
+            # that may have slipped past the matrix validator.
+            if not self._validate_no_bare_names(matrix_queue, ctx.cm_id):
+                return False
             self._template_label.setText(f"  \U0001f4cb  DCP Matrix: {ctx.cm_id}")
             self._template_label.setVisible(True)
             self._maybe_auto_save(f"DCP Matrix {ctx.cm_id}")
@@ -3484,6 +3520,13 @@ class CommandQueueWidget(QWidget):
             )
             return True
 
+        # task-019 (TASK-018): UI FAIL-CLOSED. When matrix exists but failed
+        # strict validation, abort DCP Execute without reading SPECIFIC-FLOW.json.
+        # The MATRIX_INVALID popup was already shown by the helper.
+        if self._matrix_strict_failed_for_ctx == ctx.cm_id:
+            self._matrix_strict_failed_for_ctx = None
+            return False
+
         flow_path = resolve_specific_flow(
             result.delivery,
             ctx.cm_id,
@@ -3492,7 +3535,7 @@ class CommandQueueWidget(QWidget):
         )
         if flow_path is None or not flow_path.exists():
             signal_bus.toast_requested.emit(
-                f"Matrix ausente/invalida e SPECIFIC-FLOW.json nao apareceu "
+                f"Matrix ausente e SPECIFIC-FLOW.json nao apareceu "
                 f"para {ctx.cm_id}. Regenere via "
                 f"[DCP: Build Module Pipeline].",
                 "warning",
@@ -3529,6 +3572,11 @@ class CommandQueueWidget(QWidget):
         )
         from workflow_app.models.dcp_command_matrix import TrailEntry
 
+        # task-019 (TASK-018): clear stale fail-closed flag at entry so each
+        # call reflects only the current attempt. The flag is re-armed below
+        # only when matrix exists AND fails strict validation.
+        self._matrix_strict_failed_for_ctx = None
+
         dcp_root_raw = getattr(config, "dcp_root", "") or ""
         if not dcp_root_raw:
             return None
@@ -3539,24 +3587,74 @@ class CommandQueueWidget(QWidget):
         try:
             matrix = load_matrix(dcp_root)
         except FileNotFoundError:
+            # Matrix absent: legitimate scenario for projects not yet migrated.
+            # Flag stays cleared (set at entry), so the caller may fall back
+            # to SPECIFIC-FLOW.json without abort.
             return None
         except Exception as exc:  # ValidationError + JSON errors
-            signal_bus.toast_requested.emit(
-                f"DCP-COMMAND-MATRIX.json invalido ({type(exc).__name__}): "
-                f"caindo para SPECIFIC-FLOW.json.",
-                "warning",
+            # task-019 (TASK-018): red MATRIX_INVALID popup, FAIL-CLOSED.
+            # Matrix exists but fails strict validation: arm the fail-closed
+            # flag so the caller aborts DCP Execute without falling back to
+            # SPECIFIC-FLOW.json. The popup is critical (red) and offers only
+            # detail-copy + close — no "continuar com fallback" button.
+            self._matrix_strict_failed_for_ctx = ctx.cm_id
+            matrix_path = dcp_root / "DCP-COMMAND-MATRIX.json"
+            schema_version_attempted = extract_schema_version(matrix_path)
+            latest_bak = discover_latest_bak(matrix_path)
+            body, clipboard_text = format_matrix_invalid_popup(
+                matrix_path,
+                type(exc).__name__,
+                str(exc),
+                schema_version_attempted=schema_version_attempted,
+                latest_bak=latest_bak,
             )
-            logger.warning(
-                "[DCP] matrix invalida em %s: %s — fallback para SPECIFIC-FLOW.json",
-                dcp_root, exc,
+            logger.error(
+                "[DCP] matrix invalida em %s (schema_version=%s, latest_bak=%s): "
+                "%s -> DCP Execute ABORTADO (sem fallback)",
+                matrix_path, schema_version_attempted, latest_bak, exc,
             )
+            try:
+                from PySide6.QtWidgets import QMessageBox
+
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Critical)
+                box.setWindowTitle("MATRIX_INVALID: DCP-COMMAND-MATRIX.json invalido")
+                box.setText(body)
+                box.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                    | Qt.TextInteractionFlag.TextSelectableByKeyboard
+                )
+                copy_btn = box.addButton(
+                    "Copiar detalhes", QMessageBox.ButtonRole.ActionRole
+                )
+                close_btn = box.addButton(
+                    "Fechar", QMessageBox.ButtonRole.RejectRole
+                )
+                box.setDefaultButton(close_btn)
+                box.exec()
+                if box.clickedButton() is copy_btn:
+                    QApplication.clipboard().setText(clipboard_text)
+                    signal_bus.toast_requested.emit(
+                        "Detalhes do MATRIX_INVALID copiados.", "info"
+                    )
+            except Exception as ui_exc:  # popup failed (headless/test) — keep toast
+                logger.warning(
+                    "[DCP] MATRIX_INVALID popup falhou (%s); emitindo toast critico",
+                    ui_exc,
+                )
+                signal_bus.toast_requested.emit(
+                    f"DCP-COMMAND-MATRIX.json invalido ({type(exc).__name__}): "
+                    f"DCP Execute ABORTADO (sem fallback).",
+                    "error",
+                )
             return None
 
         # task-028 (st-05): matrix-driven identity guard.
         # Replaces the legacy scope_module check (still kept in
-        # _enqueue_specific_flow for the legacy fallback path). When the
-        # operator-active module is absent from the matrix, we cannot
-        # safely derive a queue in-memory — fall back to legacy with an
+        # _enqueue_specific_flow for the transitional SPECIFIC-FLOW.json read
+        # path used by projects not yet migrated to the matrix contract).
+        # When the operator-active module is absent from the matrix, we
+        # cannot safely derive a queue in-memory — return None with an
         # explicit operator toast pointing at the regeneration entrypoint.
         matrix_module = matrix.modules.get(ctx.cm_id)
         if matrix_module is None:
@@ -3677,6 +3775,81 @@ class CommandQueueWidget(QWidget):
 
         return queue
 
+    # task-019 (TASK-018): defense-in-depth bare-slash check.
+    # Mirrors `ai-forge/scripts/_dcp_canonical.py:115-125` so the widget can
+    # reject bare names without importing from ai-forge/scripts (not on the
+    # workflow-app sys.path). Kept in sync via tests/test_dcp_fail_closed_bare_name.py.
+    _BARE_SLASH_NAME_RE = re.compile(r"^/[a-z][a-z0-9-]*(:[a-z0-9-]+)*$")
+    _BARE_SLASH_ALLOWLIST = frozenset({"/clear", "/model {tier}", "/effort {level}"})
+
+    @classmethod
+    def _is_bare_slash_name(cls, name: str) -> bool:
+        """True when `name` is a slash bare ilegitimo (token unico, sem args)."""
+        normalized = re.sub(r"\s+", " ", name or "").strip()
+        if normalized in cls._BARE_SLASH_ALLOWLIST:
+            return False
+        return bool(cls._BARE_SLASH_NAME_RE.match(normalized))
+
+    def _validate_no_bare_names(
+        self,
+        specs: list[CommandSpec],
+        cm_id: str,
+    ) -> bool:
+        """Reject the emit when any CommandSpec carries a bare slash-name.
+
+        Second-layer guard to prevent regression of the bare-name bug
+        (loop 05-27-dcp-flow-structured-fix). Returns True when all spec
+        names pass; False after surfacing a red MATRIX_INVALID-style popup
+        and a toast. The popup body identifies the offender(s) so the
+        operator can correlate with `DCP-COMMAND-MATRIX.json`.
+        """
+        offenders = [
+            spec.name for spec in specs
+            if self._is_bare_slash_name(spec.name)
+        ]
+        if not offenders:
+            return True
+
+        joined = ", ".join(offenders[:5])
+        suffix = f" (+{len(offenders) - 5} mais)" if len(offenders) > 5 else ""
+        body = (
+            "Matriz derivada contem name bare (sem args/placeholders).\n\n"
+            f"Modulo:    {cm_id}\n"
+            f"Offenders: {joined}{suffix}\n\n"
+            "DCP Execute ABORTADO (sem fallback). Regere a matrix via\n"
+            "[DCP: Build Module Pipeline] e revalide com\n"
+            "  python3 ai-forge/scripts/validate-dcp-matrix-canonical.py "
+            "--matrix <DCP-COMMAND-MATRIX.json>"
+        )
+        logger.error(
+            "[DCP] guard pre-emit rejeitou matrix com %d name bare para modulo=%s: %s",
+            len(offenders), cm_id, joined,
+        )
+        try:
+            from PySide6.QtWidgets import QMessageBox
+
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("MATRIX_INVALID: name bare na fila derivada")
+            box.setText(body)
+            box.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
+            box.addButton("Fechar", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+        except Exception as ui_exc:  # popup failed (headless/test) — keep toast
+            logger.warning(
+                "[DCP] MATRIX_INVALID (bare guard) popup falhou (%s); emitindo toast",
+                ui_exc,
+            )
+            signal_bus.toast_requested.emit(
+                f"Matriz {cm_id} contem name bare ({joined}). "
+                f"DCP Execute ABORTADO.",
+                "error",
+            )
+        return False
+
     def _on_dcp_specific_flow_clicked(self) -> None:
         """Load SPECIFIC-FLOW.json for the active module into the command queue.
 
@@ -3746,8 +3919,11 @@ class CommandQueueWidget(QWidget):
             return
 
         # Canonical path: the Specific Flow button renders the sequence from
-        # DCP-COMMAND-MATRIX.json. SPECIFIC-FLOW.json remains only as legacy
-        # fallback for projects not migrated to the matrix contract.
+        # DCP-COMMAND-MATRIX.json. SPECIFIC-FLOW.json is read only as a
+        # transitional path for projects whose matrix has not yet been
+        # generated. task-019 (TASK-018) made this path FAIL-CLOSED: when the
+        # matrix exists but fails strict validation, the button aborts without
+        # falling back to SPECIFIC-FLOW.json.
         matrix_ctx = DcpBuildContext(
             cm_id=cm_id,
             module_state=module.state,
@@ -3757,6 +3933,9 @@ class CommandQueueWidget(QWidget):
         )
         matrix_queue = self._derive_queue_from_matrix_inmemory(matrix_ctx, config)
         if matrix_queue is not None:
+            # task-019 (TASK-018): defense-in-depth guard before emit.
+            if not self._validate_no_bare_names(matrix_queue, cm_id):
+                return
             self._template_label.setText(f"  \U0001f4cb  DCP Matrix: {cm_id}")
             self._template_label.setVisible(True)
             self._maybe_auto_save(f"DCP Matrix {cm_id}")
@@ -3765,6 +3944,12 @@ class CommandQueueWidget(QWidget):
                 "[DCP] Specific-Flow button carregou matrix | modulo=%s count=%d",
                 cm_id, len(matrix_queue),
             )
+            return
+
+        # task-019 (TASK-018): UI FAIL-CLOSED. Matrix existed but failed strict;
+        # abort without reading SPECIFIC-FLOW.json. Popup ja foi mostrado.
+        if self._matrix_strict_failed_for_ctx == cm_id:
+            self._matrix_strict_failed_for_ctx = None
             return
 
         flow_path = resolve_specific_flow(
@@ -5285,6 +5470,64 @@ class CommandQueueWidget(QWidget):
             )
 
         return specs
+
+    def _on_publish_micro_sites_multilingue_clicked(self) -> None:
+        """Validate and enqueue the multilingue publish chain for a slug.
+
+        Opens a small QInputDialog asking for the micro-site slug. On confirm,
+        delegates to ``micro_sites_multilingue_expander.validate_and_build_specs``
+        which runs the 4 validation gates (deploy-map, locales-map, site.json
+        per-locale, REVIEW.md status:approved). Any failure -> red toast and
+        nothing is enqueued. On success, emits the 7 specs via
+        ``signal_bus.pipeline_ready``.
+
+        Espelha o padrao de ``_on_book_legacy_clicked``: nao depende de
+        metrics-project-pill; abre dialog proprio; emite specs e toast.
+        """
+        from PySide6.QtWidgets import QInputDialog
+        from workflow_app.command_queue.micro_sites_multilingue_expander import (
+            MicroSitesMultilingueError,
+            validate_and_build_specs,
+        )
+
+        slug, ok = QInputDialog.getText(
+            self,
+            "Publish micro-site multilingue",
+            "Slug do micro-site (ex.: a01):",
+        )
+        if not ok:
+            return
+        slug = slug.strip()
+        if not slug:
+            signal_bus.toast_requested.emit(
+                "Slug vazio — publicacao multilingue cancelada.", "warning"
+            )
+            return
+
+        try:
+            result = validate_and_build_specs(slug, Path.cwd())
+        except MicroSitesMultilingueError as exc:
+            signal_bus.toast_requested.emit(
+                f"Publish multilingue bloqueado: {exc}", "error"
+            )
+            return
+
+        logger.info(
+            "[publish-micro-sites-multilingue] slug=%s host=%s specs=%d",
+            result.slug,
+            result.host,
+            len(result.specs),
+        )
+        self._template_label.setText(
+            f"  \U0001f310  publish multilingue: {result.slug} "
+            f"({result.host}, {len(result.specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        signal_bus.pipeline_ready.emit(result.specs)
+        signal_bus.toast_requested.emit(
+            f"Publish multilingue carregado: {result.slug} -> 4 locales (br/it/es/us)",
+            "success",
+        )
 
     def _on_run_command(self, cmd_text: str) -> None:
         """Update last-command row e highlight a queue row correspondente.
