@@ -64,6 +64,142 @@ from workflow_app.templates.quick_templates import _inject_clears
 logger = logging.getLogger(__name__)
 
 
+# Canonical placeholder token (matches {project_json}, {module_n}, ...) used to
+# detect a render that drifted from the placeholder vocabulary. Prose braces are
+# not used in any canonical template, so this never matches legitimate output.
+_UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{[a-z_][a-z0-9_]*\}")
+
+# A bare slash-token without args/placeholders (with `:` namespaces). Mirrors
+# command_queue_widget._BARE_SLASH_NAME_RE and _dcp_canonical.BARE_SLASH_NAME_RE.
+_BARE_SLASH_NAME_RE = re.compile(r"^/[a-z][a-z0-9-]*(:[a-z0-9-]+)*$")
+
+
+# ─── canonical condition engine (defense-in-depth) ──────────────────────── #
+#
+# The per-module filter bits are the materialized cache of the canonical
+# condition verdict (computed by the producer, build_module_pipeline +
+# specific_flow.matrix_filter). As a SAFETY NET against a stale/incorrect
+# matrix, the consumer re-evaluates `entry.condition` at emit-time when given
+# the module's MODULE-META + project.json. This can only ADD drops (a bit==0
+# entry is skipped before this runs), never restore — so it can never leak a
+# command whose condition is False, even if the cached bit is wrongly 1.
+#
+# Cross-package: profiles.py lives under .claude/commands/_lib (not on the
+# workflow-app path). We add it defensively and import lazily; on ANY failure
+# we log a WARN and fall back to filter-only behavior so the queue NEVER fails
+# to load (Zero Silencio: the WARN surfaces the degraded mode).
+
+_evaluate_condition_cached: "Optional[Any]" = None
+_evaluate_condition_loaded = False
+
+
+def _load_evaluate_condition() -> "Optional[Any]":
+    """Lazily import profiles.evaluate_condition; cache the result (or None)."""
+    global _evaluate_condition_cached, _evaluate_condition_loaded
+    if _evaluate_condition_loaded:
+        return _evaluate_condition_cached
+    _evaluate_condition_loaded = True
+    try:
+        repo_root = Path(__file__).resolve().parents[5]
+        lib_dir = repo_root / ".claude" / "commands" / "_lib"
+        import sys as _sys
+        if str(lib_dir) not in _sys.path:
+            _sys.path.insert(0, str(lib_dir))
+        from specific_flow.profiles import evaluate_condition  # noqa: E402
+        _evaluate_condition_cached = evaluate_condition
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning(
+            "[dcp-queue] condition engine indisponivel (%s); defense-in-depth "
+            "desligada, usando filter_bits apenas.", exc
+        )
+        _evaluate_condition_cached = None
+    return _evaluate_condition_cached
+
+
+def _condition_holds(
+    condition: Optional[str],
+    meta: Optional[dict],
+    project: Optional[dict],
+) -> bool:
+    """True if the entry should be emitted per its condition.
+
+    Returns True (emit) when context is absent (meta/project None) or the engine
+    is unavailable — i.e. the consumer trusts the producer's filter bits unless
+    it can prove the condition is False. Returns False ONLY when context is
+    present, the engine loads, and the condition evaluates False.
+
+    CONTRACT: ``meta`` MUST be ENRICHED with the delivery runtime snapshot
+    (generator._enrich_meta_with_delivery_state) before being passed in. Passing
+    RAW MODULE-META would let runtime-state predicates (module.state.*,
+    review.*, tdd.gate_ready) default-false and FALSE-DROP a command the
+    producer legitimately kept. The widget enriches before calling
+    (command_queue_widget._load_condition_context); other callers must do the
+    same or pass meta=None to disable this safety net.
+    """
+    if condition is None or meta is None or project is None:
+        return True
+    fn = _load_evaluate_condition()
+    if fn is None:
+        return True
+    try:
+        return bool(fn(condition, meta, project))
+    except Exception as exc:  # pragma: no cover - never crash the queue
+        logger.warning(
+            "[dcp-queue] evaluate_condition('%s') falhou (%s); mantendo comando.",
+            condition, exc,
+        )
+        return True
+
+
+# ─── canonical-bare command set (single source of truth) ────────────────── #
+#
+# Some FULL_PROFILE commands are CANONICALLY bare by design: their template
+# carries NO placeholder (e.g. /create-task-layout, /data-test-id, every
+# /nextjs:* review). A bare rendering of these is CORRECT. Commands whose
+# template DOES carry a placeholder (e.g. /create-task {task}) are NOT in this
+# set, so a bare rendering of THEM is the loop 05-27 regression. This is the
+# exact distinction the canonical validator uses (validate-dcp-matrix-canonical
+# only flags BARE_NON_EXECUTABLE_NAME when the canonical template has "{"), so
+# the consumer guard and the validator never disagree.
+
+_canonical_bare_names_cached: "Optional[frozenset[str]]" = None
+_canonical_bare_names_loaded = False
+
+
+def canonical_bare_command_names() -> "Optional[frozenset[str]]":
+    """Slash command names that are canonically bare (no placeholder required).
+
+    Single source of truth = ``specific_flow.profiles.FULL_PROFILE`` (the same
+    source the validator consumes). Returns the frozenset, or ``None`` when
+    profiles cannot be imported so the caller can fall back to its own static
+    snapshot — never a silent fail-open.
+    """
+    global _canonical_bare_names_cached, _canonical_bare_names_loaded
+    if _canonical_bare_names_loaded:
+        return _canonical_bare_names_cached
+    _canonical_bare_names_loaded = True
+    try:
+        repo_root = Path(__file__).resolve().parents[5]
+        lib_dir = repo_root / ".claude" / "commands" / "_lib"
+        import sys as _sys
+        if str(lib_dir) not in _sys.path:
+            _sys.path.insert(0, str(lib_dir))
+        from specific_flow import profiles  # noqa: E402
+        steps = profiles.get_profile(profiles.PROFILE_FULL)
+        _canonical_bare_names_cached = frozenset(
+            st.template.strip()
+            for st in steps
+            if st.template.startswith("/") and "{" not in st.template
+        )
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning(
+            "[dcp-queue] canonical-bare set indisponivel (%s); consumidor usara "
+            "snapshot estatico de fallback.", exc
+        )
+        _canonical_bare_names_cached = None
+    return _canonical_bare_names_cached
+
+
 # Canonical phase order applied by the widget when deriving the queue
 # (source.md st-05 L450-456). A-creation is iterated BEFORE this list as a
 # dedicated sub-loop driven by `loop_multiplier["A-creation"]`. Phases
@@ -223,11 +359,28 @@ def _render(
         "{commit_variant}": commit_variant,
         "{github_check_flag}": github_check_flag,
         "{commit_target}": commit_target,
+        # Mirror templating.py:174 — {project_json} renders to the repo-relative
+        # project config path (NO `--module` fallback). Used by the /goal:review
+        # I-human entry. Omitting it let a literal `{project_json}` leak into the
+        # derived command (renderer drift vs the canonical offline generator).
+        "{project_json}": project_json_rel,
     }
     rendered = template
     for key, value in substitutions.items():
         rendered = rendered.replace(key, value)
-    return re.sub(r"\s+", " ", rendered).strip()
+    rendered = re.sub(r"\s+", " ", rendered).strip()
+    # Drift guard (Zero Silencio): every canonical placeholder MUST be
+    # substituted above. A leftover `{token}` means this renderer drifted from
+    # the canonical placeholder vocabulary (_dcp_canonical.PLACEHOLDER_PATTERNS /
+    # templating.py) — fail loud instead of emitting an unrunnable command that
+    # carries a literal placeholder.
+    leftover = _UNRESOLVED_PLACEHOLDER_RE.search(rendered)
+    if leftover:
+        raise ValueError(
+            f"placeholder nao resolvido {leftover.group(0)!r} apos render do "
+            f"template {template!r} (renderer drift vs templating.py)"
+        )
+    return rendered
 
 
 # ─── model/effort/interaction mapping ───────────────────────────────────── #
@@ -308,6 +461,8 @@ def derive_queue_from_matrix(
     commit_variant: str = "simple",
     stack: Optional[str] = None,
     include_directives: bool = False,
+    meta: Optional[dict] = None,
+    project: Optional[dict] = None,
 ) -> list[CommandSpec]:
     """Build the queue for `cm_id` per source.md st-05 algorithm 9-17.
 
@@ -358,6 +513,12 @@ def derive_queue_from_matrix(
         # projection and MUST NOT be referenced here (enforced at type level by
         # CommandIndexRuntimeEntry, which omits it).
         nonlocal position
+        # Defense-in-depth: drop when the canonical condition resolves False,
+        # even if the cached filter bit is (wrongly) 1. No-op when meta/project
+        # absent or engine unavailable (trusts producer filter bits).
+        if not _condition_holds(getattr(entry, "condition", None), meta, project):
+            logger.debug("[dcp-queue] skip condition-false: %s", entry.name)
+            return
         rendered = _render(
             entry.name,
             task=task,
@@ -367,6 +528,15 @@ def derive_queue_from_matrix(
             commit_variant=commit_variant,
             config_path=config_path,
         )
+        # Regression guard (loop 05-27): a template that REQUIRES a placeholder
+        # ("{" in entry.name) must never collapse to a bare slash token — that
+        # means the args were lost. Canonically bare entries (no "{" in name) are
+        # exempt: a bare render is correct for them.
+        if "{" in (entry.name or "") and _BARE_SLASH_NAME_RE.match(rendered):
+            raise ValueError(
+                f"template com placeholder {entry.name!r} renderizou bare "
+                f"{rendered!r} (args perdidos) no modulo {cm_id}"
+            )
         # overrides_skipped works on the rendered command name (source.md L463).
         if rendered in overrides_skipped:
             logger.debug("[dcp-queue] skip overrides_skipped: %s", rendered)
@@ -419,6 +589,10 @@ def derive_queue_from_matrix(
         # (executor contract per TASK-016 / I-NN).
         nonlocal position
         for ref in rules:
+            # Defense-in-depth for fold-in refs (CommandRef carries condition).
+            if not _condition_holds(getattr(ref, "condition", None), meta, project):
+                logger.debug("[dcp-queue] skip fold condition-false: %s", ref.name)
+                continue
             rendered = _render(
                 ref.name,
                 task=None,
@@ -441,11 +615,75 @@ def derive_queue_from_matrix(
                 config_path=config_path,
             ))
 
-    emit_fold(matrix.fold_in_rules.H_commit, "H-commit")
-    emit_fold(matrix.fold_in_rules.I_human_signoff, "I-human-signoff")
+    # Opção C (fix 2026-05-30): quando fold_in_rules NÃO FOI INICIALIZADO (todas
+    # as 4 listas vazias), auto-derivar de command_index por prefixo de fase.
+    # Isso garante que matrix-init sem fold_in_rules populado não trave o
+    # pipeline. O mecanismo fold_in_rules (sempre vs only-last) é preservado.
+    #
+    # IMPORTANTE: o fallback só dispara quando fold_in_rules está completamente
+    # uninitializado (todas as 4 arrays vazias). Quando alguma phase está
+    # intencionalmente vazia (ex: projeto sem mkt_flow → I_human_mkt=[]), o
+    # estado é respeitado sem derivação automática.
+    _fold = matrix.fold_in_rules
+    _fold_uninitialized = (
+        not _fold.H_commit
+        and not _fold.I_human_signoff
+        and not _fold.G_deploy
+        and not _fold.I_human_mkt
+    )
+
+    if _fold_uninitialized:
+        logger.warning(
+            "[dcp-queue] fold_in_rules completamente vazio em matrix — derivando H/I/G "
+            "de command_index por prefixo de fase (fix 2026-05-30). "
+            "Popule fold_in_rules via /dcp:matrix-init para eliminar este aviso."
+        )
+        from workflow_app.models.dcp_command_matrix import CommandRef as _CmdRef
+
+        def _derive_fold(phase_prefix: str) -> "list[CommandRef]":
+            return [
+                _CmdRef(
+                    name=entry.name,
+                    phase=entry.phase,  # type: ignore[arg-type]
+                    model=entry.model or None,
+                    effort=entry.effort or None,
+                    interaction=entry.interaction or None,
+                    condition=entry.condition or None,
+                    mandatory=getattr(entry, "mandatory", False),
+                    source_ref=getattr(entry, "source_ref", None),
+                )
+                for entry in matrix.command_index
+                if getattr(entry, "phase", "").startswith(phase_prefix)
+            ]
+
+        h_commit_rules: "list[CommandRef]" = _derive_fold("H-commit")
+        i_signoff_rules: "list[CommandRef]" = _derive_fold("I-human-signoff")
+        g_deploy_rules: "list[CommandRef]" = _derive_fold("G-deploy")
+        i_mkt_rules: "list[CommandRef]" = _derive_fold("I-human-mkt")
+    else:
+        h_commit_rules = list(_fold.H_commit)
+        i_signoff_rules = list(_fold.I_human_signoff)
+        g_deploy_rules = list(_fold.G_deploy)
+        i_mkt_rules = list(_fold.I_human_mkt)
+
+    # Ordem canônica: validação humana → commit (apaga a luz) → sign-off/handoff (fecha a porta).
+    # Split de I-human-signoff no primeiro /delivery:sign-off:
+    #   pre_signoff  = npm-run, goal, skeleton, sync (validação antes de commitar)
+    #   h_commit     = commit                        (apaga a luz — tudo ok, commita)
+    #   post_signoff = sign-off, handoff             (fecha a porta)
+    split_idx = next(
+        (i for i, r in enumerate(i_signoff_rules) if "/delivery:sign-off" in r.name),
+        len(i_signoff_rules),
+    )
+    pre_signoff = i_signoff_rules[:split_idx]
+    post_signoff = i_signoff_rules[split_idx:]
+
+    emit_fold(pre_signoff, "I-human-signoff")
+    emit_fold(h_commit_rules, "H-commit")
+    emit_fold(post_signoff, "I-human-signoff")
     if is_last:
-        emit_fold(matrix.fold_in_rules.G_deploy, "G-deploy")
-        emit_fold(matrix.fold_in_rules.I_human_mkt, "I-human-mkt")
+        emit_fold(g_deploy_rules, "G-deploy")
+        emit_fold(i_mkt_rules, "I-human-mkt")
 
     return _inject_clears(queue) if include_directives else queue
 
@@ -480,6 +718,7 @@ def build_load_queue_trail_entry(
 __all__ = [
     "PHASE_ORDER",
     "PER_TASK_PHASES",
+    "canonical_bare_command_names",
     "_next_non_done_module_id",
     "_last_module_id",
     "load_matrix",
