@@ -1,33 +1,32 @@
 """
 E2E conftest — helpers compartilhados pelos testes Playwright/pytest-qt do
-workflow-app. Centraliza locators canonicos para os dois engines de terminal
-(pyte legado e xterm.js novo) introduzidos pelo PR2 do plano
-05-14-workflow-app-terminal-fix-plan.
+workflow-app. Centraliza locators canonicos dos terminais do workspace.
 
 Regra (pre-T020): testes E2E NUNCA deviam usar o testid `terminal-workspace`
 sem o qualifier `[data-engine="..."]` porque DOIS nodes compartilhavam o mesmo
-testid (um por engine, pyte/xterm). Pos-T020 (loop 05-21, 2026-05-22), o
-xterm migrou para `terminal-codex-output`, ficando UM testid por engine no
-nivel Qt. O qualifier `[data-engine="..."]` permanece util para Playwright/
-DOM puro (assets/xterm/index.html injeta engine via webchannel) e como
-salvaguarda contra futuros placeholders com mesmo testid. Use as constantes
-abaixo em vez de string literal.
+testid (um por engine, pyte/xterm). Pos-T020 (loop 05-21, 2026-05-22), o T3
+migrou para o testid `terminal-codex-output`, ficando UM testid por painel no
+nivel Qt. O qualifier `[data-engine="..."]` permanece util para Playwright/DOM
+puro e como salvaguarda contra futuros placeholders com mesmo testid. Use as
+constantes abaixo em vez de string literal.
 
 Importacao recomendada:
 
-    from tests.e2e.conftest import TERMINAL_PYTE, TERMINAL_XTERM
+    from tests.e2e.conftest import TERMINAL_PYTE, TERMINAL_T3
 
 Gate de regressao: `ai-forge/workflow-app/scripts/check-terminal-locator-qualifier.sh`
 (invocado por `.git/hooks/pre-commit`) bloqueia commits que reintroduzam
 locator nao-qualificado.
 
-T020 BLOCKER 2 (2026-05-22, loop 05-21-implantation-tasklist-aba-brainstorm):
-o testid Qt do XtermOutputPanel mudou de `terminal-workspace-xterm` para
-`terminal-codex-output` (canonico §10.5 do mcp-flow-implantation-base-archive.md).
-TERMINAL_XTERM passa a refletir o novo nome; mantemos TERMINAL_PYTE em
-`terminal-workspace` pois o panel pyte (`_workspace_panel`) preserva esse
-testid em `main_window.py:1233`.
+2026-06-01: T3 (terminal Codex) passou de xterm.js/QWebEngine para pyte —
+agora os TRES terminais usam o engine pyte (OutputPanel). O testid de painel
+`terminal-codex-output` (contrato de deteccao Codex) e mantido; o data-engine
+do T3 e agora `pyte`. TERMINAL_T3 substitui o antigo nome TERMINAL_XTERM
+(alias retido por compat). TERMINAL_PYTE segue em `terminal-workspace` (T2).
 """
 
 TERMINAL_PYTE = '[data-testid="terminal-workspace"][data-engine="pyte"]'
-TERMINAL_XTERM = '[data-testid="terminal-codex-output"][data-engine="xterm"]'
+TERMINAL_T3 = '[data-testid="terminal-codex-output"][data-engine="pyte"]'
+# Alias historico (T3 era xterm.js ate 2026-06-01). Mantido para nao quebrar
+# importadores antigos; aponta para o mesmo locator pyte.
+TERMINAL_XTERM = TERMINAL_T3

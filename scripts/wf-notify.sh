@@ -11,8 +11,8 @@
 #
 # Argumentos:
 #   --status <s>   enum: success | failure | awaiting_user
-#                  (OMITIDO = legacy v1 — warning + comportamento de success
-#                   para retrocompat dos comandos ainda nao migrados.)
+#                  OBRIGATORIO. Ausente = exit 2 (fail-closed para impedir
+#                  falso verde por fallback legado).
 #   --reason <r>   enum canonico (§2.2): VERIFY_FAILED | BLOCKED | RESSALVAS |
 #                  TIMEOUT | EXIT_NONZERO | MISSING_ARG. OBRIGATORIO quando
 #                  --status=failure; ignorado nos demais casos.
@@ -100,6 +100,15 @@ done
 if [ -z "$channel" ]; then
   channel="${WF_CHANNEL_OVERRIDE:-interactive}"
 fi
+
+# Correção defensiva: se o PTY declarou um canal diferente do que o comando passou,
+# o PTY tem precedência (é a fonte de verdade do ambiente real).
+pty_channel="${WF_CHANNEL_OVERRIDE:-}"
+if [ -n "$pty_channel" ] && [ "$pty_channel" != "$channel" ]; then
+  wf_err "WARNING: canal divergente detectado — comando enviou '$channel' mas PTY declara '$pty_channel'. Usando PTY."
+  channel="$pty_channel"
+fi
+
 case "$channel" in
   interactive|workspace|workspace_xterm) ;;
   *)
@@ -108,10 +117,11 @@ case "$channel" in
     ;;
 esac
 
-# Status validation — v1 legacy (omitido) e tratado como success com WARN
+# Status validation — fail-closed. Status omitido nunca pode virar success
+# implicito, porque isso cruza falha semantica com listener verde.
 if [ -z "$status" ]; then
-  wf_err "WARNING: --status ausente (modo legacy v1). Migrar para v2: --status success|failure|awaiting_user. Veja ai-forge/rules/workflow-app-listeners.md §2.3."
-  status="success"
+  wf_err "--status e obrigatorio (success|failure|awaiting_user); fallback legacy v1 foi desativado para evitar falso verde"
+  exit 2
 fi
 case "$status" in
   success|failure|awaiting_user) ;;

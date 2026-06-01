@@ -307,3 +307,23 @@ class TestCamada3EarlyExitWatcher:
 
         assert emitted_failed == []
         assert idle_emitted == [panel._channel]
+
+    def test_helper_command_does_not_open_early_exit_window(self, panel):
+        # Helpers (/clear, /model, /effort) finish fast by design and must NOT
+        # trigger EARLY_EXIT (issue: /clear on Kimi returns to prompt in <1s).
+        panel._run_shell_command("/clear")
+        assert panel._dispatch_ts is None
+        assert panel._last_failure_reason is None
+        assert panel._bytes_since_dispatch == 0
+
+        # Because _dispatch_ts is None, idle timeout should go straight to green.
+        idle_emitted: list[str] = []
+        signal_bus.terminal_force_idle.connect(idle_emitted.append)
+        try:
+            panel._on_idle_timeout()
+        finally:
+            try:
+                signal_bus.terminal_force_idle.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        assert idle_emitted == [panel._channel]

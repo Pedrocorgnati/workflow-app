@@ -455,6 +455,9 @@ class DoublePhaseArgumentDialog(QDialog):
         flags_boolean: list[str] | None = None,
         flags_with_value: list[FlagSpec] | None = None,
         fixed_flag: str | None = None,
+        mode_radio: list[str] | None = None,
+        mode_radio_flags: dict[str, str] | None = None,
+        mode_radio_summaries: dict[str, str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -465,6 +468,14 @@ class DoublePhaseArgumentDialog(QDialog):
         self._flags_boolean = flags_boolean or []
         self._flags_with_value = flags_with_value or []
         self._fixed_flag = fixed_flag
+        # Radio de modo opcional, renderizado abaixo do input principal no
+        # modo estruturado (ex: cmd-single -> "kimi analyse" | "kimi certain").
+        # `mode_radio_flags` mapeia label -> flag a anexar no comando final
+        # (string vazia = nenhum flag extra; ex: {"kimi certain": "--certain"}).
+        self._mode_radio_options = list(mode_radio or [])
+        self._mode_radio_flags = dict(mode_radio_flags or {})
+        self._mode_radio_summaries = dict(mode_radio_summaries or {})
+        self._mode_radio_widget: RadioGroupWithSummary | None = None
         self._structured_mode = bool(self._flags_boolean or self._flags_with_value or self._fixed_flag)
         self._tokens: list[_Token] = []
         self._widgets: list[QWidget] = []
@@ -589,6 +600,22 @@ class DoublePhaseArgumentDialog(QDialog):
             alignment=Qt.AlignmentFlag.AlignTop,
         )
         form_layout.addWidget(main_input_row)
+
+        # Radio de modo (opcional), imediatamente abaixo do input principal.
+        # Usado pelo cmd-single para escolher "kimi analyse" vs "kimi certain".
+        if self._mode_radio_options:
+            mode_label = QLabel("Modo:")
+            mode_label.setStyleSheet(
+                "color: #D4D4D8; font-size: 11px; font-weight: 600;"
+            )
+            form_layout.addWidget(mode_label)
+            self._mode_radio_widget = RadioGroupWithSummary(
+                self._mode_radio_options, self._mode_radio_summaries
+            )
+            self._mode_radio_widget.setProperty(
+                "testid", "double-phase-mode-radio"
+            )
+            form_layout.addWidget(self._mode_radio_widget)
 
         # Bloco do meio: row unico de checkboxes (omitido quando fixed_flag esta definido)
         all_flags = self._flags_boolean + [f.name for f in self._flags_with_value]
@@ -1057,6 +1084,14 @@ class DoublePhaseArgumentDialog(QDialog):
                         val = self._input_widget_text(edit)
                         if val:
                             parts.append(f"--{flag_spec.name} {self._quote_if_needed(val)}")
+
+            # Flag do radio de modo (ex: --certain para "kimi certain").
+            # Aplica tanto no ramo fixed_flag quanto no estruturado generico.
+            if self._mode_radio_widget is not None:
+                sel = self._mode_radio_widget.selected()
+                mode_flag = self._mode_radio_flags.get(sel, "").strip()
+                if mode_flag:
+                    parts.append(mode_flag)
 
         else:
             for i, tok in enumerate(self._tokens):

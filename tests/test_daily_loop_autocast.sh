@@ -68,7 +68,7 @@ install_stub_notify() {
   cat > "$stub" <<STUB
 #!/usr/bin/env bash
 # stub wf-notify.sh
-echo "1" >> "$counter"
+printf '%s\n' "\$*" >> "$counter"
 if [ "\${STUB_FAIL:-0}" = "1" ]; then
   exit 1
 fi
@@ -103,6 +103,12 @@ count_markers() {
   local dir="$sandbox/blacksmith/loop-archives/test-loop/.autocast"
   if [ ! -d "$dir" ]; then printf '0'; return; fi
   ls -1 "$dir"/$pattern 2>/dev/null | wc -l | tr -d ' '
+}
+
+last_notify_args() {
+  local counter="$1"
+  if [ ! -f "$counter" ]; then printf ''; return; fi
+  tail -n 1 "$counter"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +150,12 @@ test_t2_terminal_notifies_once() {
 
   local n; n=$(count_notify "$counter")
   if [ "$n" = "1" ]; then ok "T2: exatamente 1 notify"; else fail "T2: esperado 1 notify, got $n"; fi
+  local args; args=$(last_notify_args "$counter")
+  if printf '%s' "$args" | grep -q -- '--status success'; then
+    ok "T2: notify explicito de success"
+  else
+    fail "T2: esperado --status success" "$args"
+  fi
 
   local m; m=$(count_markers "$sandbox" "do-002-*.notified.json")
   if [ "$m" = "1" ]; then ok "T2: 1 marker .notified existe"; else fail "T2: esperado 1 marker .notified, got $m"; fi
@@ -350,6 +362,121 @@ test_t9_notify_failure_replayable() {
   rm -rf "$sandbox"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# T10: final_status FAILED -> notify vermelho, nunca success legacy
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_t10_failed_final_status_sends_failure_notify() {
+  printf '\nT10: final_status FAILED -> notify failure\n'
+  local sandbox; sandbox=$(setup_sandbox)
+  local counter="$sandbox/notify.count"
+  install_stub_notify "$sandbox" "$counter"
+  write_progress_md "$sandbox" "010" "!"
+
+  bash "$sandbox/ai-forge/workflow-app/scripts/daily-loop-autocast.sh" \
+    --slug test-loop --item 010 --kind do interactive 2>/dev/null
+
+  local n; n=$(count_notify "$counter")
+  if [ "$n" = "1" ]; then ok "T10: exatamente 1 notify"; else fail "T10: esperado 1 notify, got $n"; fi
+
+  local args; args=$(last_notify_args "$counter")
+  if printf '%s' "$args" | grep -q -- '--status failure' && \
+     printf '%s' "$args" | grep -q -- '--reason VERIFY_FAILED'; then
+    ok "T10: FAILED virou failure/VERIFY_FAILED"
+  else
+    fail "T10: esperado --status failure --reason VERIFY_FAILED" "$args"
+  fi
+
+  rm -rf "$sandbox"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T11: verdict RESSALVAS -> notify vermelho, mesmo com final_status DONE
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_t11_ressalvas_sends_failure_notify() {
+  printf '\nT11: verdict RESSALVAS -> notify failure\n'
+  local sandbox; sandbox=$(setup_sandbox)
+  local counter="$sandbox/notify.count"
+  install_stub_notify "$sandbox" "$counter"
+  write_progress_md "$sandbox" "011" "x"
+
+  bash "$sandbox/ai-forge/workflow-app/scripts/daily-loop-autocast.sh" \
+    --slug test-loop --item 011 --kind review-done \
+    --final-status DONE --verdict RESSALVAS interactive 2>/dev/null
+
+  local n; n=$(count_notify "$counter")
+  if [ "$n" = "1" ]; then ok "T11: exatamente 1 notify"; else fail "T11: esperado 1 notify, got $n"; fi
+
+  local args; args=$(last_notify_args "$counter")
+  if printf '%s' "$args" | grep -q -- '--status failure' && \
+     printf '%s' "$args" | grep -q -- '--reason RESSALVAS'; then
+    ok "T11: RESSALVAS virou failure/RESSALVAS"
+  else
+    fail "T11: esperado --status failure --reason RESSALVAS" "$args"
+  fi
+
+  rm -rf "$sandbox"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T12: final_status BLOCKED -> notify vermelho/BLOCKED
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_t12_blocked_final_status_sends_failure_notify() {
+  printf '\nT12: final_status BLOCKED -> notify failure\n'
+  local sandbox; sandbox=$(setup_sandbox)
+  local counter="$sandbox/notify.count"
+  install_stub_notify "$sandbox" "$counter"
+  write_progress_md "$sandbox" "012" "x"
+
+  bash "$sandbox/ai-forge/workflow-app/scripts/daily-loop-autocast.sh" \
+    --slug test-loop --item 012 --kind review-done \
+    --final-status BLOCKED --verdict APROVADO interactive 2>/dev/null
+
+  local n; n=$(count_notify "$counter")
+  if [ "$n" = "1" ]; then ok "T12: exatamente 1 notify"; else fail "T12: esperado 1 notify, got $n"; fi
+
+  local args; args=$(last_notify_args "$counter")
+  if printf '%s' "$args" | grep -q -- '--status failure' && \
+     printf '%s' "$args" | grep -q -- '--reason BLOCKED'; then
+    ok "T12: BLOCKED virou failure/BLOCKED"
+  else
+    fail "T12: esperado --status failure --reason BLOCKED" "$args"
+  fi
+
+  rm -rf "$sandbox"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T13: verdict REPROVADO -> notify vermelho/VERIFY_FAILED
+# ─────────────────────────────────────────────────────────────────────────────
+
+test_t13_reprovado_verdict_sends_failure_notify() {
+  printf '\nT13: verdict REPROVADO -> notify failure\n'
+  local sandbox; sandbox=$(setup_sandbox)
+  local counter="$sandbox/notify.count"
+  install_stub_notify "$sandbox" "$counter"
+  write_progress_md "$sandbox" "013" "x"
+
+  bash "$sandbox/ai-forge/workflow-app/scripts/daily-loop-autocast.sh" \
+    --slug test-loop --item 013 --kind review-done \
+    --final-status DONE --verdict REPROVADO interactive 2>/dev/null
+
+  local n; n=$(count_notify "$counter")
+  if [ "$n" = "1" ]; then ok "T13: exatamente 1 notify"; else fail "T13: esperado 1 notify, got $n"; fi
+
+  local args; args=$(last_notify_args "$counter")
+  if printf '%s' "$args" | grep -q -- '--status failure' && \
+     printf '%s' "$args" | grep -q -- '--reason VERIFY_FAILED'; then
+    ok "T13: REPROVADO virou failure/VERIFY_FAILED"
+  else
+    fail "T13: esperado --status failure --reason VERIFY_FAILED" "$args"
+  fi
+
+  rm -rf "$sandbox"
+}
+
 # ─── Run all ────────────────────────────────────────────────────────────────
 
 printf '=== daily-loop-autocast.sh test suite ===\n'
@@ -363,6 +490,10 @@ test_t6_standalone_no_precondition
 test_t7_review_done_rejects_skipped
 test_t8_explicit_final_status
 test_t9_notify_failure_replayable
+test_t10_failed_final_status_sends_failure_notify
+test_t11_ressalvas_sends_failure_notify
+test_t12_blocked_final_status_sends_failure_notify
+test_t13_reprovado_verdict_sends_failure_notify
 
 printf '\n=== Result: %d passed, %d failed ===\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

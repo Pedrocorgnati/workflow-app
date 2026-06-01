@@ -15,6 +15,7 @@ Specs:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -40,6 +41,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from workflow_app.app_instance import APP_SESSION_ID
+from workflow_app.metrics_bar.recovery_context import (
+    RecoveryContext,
+    RecoveryContextBlocked,
+    write_recovery_context,
+)
+from workflow_app.metrics_bar.recovery_prompt import (
+    RECOVERY_REASONS,
+    llm_for_channel,
+)
+from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
 # ─── Instance buttons drag&drop (output-toolbar-center-top) ───────────────── #
 #
@@ -542,6 +555,7 @@ class MetricsBar(QWidget):
         #   4a: adicionado `kimid2` apos `clauded2` (mirror clauded2 — interactive terminal).
         #   4d: removido `codex` (historico).
         # 2026-05-19+: `codex` reintroduzido e roteado para T3.
+        # 2026-06-01+: botao `codex` inicia a variante `codex-high`.
         # 2026-05-14: botoes sao reordenaveis via drag&drop (output-toolbar-center-top).
         # Ordem persiste em QSettings/_INSTANCE_ORDER_SETTINGS_KEY e e restaurada aqui.
         self._instance_order_settings = QSettings("SystemForge", "WorkflowApp")
@@ -774,8 +788,15 @@ class MetricsBar(QWidget):
         # column by MainWindow (first row of the new 4th sibling).
 
 
-    # Path where the notify script writes its signal.
-    _NOTIFY_FILE = Path.home() / ".workflow-app" / "terminal-notify.json"
+    # Per-instance IPC directory. Each workflow-app process gets its own
+    # subdirectory under ~/.workflow-app/ keyed by APP_SESSION_ID (format:
+    # "session-<pid>"). This prevents multiple open instances from triggering
+    # each other's QFileSystemWatcher and firing the recovery prompt across
+    # ALL open windows when only ONE instance encounters a failure.
+    # See: ai-forge/rules/workflow-app-listeners.md §2.6 (instance isolation).
+    _NOTIFY_FILE = (
+        Path.home() / ".workflow-app" / APP_SESSION_ID / "terminal-notify.json"
+    )
 
     def _setup_activity_timers(self) -> None:
         """Idle detection — two coexisting paths.
@@ -797,12 +818,14 @@ class MetricsBar(QWidget):
           - epoch fence: rejects notifies whose iat <= last command dispatch
           - session fence: ignores notifies while runner-backed session is active
         """
-        # Hardening window — 3s of true PTY silence after notify file
-        # before the dot turns green. Resets on every chunk while active.
-        # Single timer, no hardcap: the contract is "if there's activity,
-        # the dot does NOT turn green". A CLI with infinite animation
-        # (genuine continuous output) keeps the dot yellow indefinitely
-        # — that is the correct behaviour, not a bug.
+        # Hardening window — 3s soft timer of PTY silence after the notify
+        # file before the dot turns green. Resets on every chunk while active.
+        # The soft timer alone is NOT enough for T1/T3: any CLI whose prompt
+        # animates forever (Kimi/Codex Rich/textual emit invisible cursor/CPR
+        # bytes at idle) resets it indefinitely and the dot would be stuck
+        # yellow. The notify path therefore pairs this soft timer with a 5s
+        # hardcap (see `_on_notify_file_changed`) that never resets on
+        # activity — guaranteeing green regardless of who occupies the PTY.
         self._idle_timer_interactive = QTimer(self)
         self._idle_timer_interactive.setSingleShot(True)
         self._idle_timer_interactive.setInterval(3_000)
@@ -883,12 +906,69 @@ class MetricsBar(QWidget):
             "workspace": 0.0,
             "workspace_xterm": 0.0,
         }
+        # Monotonic per-channel dispatch counter — the race guard for the
+        # internal helper auto-idle timer. SEPARATE from `_command_epoch` on
+        # purpose: `_command_epoch` is wall-clock because it is compared
+        # against the cross-process `iat` written by notify-terminal-idle.py;
+        # using wall-clock for the in-process timer guard was fragile (a
+        # backward NTP step or two same-tick bumps could let a stale helper
+        # timer arm hardening during a real command). A strictly-increasing
+        # integer has neither failure mode. Adversarial-review fix (P1).
+        self._dispatch_seq: dict[str, int] = {
+            "interactive": 0,
+            "workspace": 0,
+            "workspace_xterm": 0,
+        }
+
+        # Anti-duplicate notify guard: QFileSystemWatcher can fire multiple
+        # times for a single atomic write (mkstemp + os.replace) on some
+        # inotify backends. This stores the last processed run_id per channel
+        # so identical notifies are dropped idempotently. (2026-05-31)
+        self._last_processed_run_id: dict[str, str] = {
+            "interactive": "",
+            "workspace": "",
+            "workspace_xterm": "",
+        }
 
         # External-session fence: True between terminal_session_started and
         # terminal_session_finished. While active, authoritative notifies are
         # ignored — runner-driven sessions own the dot via the legacy
         # heuristic path (terminal_session_finished -> _on_force_idle).
         self._session_active: dict[str, bool] = {
+            "interactive": False,
+            "workspace": False,
+            "workspace_xterm": False,
+        }
+
+        # Notify-authoritative fence (anti command-stacking — the catastrophic
+        # cascade bug). T1 (interactive) and T3 (workspace_xterm) green not only
+        # via the authoritative notify file but ALSO via a pure PTY-SILENCE
+        # heuristic: OutputPanel/XtermOutputPanel arm a 2s idle timer on output,
+        # then emit terminal_force_idle on silence -> _on_force_idle ->
+        # _arm_hardening -> green. That silence path RACES AHEAD of the real
+        # `wf-notify.sh --status success` while a command is still running but
+        # momentarily output-quiet (a long blocking `Using Shell`/Bash tool
+        # whose CLI spinner freezes). The false green satisfies the autocast
+        # `verde+verde` gate, which fires the NEXT queue item into the still-busy
+        # CLI; the paste echoes a chunk, silence returns, it false-greens again,
+        # and N commands stack unsubmitted in the input box.
+        #
+        # While `_awaiting_notify[channel]` is True (a real, non-helper command
+        # was dispatched and has not yet reached an authoritative terminal/pause
+        # state), `_on_force_idle` is suppressed for that channel: ONLY the
+        # authoritative notify (idle/failed/awaiting_user) or the fatal/early-exit
+        # tripwires may resolve the dot. T2 (workspace) never arms the silence
+        # heuristic (it is notify-only by design) so it was already immune; the
+        # flag is tracked for all three channels for symmetry.
+        #
+        # Cleared at the single chokepoint where the dot actually greens
+        # (`_enter_authoritative_idle`) and in the failed/awaiting handlers;
+        # re-evaluated on every dispatch (helper dispatch sets it False). NOT
+        # cleared in session_started/finished — T3's idle-timeout emits
+        # terminal_session_finished AND terminal_force_idle in the same callback,
+        # so clearing there would re-open the very hole this closes.
+        # See ai-forge/rules/workflow-app-listeners.md §15.3 / §11.
+        self._awaiting_notify: dict[str, bool] = {
             "interactive": False,
             "workspace": False,
             "workspace_xterm": False,
@@ -901,6 +981,26 @@ class MetricsBar(QWidget):
         # created and started; even Kimi's invisible CPR/cursor chunks
         # cannot keep the dot yellow past the cap.
         self._hardcap_timer: dict[str, QTimer] = {}
+
+        # ── Red-listener auto-recovery (ai-forge/rules/workflow-app-listeners.md) ──
+        # When a dot turns red by a SEMANTIC failure AND autocast was on, wait
+        # 2s then paste a recovery prompt into the SAME terminal (with Enter).
+        # _main_llm tracks which CLI occupies T1 (workers are fixed by channel:
+        # T2=kimi, T3=codex). _recovery_timer holds the per-channel 2s timers.
+        # _recovery_reason carries the failure reason to the timeout callback.
+        # _recovery_attempted is the per-failure-streak loop guard: a channel
+        # gets at most ONE auto-recovery until it genuinely recovers (green) or
+        # the human clicks the dot — preventing an infinite recover→fail loop.
+        self._main_llm: str = "claude"
+        self._recovery_timer: dict[str, QTimer] = {}
+        self._recovery_reason: dict[str, str] = {}
+        self._recovery_attempted: set[str] = set()
+        # Tracks channels whose autocast was aborted *because* a recovery prompt
+        # was dispatched (was_autocast_on=True at failure time). When the channel
+        # successfully reaches idle via _enter_authoritative_idle (recovery option
+        # (a) succeeded), the autocast is re-armed automatically. Discarded on
+        # human dot-click (via _on_dot_recovery_reset) to prevent stale re-arms.
+        self._autocast_aborted_by_recovery: set[str] = set()
 
     def _setup_git_overlay(self) -> None:
         """Configure overlay label for git info (bottom-right corner)."""
@@ -952,7 +1052,7 @@ class MetricsBar(QWidget):
         self._apply_instance_styles()
         self._signal_bus.instance_selected.emit(name)
         if name == "codex":
-            self._signal_bus.run_command_in_workspace_xterm.emit(name)
+            self._signal_bus.run_command_in_workspace_xterm.emit("codex-high")
         elif name == "kimid":
             self._signal_bus.run_command_in_workspace_terminal.emit(name)
         else:
@@ -1195,6 +1295,16 @@ class MetricsBar(QWidget):
         # input, which is semantically the opposite of "command completed".
         if self._awaiting_user_input:
             return
+        # Notify-authoritative interlock (restart-safe defense-in-depth).
+        # Never advance the queue while ANY channel still has a real command
+        # in flight (fence up). Complements the chokepoint in
+        # `_enter_authoritative_idle`: even if a dot greens spuriously — e.g.
+        # fence/state confusion right after an app restart that reattached to a
+        # still-running PTY — the autocast refuses to stack the next command.
+        # A genuine completion lowers the fence first, so the happy path is
+        # unaffected; the failure direction is "stall (visible)" not "cascade".
+        if any(self._awaiting_notify.values()):
+            return
         self._autocast_fire_timer.start()
 
     # ─────────────────────────────────────────────────────── Signals ─── #
@@ -1209,6 +1319,17 @@ class MetricsBar(QWidget):
         bus.terminal_session_finished.connect(self._on_terminal_session_finished)
         bus.terminal_force_failed.connect(self._on_terminal_force_failed)
         bus.terminal_awaiting_user.connect(self._on_terminal_awaiting_user)
+
+        # Main LLM (T1) tracking for the red-listener auto-recovery prompt.
+        bus.main_llm_changed.connect(self._on_main_llm_changed)
+
+        # Auto-recovery loop guard reset: when a dot leaves a priority state by
+        # going green/idle (busy_changed False) OR by a human click that resets
+        # it, clear the per-channel attempt flag so a FUTURE failure streak can
+        # auto-recover again. set_busy(True) does not clear it.
+        self._dot_interactive.busy_changed.connect(self._on_dot_recovery_reset)
+        self._dot_workspace.busy_changed.connect(self._on_dot_recovery_reset)
+        self._dot_workspace_xterm.busy_changed.connect(self._on_dot_recovery_reset)
 
         # Autocast — listen to dot busy transitions to drive the loop state machine
         self._dot_interactive.busy_changed.connect(self._on_dot_busy_changed)
@@ -1243,6 +1364,11 @@ class MetricsBar(QWidget):
         # without listening here the workspace epoch never advances and
         # any helper auto-idle scheduled before it would fire mid-command.
         bus.kimi_blue_arrow_dispatched.connect(self._on_command_dispatched_workspace)
+        # Listener-only pulse: /model and /effort suppressed under Codex/Kimi
+        # Main LLM still need the dot to cycle yellow→green so the autocast
+        # loop advances — but with no terminal write (the directive is not
+        # sent). See CommandQueueWidget._dispatch_codex_command / _dispatch_kimi_main_command.
+        bus.listener_helper_pulse.connect(self._on_listener_helper_pulse)
 
         # Modo Remoto removido 2026-05-12 — sem connections para
         # remote_server_started/stopped/client_connected/disconnected.
@@ -1293,6 +1419,21 @@ class MetricsBar(QWidget):
             return None
         target = repo_root.joinpath(*segments)
         return str(target) if target.is_dir() else None
+
+    def _repo_root_path(self) -> "Path | None":
+        """Resolve a raiz do repositorio (marcador `ai-forge/workflow-app/`).
+
+        Ao contrario de `_resolve_walk_up`, retorna a raiz mesmo que o subdir
+        alvo ainda nao exista — usado por `write_recovery_context`, que cria
+        `blacksmith/recovery/context/` com parents=True na hora de gravar o
+        snapshot diagnostico da auto-recuperacao.
+        """
+        cur = Path(__file__).resolve().parent
+        while cur != cur.parent:
+            if (cur / "ai-forge" / "workflow-app").is_dir():
+                return cur
+            cur = cur.parent
+        return None
 
     def _open_config_picker(self, title: str, fallback_segments: tuple[str, ...]) -> None:
         """Shared picker for Projeto/Loop buttons.
@@ -1630,8 +1771,16 @@ class MetricsBar(QWidget):
     # ── Terminal status dot slots ─────────────────────────────────────── #
 
     def _clean_stale_notify_files(self) -> None:
-        """Truncate notify files with expired timestamps on startup."""
+        """Truncate notify files with expired timestamps on startup.
+
+        Also garbage-collects orphaned session directories: any
+        ~/.workflow-app/session-<pid>/ whose PID is no longer running is
+        a leftover from a previous app instance (crashed or cleanly closed)
+        and is removed to avoid accumulating stale IPC files on disk.
+        """
         import time as _time
+
+        # 1. Truncate expired payloads in THIS instance's notify files.
         for p in self._notify_files.values():
             try:
                 data = json.loads(p.read_text())
@@ -1641,24 +1790,109 @@ class MetricsBar(QWidget):
             except Exception:
                 pass
 
-    def _on_notify_directory_changed(self, _path: str) -> None:
-        """Re-create + re-watch any notify file that was deleted at runtime.
+        # 2. GC orphaned session dirs from previous instances.
+        wf_dir = self._NOTIFY_FILE.parent.parent  # ~/.workflow-app/
+        try:
+            for entry in wf_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if not name.startswith("session-"):
+                    continue
+                if name == APP_SESSION_ID:
+                    continue  # our own dir — never touch it
+                pid_str = name[len("session-"):]
+                if not pid_str.isdigit():
+                    continue
+                pid = int(pid_str)
+                # On Linux, /proc/<pid> exists iff the process is alive.
+                # Fallback: try os.kill(pid, 0) which raises if not running.
+                alive = (
+                    os.path.exists(f"/proc/{pid}")
+                    if os.path.exists("/proc")
+                    else self._pid_alive(pid)
+                )
+                if not alive:
+                    import shutil as _shutil
+                    try:
+                        _shutil.rmtree(entry)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
-        QFileSystemWatcher drops a watched file path on delete and never
-        re-arms it on its own. Without this recovery the channel stays
-        disconnected from notify events for the rest of the app session.
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        """Return True if a process with the given PID exists (POSIX).
+
+        os.kill(pid, 0) sends signal 0 — does not kill the process, only
+        checks existence. PermissionError means the process EXISTS but we
+        lack permission to signal it (still alive). ProcessLookupError /
+        ESRCH means no such process.
         """
-        for ch, p in self._notify_files.items():
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True  # process exists; we just cannot signal it
+        except OSError:
+            return False
+
+    def _on_notify_directory_changed(self, _path: str) -> None:
+        """Re-create + re-watch deleted notify files AND recover missed writes.
+
+        Two failure modes are handled here:
+
+        1. Delete: QFileSystemWatcher drops a watched file path on delete and
+           never re-arms it on its own. Without recovery the channel stays
+           disconnected from notify events for the rest of the app session.
+
+        2. Missed fileChanged: notify-terminal-idle.py writes atomically via
+           mkstemp + os.replace. On some Linux inotify backends an atomic
+           rename surfaces ONLY as a directoryChanged on the parent dir, not
+           as a fileChanged on the watched path — so a valid `state: idle`
+           payload can land on disk fully unread, leaving the channel stuck
+           busy (yellow) forever. We therefore re-run the per-file handler for
+           every existing notify file here. Re-processing is idempotent and
+           cascade-safe via THREE independent guards in `_on_notify_file_changed`:
+           the run_id anti-duplicate guard `return`s for any notify already
+           consumed first-hand (so a rescan only acts on a GENUINELY missed
+           notify); the epoch fence rejects notifies that pre-date the latest
+           dispatch (so a stale notify cannot green an in-flight command); and
+           `_arm_hardening` no-ops when the channel is already idle-locked. Under
+           those guards the rescan is allowed to lower the notify-authoritative
+           fence for a run_id-bearing notify (see §15.6) — that is the recovery
+           that un-sticks the yellow dot.
+        """
+        for _ch, p in self._notify_files.items():
             if not p.exists():
                 try:
                     p.write_text("{}")
                 except OSError:
                     continue
+                if str(p) not in self._notify_watcher.files():
+                    self._notify_watcher.addPath(str(p))
+                continue
             if str(p) not in self._notify_watcher.files():
                 self._notify_watcher.addPath(str(p))
+            # Recover a fileChanged the watcher may have swallowed on an
+            # atomic rename. Guarded + idempotent (see docstring). reprocess=True
+            # lets the handler distinguish a rescan from a first-hand event: a
+            # rescan lowers the fence ONLY for a run_id-bearing, never-consumed
+            # notify (the run_id dedup guard proves it was genuinely missed),
+            # never for a consumed or run_id-less one.
+            self._on_notify_file_changed(str(p), reprocess=True)
 
-    def _on_notify_file_changed(self, path: str) -> None:
-        """QFileSystemWatcher callback — skill script wrote the notify file."""
+    def _on_notify_file_changed(self, path: str, *, reprocess: bool = False) -> None:
+        """QFileSystemWatcher callback — skill script wrote the notify file.
+
+        `reprocess=True` marks a defensive re-read driven by
+        `_on_notify_directory_changed` (recovering a fileChanged the watcher may
+        have swallowed). A re-read may resurface an already-consumed / stale
+        notify, so it MUST NOT lower the notify-authoritative fence — only a
+        first-hand `fileChanged` (reprocess=False) for a fresh notify may green
+        an in-flight command. State updates for non-fenced channels still apply.
+        """
         import time as _time
         try:
             data = json.loads(Path(path).read_text())
@@ -1675,14 +1909,22 @@ class MetricsBar(QWidget):
             )
             if expected is not None and channel != expected:
                 return
+            run_id = data.get("run_id", "")
+            # Anti-duplicate guard: drop identical run_ids to prevent
+            # QFileSystemWatcher multi-fire from causing double transitions.
+            if run_id and self._last_processed_run_id.get(channel, "") == run_id:
+                return
             state = data.get("state")
             if state == "failed" and channel in ("interactive", "workspace", "workspace_xterm"):
+                self._last_processed_run_id[channel] = run_id
                 self._on_terminal_force_failed(channel, data.get("reason", "notify"))
                 return
             if state == "awaiting_user" and channel in ("interactive", "workspace", "workspace_xterm"):
+                self._last_processed_run_id[channel] = run_id
                 self._on_terminal_awaiting_user(channel)
                 return
             if state == "busy" and channel in ("interactive", "workspace", "workspace_xterm"):
+                self._last_processed_run_id[channel] = run_id
                 self._release_idle_lock(channel)
                 dot = self._dot_for(channel)
                 if dot:
@@ -1700,25 +1942,68 @@ class MetricsBar(QWidget):
                 # Session fence: while a runner-backed session is active,
                 # the dot is owned by terminal_session_started/finished.
                 # An authoritative notify here would silently mask runner
-                # output until the next command.
+                # output until the next command. Do not mark run_id consumed:
+                # terminal_session_finished reprocesses the pending payload.
                 if self._session_active.get(channel):
                     return
-                # Workspace (Kimi) bypasses hardening entirely — Kimi's TUI
-                # emits continuous subtle PTY chunks at the input prompt
-                # which would reset any soft timer forever. Instead, wait
-                # a fixed 5s after notify then go straight to green.
-                # Interactive (Claude Code) keeps the strict hardening
-                # contract: 3s soft, no hardcap. Claude genuinely goes
-                # silent at its prompt so soft fires reliably on its own.
+                # Anti-duplicate: mark as consumed only after all fences pass.
+                # Marking before the session fence caused a stuck-yellow bug:
+                # the success notify was remembered as processed but never
+                # lowered _awaiting_notify or armed hardening.
+                self._last_processed_run_id[channel] = run_id
+                # Workspace (T2, Kimi) bypasses chunk-watching entirely —
+                # Kimi's TUI emits continuous subtle PTY chunks at the input
+                # prompt which would reset any soft timer forever. Wait a
+                # fixed 5s after notify then go straight to green.
+                #
+                # Interactive (T1) and workspace_xterm (T3) keep the soft 3s
+                # timer (so a genuinely-silent CLI like Claude greens fast)
+                # BUT also arm a 5s hardcap. Any continuously-animating CLI
+                # (Kimi/Codex Rich/textual prompts emit invisible cursor/CPR
+                # bytes indefinitely) would otherwise reset the soft timer
+                # forever and leave the dot stuck yellow. The hardcap never
+                # resets on activity, so the dot greens within 5s regardless
+                # of who occupies the terminal. This is the canonical
+                # "each terminal reaches its own listener" guarantee — see
+                # ai-forge/rules/workflow-app-listeners.md §15.3.
+                # Lower the notify-authoritative fence HERE — this is the only
+                # site that proves a real completion for the in-flight command,
+                # so the soft/hardcap green that follows passes the chokepoint
+                # guard in `_enter_authoritative_idle`. Gated on:
+                #   - `iat` present: the epoch check above already dropped stale
+                #     iats; an iat-LESS notify (manual edit / legacy writer)
+                #     must NOT lower the fence — failing toward recoverable
+                #     stuck-yellow beats a catastrophic green cascade.
+                #   - directory-rescan recovery (`reprocess`) MAY lower the fence
+                #     WHEN `run_id` is present. The anti-duplicate guard above
+                #     (see `_last_processed_run_id` check) already `return`ed for
+                #     any notify whose run_id was consumed first-hand, so reaching
+                #     here under reprocess proves the first-hand `fileChanged` was
+                #     SWALLOWED by inotify on the atomic os.replace inode swap in
+                #     notify-terminal-idle.py — i.e. this IS the genuine,
+                #     never-greened authoritative notify, not a resurfaced stale
+                #     one. Without lowering here, a single missed `fileChanged`
+                #     leaves the dot stuck yellow forever (no CLI re-fire of
+                #     wf-notify can recover it, because every re-fire hits the
+                #     same flaky inode-swap path). A run_id-LESS reprocess still
+                #     must NOT lower (legacy / manual writer with no dedup key).
+                #     See ai-forge/rules/workflow-app-listeners.md §15.6.
+                if iat and (not reprocess or run_id):
+                    self._awaiting_notify[channel] = False
                 if channel == "workspace":
                     self._arm_workspace_post_notify_timeout()
                 else:
-                    self._arm_hardening(channel)
+                    self._arm_hardening(channel, hardcap_ms=self._WORKSPACE_POST_NOTIFY_MS)
         except Exception:
             pass
-        # Some Linux inotify backends remove the watch after IN_CLOSE_WRITE; re-add it.
-        if path not in self._notify_watcher.files():
-            self._notify_watcher.addPath(path)
+        finally:
+            # Some Linux inotify backends remove the watch after IN_CLOSE_WRITE
+            # (or after the atomic rename). Re-add unconditionally — this must
+            # run on EVERY path, including the early `return`s above, or a
+            # channel can silently lose its watch after the first stale/fenced
+            # notify and never recover.
+            if path not in self._notify_watcher.files():
+                self._notify_watcher.addPath(path)
 
     def _on_force_idle(self, channel: str) -> None:
         """OutputPanel detected 2s of PTY silence on this channel.
@@ -1736,6 +2021,15 @@ class MetricsBar(QWidget):
             return
         if self._idle_locked.get(channel):
             return
+        # Notify-authoritative fence: a real (non-helper) command is still in
+        # flight and has NOT yet emitted its authoritative notify. PTY silence
+        # alone must NOT promote it to green — otherwise a long output-quiet
+        # tool call false-greens the dot, the autocast fires the next queue
+        # item, and commands stack in the busy CLI (the cascade bug). Only the
+        # notify file (idle/failed/awaiting_user) or the fatal/early-exit
+        # tripwires resolve the dot while this fence is up.
+        if self._awaiting_notify.get(channel):
+            return
         self._arm_hardening(channel)
 
     def _on_idle_confirmed(self, channel: str) -> None:
@@ -1751,10 +2045,13 @@ class MetricsBar(QWidget):
         """Enter the hardening phase. Dot stays YELLOW until soft timer
         expires (3s of true silence) OR optional hardcap fires.
 
-        Two callers, two contracts:
-          - `_on_notify_file_changed` calls without hardcap → strict
-            "if there's activity, NOT green" contract. Skills that emit
-            forever stay yellow forever (correct).
+        Callers and contracts:
+          - `_on_notify_file_changed` (T1 interactive / T3 workspace_xterm)
+            calls WITH hardcap_ms=5000 → soft 3s for fast-greening silent
+            CLIs (Claude), plus a 5s ceiling so a continuously-animating CLI
+            (Kimi/Codex) cannot keep the dot yellow forever.
+          - `_on_force_idle` (T1 silence heuristic) calls without hardcap →
+            pure soft timer; only reachable when the PTY actually goes quiet.
           - `_helper_auto_idle` calls with hardcap_ms=5000 → helpers
             (/clear, /model, etc) eventually flip green even if Kimi's
             TUI emits invisible CPR/cursor chunks indefinitely.
@@ -1808,19 +2105,68 @@ class MetricsBar(QWidget):
         cap.setInterval(self._WORKSPACE_POST_NOTIFY_MS)
         cap.start()
 
-    def _enter_authoritative_idle(self, channel: str) -> None:
+    def _enter_authoritative_idle(self, channel: str, *, authoritative: bool = False) -> None:
         """Promote channel to green + locked. PTY repaint chunks (cursor
         blink, Rich status bar, mouse-click repaints, etc.) are ignored
         until the app sends the next command or an external session starts.
+
+        CHOKEPOINT FENCE (anti command-stacking cascade — 2026-05-31 v2).
+        EVERY idle path funnels through here: the soft-silence timer
+        (`_on_idle_confirmed`), the 5s hardcap (`_on_hardcap_expired`) and the
+        pure PTY-silence heuristic (`_on_force_idle`). The v1 fix fenced ONLY
+        `_on_force_idle`, leaving the soft-timer and hardcap (armed by
+        `_on_notify_file_changed`, or re-armed by a re-processed notify) free to
+        green a real command still in flight — that is why the cascade kept
+        coming back. Enforcing the fence at this single chokepoint makes a
+        false-green structurally impossible regardless of which feeder reached
+        it. The fence (`_awaiting_notify[channel]`) is lowered ONLY by the
+        channel's own fresh authoritative idle notify (see
+        `_on_notify_file_changed`); while it is still up, nothing greens the dot
+        unless the caller explicitly passes `authoritative=True`.
+        See ai-forge/rules/workflow-app-listeners.md §15.5.
         """
+        if self._awaiting_notify.get(channel) and not authoritative:
+            # A real command is in flight and its authoritative notify has not
+            # lowered the fence yet. This green was triggered by a timer /
+            # hardcap / silence / re-processed notify — refuse it. Do NOT stop
+            # the (single-shot, already-fired) timers and do NOT clear the
+            # fence: the dot stays yellow until the genuine notify or a tripwire
+            # resolves it.
+            return
         idle = self._idle_timer_for(channel)
         if idle:
             idle.stop()
         cap = self._hardcap_timer.get(channel)
         if cap:
             cap.stop()
-        self._idle_locked[channel] = True
         dot = self._dot_for(channel)
+        if dot and dot.state in ("failed", "awaiting_user"):
+            # Failure/awaiting_user are priority states. A later success/idle
+            # notify, hardcap, or prompt repaint must not auto-clear them; only
+            # explicit human action (or a new dispatch path) can move them on.
+            self._idle_locked[channel] = False
+            self._update_overall_listener()
+            return
+        self._idle_locked[channel] = True
+        # The dot is genuinely green now (this is the single chokepoint every
+        # idle path funnels through: notify-armed soft timer, hardcap, or the
+        # silence heuristic). Lower the notify-authoritative fence here so it is
+        # cleared exactly when the channel actually reaches idle, regardless of
+        # which path greened it.
+        self._awaiting_notify[channel] = False
+        # Recovery option (a) re-arm: if this success is the outcome of a
+        # red-listener auto-recovery that aborted the autocast, re-arm it now.
+        # The channel is still in _autocast_aborted_by_recovery at this point
+        # (cleared a frame later by _on_dot_recovery_reset via busy_changed).
+        # We discard here to prevent _on_dot_recovery_reset from re-enabling
+        # a spurious re-arm path if the channel goes idle again in the same
+        # streak without a new failure. Human-click path (failed->idle via
+        # mousePressEvent) discards via _on_dot_recovery_reset before reaching
+        # _enter_authoritative_idle, so no false re-arm occurs there.
+        if channel in self._autocast_aborted_by_recovery:
+            self._autocast_aborted_by_recovery.discard(channel)
+            if not self._btn_autocast.isChecked():
+                self._btn_autocast.setChecked(True)
         if dot:
             dot.set_busy(False)
         self._update_overall_listener()
@@ -1829,7 +2175,10 @@ class MetricsBar(QWidget):
         """Release the authoritative idle lock for a channel.
 
         Also cancels any in-flight hardening (idle/hardcap timers) so a new
-        command does not get prematurely promoted by a stale notify.
+        command does not get prematurely promoted by a stale notify, and any
+        pending red-listener auto-recovery timer (a new dispatch/failure on the
+        channel supersedes a queued recovery; the failure path re-schedules
+        right after).
         """
         self._idle_locked[channel] = False
         idle = self._idle_timer_for(channel)
@@ -1838,6 +2187,7 @@ class MetricsBar(QWidget):
         cap = self._hardcap_timer.get(channel)
         if cap:
             cap.stop()
+        self._cancel_recovery_timer(channel)
 
     def _bump_command_epoch(self, channel: str) -> None:
         """Advance the per-channel epoch fence to wall-clock now.
@@ -1857,6 +2207,9 @@ class MetricsBar(QWidget):
         self._command_epoch[channel] = max(
             self._command_epoch.get(channel, 0.0), _time.time()
         )
+        # Strictly-increasing dispatch sequence for the helper-timer guard
+        # (see _dispatch_seq init). Never decreases, never ties.
+        self._dispatch_seq[channel] = self._dispatch_seq.get(channel, 0) + 1
 
     def _on_command_dispatched_interactive(self, cmd: str) -> None:
         """Bound slot — a new interactive command was dispatched. Bump
@@ -1870,6 +2223,11 @@ class MetricsBar(QWidget):
         """
         self._bump_command_epoch("interactive")
         self._release_idle_lock("interactive")
+        # Raise the notify-authoritative fence for real commands; helpers
+        # (/clear /model /effort, cd, CLI launches) green via their own auto-idle
+        # timer and must NOT raise it (they never write a notify). See
+        # `_awaiting_notify` init + `_on_force_idle`.
+        self._awaiting_notify["interactive"] = not self._is_helper_command(cmd)
         self._dot_interactive.set_busy(True)
         self._maybe_schedule_helper_auto_idle("interactive", cmd)
         self._update_overall_listener()
@@ -1878,6 +2236,7 @@ class MetricsBar(QWidget):
         """Bound slot — a new workspace command was dispatched."""
         self._bump_command_epoch("workspace")
         self._release_idle_lock("workspace")
+        self._awaiting_notify["workspace"] = not self._is_helper_command(cmd)
         self._dot_workspace.set_busy(True)
         self._maybe_schedule_helper_auto_idle("workspace", cmd)
         self._update_overall_listener()
@@ -1885,19 +2244,51 @@ class MetricsBar(QWidget):
     def _on_command_dispatched_workspace_xterm(self, cmd: str) -> None:
         self._bump_command_epoch("workspace_xterm")
         self._release_idle_lock("workspace_xterm")
+        self._awaiting_notify["workspace_xterm"] = not self._is_helper_command(cmd)
         self._dot_workspace_xterm.set_busy(True)
         self._maybe_schedule_helper_auto_idle("workspace_xterm", cmd)
+        self._update_overall_listener()
+
+    def _on_listener_helper_pulse(self, channel: str) -> None:
+        """Pulse a listener dot yellow→green WITHOUT any terminal dispatch.
+
+        Used when the Main LLM is Codex/Kimi and a Claude-specific directive
+        (/model, /effort) is deliberately not sent to the CLI. The dot must
+        still cycle exactly like a real helper dispatch so the autocast loop
+        sees the busy→idle transition and fires the next step. Mirrors the
+        `_on_command_dispatched_*` slots minus the PTY write: bump epoch,
+        release lock, go busy, then arm the same 1s helper auto-idle.
+        """
+        dot = self._dot_for(channel)
+        if dot is None:
+            return
+        self._bump_command_epoch(channel)
+        self._release_idle_lock(channel)
+        # A suppressed /model|/effort is a helper, never a notify-emitting
+        # command — lower the fence so its auto-idle green path is not blocked.
+        self._awaiting_notify[channel] = False
+        dot.set_busy(True)
+        # Pass a canonical helper token so _maybe_schedule_helper_auto_idle
+        # arms the auto-green path (it gates on _is_helper_command).
+        self._maybe_schedule_helper_auto_idle(channel, "/effort")
         self._update_overall_listener()
 
     # Queue helpers — no notify file, just mutate CLI session state or
     # change the bash environment. All these get a deferred hardening
     # arm so the dot eventually goes green after their brief output.
-    _HELPER_COMMANDS: tuple[str, ...] = (
-        "/model", "/effort", "/clear",            # slash-helpers
-        "cd",                                      # bash directory change
-        "clauded", "kimid", "clauded2", "kimid2", "codex",  # CLI launches
-    )
+    # Canonical vocabulary lives in workflow_app.terminal_helpers; this is a
+    # back-compat alias so existing references keep resolving.
+    _HELPER_COMMANDS: tuple[str, ...] = HELPER_COMMANDS
     _HELPER_AUTO_IDLE_MS: int = 1_000
+    # Interactive (T1, Claude Code) helpers need a LONGER auto-idle than the
+    # 1s base. Claude's Ink prompt takes ~1.5-2.5s to accept the pasted
+    # directive and submit it; if the dot goes green at 1s, the verde+verde
+    # gate fires the NEXT queue item before Claude consumed the current one
+    # and the directives stack unsubmitted in the input box (/clear /model
+    # /effort /loop:... all pasted at once). A longer hold keeps the dot
+    # yellow until Claude is realistically ready. Anti command-stacking.
+    # Ver ai-forge/rules/workflow-app-listeners.md §2.6b.
+    _HELPER_AUTO_IDLE_INTERACTIVE_MS: int = 2_500
     # Extra delay added to /clear on the workspace channel: Kimi's TUI
     # repaint after a clear takes longer than a regular helper, so the
     # dot must stay yellow longer before hardening arms.
@@ -1921,9 +2312,18 @@ class MetricsBar(QWidget):
         """
         if not self._is_helper_command(cmd):
             return
-        scheduled_epoch = self._command_epoch.get(channel, 0.0)
+        # Capture the dispatch sequence at schedule time. If a newer command
+        # is dispatched before the timer fires, the seq advances and the
+        # stale auto-idle is dropped (monotonic int — no wall-clock pitfalls).
+        scheduled_seq = self._dispatch_seq.get(channel, 0)
         head = cmd.strip().split(None, 1)[0].lower() if cmd.strip() else ""
-        delay_ms = self._HELPER_AUTO_IDLE_MS
+        # Interactive holds longer so Claude Code finishes consuming the
+        # directive before the verde+verde gate fires the next item
+        # (anti command-stacking — ver _HELPER_AUTO_IDLE_INTERACTIVE_MS).
+        if channel == "interactive":
+            delay_ms = self._HELPER_AUTO_IDLE_INTERACTIVE_MS
+        else:
+            delay_ms = self._HELPER_AUTO_IDLE_MS
         # /clear on workspace gets +1s extra because Kimi's TUI repaint
         # after a clear is slower — the dot must stay yellow longer to
         # cover the repaint window before hardening arms.
@@ -1932,15 +2332,12 @@ class MetricsBar(QWidget):
         QTimer.singleShot(
             delay_ms,
             self,
-            lambda: self._helper_auto_idle(channel, scheduled_epoch),
+            lambda: self._helper_auto_idle(channel, scheduled_seq),
         )
 
     def _is_helper_command(self, cmd: str) -> bool:
-        """Match a queue helper by the leading slash-token (case-insensitive)."""
-        if not cmd or not cmd.strip():
-            return False
-        head = cmd.strip().split(None, 1)[0].lower()
-        return head in self._HELPER_COMMANDS
+        """Delegates to the canonical predicate (workflow_app.terminal_helpers)."""
+        return is_helper_command(cmd)
 
     # Hardcap window — only used by HELPERS (no notify file) on either
     # channel. Skills on interactive use no cap (Claude truly idles).
@@ -1952,21 +2349,22 @@ class MetricsBar(QWidget):
     # prompt emits subtle PTY bytes that would reset any soft timer.
     _WORKSPACE_POST_NOTIFY_MS: int = 5_000
 
-    def _helper_auto_idle(self, channel: str, scheduled_epoch: float) -> None:
+    def _helper_auto_idle(self, channel: str, scheduled_seq: int) -> None:
         """Arm hardening on behalf of a helper command (no notify file).
 
         Helpers (/clear /model /effort, also `cd` and `kimid`) don't write
         notify files because they're not skills — they just mutate CLI
-        session state. Auto-idle waits 1s/2s post-dispatch then arms
+        session state. Auto-idle waits 1s/2.5s post-dispatch then arms
         hardening WITH a 5s hardcap. The hardcap guarantees the dot turns
         green even if Kimi's TUI keeps emitting invisible cursor/CPR
         chunks (Codex/Kimi /mcp:dual consensus: option B).
 
-        Race protection: helper at t=0, real command at t=0.5 → at t=1 the
-        helper's auto-idle would otherwise hand control over to a stale
-        hardening. Comparing epochs cancels the late auto-idle.
+        Race protection: helper at seq=N, real command dispatched before the
+        timer fires bumps the channel to seq=N+1 → this stale auto-idle is
+        dropped. Uses the monotonic `_dispatch_seq` (not wall-clock epoch),
+        so a backward NTP step or two same-tick bumps can't defeat the guard.
         """
-        if self._command_epoch.get(channel, 0.0) > scheduled_epoch:
+        if self._dispatch_seq.get(channel, 0) != scheduled_seq:
             return
         self._arm_hardening(channel, hardcap_ms=self._HELPER_HARDCAP_MS)
 
@@ -1983,6 +2381,9 @@ class MetricsBar(QWidget):
             return
         dot = self._dot_for(channel)
         timer = self._idle_timer_for(channel)
+        if dot and dot.state in ("failed", "awaiting_user"):
+            self._update_overall_listener()
+            return
         if dot:
             dot.set_busy(True)
         if timer and timer.isActive():
@@ -2010,6 +2411,9 @@ class MetricsBar(QWidget):
         if channel not in self._session_active:
             return
         self._session_active[channel] = False
+        notify_path = self._notify_files.get(channel)
+        if notify_path is not None and notify_path.exists():
+            self._on_notify_file_changed(str(notify_path), reprocess=True)
 
     def _dot_for(self, channel: str) -> "TerminalStatusDot | None":
         if channel == "interactive":
@@ -2029,22 +2433,186 @@ class MetricsBar(QWidget):
             return self._idle_timer_workspace_xterm
         return None
 
-    def _on_terminal_force_failed(self, channel: str, _reason: str) -> None:
+    def _on_terminal_force_failed(self, channel: str, reason: str) -> None:
+        # Guard: suprimir EARLY_EXIT quando o notify-fence esta up.
+        # Fence up = comando real em voo que ainda nao emitiu notify.
+        # PTY silencio durante tool calls (client-side, sem saida PTY) e
+        # normal — nao e crash. Converte falso-VERMELHO em amarelo persistente
+        # (recuperavel) ao inves de vermelho (aborta autocast desnecessariamente).
+        # Patterns fatais reais (AUTH_*, CREDIT, RATE_LIMIT) bypassam isso —
+        # sao emitidos por _scan_chunk_for_fatal com reason especifico, nao EARLY_EXIT.
+        # Documentado em ai-forge/rules/workflow-app-listeners.md §3.1.
+        if reason == "EARLY_EXIT" and self._awaiting_notify.get(channel):
+            return
         dot = self._dot_for(channel)
         if not dot:
             return
-        self._release_idle_lock(channel)
+        # Capture autocast state BEFORE the abort round-trip unchecks the button.
+        was_autocast_on = self._btn_autocast.isChecked()
+        self._release_idle_lock(channel)  # also cancels any pending recovery timer
+        # Authoritative terminal state reached — lower the notify fence (failed
+        # does not funnel through _enter_authoritative_idle's green branch).
+        self._awaiting_notify[channel] = False
         dot.set_state("failed")
         self._update_overall_listener()
         self._signal_bus.autocast_abort_requested.emit("listener-failure", channel)
+        # Auto-recovery: red → wait 2s → paste recovery prompt into the SAME
+        # terminal. Gated on (1) autocast was on, (2) a SEMANTIC failure reason
+        # (infra/auth tripwires are excluded — CLI may be dead), (3) we have not
+        # already auto-recovered this streak (loop guard).
+        if (
+            was_autocast_on
+            and reason in RECOVERY_REASONS
+            and channel not in self._recovery_attempted
+        ):
+            self._autocast_aborted_by_recovery.add(channel)
+            self._schedule_recovery_prompt(channel, reason)
 
     def _on_terminal_awaiting_user(self, channel: str) -> None:
         dot = self._dot_for(channel)
         if not dot:
             return
         self._release_idle_lock(channel)
+        # Authoritative pause state reached (command explicitly signalled it is
+        # waiting on the human) — lower the notify fence; awaiting_user does not
+        # funnel through _enter_authoritative_idle's green branch.
+        self._awaiting_notify[channel] = False
         dot.set_state("awaiting_user")
         self._update_overall_listener()
+
+    # ─────────────────────────── Red-listener auto-recovery ─────────────── #
+    # Canonical flow: ai-forge/rules/workflow-app-listeners.md (auto-recovery
+    # section) + ai-forge/rules/llm-routing-div.md (channel→LLM binding).
+    _RECOVERY_DELAY_MS: int = 2_000
+
+    def _on_main_llm_changed(self, llm: str) -> None:
+        """Cache which CLI occupies T1 (interactive). Workers are fixed by
+        channel (workspace=kimi, workspace_xterm=codex)."""
+        if llm in ("claude", "codex", "kimi"):
+            self._main_llm = llm
+
+    def _on_dot_recovery_reset(self, channel: str, busy: bool) -> None:
+        """Clear the auto-recovery loop guard when a channel genuinely leaves a
+        priority state by going idle/green (success) or by a human click that
+        resets a red/blue dot. Both surface as busy_changed(channel, False).
+
+        set_busy(True) — the recovery's own dispatch — does NOT clear the
+        guard, so a recovery that fails again stays guarded (no infinite loop).
+        """
+        if not busy:
+            self._recovery_attempted.discard(channel)
+            # Also clean up the re-arm flag. In the success path this is
+            # already discarded by _enter_authoritative_idle; here it is
+            # defensive cleanup for the human-click path (failed->idle via
+            # mousePressEvent) so a stale flag cannot re-arm on a future idle.
+            self._autocast_aborted_by_recovery.discard(channel)
+
+    def _llm_for_channel(self, channel: str) -> str:
+        return llm_for_channel(channel, self._main_llm)
+
+    def _schedule_recovery_prompt(self, channel: str, reason: str) -> None:
+        """Arm the 2s single-shot timer that fires the recovery prompt."""
+        timer = self._recovery_timer.get(channel)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda c=channel: self._fire_recovery_prompt(c)
+            )
+            self._recovery_timer[channel] = timer
+        self._recovery_reason[channel] = reason
+        timer.start(self._RECOVERY_DELAY_MS)
+
+    def _cancel_recovery_timer(self, channel: str) -> None:
+        """Stop a pending recovery timer (does NOT touch the loop guard)."""
+        timer = self._recovery_timer.get(channel)
+        if timer is not None:
+            timer.stop()
+
+    def _build_recovery_snapshot(self, channel: str, reason: str) -> "Path | None":
+        """Materializa o snapshot diagnostico da tentativa (TASK 05).
+
+        Snapshot minimo por design: MetricsBar nao retem scrollback nem o
+        ultimo comando por canal, entao passamos apenas os campos que temos
+        (canal, reason, autocast_state, main_llm); o helper preenche os demais
+        com `INDISPONIVEL`. Nunca aborta por falta de scrollback. Qualquer
+        falha real de IO (ou canal corrompido) retorna None — o chamador
+        decide nao emitir um sinal sem `context_file` valido."""
+        repo_root = self._repo_root_path()
+        if repo_root is None:
+            return None
+        ctx = RecoveryContext(
+            channel=channel,
+            reason=reason,
+            autocast_state="on" if self._btn_autocast.isChecked() else "off",
+            main_llm=self._main_llm,
+        )
+        try:
+            return write_recovery_context(ctx, repo_root=repo_root)
+        except (RecoveryContextBlocked, OSError):
+            return None
+
+    def _fire_recovery_prompt(self, channel: str) -> None:
+        """Timer callback — emite o sinal semantico de recuperacao do canal.
+
+        Re-checks the dot is still red: if the human already cleared it or a
+        new dispatch moved it on during the 2s window, abort silently.
+
+        Migracao TASK 07 (loop 06-01-listener-recovery-command): em vez de
+        montar e colar o prompt-cru de recuperacao no terminal, este metodo
+        agora (1) valida que o reason esta em RECOVERY_REASONS — abortando sem
+        emitir quando nao esta, em vez de cair no fallback silencioso
+        `FAILURE`; (2) grava um snapshot diagnostico via TASK 05; (3) emite
+        `request_recovery_command(channel, reason, context_file)`. O handler de
+        dispatch (TASK 08) monta+valida o comando e o cola, movendo o dot
+        failed→busy (a "novo dispatch explicito" de workflow-app-listeners.md
+        §1.2). Preserva: revalidacao de vermelho, gate de 2s (no scheduler) e
+        `_recovery_attempted.add(channel)` antes de qualquer emit."""
+        dot = self._dot_for(channel)
+        if dot is None or dot.state != "failed":
+            return
+        # Zero Assumido: reason fora do enum aborta sem emitir (sem fallback
+        # silencioso "FAILURE"). O scheduler ja gateia em RECOVERY_REASONS;
+        # este e o belt-and-suspenders no ponto de emit.
+        reason = self._recovery_reason.get(channel)
+        if reason not in RECOVERY_REASONS:
+            self._signal_bus.toast_requested.emit(
+                f"Auto-recuperacao abortada: motivo invalido ({reason}) "
+                f"fora de RECOVERY_REASONS.",
+                "warning",
+            )
+            return
+        # Mark BEFORE emitting so a re-failure of the recovery itself is
+        # loop-guarded (the channel stays red until the human steps in).
+        self._recovery_attempted.add(channel)
+        llm = self._llm_for_channel(channel)
+        context_file = self._build_recovery_snapshot(channel, reason)
+        if context_file is None:
+            # Sem context_file valido nao ha como emitir um sinal conforme o
+            # contrato de request_recovery_command (Zero Estados Indefinidos).
+            self._signal_bus.toast_requested.emit(
+                f"Auto-recuperacao abortada: falha ao gravar snapshot "
+                f"diagnostico do canal {channel}.",
+                "warning",
+            )
+            return
+        # Os 3 emits antigos (run_command_in_terminal / kimi_blue_arrow_dispatched
+        # / run_command_in_workspace_xterm) deixam de carregar o prompt-cru:
+        # quem cola e o handler de TASK 08 a partir deste sinal estruturado.
+        self._signal_bus.request_recovery_command.emit(
+            channel, reason, str(context_file)
+        )
+        label_map = {
+            "interactive": "Terminal 1",
+            "workspace": "Terminal 2",
+            "workspace_xterm": "Terminal 3",
+        }
+        self._signal_bus.toast_requested.emit(
+            f"AUTO-RECUPERACAO: sinal emitido para "
+            f"{label_map.get(channel, channel)} ({llm}, motivo {reason}, "
+            f"snapshot {context_file.name}).",
+            "info",
+        )
 
     def _update_overall_listener(self) -> None:
         states = [
@@ -2052,11 +2620,11 @@ class MetricsBar(QWidget):
             self._dot_workspace.state,
             self._dot_workspace_xterm.state,
         ]
-        if any(s == "awaiting_user" for s in states):
-            self._dot_general.set_state("awaiting_user")
-            return
         if any(s == "failed" for s in states):
             self._dot_general.set_state("failed")
+            return
+        if any(s == "awaiting_user" for s in states):
+            self._dot_general.set_state("awaiting_user")
             return
         if any(s == "busy" for s in states):
             self._dot_general.set_state("busy")

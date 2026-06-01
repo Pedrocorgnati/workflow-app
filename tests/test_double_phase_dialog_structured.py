@@ -205,3 +205,62 @@ def test_structured_quotes_main_input_with_spaces(qapp):
     assert spy.count() == 1
     assert spy.at(0)[0] == '/daily-loop "descricao com espacos"'
     dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# Mode radio (cmd-single: "kimi analyse" | "kimi certain")
+# ---------------------------------------------------------------------------
+
+
+def _make_cmd_single_dialog():
+    return DoublePhaseArgumentDialog(
+        pipeline_name="/loop",
+        fixed_flag="cmd-single",
+        mode_radio=["kimi analyse", "kimi certain"],
+        mode_radio_flags={"kimi analyse": "", "kimi certain": "--certain"},
+        mode_radio_summaries={
+            "kimi analyse": "par padrao",
+            "kimi certain": "par forcado",
+        },
+    )
+
+
+def test_mode_radio_renders_below_main_input(qapp):
+    """cmd-single renderiza o radio de modo com 2 opcoes e testid proprio."""
+    from workflow_app.command_queue.double_phase_dialog import RadioGroupWithSummary
+
+    dlg = _make_cmd_single_dialog()
+    radios = [
+        w for w in dlg.findChildren(RadioGroupWithSummary)
+        if w.property("testid") == "double-phase-mode-radio"
+    ]
+    assert len(radios) == 1
+    assert radios[0].selected() == "kimi analyse"  # default = primeira opcao
+    dlg.deleteLater()
+
+
+def test_mode_radio_kimi_analyse_emits_no_extra_flag(qapp):
+    """Default (kimi analyse) NAO acrescenta --certain ao comando."""
+    dlg = _make_cmd_single_dialog()
+    dlg._main_input.setPlainText("blacksmith/x.md")
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 1
+    line = spy.at(0)[0]
+    assert line == "/loop --cmd-single blacksmith/x.md"
+    assert "--certain" not in line
+    dlg.deleteLater()
+
+
+def test_mode_radio_kimi_certain_emits_certain_flag(qapp):
+    """kimi certain acrescenta --certain apos o path."""
+    dlg = _make_cmd_single_dialog()
+    dlg._main_input.setPlainText("blacksmith/x.md")
+    dlg._mode_radio_widget._buttons[1].setChecked(True)
+    assert dlg._mode_radio_widget.selected() == "kimi certain"
+    spy = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy.count() == 1
+    line = spy.at(0)[0]
+    assert line == "/loop --cmd-single blacksmith/x.md --certain"
+    dlg.deleteLater()

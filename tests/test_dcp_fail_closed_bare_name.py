@@ -102,13 +102,14 @@ def _capture_toasts() -> Tuple[List[Tuple[str, str]], Any]:
     return captured, disconnect
 
 
-def _bare_spec(name: str = "/create-task") -> CommandSpec:
+def _bare_spec(name: str = "/create-task", *, config_path: str = "") -> CommandSpec:
     return CommandSpec(
         name=name,
         model=ModelName.SONNET,
         interaction_type=InteractionType.AUTO,
         position=1,
         effort=EffortLevel.STANDARD,
+        config_path=config_path,
         kind="slash",
     )
 
@@ -187,10 +188,16 @@ def test_validate_no_bare_names_blocks_emit_and_shows_matrix_invalid_popup(
 def test_validate_no_bare_names_allows_well_formed_specs(
     qapp, monkeypatch, tmp_path: Path
 ) -> None:
-    """C1.b - sanity counter-case: well-formed specs (slash + args, or
-    allowlisted bare tokens) pass through and the helper returns True.
+    """C1.b - sanity counter-case: well-formed specs pass and helper returns True.
 
-    Guards against false positives that would block legitimate matrices.
+    Well-formed = slash + args, OR a canonically-bare command (no placeholder in
+    its FULL_PROFILE template, e.g. /create-task-layout, /data-test-id, /nextjs:*
+    reviews), OR a directive (/clear, /model {tier}, /effort {level}).
+
+    Guards against false positives that would block legitimate matrices — this is
+    the exact class of bug that aborted module-2-shared-foundations on tecum-app
+    (30 canonically-bare commands wrongly flagged). config_path is intentionally
+    NOT set on these specs: canonically-bare commands must pass on their own.
     """
     from workflow_app.config.app_state import app_state
 
@@ -204,9 +211,14 @@ def test_validate_no_bare_names_allows_well_formed_specs(
         try:
             specs = [
                 _bare_spec("/create-task --module 1 --task 2"),  # has args
-                _bare_spec("/clear"),                            # allowlisted
-                _bare_spec("/model {tier}"),                     # allowlisted
-                _bare_spec("/effort {level}"),                   # allowlisted
+                _bare_spec("/create-task-layout"),               # canonically bare
+                _bare_spec("/data-test-id"),                     # canonically bare
+                _bare_spec("/gate:frontend-runtime"),            # canonically bare
+                _bare_spec("/nextjs:security"),                  # canonically bare
+                _bare_spec("/build-verify"),                     # canonically bare
+                _bare_spec("/clear"),                            # directive
+                _bare_spec("/model {tier}"),                     # directive
+                _bare_spec("/effort {level}"),                   # directive
             ]
             result = widget._validate_no_bare_names(specs, "module-1-x")
         finally:
@@ -215,10 +227,98 @@ def test_validate_no_bare_names_allows_well_formed_specs(
         app_state.clear_config()
         pr_disconnect()
 
-    assert result is True, "well-formed and allowlisted specs must pass"
+    assert result is True, "well-formed, canonically-bare and directive specs must pass"
     # Helper itself does not emit; caller decides. We only assert no spurious
     # emission slipped through.
     assert pr_calls == []
+
+
+def test_canonically_bare_commands_pass_with_empty_config(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """Regression for the tecum-app abort (module-2-shared-foundations): the exact
+    offenders reported (canonically-bare FULL_PROFILE commands) MUST pass even
+    with empty config_path. Before the fix the guard flagged all 30 of them
+    because config_path happened to be empty in that code path.
+    """
+    from workflow_app.config.app_state import app_state
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    cfg = _make_config(tmp_path, wbs_root)
+
+    offenders_reported = [
+        "/create-task-layout", "/gate:frontend-runtime", "/data-test-id",
+        "/db-migration-create", "/assets:create", "/env-creation",
+        "/nextjs:configuration", "/nextjs:security", "/secrets-scan",
+        "/build-verify",
+    ]
+    try:
+        widget = _setup_widget(qapp, monkeypatch, cfg)
+        try:
+            specs = [_bare_spec(n, config_path="") for n in offenders_reported]
+            result = widget._validate_no_bare_names(
+                specs, "module-2-shared-foundations"
+            )
+        finally:
+            widget.deleteLater()
+    finally:
+        app_state.clear_config()
+
+    assert result is True, (
+        "canonically-bare commands must not be flagged as bare-name offenders "
+        "(empty config_path is irrelevant — they are bare by design)"
+    )
+
+
+def test_bare_guard_falls_back_to_static_snapshot_on_import_failure(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """When profiles.FULL_PROFILE cannot be imported, the guard uses the static
+    _CANONICAL_BARE_FALLBACK snapshot — NOT a silent fail-open. A canonically-bare
+    command still passes; a real placeholder-loss (/create-task) is still flagged.
+    """
+    from workflow_app.config.app_state import app_state
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.dcp import queue_derivation
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    cfg = _make_config(tmp_path, wbs_root)
+
+    # Simulate profiles import failure and force the class-cached allowlist to
+    # recompute against the static fallback for this test only.
+    monkeypatch.setattr(
+        queue_derivation, "canonical_bare_command_names", lambda: None
+    )
+    monkeypatch.setattr(
+        CommandQueueWidget, "_bare_allowlist_cache", None, raising=False
+    )
+
+    try:
+        widget = _setup_widget(qapp, monkeypatch, cfg)
+        try:
+            ok = widget._validate_no_bare_names(
+                [_bare_spec("/create-task-layout"), _bare_spec("/data-test-id")],
+                "module-1-x",
+            )
+            with patch("PySide6.QtWidgets.QMessageBox.exec", new=lambda *a, **k: 0):
+                bad = widget._validate_no_bare_names(
+                    [_bare_spec("/create-task")], "module-1-x"
+                )
+        finally:
+            widget.deleteLater()
+    finally:
+        app_state.clear_config()
+        CommandQueueWidget._bare_allowlist_cache = None
+
+    assert ok is True, "static fallback must admit canonically-bare commands"
+    assert bad is False, (
+        "static fallback must still flag /create-task placeholder-loss "
+        "(no silent fail-open)"
+    )
+    assert "/create-task-layout" in CommandQueueWidget._CANONICAL_BARE_FALLBACK
+    assert "/create-task" not in CommandQueueWidget._CANONICAL_BARE_FALLBACK
 
 
 # --- C2: end-to-end via in-memory deriver with invalid matrix on disk ----- #

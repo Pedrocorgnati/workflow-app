@@ -8,12 +8,17 @@ get_logger()   is a thin wrapper around logging.getLogger.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _LOG_DIR = Path.home() / ".workflow-app" / "logs"
-_LOG_FILE = _LOG_DIR / "workflow-app.log"
+# Per-process log file: Python's RotatingFileHandler is not safe for concurrent
+# use by multiple OS processes (flock semantics differ per platform and rotation
+# causes data loss when two processes race on the rename). Each instance writes
+# to its own file; a log reader can `cat workflow-app-*.log | sort` to merge.
+_LOG_FILE = _LOG_DIR / f"workflow-app-{os.getpid()}.log"
 
 _FMT = "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"

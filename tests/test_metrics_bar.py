@@ -35,6 +35,15 @@ def test_height_is_38px(bar):
     assert bar.height() == 38
 
 
+def test_codex_instance_button_launches_codex_high(bar):
+    bar._on_instance_clicked(0, "codex")
+
+    bar._signal_bus.instance_selected.emit.assert_called_with("codex")
+    bar._signal_bus.run_command_in_workspace_xterm.emit.assert_called_with("codex-high")
+    bar._signal_bus.run_command_in_terminal.emit.assert_not_called()
+    bar._signal_bus.run_command_in_workspace_terminal.emit.assert_not_called()
+
+
 # ── set_progress_text (backward-compat stub) ─────────────────────────────── #
 
 
@@ -381,7 +390,7 @@ class TestMetricsBarAuthoritativeIdle:
     def test_enter_authoritative_idle_sets_green_and_lock(self, bar):
         bar._enter_authoritative_idle("workspace")
         assert bar._idle_locked["workspace"] is True
-        assert bar._dot_workspace._busy is False
+        assert bar._dot_workspace.is_busy is False
 
     def test_enter_authoritative_idle_stops_hardening_timer(self, bar):
         bar._idle_timer_workspace.start()
@@ -393,19 +402,44 @@ class TestMetricsBarAuthoritativeIdle:
         bar._enter_authoritative_idle("workspace")
         bar._dot_workspace.set_busy(False)
         bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is False
+        assert bar._dot_workspace.is_busy is False
+
+    def test_failed_state_is_not_cleared_by_late_idle_success(self, bar):
+        """Failure wins: a later success/idle notify cannot turn red green."""
+        bar._release_idle_lock("workspace")
+        bar._dot_workspace.set_state("failed")
+        bar._enter_authoritative_idle("workspace")
+        assert bar._dot_workspace.state == "failed"
+        assert bar._idle_locked["workspace"] is False
+
+    def test_failed_state_is_not_cleared_by_prompt_activity(self, bar):
+        """Prompt repaint chunks after a failure cannot clear the red dot."""
+        bar._release_idle_lock("workspace")
+        bar._dot_workspace.set_state("failed")
+        bar._on_terminal_activity("workspace")
+        assert bar._dot_workspace.state == "failed"
+
+    def test_overall_listener_failed_wins_over_awaiting_user(self, bar):
+        """Aggregate dot must preserve the canonical priority:
+        failed > awaiting_user > busy > idle.
+        """
+        bar._dot_interactive.set_state("failed")
+        bar._dot_workspace.set_state("awaiting_user")
+        bar._dot_workspace_xterm.set_state("idle")
+        bar._update_overall_listener()
+        assert bar._dot_general.state == "failed"
 
     def test_release_idle_lock_allows_activity_to_turn_yellow(self, bar):
         bar._enter_authoritative_idle("workspace")
         bar._release_idle_lock("workspace")
         bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
 
     def test_terminal_session_started_releases_lock(self, bar):
         bar._enter_authoritative_idle("workspace")
         bar._on_terminal_session_started("workspace")
         assert bar._idle_locked["workspace"] is False
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
 
     def test_run_command_in_workspace_terminal_releases_lock(self, qapp):
         from workflow_app.signal_bus import SignalBus
@@ -441,8 +475,8 @@ class TestMetricsBarAuthoritativeIdle:
         """
         assert bar._idle_locked["workspace"] is True
         assert bar._idle_locked["interactive"] is True
-        assert bar._dot_workspace._busy is False
-        assert bar._dot_interactive._busy is False
+        assert bar._dot_workspace.is_busy is False
+        assert bar._dot_interactive.is_busy is False
 
     def test_click_at_startup_does_not_flip_dot_yellow(self, bar):
         """Clicking the Kimi terminal generates an ANSI repaint chunk that
@@ -451,7 +485,7 @@ class TestMetricsBarAuthoritativeIdle:
         clicking Kimi flipped the dot yellow even with no command running.
         """
         bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is False
+        assert bar._dot_workspace.is_busy is False
         assert bar._idle_locked["workspace"] is True
 
     # ── Hardening phase (post-notify streaming absorption) ───────────── #
@@ -465,7 +499,7 @@ class TestMetricsBarAuthoritativeIdle:
         bar._release_idle_lock("workspace")
         bar._dot_workspace.set_busy(True)
         bar._arm_hardening("workspace")
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
         assert bar._idle_locked["workspace"] is False
         assert bar._idle_timer_workspace.isActive()
 
@@ -474,7 +508,7 @@ class TestMetricsBarAuthoritativeIdle:
         bar._release_idle_lock("workspace")
         bar._arm_hardening("workspace")
         bar._idle_timer_workspace.timeout.emit()
-        assert bar._dot_workspace._busy is False
+        assert bar._dot_workspace.is_busy is False
         assert bar._idle_locked["workspace"] is True
 
     def test_continuous_chunks_keep_dot_yellow_indefinitely(self, bar):
@@ -489,7 +523,7 @@ class TestMetricsBarAuthoritativeIdle:
         # Simulate continuous chunks resetting the soft timer
         for _ in range(10):
             bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
         assert bar._idle_locked["workspace"] is False
         assert bar._idle_timer_workspace.isActive()  # still counting
 
@@ -564,7 +598,48 @@ class TestMetricsBarAuthoritativeIdle:
         bar._on_notify_file_changed(str(notify_path))
         # Session still owns the dot — lock must stay released, dot busy
         assert bar._idle_locked["workspace"] is False
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
+
+    def test_t3_notify_during_session_reprocessed_on_session_finished(self, qapp):
+        """Regression: T3 could stay yellow after a valid success notify.
+
+        The idle notify can arrive while ``_session_active`` is still true.
+        That first read must not consume the run_id permanently; when the
+        session finishes, the same payload is reprocessed and arms T3 hardening.
+        """
+        import json
+        import time
+        from workflow_app.signal_bus import SignalBus
+
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_workspace_xterm.emit("/loop-rocksmash:compare task.md")
+        assert mb._awaiting_notify["workspace_xterm"] is True
+
+        mb._on_terminal_session_started("workspace_xterm")
+        assert mb._session_active["workspace_xterm"] is True
+
+        notify_path = mb._notify_files["workspace_xterm"]
+        notify_path.write_text(json.dumps({
+            "channel": "workspace_xterm",
+            "state": "idle",
+            "iat": time.time(),
+            "exp": time.time() + 10.0,
+            "run_id": "t3-session-race-success",
+        }))
+        mb._on_notify_file_changed(str(notify_path))
+
+        assert mb._awaiting_notify["workspace_xterm"] is True
+        assert mb._last_processed_run_id["workspace_xterm"] != "t3-session-race-success"
+        assert not mb._idle_timer_workspace_xterm.isActive()
+
+        mb._on_terminal_session_finished("workspace_xterm")
+
+        assert mb._awaiting_notify["workspace_xterm"] is False
+        assert mb._last_processed_run_id["workspace_xterm"] == "t3-session-race-success"
+        assert mb._idle_timer_workspace_xterm.isActive()
+        cap = mb._hardcap_timer.get("workspace_xterm")
+        assert cap is not None and cap.isActive()
 
     def test_notify_at_epoch_boundary_is_rejected(self, qapp):
         """Same-tick equality (iat == epoch) must reject the notify.
@@ -595,6 +670,7 @@ class TestMetricsBarAuthoritativeIdle:
         assert bar._is_helper_command("/model opus") is True
         assert bar._is_helper_command("/effort high") is True
         assert bar._is_helper_command("/clear") is True
+        assert bar._is_helper_command("codex-high") is True
         assert bar._is_helper_command("/MODEL OPUS") is True  # case-insensitive
         assert bar._is_helper_command("/skill:test") is False
         assert bar._is_helper_command("/qa:trace --module 1") is False
@@ -612,15 +688,50 @@ class TestMetricsBarAuthoritativeIdle:
         mb = MetricsBar(bus)
         bus.run_command_in_terminal.emit("/clear")
         assert mb._idle_locked["interactive"] is False
-        scheduled_epoch = mb._command_epoch["interactive"]
-        mb._helper_auto_idle("interactive", scheduled_epoch)
+        scheduled_seq = mb._dispatch_seq["interactive"]
+        mb._helper_auto_idle("interactive", scheduled_seq)
         # Soft timer must be armed but lock not yet flipped
         assert mb._idle_timer_interactive.isActive()
         assert mb._idle_locked["interactive"] is False
         # Now simulate 3s of silence: soft fires → green + lock
         mb._idle_timer_interactive.timeout.emit()
         assert mb._idle_locked["interactive"] is True
-        assert mb._dot_interactive._busy is False
+        assert mb._dot_interactive.is_busy is False
+
+    def test_listener_helper_pulse_cycles_dot_without_terminal_write(self, qapp):
+        """Codex/Kimi main: /model and /effort emit listener_helper_pulse,
+        which must cycle the dot busy→green exactly like a real helper
+        dispatch (release lock, go busy, arm soft hardening) but WITHOUT any
+        terminal write — so the autocast loop advances.
+        """
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        terminal_writes: list[str] = []
+        bus.run_command_in_terminal.connect(terminal_writes.append)
+        try:
+            bus.listener_helper_pulse.emit("interactive")
+        finally:
+            bus.run_command_in_terminal.disconnect(terminal_writes.append)
+        # No terminal write — the directive was suppressed.
+        assert terminal_writes == []
+        # But the dot pulsed busy and the lock was released, same as a helper.
+        assert mb._idle_locked["interactive"] is False
+        assert mb._dot_interactive.is_busy is True
+        # And the 1s helper auto-idle path arms hardening → eventual green.
+        scheduled_seq = mb._dispatch_seq["interactive"]
+        mb._helper_auto_idle("interactive", scheduled_seq)
+        assert mb._idle_timer_interactive.isActive()
+        mb._idle_timer_interactive.timeout.emit()
+        assert mb._idle_locked["interactive"] is True
+        assert mb._dot_interactive.is_busy is False
+
+    def test_listener_helper_pulse_ignores_unknown_channel(self, qapp):
+        """Defensive: an unrecognized channel is a no-op (no crash)."""
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.listener_helper_pulse.emit("does-not-exist")  # must not raise
 
     def test_helper_auto_idle_skipped_when_newer_command_dispatched(self, qapp):
         """Race: /clear at t=0, real command at t=0.5 → /clear's auto-idle at
@@ -662,8 +773,8 @@ class TestMetricsBarAuthoritativeIdle:
         assert mb._idle_locked["interactive"] is False
         assert mb._idle_locked["workspace"] is False
         # Helper auto-idle arms hardening on both (1s post-dispatch)
-        mb._helper_auto_idle("interactive", mb._command_epoch["interactive"])
-        mb._helper_auto_idle("workspace", mb._command_epoch["workspace"])
+        mb._helper_auto_idle("interactive", mb._dispatch_seq["interactive"])
+        mb._helper_auto_idle("workspace", mb._dispatch_seq["workspace"])
         assert mb._idle_timer_interactive.isActive()
         assert mb._idle_timer_workspace.isActive()
         # Soft expires (3s of silence) on both → green + lock
@@ -706,10 +817,11 @@ class TestMetricsBarAuthoritativeIdle:
         assert cap is not None and cap.isActive()
         assert cap.interval() == 5_000
 
-    def test_interactive_skills_use_strict_hardening_no_hardcap(self, qapp, tmp_path):
-        """Interactive (Claude Code) keeps the strict contract: 3s soft
-        timer only, no hardcap. Claude goes truly silent at its prompt
-        so soft fires reliably on its own — no extrapolation needed."""
+    def test_interactive_skills_use_hardening_with_hardcap(self, qapp, tmp_path):
+        """Interactive (Claude Code or Kimi) uses soft 3s timer PLUS a 5s
+        hardcap. Kimi CLI emits invisible cursor/CPR chunks at its prompt
+        that reset the soft timer indefinitely; the hardcap guarantees the
+        dot eventually turns green even under constant PTY activity."""
         import json, time
         from workflow_app.signal_bus import SignalBus
         bus = SignalBus()
@@ -726,8 +838,99 @@ class TestMetricsBarAuthoritativeIdle:
         # Soft 3s armed
         assert mb._idle_timer_interactive.isActive()
         assert mb._idle_timer_interactive.interval() == 3_000
-        # No hardcap entry created — strict contract preserved
-        assert "interactive" not in mb._hardcap_timer
+        # Hardcap 5s ALSO armed — prevents Kimi "yellow forever" bug
+        cap = mb._hardcap_timer.get("interactive")
+        assert cap is not None and cap.isActive()
+        assert cap.interval() == 5_000
+
+    def test_workspace_xterm_skills_use_hardening_with_hardcap(self, qapp, tmp_path):
+        """T3 (workspace_xterm, Codex worker) takes the SAME soft+hardcap
+        path as T1. Any continuously-animating CLI in T3 would otherwise
+        reset the soft timer forever (same class of bug as Kimi-in-T1).
+        Enforces 'each terminal reaches its own listener' for T3."""
+        import json, time
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_workspace_xterm.emit("/skill:test")
+        notify_path = mb._notify_files["workspace_xterm"]
+        notify_path.write_text(json.dumps({
+            "channel": "workspace_xterm",
+            "state": "idle",
+            "iat": time.time(),
+            "exp": time.time() + 10.0,
+        }))
+        mb._on_notify_file_changed(str(notify_path))
+        assert mb._idle_timer_workspace_xterm.isActive()
+        cap = mb._hardcap_timer.get("workspace_xterm")
+        assert cap is not None and cap.isActive()
+        assert cap.interval() == 5_000
+
+    def test_directory_changed_recovers_missed_interactive_notify(self, qapp, tmp_path):
+        """Atomic os.replace can surface only as a directoryChanged (not a
+        fileChanged) on some inotify backends. _on_notify_directory_changed
+        must reprocess existing payloads so a valid idle notify is never
+        left unread — otherwise the dot is stuck yellow despite a correct
+        on-disk file. This is the defense-in-depth backstop for the
+        Kimi-in-T1 fix.
+
+        The payload carries a `run_id` because the canonical writer
+        (notify-terminal-idle.py) ALWAYS emits one; the rescan recovery
+        lowers the notify-authoritative fence only for run_id-bearing,
+        never-consumed notifies (§15.6) — exactly this case."""
+        import json, time
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_terminal.emit("/skill:test")
+        # Write a fresh idle payload WITHOUT calling _on_notify_file_changed
+        # (simulating the swallowed fileChanged). run_id present = canonical.
+        notify_path = mb._notify_files["interactive"]
+        notify_path.write_text(json.dumps({
+            "channel": "interactive",
+            "state": "idle",
+            "iat": time.time(),
+            "exp": time.time() + 10.0,
+            "run_id": "recovered-missed-1",
+        }))
+        assert not mb._idle_timer_interactive.isActive()  # nothing processed yet
+        # Only the directory event fires.
+        mb._on_notify_directory_changed(str(notify_path.parent))
+        cap = mb._hardcap_timer.get("interactive")
+        assert cap is not None and cap.isActive(), (
+            "directoryChanged must recover the missed interactive notify"
+        )
+        # Idempotent: once green+locked, a second directory event is a no-op.
+        mb._enter_authoritative_idle("interactive")
+        assert mb._idle_locked["interactive"] is True
+        mb._on_notify_directory_changed(str(notify_path.parent))
+        assert mb._idle_locked["interactive"] is True
+        assert mb._dot_interactive.is_busy is False
+
+    def test_directory_changed_does_not_green_running_command(self, qapp, tmp_path):
+        """A directoryChanged reprocess must NOT flip a freshly-dispatched
+        command green: the stale previous-command notify is rejected by the
+        epoch fence (iat <= current epoch)."""
+        import json, time
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        notify_path = mb._notify_files["interactive"]
+        # Old notify written BEFORE the new dispatch (iat in the past).
+        old_iat = time.time() - 5.0
+        notify_path.write_text(json.dumps({
+            "channel": "interactive",
+            "state": "idle",
+            "iat": old_iat,
+            "exp": time.time() + 10.0,
+        }))
+        # New command dispatched now → bumps epoch past old_iat, dot busy.
+        bus.run_command_in_terminal.emit("/skill:running")
+        assert mb._dot_interactive.is_busy is True
+        # Directory event reprocesses the stale notify → must be fenced out.
+        mb._on_notify_directory_changed(str(notify_path.parent))
+        assert "interactive" not in mb._hardcap_timer or not mb._hardcap_timer["interactive"].isActive()
+        assert mb._dot_interactive.is_busy is True  # still running, still yellow
 
     def test_arm_hardening_without_hardcap_leaves_no_cap(self, bar):
         """Calling _arm_hardening with default hardcap_ms=None creates no
@@ -757,12 +960,12 @@ class TestMetricsBarAuthoritativeIdle:
         # Continuous chunks reset soft but NOT hardcap
         for _ in range(10):
             bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
         assert bar._idle_locked["workspace"] is False
         # Fire hardcap directly
         bar._hardcap_timer["workspace"].timeout.emit()
         assert bar._idle_locked["workspace"] is True
-        assert bar._dot_workspace._busy is False
+        assert bar._dot_workspace.is_busy is False
 
     def test_clear_workspace_extra_delay_constant(self, bar):
         """/clear on workspace adds +1s extra to the helper auto-idle
@@ -780,16 +983,16 @@ class TestMetricsBarAuthoritativeIdle:
         bus = SignalBus()
         mb = MetricsBar(bus)
         # Both dots start green (lock=True default)
-        assert mb._dot_workspace._busy is False
-        assert mb._dot_interactive._busy is False
+        assert mb._dot_workspace.is_busy is False
+        assert mb._dot_interactive.is_busy is False
         # Dispatch must flip both yellow synchronously
         bus.run_command_in_workspace_terminal.emit("/clear")
-        assert mb._dot_workspace._busy is True, (
+        assert mb._dot_workspace.is_busy is True, (
             "Workspace dispatch must force dot yellow synchronously, even "
             "if the CLI processes the command silently (no PTY chunks)."
         )
         bus.run_command_in_terminal.emit("/clear")
-        assert mb._dot_interactive._busy is True
+        assert mb._dot_interactive.is_busy is True
 
     def test_terminal_activity_alone_does_not_arm_soft_timer(self, bar):
         """Bug repro guard: long bash with intra-command sleeps would
@@ -803,7 +1006,7 @@ class TestMetricsBarAuthoritativeIdle:
         # Simulate many chunks arriving via terminal_activity
         for _ in range(5):
             bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is True
+        assert bar._dot_workspace.is_busy is True
         assert not bar._idle_timer_workspace.isActive(), (
             "terminal_activity alone must not arm the soft timer. "
             "Hardening only engages via notify file (_arm_hardening)."
@@ -834,7 +1037,7 @@ class TestMetricsBarAuthoritativeIdle:
         # Lock must NOT have flipped (epoch advanced) — late helper drops
         assert mb._idle_locked["workspace"] is False
         # Dot is yellow because dispatch forces it yellow now (UX feedback)
-        assert mb._dot_workspace._busy is True
+        assert mb._dot_workspace.is_busy is True
 
     def test_command_epoch_never_decreases(self, bar):
         """Backward NTP step must not reset the fence below older iat values.
@@ -865,8 +1068,211 @@ class TestMetricsBarAuthoritativeIdle:
         assert bar._idle_locked["workspace"] is True
         # Activity on interactive flips its dot yellow
         bar._on_terminal_activity("interactive")
-        assert bar._dot_interactive._busy is True
+        assert bar._dot_interactive.is_busy is True
         # Activity on workspace is still suppressed by its lock
         bar._dot_workspace.set_busy(False)
         bar._on_terminal_activity("workspace")
-        assert bar._dot_workspace._busy is False
+        assert bar._dot_workspace.is_busy is False
+
+
+class TestNotifyAuthoritativeFenceAntiCascade:
+    """Regression guard for the catastrophic command-stacking cascade.
+
+    Root cause: T1 (interactive) and T3 (workspace_xterm) green not only via
+    the authoritative `wf-notify.sh` file but ALSO via a pure PTY-silence
+    heuristic (OutputPanel/XtermOutputPanel 2s idle timer -> terminal_force_idle
+    -> _on_force_idle -> _arm_hardening -> green). While a real command runs a
+    long, output-quiet tool (a blocking `Using Shell`/Bash whose CLI spinner
+    freezes), that silence path false-greens the dot ~5s in, the autocast
+    verde+verde gate fires the NEXT queue item into the still-busy CLI, the
+    paste echoes a chunk + silence, it false-greens again -> N commands stack
+    unsubmitted in the input box.
+
+    Fix: `_awaiting_notify[channel]` raised on every real (non-helper) dispatch
+    suppresses `_on_force_idle` for that channel until an authoritative notify
+    (idle/failed/awaiting_user) or a fatal/early-exit tripwire resolves the dot.
+    See ai-forge/rules/workflow-app-listeners.md §15.3.
+    """
+
+    # ── Fence is raised/lowered correctly ─────────────────────────────── #
+
+    def test_real_dispatch_raises_fence_interactive(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        assert mb._awaiting_notify["interactive"] is False
+        bus.run_command_in_terminal.emit("/skill:slash-executor /loop:iteraction:execute-task")
+        assert mb._awaiting_notify["interactive"] is True
+        assert mb._dot_interactive.is_busy is True
+
+    def test_real_dispatch_raises_fence_workspace_xterm(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_workspace_xterm.emit("/skill:qa:trace")
+        assert mb._awaiting_notify["workspace_xterm"] is True
+        assert mb._dot_workspace_xterm.is_busy is True
+
+    def test_helper_dispatch_does_not_raise_fence(self, qapp):
+        """Helpers (/clear /model /effort, cd, CLI launches) green via their own
+        auto-idle timer and must NOT raise the fence (they never notify)."""
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        for helper in ("/clear", "/model opus", "/effort high", "cd foo", "kimid"):
+            bus.run_command_in_terminal.emit(helper)
+            assert mb._awaiting_notify["interactive"] is False, (
+                f"helper {helper!r} must not raise the notify fence"
+            )
+
+    def test_listener_helper_pulse_lowers_fence(self, qapp):
+        """A suppressed /model|/effort pulse (Codex/Kimi main) is a helper —
+        it must lower the fence so its auto-idle green path is not blocked."""
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        # First a real command raises the fence...
+        bus.run_command_in_terminal.emit("/skill:foo")
+        assert mb._awaiting_notify["interactive"] is True
+        # ...then a helper pulse on the same channel lowers it.
+        bus.listener_helper_pulse.emit("interactive")
+        assert mb._awaiting_notify["interactive"] is False
+
+    # ── THE cascade: silence must NOT green a running command ─────────── #
+
+    def test_force_idle_suppressed_while_awaiting_notify_interactive(self, qapp):
+        """Core repro: real command dispatched, PTY goes silent -> force_idle.
+        The dot must STAY yellow and NO hardening must arm (no path to green)."""
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_terminal.emit("/skill:long-silent-task")
+        assert mb._dot_interactive.is_busy is True
+        # Simulate many rounds of PTY silence (OutputPanel idle timeout).
+        for _ in range(5):
+            mb._on_force_idle("interactive")
+        assert mb._dot_interactive.is_busy is True, (
+            "silence must not green a command awaiting its notify (cascade root)"
+        )
+        assert not mb._idle_timer_interactive.isActive(), (
+            "force_idle must not arm hardening while the notify fence is up"
+        )
+        assert "interactive" not in mb._hardcap_timer or not mb._hardcap_timer["interactive"].isActive()
+
+    def test_force_idle_suppressed_while_awaiting_notify_xterm(self, qapp):
+        """Same guard for T3 (Codex worker). T3's idle-timeout emits
+        session_finished + force_idle together; the fence must survive that."""
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_workspace_xterm.emit("/skill:long-silent-task")
+        assert mb._dot_workspace_xterm.is_busy is True
+        # T3 idle-timeout order: session_finished THEN force_idle.
+        mb._on_terminal_session_finished("workspace_xterm")
+        mb._on_force_idle("workspace_xterm")
+        assert mb._dot_workspace_xterm.is_busy is True, (
+            "session_finished must not lower the fence and let silence green T3"
+        )
+        assert not mb._idle_timer_workspace_xterm.isActive()
+
+    # ── The legit silence heuristic still works (direct typing) ───────── #
+
+    def test_force_idle_greens_when_not_awaiting_notify(self, bar):
+        """Direct typing into T1 (no app dispatch) leaves the fence down, so the
+        silence heuristic must still arm hardening and green Claude normally."""
+        bar._release_idle_lock("interactive")
+        assert bar._awaiting_notify["interactive"] is False
+        bar._on_force_idle("interactive")
+        assert bar._idle_timer_interactive.isActive(), (
+            "with no command awaiting notify, silence must still arm hardening"
+        )
+
+    # ── Authoritative notify lowers the fence and greens ──────────────── #
+
+    def test_notify_idle_clears_fence_and_greens(self, qapp, tmp_path):
+        import json, time
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_terminal.emit("/skill:test")
+        assert mb._awaiting_notify["interactive"] is True
+        notify_path = mb._notify_files["interactive"]
+        notify_path.write_text(json.dumps({
+            "channel": "interactive", "state": "idle",
+            "iat": time.time(), "exp": time.time() + 10.0,
+            "run_id": "run-notify-clear-1",
+        }))
+        mb._on_notify_file_changed(str(notify_path))
+        # Notify arms hardening; fence still up until the dot actually greens.
+        assert mb._idle_timer_interactive.isActive()
+        # Soft timer fires (true silence) -> authoritative idle -> green + clear.
+        mb._idle_timer_interactive.timeout.emit()
+        assert mb._dot_interactive.is_busy is False
+        assert mb._awaiting_notify["interactive"] is False
+
+    def test_failure_notify_clears_fence(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_terminal.emit("/skill:test")
+        assert mb._awaiting_notify["interactive"] is True
+        mb._on_terminal_force_failed("interactive", "VERIFY_FAILED")
+        assert mb._awaiting_notify["interactive"] is False
+        assert mb._dot_interactive.state == "failed"
+
+    def test_awaiting_user_notify_clears_fence(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.run_command_in_terminal.emit("/skill:test")
+        assert mb._awaiting_notify["interactive"] is True
+        mb._on_terminal_awaiting_user("interactive")
+        assert mb._awaiting_notify["interactive"] is False
+        assert mb._dot_interactive.state == "awaiting_user"
+
+    # ── End-to-end: autocast must not fire the next item on silence ───── #
+
+    def test_autocast_does_not_fire_next_on_silence_then_fires_on_notify(self, qapp, tmp_path):
+        """Full cascade guard. Autocast running; a real command is dispatched.
+        Repeated PTY silence must NOT re-open the verde+verde gate. Only the
+        authoritative notify greens the dot and fires exactly one next step."""
+        import json, time
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        fires: list[int] = []
+        bus.autocast_step_requested.connect(lambda: fires.append(1))
+
+        # Arm autocast (setChecked triggers _on_autocast_toggled) and consume
+        # the initial fire from toggling it on.
+        mb._btn_autocast.setChecked(True)
+        fires.clear()
+        mb._autocast_phase = "running"
+
+        # A real command is dispatched on T1 (the item the autocast just fired).
+        bus.run_command_in_terminal.emit("/skill:slash-executor /loop:iteraction:execute-task")
+        assert mb._dot_interactive.is_busy is True
+
+        # Long, output-quiet tool call: 5 rounds of PTY silence.
+        for _ in range(5):
+            mb._on_force_idle("interactive")
+        assert mb._dot_interactive.is_busy is True
+        assert fires == [], (
+            "autocast must NOT fire the next item while the command is still "
+            "running (this is exactly the command-stacking cascade)"
+        )
+
+        # Command genuinely finishes -> authoritative notify -> green.
+        notify_path = mb._notify_files["interactive"]
+        notify_path.write_text(json.dumps({
+            "channel": "interactive", "state": "idle",
+            "iat": time.time(), "exp": time.time() + 10.0,
+            "run_id": "run-e2e-1",
+        }))
+        mb._on_notify_file_changed(str(notify_path))
+        mb._idle_timer_interactive.timeout.emit()  # true silence -> green
+        assert mb._dot_interactive.is_busy is False
+        # The verde+verde debounce timer is now armed; fire it -> exactly one step.
+        assert mb._autocast_fire_timer.isActive()
+        mb._autocast_fire_timer.timeout.emit()
+        assert fires == [1], "exactly one next item fires, after the notify"

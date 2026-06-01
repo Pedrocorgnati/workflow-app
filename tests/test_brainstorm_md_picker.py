@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 def _find_md_btn(window):
     """Acha o QPushButton do picker via testid brainstorm-md-picker."""
@@ -25,6 +23,16 @@ def _find_md_btn(window):
         if btn.property("testid") == "brainstorm-md-picker":
             return btn
     raise AssertionError("brainstorm-md-picker nao encontrado")
+
+
+def _find_copy_path_btn(window):
+    """Acha o QPushButton que copia o path selecionado pelo picker."""
+    from PySide6.QtWidgets import QPushButton
+
+    for btn in window.findChildren(QPushButton):
+        if btn.property("testid") == "brainstorm-md-copy-path":
+            return btn
+    raise AssertionError("brainstorm-md-copy-path nao encontrado")
 
 
 def _collect_toasts(request):
@@ -96,6 +104,44 @@ def test_picker_canonical_dir_created_emits_toast_once(qapp, monkeypatch, tmp_pa
     md_btn.click()
     info_toasts_after = [m for m, lvl in toasts if lvl == "info" and "Diretorio criado" in m]
     assert info_toasts_after == ["Diretorio criado: blacksmith/brainstorm-mcp/"]
+
+
+def test_copy_path_button_copies_selected_md_path(qapp, monkeypatch, tmp_path, request):
+    """Botao 1:1 ao lado do picker copia o path completo do .md selecionado."""
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+    monkeypatch.setattr(
+        MainWindow, "_systemforge_root", staticmethod(lambda: tmp_path)
+    )
+    canonical = tmp_path / "blacksmith" / "brainstorm-mcp"
+    target_md = canonical / "ideia.md"
+
+    def fake_get_open_file_name(parent, title, start_dir, file_filter):
+        target_md.write_text("# nota\n", encoding="utf-8")
+        return (str(target_md), "")
+
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        fake_get_open_file_name,
+    )
+    toasts = _collect_toasts(request)
+
+    md_btn = _find_md_btn(window)
+    copy_btn = _find_copy_path_btn(window)
+    assert copy_btn.width() == 24
+    assert copy_btn.height() == 24
+
+    md_btn.click()
+    qapp.clipboard().clear()
+    copy_btn.click()
+
+    assert qapp.clipboard().text() == str(target_md)
+    info_toasts = [
+        m for m, lvl in toasts
+        if lvl == "info" and "Path do .md copiado" in m
+    ]
+    assert info_toasts == ["Path do .md copiado para a area de transferencia."]
 
 
 def test_picker_mkdir_permission_error_falls_back_to_blacksmith(

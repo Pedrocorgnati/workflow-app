@@ -376,7 +376,6 @@ def test_xterm_inject_text_starts_collapsed_t3_before_send(monkeypatch):
             shell._master_fd = 123
 
     fake_window = SimpleNamespace(_workspace_panel_xterm=FakePanel())
-    monkeypatch.setattr(main_window_module, "XTERM_AVAILABLE", True)
 
     ok = main_window_module.MainWindow._xterm_inject_text(
         fake_window,
@@ -386,3 +385,52 @@ def test_xterm_inject_text_starts_collapsed_t3_before_send(monkeypatch):
 
     assert ok is True
     assert shell.sent == [b"echo t3"]
+
+
+def test_xterm_inject_text_schedules_enter_after_one_second(monkeypatch):
+    """Codex worker sends prompt first, then Enter after the paste has landed."""
+    from workflow_app import main_window as main_window_module
+
+    class FakeShell:
+        def __init__(self):
+            self._master_fd = 123
+            self.sent: list[bytes] = []
+
+        def send_raw(self, data: bytes):
+            self.sent.append(data)
+
+    shell = FakeShell()
+
+    class FakePanel:
+        _shell = shell
+
+        def ensure_shell_started(self):
+            pass
+
+    delays: list[int] = []
+    callbacks = []
+
+    def _single_shot(delay_ms, callback):
+        delays.append(delay_ms)
+        callbacks.append(callback)
+
+    fake_window = SimpleNamespace(_workspace_panel_xterm=FakePanel())
+    monkeypatch.setattr(
+        main_window_module.QTimer,
+        "singleShot",
+        _single_shot,
+    )
+
+    ok = main_window_module.MainWindow._xterm_inject_text(
+        fake_window,
+        "echo t3",
+        with_enter=True,
+    )
+
+    assert ok is True
+    assert shell.sent == [b"echo t3"]
+    assert delays == [1000]
+
+    callbacks[0]()
+
+    assert shell.sent == [b"echo t3", b"\r"]

@@ -30,8 +30,7 @@ import sys
 from pathlib import Path
 
 import yaml
-
-from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,19 +57,11 @@ from workflow_app.command_queue.add_command_dialog import AddCommandDialog
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 from workflow_app.config.app_state import app_state
 from workflow_app.config.config_bar import ConfigBar
-from workflow_app.config.config_parser import detect_config, parse_config
+from workflow_app.config.config_parser import parse_config
 from workflow_app.domain import CommandSpec
 from workflow_app.errors import ConfigError
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 from workflow_app.output_panel.output_panel import OutputPanel
-
-try:
-    from workflow_app.output_panel.xterm_output_panel import XtermOutputPanel
-
-    XTERM_AVAILABLE = True
-except ImportError:
-    XtermOutputPanel = None  # type: ignore[assignment,misc]
-    XTERM_AVAILABLE = False
 from workflow_app.services.delivery_reader import DeliveryReader
 from workflow_app.services.lock_service import LockService
 from workflow_app.signal_bus import signal_bus
@@ -771,10 +762,11 @@ _DATATEST_FILTERED_IDS = frozenset({
     "terminal-interactive",
     "terminal-workspace",
     # Fix T020 (BLOCKER 2) loop 05-21-implantation-tasklist-aba-brainstorm:
-    # testid canonico do panel xterm e `terminal-codex-output` conforme
+    # testid canonico do panel T3 (Codex) e `terminal-codex-output` conforme
     # mcp-flow-implantation-base-archive.md §10.5. Antes era
     # `terminal-workspace-xterm` (so casava o nome interno), o que fazia
-    # `_codex_terminal_available()` retornar False sempre.
+    # `_codex_terminal_available()` retornar False sempre. Contrato mantido
+    # apos T3 migrar de xterm para pyte (2026-06-01).
     "terminal-codex-output",
 })
 
@@ -1060,6 +1052,21 @@ class MainWindow(QMainWindow):
         self._command_queue = CommandQueueWidget(parent=self)
         self._command_queue.setProperty("testid", "main-command-queue")
 
+        # Botao Clear — esvazia o queue-command-list desta instancia.
+        # Vive no pill-row (nao no MetricsBar) porque depende diretamente de
+        # self._command_queue. Estilo vermelho para sinalizar acao destrutiva,
+        # diferenciando dos botoes ambar de selecao de JSON.
+        self._clear_queue_btn = QPushButton("Clear")
+        self._clear_queue_btn.setProperty("testid", "main-command-queue-clear-btn")
+        self._clear_queue_btn.setToolTip("Esvaziar a fila (queue-command-list) desta janela")
+        self._clear_queue_btn.setFixedHeight(28)
+        self._clear_queue_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #F87171; border: 1px solid #F87171;"
+            "  border-radius: 5px; font-size: 11px; font-weight: 600; padding: 0 12px; }"
+            "QPushButton:hover { background: rgba(248, 113, 113, 0.12); }"
+        )
+        self._clear_queue_btn.clicked.connect(self._on_clear_queue_clicked)
+
         # Pill row — project pill + selectors as first div inside command queue.
         # Widgets are reparented from MetricsBar (state machine stays in MetricsBar).
         _pill_row = QWidget()
@@ -1075,6 +1082,7 @@ class MainWindow(QMainWindow):
             self._metrics_bar._proj_open_btn,
             self._metrics_bar._proj_select_btn,
             self._metrics_bar._loop_select_btn,
+            self._clear_queue_btn,
         ):
             _pill_row_layout.addWidget(_w)
         # Park hidden nav buttons here so MetricsBar is fully decoupled
@@ -1136,42 +1144,29 @@ class MainWindow(QMainWindow):
         # output-toolbar-col1-top (`_toolbar_bar`) continua na coluna 1
         # (entre main-window-label e main-command-queue-pill-row).
         _toolbar_bar, _toolbar_left_top = self._build_output_toolbar()
+
+        # Layout em duas linhas:
+        # Linha 1: output-toolbar-left | output-toolbar-progress-boxes | output-toolbar-datatest-queue-stack
+        # Linha 2: output-toolbar-center | output-toolbar-mcp
         _toolbar_row = QWidget()
-        _toolbar_row_layout = QHBoxLayout(_toolbar_row)
+        _toolbar_row_layout = QVBoxLayout(_toolbar_row)
         _toolbar_row_layout.setContentsMargins(0, 10, 0, 0)
-        _toolbar_row_layout.setSpacing(10)
+        _toolbar_row_layout.setSpacing(6)
+
+        # --- Linha 1 ---
+        _top_row = QWidget()
+        _top_row_layout = QHBoxLayout(_top_row)
+        _top_row_layout.setContentsMargins(0, 0, 0, 0)
+        _top_row_layout.setSpacing(10)
 
         # output-toolbar-left: abas primarias (Pipelines/Workflow/Auxiliar/Daily).
-        _toolbar_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
+        _top_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
 
-        # output-toolbar-center: controles de inserções (Inserções tab + route-toggles
-        # + gear) + conteúdo da aba Inserções. Separado do left em 2026-05-24.
-        _center_widget = QWidget()
-        _center_widget.setObjectName("OutputToolbarCenter")
-        _center_widget.setProperty("testid", "output-toolbar-center")
-        _center_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        _center_widget.setStyleSheet(
-            "QWidget#OutputToolbarCenter { background-color: #1E1E21;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
-        )
-        _center_layout = QVBoxLayout(_center_widget)
-        _center_layout.setContentsMargins(4, 4, 4, 4)
-        _center_layout.setSpacing(0)
-        _center_layout.addWidget(self._command_queue.insertions_bar)
-        _center_layout.addWidget(self._command_queue.insertions_content)
-        _toolbar_row_layout.addWidget(_center_widget)                                 # center
-
-        # Coluna MCP: radio Claude/Kimi/Codex + acoes Main MCP/Parallel/Dual.
-        # A combinacao aplica o comando legado correto no terminal alvo fixo.
-        _mcp_column = self._build_mcp_column(self._mcp_column_btns)
-        _toolbar_row_layout.addWidget(_mcp_column)                                   # mcp
-        # Coluna progress-boxes (entre output-toolbar-mcp e output-toolbar-queue-toggles):
-        # 5 botoes coloridos com checkbox-label que apenas alternam a cor do botao
-        # para cinza (estado "checado") sem efeitos colaterais.
+        # Coluna progress-boxes
         _progress_boxes_column = self._build_progress_boxes_column()
-        _toolbar_row_layout.addWidget(_progress_boxes_column)                        # progress-boxes
-        # Ultima coluna empilhada (2026-05-19): test-mode em cima, queue-toggles
-        # embaixo. queue-toggles agora dispoe seus 2 botoes em row.
+        _top_row_layout.addWidget(_progress_boxes_column)                          # progress-boxes
+
+        # Ultima coluna empilhada: test-mode em cima, queue-toggles embaixo.
         _queue_toggles_column = self._build_queue_toggles_column()
         _test_mode_column = self._build_test_mode_column()
         _last_column = QWidget()
@@ -1187,7 +1182,38 @@ class MainWindow(QMainWindow):
         _last_column_layout.setSpacing(6)
         _last_column_layout.addWidget(_test_mode_column)
         _last_column_layout.addWidget(_queue_toggles_column)
-        _toolbar_row_layout.addWidget(_last_column)                                  # test-mode + queue-toggles
+        _top_row_layout.addWidget(_last_column)                                    # test-mode + queue-toggles
+
+        _toolbar_row_layout.addWidget(_top_row)
+
+        # --- Linha 2 ---
+        _bottom_row = QWidget()
+        _bottom_row_layout = QHBoxLayout(_bottom_row)
+        _bottom_row_layout.setContentsMargins(0, 0, 0, 0)
+        _bottom_row_layout.setSpacing(10)
+
+        # output-toolbar-center: controles de inserções (Inserções tab + route-toggles
+        # + gear) + conteúdo da aba Inserções.
+        _center_widget = QWidget()
+        _center_widget.setObjectName("OutputToolbarCenter")
+        _center_widget.setProperty("testid", "output-toolbar-center")
+        _center_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _center_widget.setStyleSheet(
+            "QWidget#OutputToolbarCenter { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _center_layout = QVBoxLayout(_center_widget)
+        _center_layout.setContentsMargins(4, 4, 4, 4)
+        _center_layout.setSpacing(0)
+        _center_layout.addWidget(self._command_queue.insertions_bar)
+        _center_layout.addWidget(self._command_queue.insertions_content)
+        _bottom_row_layout.addWidget(_center_widget, stretch=1)                    # center
+
+        # Coluna MCP: radio Claude/Kimi/Codex + acoes Main MCP/Parallel/Dual.
+        _mcp_column = self._build_mcp_column(self._mcp_column_btns)
+        _bottom_row_layout.addWidget(_mcp_column)                                  # mcp
+
+        _toolbar_row_layout.addWidget(_bottom_row)
         output_layout.addWidget(_toolbar_row)
 
         # Ordem final de main-command-queue (refactor 2026-05-18):
@@ -1240,36 +1266,36 @@ class MainWindow(QMainWindow):
         workspace_layout.addWidget(self._build_workspace_label_bar())
         # Inner splitter perpendicular ao outer (_terminal_splitter). Default
         # outer = Horizontal (T1 left, T2 right) -> inner = Vertical (T2 pyte
-        # acima do T3 xterm quando expandido). _apply_workspace_inner_orientation
+        # acima do T3 pyte quando expandido). _apply_workspace_inner_orientation
         # mantem a invariante ao alternar layout.
         self._workspace_terminal_splitter = QSplitter(Qt.Vertical, parent=self._workspace_wrapper)
         self._workspace_terminal_splitter.setProperty("testid", "terminal-workspace-splitter")
 
-        # Child 0 = pyte (T2, colapsavel). Child 1 = xterm (T3, sempre visivel).
+        # Child 0 = pyte (T2/Kimi, colapsavel). Child 1 = pyte (T3/Codex).
+        # 2026-06-01: os tres terminais (T1/T2/T3) usam o mesmo engine pyte
+        # (OutputPanel). T3 difere apenas no canal logico "workspace_xterm"
+        # (channel_override) que preserva dot/notify/recovery do listener Codex.
         self._workspace_panel = OutputPanel(parent=self._workspace_terminal_splitter, workspace_mode=True)
         self._workspace_panel.setProperty("testid", "terminal-workspace")
         self._workspace_panel.setProperty("data-engine", "pyte")
         self._workspace_terminal_splitter.addWidget(self._workspace_panel)
 
-        if XTERM_AVAILABLE:
-            self._workspace_panel_xterm = XtermOutputPanel(
-                parent=self._workspace_terminal_splitter, workspace_mode=True
-            )
-            # Fix T020 (BLOCKER 2): testid canonico e `terminal-codex-output`
-            # conforme mcp-flow-implantation-base-archive.md §10.5. Antes
-            # `terminal-workspace-xterm` impedia `_codex_terminal_available()`
-            # de detectar T3 e bloqueava todos os botoes Codex silenciosamente.
-            self._workspace_panel_xterm.setProperty("testid", "terminal-codex-output")
-            self._workspace_panel_xterm.setProperty("data-engine", "xterm")
-            self._workspace_terminal_splitter.addWidget(self._workspace_panel_xterm)
-            # Estado inicial fixo: T3 colapsado, T2 (pyte) ocupa 100%
-            # (sem memoria entre sessoes). child 0 = T2, child 1 = T3.
-            self._t3_visible = False
-            self._workspace_terminal_splitter.setSizes([1, 0])
-        else:
-            # Sem xterm, apenas pyte (T2) existe. T3 toggle nao opera.
-            self._t3_visible = False
-            self._workspace_terminal_splitter.setSizes([1, 0])
+        # T3 = terminal Codex, agora pyte (antes XtermOutputPanel/QWebEngine).
+        # Fix T020 (BLOCKER 2): testid canonico `terminal-codex-output` e
+        # contrato — `_codex_terminal_available()` e MCPPromptButton dependem
+        # dele para detectar o T3 e habilitar os botoes Codex. Mantido byte-a-byte.
+        self._workspace_panel_xterm = OutputPanel(
+            parent=self._workspace_terminal_splitter,
+            workspace_mode=True,
+            channel_override="workspace_xterm",
+        )
+        self._workspace_panel_xterm.setProperty("testid", "terminal-codex-output")
+        self._workspace_panel_xterm.setProperty("data-engine", "pyte")
+        self._workspace_terminal_splitter.addWidget(self._workspace_panel_xterm)
+        # Estado inicial fixo: T3 colapsado, T2 ocupa 100% (sem memoria entre
+        # sessoes). child 0 = T2, child 1 = T3.
+        self._t3_visible = False
+        self._workspace_terminal_splitter.setSizes([1, 0])
         self._update_t3_arrow_icon()
 
         workspace_layout.addWidget(self._workspace_terminal_splitter, stretch=1)
@@ -1438,21 +1464,17 @@ class MainWindow(QMainWindow):
         )
         self._chk_route_t2.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
-        # 2026-05-19+: T3 = xterm do workspace (semantica invertida).
-        # Por default desligado — o operador expande o T2 pelo arrow no
-        # label bar do terminal-workspace-splitter e ativa o route quando
-        # quiser scriptar diretamente naquele painel.
+        # T3 = terminal Codex (pyte). Por default desligado — o operador
+        # expande o T3 pelo arrow no label bar do terminal-workspace-splitter
+        # e ativa o route quando quiser scriptar diretamente naquele painel.
         self._chk_route_t3 = QCheckBox("T3")
         self._chk_route_t3.setProperty("testid", "terminal-route-t3")
         self._chk_route_t3.setChecked(False)
-        self._chk_route_t3.setEnabled(XTERM_AVAILABLE)
+        self._chk_route_t3.setEnabled(True)
         self._chk_route_t3.setToolTip(
-            "T3: publicar em terminal-workspace xterm (sempre visivel).\n"
+            "T3: publicar em terminal-codex-output (pyte, Codex).\n"
             "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
             "Nenhum = no-op silencioso."
-            if XTERM_AVAILABLE else
-            "T3 indisponivel: engine xterm ausente. "
-            "Instale: pip install workflow-app[xterm]"
         )
         self._chk_route_t3.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
@@ -1719,9 +1741,10 @@ class MainWindow(QMainWindow):
             self._collapse_chevron
         )
 
-        # 2026-05-19: engine-toggle ("1-pyte") removido. O pyte vira T3
-        # (terminal colapsavel) controlado pelo arrow em terminal-workspace-splitter
-        # label bar; xterm permanece como T2 sempre visivel.
+        # 2026-05-19: engine-toggle ("1-pyte") removido. T3 (terminal Codex
+        # colapsavel) e controlado pelo arrow em terminal-workspace-splitter
+        # label bar; T2 (Kimi) permanece sempre visivel. 2026-06-01: T3 passou
+        # de xterm para pyte (todos os terminais usam OutputPanel).
         # Task 3 (loop 05-13-workflow-app-layout-2): _btn_datatest movido para a nova
         # coluna `output-toolbar-test-mode` (4o sibling de _toolbar_row).
 
@@ -1739,7 +1762,7 @@ class MainWindow(QMainWindow):
         # criados para preservar o contrato de action_widgets, mas a aba MCPs
         # renderiza radio Claude/Kimi/Codex + 3 acoes.
         self._mcp_column_btns = action_widgets[2:11]
-        # rules: dcp+cmd+terminal+listeners+indicators+add-rules
+        # rules: dcp+meta-feeding+cmd+terminal+listeners+cascade-bug+indicators+prompt+add-rules
         _rules_btns = workflow_app_widgets[1:]
         # prompts: asq-user (migrado da ex-subtab mcps) + entries .md.
         # Guardado em self para que rebuild via modal/watcher possa re-prepender.
@@ -2452,8 +2475,20 @@ class MainWindow(QMainWindow):
 
         md_btn.clicked.connect(_pick_md)
 
+        def _copy_selected_md_path() -> None:
+            selected_path = (self._brainstorm_md_path or "").strip()
+            if not selected_path:
+                signal_bus.toast_requested.emit(
+                    "Nenhum arquivo .md selecionado para copiar.", "warning"
+                )
+                return
+            QApplication.clipboard().setText(selected_path)
+            signal_bus.toast_requested.emit(
+                "Path do .md copiado para a area de transferencia.", "info"
+            )
+
         # T4 (loop 05-21-implantation-tasklist-aba-brainstorm): row container
-        # com `md_btn` (stretch=1) + `gear_btn_brainstorm` (24x24, _GearButton
+        # com `md_btn` (stretch=1) + copy path button + `gear_btn_brainstorm` (24x24, _GearButton
         # extraido). Testid canonico `brainstorm-mcp-config-gear`. Clique abre
         # BrainstormMcpConfigDialog (modulo separado, import sob demanda no
         # handler para nao impactar cold start).
@@ -2464,6 +2499,22 @@ class MainWindow(QMainWindow):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
         row_layout.addWidget(md_btn, stretch=1)
+        copy_md_path_btn = QPushButton()
+        copy_md_path_btn.setProperty("testid", "brainstorm-md-copy-path")
+        copy_md_path_btn.setFixedSize(24, 24)
+        copy_md_path_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_md_path_btn.setToolTip("Copiar path do arquivo .md selecionado")
+        copy_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "copy.svg"
+        copy_icon = self._load_tinted_svg_icon(copy_icon_path, "#FAFAFA")
+        if copy_icon is not None:
+            copy_md_path_btn.setIcon(copy_icon)
+            copy_md_path_btn.setIconSize(QSize(12, 12))
+        else:
+            copy_md_path_btn.setText("⎘")
+        copy_md_path_btn.setStyleSheet(_GEAR_QSS)
+        copy_md_path_btn.clicked.connect(_copy_selected_md_path)
+        self._brainstorm_md_copy_path_btn = copy_md_path_btn
+        row_layout.addWidget(copy_md_path_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         gear_btn_brainstorm = _GearButton(
             testid="brainstorm-mcp-config-gear",
             tooltip="Configurar 9 seeds brainstorm-mcp (label, prompt, agent, action, target)",
@@ -2924,18 +2975,17 @@ class MainWindow(QMainWindow):
                 signal_bus.dispatch_result.emit(button_id, False)
                 return
             # Fix T020 (BLOCKER 1): antes, T3 com falha silenciosa
-            # (XTERM_AVAILABLE=False, shell nao iniciado, send_raw exception)
-            # emitia dispatch_result(True) mascarando incidente. Agora o
+            # (shell nao iniciado, send_raw exception) emitia
+            # dispatch_result(True) mascarando incidente. Agora o
             # caller propaga toast de erro e dispatch_result(False) quando
             # `_publish_to_specific_terminal` retorna False (apenas T3 pode
             # falhar — T1/T2 sao fire-and-forget e sempre retornam True).
             if not published_ok:
                 canonical_t3_err = (
-                    "Falha ao injetar prompt no terminal Codex (T3): xterm "
-                    "indisponivel ou shell nao iniciado. Publicacao abortada "
-                    "para evitar perda silenciosa do prompt. Verifique se o "
-                    "PySide6-WebEngine esta instalado e se o terminal "
-                    "workspace-xterm esta ativo."
+                    "Falha ao injetar prompt no terminal Codex (T3): shell "
+                    "nao iniciado. Publicacao abortada para evitar perda "
+                    "silenciosa do prompt. Verifique se o terminal "
+                    "terminal-codex-output (pyte) esta ativo."
                 )
                 signal_bus.toast_requested.emit(canonical_t3_err, "error")
                 import logging as _logging
@@ -2959,19 +3009,19 @@ class MainWindow(QMainWindow):
         """Publica `text` num terminal especifico (1/2/3), ignorando T1/T2/T3.
 
         Retorna True quando a publicacao foi confirmada, False quando o sink
-        nao recebeu os bytes (apenas T3: xterm ausente, shell nao iniciado,
-        send_raw falhou). T1 e T2 sao fire-and-forget via signal_bus, retornam
-        True incondicionalmente (semantica historica preservada).
+        nao recebeu os bytes (apenas T3: shell nao iniciado, send_raw falhou).
+        T1 e T2 sao fire-and-forget via signal_bus, retornam True
+        incondicionalmente (semantica historica preservada).
 
         Espelha o mapping de `_publish_to_terminal` sem consultar os
         checkboxes `terminal-route-toggles`:
         - 1 -> terminal-interactive (pyte) via paste_text_in_terminal.
-        - 2 -> terminal-workspace pyte via paste_text_in_workspace_terminal.
-        - 3 -> terminal-workspace xterm via _xterm_inject_text (retorna bool).
+        - 2 -> terminal-workspace (pyte) via paste_text_in_workspace_terminal.
+        - 3 -> terminal-codex-output (pyte) via _xterm_inject_text (retorna bool).
 
         Fix T020 (BLOCKER 1) loop 05-21-implantation-tasklist-aba-brainstorm:
-        antes, T3 com falha (XTERM_AVAILABLE=False, shell nao iniciado) emitia
-        sucesso fantasma; caller agora propaga toast de erro quando falha.
+        antes, T3 com falha (shell nao iniciado) emitia sucesso fantasma;
+        caller agora propaga toast de erro quando falha.
         """
         if terminal == 1:
             signal_bus.paste_text_in_terminal.emit(text)
@@ -3865,36 +3915,44 @@ class MainWindow(QMainWindow):
             f"{len(_new)} novo(s) prompt(s) detectado(s) e adicionado(s).", "info"
         )
 
-    # ── Workspace dispatch helpers (2026-05-19+: T2=pyte, T3=xterm) ─── #
+    # ── Workspace dispatch helpers (T2=pyte/Kimi, T3=pyte/Codex) ────── #
     def _xterm_inject_text(self, text: str, with_enter: bool = False) -> bool:
-        """Injeta `text` diretamente no shell que alimenta o xterm (T3).
+        """Injeta `text` diretamente no shell pyte do T3 (Codex).
 
-        Retorna True quando o shell esta vivo e recebeu os bytes; False se
-        xterm nao esta disponivel (PySide6-WebEngine ausente). Quando
-        `with_enter=True`, agenda um \r como keypress separado (mesmo padrao
-        de OutputPanel._run_shell_command para evitar swallow em CLIs Ink).
+        Retorna True quando o shell esta vivo e recebeu os bytes; False se o
+        painel T3 nao existe ou o shell nao iniciou. Quando `with_enter=True`,
+        arma a janela de early-exit (Camada 3) do painel e agenda um \r como
+        keypress separado apos 1000ms — Codex/Ink engolem um Enter que chega
+        colado ao paste. (Nome historico `_xterm_inject_text` preservado; o
+        engine agora e pyte, igual a T1/T2.)
         """
-        if not XTERM_AVAILABLE or not hasattr(self, "_workspace_panel_xterm"):
+        if not hasattr(self, "_workspace_panel_xterm"):
             return False
-        shell = getattr(self._workspace_panel_xterm, "_shell", None)
+        panel = self._workspace_panel_xterm
+        shell = getattr(panel, "_shell", None)
         if shell is None:
             return False
         try:
-            ensure_started = getattr(
-                self._workspace_panel_xterm,
-                "ensure_shell_started",
-                None,
-            )
+            ensure_started = getattr(panel, "ensure_shell_started", None)
             if callable(ensure_started):
                 ensure_started()
             if getattr(shell, "_master_fd", None) is None:
-                logger.warning("xterm shell is not started; injection skipped")
+                logger.warning("T3 (Codex) shell is not started; injection skipped")
                 return False
             shell.send_raw(text.encode("utf-8", errors="replace"))
             if with_enter:
-                QTimer.singleShot(80, lambda: shell.send_raw(b"\r"))
+                # Arma o early-exit watcher do painel para este dispatch real:
+                # a rota imperativa nao passa por OutputPanel._run_shell_command,
+                # entao sem isto o _dispatch_ts nunca seria setado e um Codex que
+                # morre cedo (auth/credit) ficaria verde-silencioso. Helpers sao
+                # isentos dentro de arm_dispatch_window.
+                arm = getattr(panel, "arm_dispatch_window", None)
+                if callable(arm):
+                    arm(text)
+                # Codex/Ink can swallow Enter when it lands too close to paste.
+                QTimer.singleShot(1000, lambda: shell.send_raw(b"\r"))
         except Exception:  # noqa: BLE001
-            logger.exception("xterm shell.send_raw failed")
+            logger.exception("T3 (Codex) shell.send_raw failed")
             return False
         return True
 
@@ -3902,8 +3960,8 @@ class MainWindow(QMainWindow):
         """Helper para emissores que historicamente miravam o pyte direto
         (label-bar WORKSPACE/SystemForge/cd/mention + notes-bar ↑).
 
-        Politica: T2 (pyte) e o terminal sempre visivel no workspace e
-        recebe sempre. T3 (xterm) so recebe quando o operador o expandiu
+        Politica: T2 (pyte/Kimi) e o terminal sempre visivel no workspace e
+        recebe sempre. T3 (pyte/Codex) so recebe quando o operador o expandiu
         pelo arrow do label bar (Zero Silencio: nao injeta em terminal
         colapsado/invisivel).
         """
@@ -3912,8 +3970,8 @@ class MainWindow(QMainWindow):
             signal_bus.run_command_in_workspace_terminal.emit(text)
         else:
             signal_bus.paste_text_in_workspace_terminal.emit(text)
-        # T3 (xterm): so quando expandido.
-        if XTERM_AVAILABLE and getattr(self, "_t3_visible", False):
+        # T3 (pyte/Codex): so quando expandido.
+        if getattr(self, "_t3_visible", False):
             self._xterm_inject_text(text, with_enter=with_enter)
 
     def _publish_to_terminal(self, text: str) -> None:
@@ -4208,6 +4266,17 @@ class MainWindow(QMainWindow):
         )
         dcp_rules_btn.clicked.connect(_paste_path("ai-forge/rules/dcp-cmd-list-build.md"))
 
+        meta_feeding_rules_btn = _make_btn(
+            "Meta-feeding-rules", "queue-btn-dcp-meta-feeding-rules-path",
+            "#22C55E", "#16A34A", "#15803D",
+            "Cola o path ai-forge/rules/dcp-module-meta-feeding.md no terminal\n"
+            "(upstream do filtro: como a MODULE-META alimenta a lista de comandos\n"
+            "de cada module — schema canonico, produtores, gates, mapa campo->comando)",
+        )
+        meta_feeding_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/dcp-module-meta-feeding.md")
+        )
+
         cmd_rules_btn = _make_btn(
             "Cmd-list-rules", "queue-btn-command-list-basic-rules-path",
             "#A855F7", "#9333EA", "#7E22CE",
@@ -4232,6 +4301,25 @@ class MainWindow(QMainWindow):
         )
         listeners_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-listeners.md"))
 
+        # Relatorio de bug recorrente (command-stacking cascade): comando ainda
+        # rodando emite notify "finalizado", o gate verde+verde empilha dezenas
+        # de comandos no buffer do CLI. Quase-impossivel de auto-resolver pelo
+        # Claude (e codigo do MetricsBar/OutputPanel + ciclo de vida do processo,
+        # nao do comando .md). Botao cola o path do relatorio canonico para
+        # reacionar a investigacao quantas vezes for preciso. Ver §15.5 e §4 do
+        # relatorio.
+        cascade_bug_btn = _make_btn(
+            "Cascade-bug", "queue-btn-cascade-bug-report-path",
+            "#F43F5E", "#E11D48", "#BE123C",
+            "Cola o path do relatorio do bug da cascade do listener no terminal\n"
+            "blacksmith/recovery/interactive-listener-silence-cascade-2026-05-31T0338.md\n"
+            "(comando ainda rodando emite notify de fim -> empilha dezenas de\n"
+            "comandos na fila; quase-impossivel de auto-resolver pelo Claude)",
+        )
+        cascade_bug_btn.clicked.connect(
+            _paste_path("blacksmith/recovery/interactive-listener-silence-cascade-2026-05-31T0338.md")
+        )
+
         indicators_rules_btn = _make_btn(
             "Indicators-rules", "queue-btn-indicators-rules-path",
             "#14B8A6", "#0D9488", "#0F766E",
@@ -4247,6 +4335,116 @@ class MainWindow(QMainWindow):
             "(regras de criacao de prompts para a sub-aba prompts)",
         )
         prompt_rules_btn.clicked.connect(_paste_path("ai-forge/rules/prompt-creation-rules.md"))
+
+        # 2026-05-31: botoes para os arquivos de regras de ai-forge/rules/ que
+        # ainda nao tinham atalho na sub-aba RULES (queue-subtab-insertions-rules).
+        # Mesmo padrao _make_btn + _paste_path dos demais: copia o path literal e
+        # digita no terminal via _publish_to_terminal (respeita terminal-route-toggles).
+        build_render_rules_btn = _make_btn(
+            "Build-render-rules", "queue-btn-dcp-build-to-list-rendering-rules-path",
+            "#06B6D4", "#0891B2", "#0E7490",
+            "Cola o path ai-forge/rules/dcp-build-to-list-rendering.md no terminal\n"
+            "(contrato do hand-off Build -> Specific-Flow: queue-btn-dcp-build ->\n"
+            "queue-btn-dcp-specific-flow, o trecho mais fragil do fluxo DCP)",
+        )
+        build_render_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/dcp-build-to-list-rendering.md")
+        )
+
+        matrix_spec_rules_btn = _make_btn(
+            "Matrix-spec-rules", "queue-btn-dcp-matrix-spec-rules-path",
+            "#8B5CF6", "#7C3AED", "#6D28D9",
+            "Cola o path ai-forge/rules/dcp-matrix-spec.md no terminal\n"
+            "(spec arquitetural do DCP-COMMAND-MATRIX.json: schema completo,\n"
+            "invariantes I-NN, validator strict, telemetria, fail-closed)",
+        )
+        matrix_spec_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/dcp-matrix-spec.md")
+        )
+
+        llm_routing_rules_btn = _make_btn(
+            "Llm-routing-rules", "queue-btn-llm-routing-div-rules-path",
+            "#EC4899", "#DB2777", "#BE185D",
+            "Cola o path ai-forge/rules/llm-routing-div.md no terminal\n"
+            "(regras canonicas da queue-div-llm-routing: Main LLM x Parallel\n"
+            "Worker, dispatch Claude/Codex/Kimi, supressao de /model e /effort)",
+        )
+        llm_routing_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/llm-routing-div.md")
+        )
+
+        main_llm_publish_rules_btn = _make_btn(
+            "Main-llm-publish-rules", "queue-btn-main-llm-publish-rules-path",
+            "#14B8A6", "#0D9488", "#0F766E",
+            "Cola o path ai-forge/rules/main-llm-publish.md no terminal\n"
+            "(regras de PUBLICACAO por Main LLM no queue-div-main-llm: Claude usa\n"
+            "o comando, Kimi a adaptacao do comando, Codex o prompt que simula)",
+        )
+        main_llm_publish_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/main-llm-publish.md")
+        )
+
+        loop_rules_btn = _make_btn(
+            "Loop-rules", "queue-btn-loop-rules-path",
+            "#84CC16", "#65A30D", "#4D7C0F",
+            "Cola o path ai-forge/rules/loop-rules.md no terminal\n"
+            "(regras canonicas do subflow /loop F4d: 8 fases de preparacao,\n"
+            "schema _LOOP-CONFIG.json, iteration_template, comandos auxiliares)",
+        )
+        loop_rules_btn.clicked.connect(_paste_path("ai-forge/rules/loop-rules.md"))
+
+        rocksmash_rules_btn = _make_btn(
+            "Rocksmash-rules", "queue-btn-rocksmash-rules-path",
+            "#D946EF", "#C026D3", "#A21CAF",
+            "Cola o path ai-forge/rules/rocksmash.md no terminal\n"
+            "(estudo + regras canonicas do subflow /loop --rocksmash: documento\n"
+            "unificado de integracao em {wbs_root}/rocksmash-integration/)",
+        )
+        rocksmash_rules_btn.clicked.connect(_paste_path("ai-forge/rules/rocksmash.md"))
+
+        listener_amarelo_btn = _make_btn(
+            "Listener-amarelo", "queue-btn-listener-amarelo-rules-path",
+            "#FBBF24", "#F59E0B", "#D97706",
+            "Cola o path ai-forge/rules/listener-amarelo.md no terminal\n"
+            "(cartao de referencia rapida do estado busy do listener;\n"
+            "fonte-mae em workflow-app-listeners.md)",
+        )
+        listener_amarelo_btn.clicked.connect(
+            _paste_path("ai-forge/rules/listener-amarelo.md")
+        )
+
+        listener_azul_btn = _make_btn(
+            "Listener-azul", "queue-btn-listener-azul-rules-path",
+            "#3B82F6", "#2563EB", "#1D4ED8",
+            "Cola o path ai-forge/rules/listener-azul.md no terminal\n"
+            "(cartao de referencia rapida do estado awaiting_user do listener;\n"
+            "fonte-mae em workflow-app-listeners.md)",
+        )
+        listener_azul_btn.clicked.connect(
+            _paste_path("ai-forge/rules/listener-azul.md")
+        )
+
+        listener_verde_btn = _make_btn(
+            "Listener-verde", "queue-btn-listener-verde-rules-path",
+            "#16A34A", "#15803D", "#166534",
+            "Cola o path ai-forge/rules/listener-verde.md no terminal\n"
+            "(cartao de referencia rapida do estado idle do listener;\n"
+            "fonte-mae em workflow-app-listeners.md)",
+        )
+        listener_verde_btn.clicked.connect(
+            _paste_path("ai-forge/rules/listener-verde.md")
+        )
+
+        listener_vermelho_btn = _make_btn(
+            "Listener-vermelho", "queue-btn-listener-vermelho-rules-path",
+            "#DC2626", "#B91C1C", "#991B1B",
+            "Cola o path ai-forge/rules/listener-vermelho.md no terminal\n"
+            "(cartao de referencia rapida do estado failed do listener;\n"
+            "fonte-mae em workflow-app-listeners.md)",
+        )
+        listener_vermelho_btn.clicked.connect(
+            _paste_path("ai-forge/rules/listener-vermelho.md")
+        )
 
         add_rules_prompt = (
             "crie no ai-forge/rules um novo arquivo de regras referente a "
@@ -4275,9 +4473,15 @@ class MainWindow(QMainWindow):
         add_rules_btn.clicked.connect(_paste_add_rules)
 
         return [
-            workflow_app_btn, dcp_rules_btn, cmd_rules_btn,
-            terminal_rules_btn, listeners_rules_btn, indicators_rules_btn,
-            prompt_rules_btn, add_rules_btn,
+            workflow_app_btn, dcp_rules_btn, meta_feeding_rules_btn, cmd_rules_btn,
+            terminal_rules_btn, listeners_rules_btn, cascade_bug_btn,
+            indicators_rules_btn, prompt_rules_btn,
+            build_render_rules_btn, matrix_spec_rules_btn, llm_routing_rules_btn,
+            main_llm_publish_rules_btn,
+            loop_rules_btn, rocksmash_rules_btn,
+            listener_amarelo_btn, listener_azul_btn, listener_verde_btn,
+            listener_vermelho_btn,
+            add_rules_btn,
         ]
 
     def _populate_header_paths_extras(self) -> list[QPushButton]:
@@ -4536,11 +4740,10 @@ class MainWindow(QMainWindow):
             if not text:
                 return
             if is_workspace:
-                # 2026-05-19: workspace = xterm (T2 sempre visivel) +
-                # opcionalmente pyte (T3) se expandido. Foco no xterm
-                # quando disponivel; fallback pyte caso contrario.
+                # workspace = T2 (Kimi, sempre visivel) + T3 (Codex) quando
+                # expandido; ambos pyte. Foco no T3 quando expandido, senao T2.
                 self._dispatch_workspace_text(text, with_enter=False)
-                if XTERM_AVAILABLE and hasattr(self, "_workspace_panel_xterm"):
+                if getattr(self, "_t3_visible", False) and hasattr(self, "_workspace_panel_xterm"):
                     try:
                         self._workspace_panel_xterm._terminal.setFocus()
                     except AttributeError:
@@ -4655,12 +4858,11 @@ class MainWindow(QMainWindow):
         btn_ws = _btn("WORKSPACE", "#A78BFA")
         btn_ws.setToolTip("cd → workspace do projeto carregado")
 
-        # 2026-05-19: label-bar buttons agora roteiam para o terminal
-        # WORKSPACE visivel (xterm = T2; tambem pyte = T3 se expandido) via
-        # _dispatch_workspace_text. Antes miravam pyte direto via signal_bus,
-        # o que silenciava quando pyte estava colapsado (T3 hidden).
+        # label-bar buttons roteiam para o terminal WORKSPACE visivel
+        # (T2/Kimi sempre visivel; T3/Codex se expandido) via
+        # _dispatch_workspace_text. Foco no T3 quando expandido, senao T2.
         def _focus_workspace() -> None:
-            if XTERM_AVAILABLE and hasattr(self, "_workspace_panel_xterm"):
+            if getattr(self, "_t3_visible", False) and hasattr(self, "_workspace_panel_xterm"):
                 try:
                     self._workspace_panel_xterm._terminal.setFocus()
                     return
@@ -4732,7 +4934,7 @@ class MainWindow(QMainWindow):
         self._t3_arrow_btn.setProperty("testid", "terminal-t3-toggle")
         self._t3_arrow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._t3_arrow_btn.setFixedSize(18, 18)
-        self._t3_arrow_btn.setEnabled(XTERM_AVAILABLE)
+        self._t3_arrow_btn.setEnabled(True)
         self._t3_arrow_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none;"
             " color: #FAFAFA; font-size: 12px; font-weight: 700; padding: 0; }"
@@ -4859,7 +5061,7 @@ class MainWindow(QMainWindow):
     def _apply_workspace_split_sizes(self) -> None:
         """Aplica split do workspace sem substituir terminais.
 
-        child 0 = T2 (pyte), child 1 = T3 (xterm). Regra (so 2 estados):
+        child 0 = T2 (pyte), child 1 = T3 (pyte). Regra (so 2 estados):
         - T3 expandido -> 50/50 exato entre T2 e T3
         - T3 colapsado -> T2 ocupa 100%, T3 fica em 0
         T3 NUNCA ocupa a area inteira.
@@ -4891,16 +5093,14 @@ class MainWindow(QMainWindow):
         else:
             text = "▼" if visible else "▲"
         tip = (
-            "Colapsar terminal 3 (xterm)"
+            "Colapsar terminal 3 (Codex)"
             if visible
-            else "Expandir terminal 3 (xterm) em 50/50"
+            else "Expandir terminal 3 (Codex) em 50/50"
         )
         self._t3_arrow_btn.setText(text)
         self._t3_arrow_btn.setToolTip(tip)
 
     def _on_t3_arrow_clicked(self) -> None:
-        if not XTERM_AVAILABLE:
-            return
         self._t3_visible = not getattr(self, "_t3_visible", False)
         self._apply_workspace_inner_orientation()
         self._update_t3_arrow_icon()
@@ -5396,27 +5596,34 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────── Config detection ──── #
 
     def _attempt_startup_detection(self) -> None:
-        """Tenta detectar e carregar project.json automaticamente ao iniciar.
+        """Inicia SEMPRE em "modo sem projeto" — nenhum JSON carregado.
 
-        Prioridade:
-        1. Último config salvo no QSettings (persistência entre sessões)
-        2. Auto-detecção via detect_config() (fallback)
+        Decisao de seguranca multi-instance (2026-05-31): o workflow-app roda
+        em multiplas instancias sobre o mesmo working tree. Auto-carregar o
+        ultimo project.json (via QSettings) ou auto-detectar via detect_config()
+        no startup faz uma instancia recem-aberta herdar o projeto + a fila
+        (queue-command-list) de outra sessao, criando o risco real de comecar
+        a rodar a pipeline errada contra o projeto errado.
+
+        Portanto o startup NAO carrega nada:
+        - metrics-project-pill fica sem selecao (_apply_project_empty, via
+          MetricsBar.__init__ ao ver app_state sem config);
+        - queue-command-list fica vazio (so e populado por _load_config ->
+          _restore_queue_from_storage, que nunca roda aqui);
+        - o usuario seleciona explicitamente o JSON na pill (_on_proj_select /
+          _on_loop_select / _on_proj_open), tornando a escolha de contexto um
+          ato consciente por instancia.
+
+        O ultimo config continua persistido em QSettings
+        (self._SETTINGS_LAST_CONFIG, gravado por _load_config) apenas como
+        registro/conveniencia do seletor — nunca para auto-load.
         """
-        from pathlib import Path
-
-        last_path = self._settings.value(self._SETTINGS_LAST_CONFIG)
-        if last_path and Path(last_path).exists():
-            logger.info("Restaurando último config do QSettings: %s", last_path)
-            self._load_config(last_path)
-            return
-
-        config_path = detect_config()
-        if config_path:
-            logger.info("Config detectado no startup: %s", config_path)
-            self._load_config(config_path)
-        else:
-            logger.info("Nenhum config detectado no cwd. Modo sem projeto.")
-            self._update_title(project_name=None)
+        logger.info(
+            "Startup em modo sem projeto (multi-instance safety): nenhum "
+            "config auto-carregado; aguardando selecao manual na "
+            "metrics-project-pill."
+        )
+        self._update_title(project_name=None)
 
     def _load_config(self, path: str) -> None:
         """Carrega um project.json e atualiza o estado da aplicação.
@@ -5690,6 +5897,20 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             self._show_toast(f"Erro ao salvar fila: {exc}", "error")
+
+    def _on_clear_queue_clicked(self) -> None:
+        """Esvazia o queue-command-list desta instancia (botao Clear do pill-row).
+
+        Acao destrutiva direta (sem confirmacao, conforme pedido), mas com
+        feedback explicito via toast (Zero Silencio). Idempotente: clicar com
+        a fila ja vazia apenas informa, sem efeito colateral.
+        """
+        count = len(self._command_queue.get_queue_snapshot())
+        if count == 0:
+            self._show_toast("Fila ja esta vazia.", "info")
+            return
+        self._command_queue.clear_queue()
+        self._show_toast(f"Fila esvaziada: {count} comandos removidos.", "success")
 
     def _restore_queue_from_storage(self, config_path: str) -> None:
         """Restaura fila do storage dedicado queue_root, se existir."""

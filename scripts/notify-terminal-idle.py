@@ -10,13 +10,22 @@ v2 contract (ai-forge/rules/workflow-app-listeners.md §2.3 + §9):
       --exit-code  int (default: 0 em success / awaiting_user, 1 em failure)
       --run-id     string opaca (default: ISO-8601 + pid)
 
-  - Retrocompat v1: invocacao `notify-terminal-idle.py [channel]` continua
-    valida e e tratada como `--status success` (legacy success path).
+  - `--status` e obrigatorio. O antigo atalho v1
+    `notify-terminal-idle.py [channel]` foi desativado para impedir falso
+    verde por fallback legado.
 
-IPC: atomic file write via mkstemp + os.replace na pasta `~/.workflow-app/`.
-Um arquivo por canal (`terminal-notify-{channel}.json`) elimina race entre
-canais. O app le via QFileSystemWatcher; o `mkstemp+os.replace` garante que
-o watcher so dispare quando o arquivo esta completo.
+IPC: escrita IN-PLACE no mesmo inode (write-from-0 + ftruncate + fsync) em
+`~/.workflow-app/<session>/terminal-notify-{channel}.json`. O subdiretorio
+`<session>` e resolvido a partir de WF_APP_SESSION_ID (injetado no PTY pelo
+app via PersistentShell.extra_env). Quando ausente (CI headless, invocacao
+manual) usa "session-default". Um arquivo por canal por instancia — elimina
+cross-instance contamination (bug: multiplas instancias abertas em paralelo
+observando o mesmo arquivo e recebendo o recovery prompt umas das outras).
+O app le via QFileSystemWatcher; a escrita in-place mantem o inode estavel
+para que o inotify entregue IN_MODIFY de forma deterministica (mkstemp+
+os.replace trocava o inode e o fileChanged era frequentemente engolido ->
+dot preso amarelo; ver §15.6 de ai-forge/rules/workflow-app-listeners.md).
+Leitura parcial e tratada no consumidor (try/except + dedup por run_id).
 
 Payload escrito (v2):
     {
@@ -36,7 +45,8 @@ Mapping `status -> state` (consumido por TerminalStatusDot):
     failure         -> "failed"          (dot vermelho)
     awaiting_user   -> "awaiting_user"   (dot azul)
 
-Consumers v1 que so leem `state` continuam funcionando (success/v1 = idle).
+Consumers que leem apenas `state` continuam funcionando, desde que o emissor
+use o contrato v2 explicito.
 
 Exit codes:
     0  payload escrito
@@ -49,11 +59,11 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-_DIR = Path.home() / ".workflow-app"
+_SESSION_ID: str = os.environ.get("WF_APP_SESSION_ID", "session-default")
+_DIR = Path.home() / ".workflow-app" / _SESSION_ID
 
 _VALID_CHANNELS = ("interactive", "workspace", "workspace_xterm")
 _VALID_STATUS = ("success", "failure", "awaiting_user")
@@ -74,26 +84,13 @@ def _notify_file_name(channel: str) -> str:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    """Parse v2 flags; fall back to v1 positional channel when no flags given.
-
-    v1 form (still accepted): `notify-terminal-idle.py interactive`
-    """
-    # v1 compat shortcut: exactly one positional, no flags.
-    if len(argv) == 1 and not argv[0].startswith("-"):
-        return argparse.Namespace(
-            channel=argv[0],
-            status="success",
-            reason="",
-            exit_code=0,
-            run_id=f"v1-{int(time.time())}-{os.getpid()}",
-        )
-
+    """Parse v2 flags. Status is required so success/failure is explicit."""
     parser = argparse.ArgumentParser(
         description="Notify workflow-app of a terminal channel event (v2).",
         add_help=True,
     )
     parser.add_argument("--channel", required=True, choices=_VALID_CHANNELS)
-    parser.add_argument("--status", default="success", choices=_VALID_STATUS)
+    parser.add_argument("--status", required=True, choices=_VALID_STATUS)
     parser.add_argument("--reason", default="")
     parser.add_argument("--exit-code", dest="exit_code", type=int, default=None)
     parser.add_argument("--run-id", dest="run_id", default="")
@@ -123,22 +120,36 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def _atomic_write(path: Path, payload: str) -> None:
-    """mkstemp + os.replace na mesma pasta — inotify so dispara quando completo."""
+def _inplace_write(path: Path, payload: str) -> None:
+    """Escrita IN-PLACE no MESMO inode (write-from-0 + ftruncate + fsync).
+
+    Antes usava mkstemp + os.replace (rename atomico). O rename TROCA o inode,
+    e o QFileSystemWatcher (inotify) do app frequentemente ENGOLE o fileChanged
+    resultante — surgindo so como directoryChanged, que tambem nao e 100%
+    confiavel — deixando o dot do listener preso AMARELO apesar do payload
+    correto em disco (ver ai-forge/rules/workflow-app-listeners.md §15.6;
+    confirmado empiricamente em 2026-05-31: write os.replace nao verdejava o
+    dot, write in-place no mesmo inode verdejava todas as vezes).
+
+    Escrever in-place mantem o inode estavel, entao o inotify entrega IN_MODIFY
+    no path observado de forma deterministica (caminho first-hand). A
+    seguranca contra leitura parcial e garantida no consumidor (json.loads em
+    try/except + dedup por run_id + reprocess por directoryChanged como
+    backstop) e a janela e minima: um unico write() do payload pequeno, seguido
+    de ftruncate para o tamanho exato (sem janela de tamanho-zero).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_notify_")
+    data = payload.encode("utf-8")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        os.lseek(fd, 0, os.SEEK_SET)
+        written = 0
+        while written < len(data):
+            written += os.write(fd, data[written:])
+        os.ftruncate(fd, len(data))  # remove cauda de um payload anterior maior
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def main(argv: list[str]) -> int:
@@ -146,6 +157,17 @@ def main(argv: list[str]) -> int:
         args = _parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 1)
+
+    # Correção defensiva: PTY é fonte de verdade do canal real
+    pty_channel = os.environ.get("WF_CHANNEL_OVERRIDE", "")
+    if pty_channel and pty_channel != args.channel:
+        print(
+            f"notify-terminal-idle: WARNING: canal divergente — "
+            f"comando enviou '{args.channel}' mas PTY declara '{pty_channel}'. "
+            f"Usando PTY.",
+            file=sys.stderr,
+        )
+        args.channel = pty_channel
 
     now = time.time()
     state = _STATUS_TO_STATE[args.status]
@@ -164,7 +186,7 @@ def main(argv: list[str]) -> int:
 
     target = _DIR / f"terminal-notify-{_notify_file_name(args.channel)}.json"
     try:
-        _atomic_write(target, payload)
+        _inplace_write(target, payload)
     except OSError as exc:
         print(f"error: notify write failed: {exc}", file=sys.stderr)
         return 1

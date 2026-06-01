@@ -154,7 +154,7 @@ if [ -z "$item_id" ] || [ -z "$loop_slug" ]; then
     autocast_err "wf-notify.sh not found at $notify_sh"
     exit 0
   fi
-  if ! "${BASH:-bash}" "$notify_sh" "$wf_channel"; then
+  if ! "${BASH:-bash}" "$notify_sh" --status success "$wf_channel"; then
     autocast_err "wf-notify.sh non-blocking failure for channel=$wf_channel (standalone mode)"
   fi
   exit 0
@@ -246,6 +246,50 @@ if [ -z "$run_id" ]; then
   exit 0
 fi
 
+# ─── Derivar status semantico do listener ────────────────────────────────────
+# O listener vermelho existe para estados terminais que exigem intervencao.
+# Portanto FAILED/RESSALVAS/BLOCKED nunca podem virar success. SKIPPED e
+# terminal valido para kind=do e continua verde.
+
+final_status_upper=$(printf '%s' "$final_status" | tr '[:lower:]' '[:upper:]')
+verdict_upper=$(printf '%s' "$verdict" | tr '[:lower:]' '[:upper:]')
+notify_status="success"
+notify_reason=""
+
+case "$final_status_upper" in
+  FAILED|FAIL|ERROR|REPROVADO)
+    notify_status="failure"
+    notify_reason="VERIFY_FAILED"
+    ;;
+  BLOCKED|BLOQUEADO)
+    notify_status="failure"
+    notify_reason="BLOCKED"
+    ;;
+  RESSALVAS|*RESSALVA*)
+    notify_status="failure"
+    notify_reason="RESSALVAS"
+    ;;
+  UNKNOWN|"")
+    notify_status="failure"
+    notify_reason="BLOCKED"
+    ;;
+esac
+
+case "$verdict_upper" in
+  RESSALVAS|*RESSALVA*)
+    notify_status="failure"
+    notify_reason="RESSALVAS"
+    ;;
+  REPROVADO|REJECTED|REJEITADO)
+    notify_status="failure"
+    notify_reason="VERIFY_FAILED"
+    ;;
+  BLOCKED|BLOQUEADO)
+    notify_status="failure"
+    notify_reason="BLOCKED"
+    ;;
+esac
+
 # ─── Compute hashes (durability anchors) ────────────────────────────────────
 
 progress_sha=$(file_sha "$progress_file")
@@ -300,7 +344,16 @@ if [ ! -f "$notify_sh" ]; then
   exit 0
 fi
 
-if "${BASH:-bash}" "$notify_sh" "$wf_channel"; then
+if [ "$notify_status" = "failure" ]; then
+  "${BASH:-bash}" "$notify_sh" \
+    --status failure --reason "$notify_reason" "$wf_channel"
+  notify_rc=$?
+else
+  "${BASH:-bash}" "$notify_sh" --status success "$wf_channel"
+  notify_rc=$?
+fi
+
+if [ "$notify_rc" -eq 0 ]; then
   notified_path="$autocast_dir/${kind}-${item_id}-${run_id}.notified.json"
   mv "$inflight_path" "$notified_path" 2>/dev/null
 else

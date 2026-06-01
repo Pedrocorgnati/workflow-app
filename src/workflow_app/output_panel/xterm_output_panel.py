@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
@@ -7,9 +8,11 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from .output_panel import _find_systemforge_root
+from workflow_app.app_instance import APP_SESSION_ID
+from .output_panel import _FATAL_PATTERNS, _find_systemforge_root
 from .persistent_shell import PersistentShell
 from workflow_app.signal_bus import signal_bus
+from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
 ASSETS_DIR = Path(__file__).resolve().parents[3] / "assets" / "xterm"
 
@@ -90,7 +93,10 @@ class XtermOutputPanel(QWidget):
             extra_env={
                 "WF_CHANNEL_OVERRIDE": (
                     "workspace_xterm" if workspace_mode else "interactive"
-                )
+                ),
+                # Per-instance session ID — same isolation contract as
+                # OutputPanel. See ai-forge/rules/workflow-app-listeners.md §2.7.
+                "WF_APP_SESSION_ID": APP_SESSION_ID,
             },
             parent=self,
         )
@@ -116,6 +122,59 @@ class XtermOutputPanel(QWidget):
         self._idle_timer.setSingleShot(True)
         self._idle_timer.setInterval(2_000)
         self._idle_timer.timeout.connect(self._on_idle_timeout)
+
+        # ── Tripwires (parity with OutputPanel T1/T2) ──────────────────── #
+        # Before 2026-05-30 T3 had NO failure tripwires: a Codex worker that
+        # crashed / exited on error / never reached the `## FASE FINAL` notify
+        # block would let the 2s idle timer flip the dot straight to GREEN —
+        # a silent-green that made autocast advance as if the command had
+        # succeeded (gap confirmed by /mcp:kimi adversarial review). We now
+        # mirror OutputPanel: a fatal-pattern scanner (Camada 1) plus an
+        # early-exit watcher (Camada 3). Only the workspace_xterm channel (T3,
+        # which has a dedicated listener dot) emits terminal_force_failed;
+        # interactive_xterm has no dot and stays silent.
+        self._dispatch_ts: float | None = None
+        self._bytes_since_dispatch: int = 0
+        self._last_failure_reason: str | None = None
+        signal_bus.run_command_in_workspace_xterm.connect(self._note_dispatch)
+
+    # Calibrated identically to OutputPanel: a real command emits kilobytes
+    # over several seconds; a CLI dying on auth/credit emits ~hundreds of
+    # bytes in under a second.
+    _EARLY_EXIT_BYTES_THRESHOLD = 512
+    _EARLY_EXIT_TIME_THRESHOLD_S = 4.0
+
+    # Helpers — no notify file, brief output, must NOT trigger early-exit.
+    # Canonical vocabulary lives in workflow_app.terminal_helpers; this is a
+    # back-compat alias so existing references keep resolving.
+    _HELPER_COMMANDS: tuple[str, ...] = HELPER_COMMANDS
+
+    @staticmethod
+    def _is_helper_command(cmd: str) -> bool:
+        """Delegates to the canonical predicate (workflow_app.terminal_helpers)."""
+        return is_helper_command(cmd)
+
+    def _note_dispatch(self, _cmd: str) -> None:
+        """A command was dispatched to T3 (run_command_in_workspace_xterm).
+
+        Opens the early-exit window and resets the fatal dedupe (new dispatch
+        ⇒ new error window). Only meaningful for the workspace_xterm panel.
+        Helpers are exempt: they finish fast by design and would false-trigger
+        EARLY_EXIT (e.g. /clear on Kimi returns to prompt in <1s).
+        """
+        if self._channel_name != "workspace_xterm":
+            return
+        if self._is_helper_command(_cmd):
+            # Disarm explicitamente (paridade com OutputPanel._run_shell_command):
+            # um _dispatch_ts stale de um comando real anterior nao pode
+            # false-firar EARLY_EXIT durante o helper. Um bare `return` deixaria
+            # a janela armada. Ver workflow-app-listeners.md §3.3.
+            self._dispatch_ts = None
+            self._bytes_since_dispatch = 0
+            return
+        self._dispatch_ts = time.monotonic()
+        self._bytes_since_dispatch = 0
+        self._last_failure_reason = None
 
     def ensure_shell_started(self) -> None:
         if not self._shell_started and self._shell is not None:
@@ -144,10 +203,53 @@ class XtermOutputPanel(QWidget):
     def set_interactive_mode(self, enabled: bool) -> None:
         pass
 
-    def _on_shell_output(self, _data: bytes) -> None:
+    def _on_shell_output(self, data) -> None:
         signal_bus.terminal_activity.emit("workspace_xterm")
         self._idle_timer.start()
+        # Camada 3 byte accounting + Camada 1 fatal scan (parity with OutputPanel).
+        chunk = data if isinstance(data, str) else (
+            data.decode("utf-8", errors="replace")
+            if isinstance(data, (bytes, bytearray))
+            else str(data)
+        )
+        if self._dispatch_ts is not None:
+            self._bytes_since_dispatch += len(chunk)
+        self._scan_chunk_for_fatal(chunk)
+
+    def _scan_chunk_for_fatal(self, chunk: str) -> None:
+        """Camada 1: known fatal CLI errors → terminal_force_failed (red).
+
+        Idempotent per reason within a PTY session (dedupe via
+        _last_failure_reason). Only emits for the workspace_xterm channel.
+        """
+        if not chunk or self._channel_name != "workspace_xterm":
+            return
+        for reason, pattern in _FATAL_PATTERNS:
+            if not pattern.search(chunk):
+                continue
+            if self._last_failure_reason == reason:
+                return
+            self._last_failure_reason = reason
+            signal_bus.terminal_force_failed.emit("workspace_xterm", reason)
+            return
 
     def _on_idle_timeout(self) -> None:
+        # Camada 3: early-exit watcher. If a command was dispatched recently,
+        # the PTY emitted few bytes in a short window, and no fatal pattern
+        # matched, treat the 2s silence as a crash-before-notify → red instead
+        # of the unconditional green that caused silent-green on T3.
+        if (
+            self._channel_name == "workspace_xterm"
+            and self._dispatch_ts is not None
+            and self._last_failure_reason is None
+            and self._bytes_since_dispatch < self._EARLY_EXIT_BYTES_THRESHOLD
+            and (time.monotonic() - self._dispatch_ts) < self._EARLY_EXIT_TIME_THRESHOLD_S
+        ):
+            self._last_failure_reason = "EARLY_EXIT"
+            self._dispatch_ts = None
+            signal_bus.terminal_force_failed.emit("workspace_xterm", "EARLY_EXIT")
+            return
+        # Normal path: consume the dispatch window and go green.
+        self._dispatch_ts = None
         signal_bus.terminal_session_finished.emit(self._channel_name)
         signal_bus.terminal_force_idle.emit(self._channel_name)

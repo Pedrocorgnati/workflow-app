@@ -185,6 +185,10 @@ def test_workspace_xterm_panel_binds_workspace_xterm_channel(qapp, monkeypatch):
     try:
         assert panel._shell._extra_env["WF_CHANNEL_OVERRIDE"] == "workspace_xterm"
         assert panel._channel_name == "workspace_xterm"
+        # Per-instance isolation: WF_APP_SESSION_ID must be bound so that
+        # wf-notify.sh writes to this process's subdirectory, not a shared path.
+        from workflow_app.app_instance import APP_SESSION_ID
+        assert panel._shell._extra_env["WF_APP_SESSION_ID"] == APP_SESSION_ID
     finally:
         panel.deleteLater()
 

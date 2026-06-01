@@ -47,6 +47,7 @@ from workflow_app.command_queue.command_item_widget import CommandItemWidget
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
+from workflow_app.metrics_bar.recovery_prompt import RECOVERY_REASONS
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -1050,6 +1051,7 @@ class CommandQueueWidget(QWidget):
         mode = None
         path_arg = ""
         name_arg = ""
+        certain = False
 
         if len(tokens) >= 2 and tokens[0] == "/loop":
             i = 1
@@ -1064,6 +1066,11 @@ class CommandQueueWidget(QWidget):
                 elif t == "--name" and i + 1 < len(tokens):
                     name_arg = tokens[i + 1]
                     i += 2
+                    continue
+                elif t == "--certain":
+                    # cmd-single "kimi certain": forca --force no par kimi-pair.
+                    certain = True
+                    i += 1
                     continue
                 i += 1
 
@@ -1167,60 +1174,50 @@ class CommandQueueWidget(QWidget):
             md_path_str = str(md_path)
             kimi_slug = cmd_target_slash.lstrip("/")
             report_path = f"blacksmith/{kimi_slug}-kimi-pair-report.md"
+
+            def _clear_spec(position: int) -> CommandSpec:
+                # Boundary entre grupos independentes: apenas /clear. /model e
+                # /effort sao suprimidos porque TODOS os grupos cmd_single
+                # rodam em opus/high — re-emiti-los viola a anti-redundancia
+                # (ai-forge/rules/workflow-app-command-lists.md §3.1).
+                return CommandSpec(
+                    name="/clear",
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=position,
+                )
+
+            def _cmd_spec(name: str) -> CommandSpec:
+                return CommandSpec(
+                    name=name,
+                    model=loop_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=loop_effort,
+                    position=len(specs) + 1,
+                )
+
+            # "kimi certain" forca --force nas duas pontas do par kimi-pair
+            # (pula o gate macro de elegibilidade; PROIBIDA continua barrando
+            # individualmente, ver FASE 0.3 de kimi-pair-analyse/execute).
+            force = "--force " if certain else ""
+
+            # Grupo 1: /clear /model opus /effort high (estado conhecido na
+            # partida — §3.4). Grupos seguintes herdam model/effort e emitem
+            # apenas /clear (§3.1).
             specs = _build_prep_specs("cmd_single", start_position=1)
-            specs.append(
-                CommandSpec(
-                    name=f"/cmd:{cmd_action} {md_path_str}",
-                    model=loop_model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=loop_effort,
-                    position=len(specs) + 1,
-                )
-            )
-            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
-            specs.append(
-                CommandSpec(
-                    name=f"/cmd:review {cmd_target_slash} {md_path_str}",
-                    model=loop_model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=loop_effort,
-                    position=len(specs) + 1,
-                )
-            )
-            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
-            specs.append(
-                CommandSpec(
-                    name=f"/cmd:kimi-pair-analyse {cmd_target_slash}",
-                    model=loop_model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=loop_effort,
-                    position=len(specs) + 1,
-                )
-            )
-            specs.append(
-                CommandSpec(
-                    name=f"/cmd:kimi-pair-execute {report_path}",
-                    model=loop_model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=loop_effort,
-                    position=len(specs) + 1,
-                )
-            )
-            specs.extend(_build_prep_specs("cmd_single", start_position=len(specs) + 1))
-            specs.append(
-                CommandSpec(
-                    name="/cmd:readme-upd",
-                    model=loop_model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    effort=loop_effort,
-                    position=len(specs) + 1,
-                )
-            )
+            specs.append(_cmd_spec(f"/cmd:{cmd_action} {md_path_str}"))
+            specs.append(_clear_spec(len(specs) + 1))
+            specs.append(_cmd_spec(f"/cmd:review {cmd_target_slash} {md_path_str}"))
+            specs.append(_clear_spec(len(specs) + 1))
+            # Par kimi-pair compartilha contexto: execute consome o relatorio
+            # produzido por analyse, entao NAO ha /clear entre eles (§3.2/§3.3).
+            specs.append(_cmd_spec(f"/cmd:kimi-pair-analyse {force}{cmd_target_slash}"))
+            specs.append(_cmd_spec(f"/cmd:kimi-pair-execute {force}{report_path}"))
+            specs.append(_clear_spec(len(specs) + 1))
+            specs.append(_cmd_spec("/cmd:readme-upd"))
             label = f"  \U0001f4cb  Loop --cmd-single: {cmd_target_slash} ({cmd_action})"
             auto_save_label = f"Loop --cmd-single {cmd_target_slash}"
         else:
@@ -1268,7 +1265,23 @@ class CommandQueueWidget(QWidget):
                 )
             )
             for sub in sub_names[1:]:
-                specs.extend(_build_prep_specs("loop", start_position=len(specs) + 1))
+                # Boundary entre fases independentes: apenas /clear. /model e
+                # /effort sao SUPRIMIDOS porque TODAS as fases do loop rodam em
+                # opus/high (GROUP_MAP["loop"]) — re-emiti-los viola a politica
+                # anti-redundancia (ai-forge/rules/workflow-app-command-lists.md
+                # secao 3.1, REGRA INVIOLAVEL). Espelha o branch --cmd-single,
+                # que ja faz isso certo via _clear_spec. O primeiro grupo (acima)
+                # ja recebeu /clear /model /effort completo (secao 3.4).
+                specs.append(
+                    CommandSpec(
+                        name="/clear",
+                        model=loop_model,
+                        interaction_type=InteractionType.AUTO,
+                        config_path="",
+                        effort=loop_effort,
+                        position=len(specs) + 1,
+                    )
+                )
                 specs.append(
                     CommandSpec(
                         name=sub,
@@ -1442,7 +1455,21 @@ class CommandQueueWidget(QWidget):
             )
         )
         for sub in sub_names[1:]:
-            specs.extend(_build_prep_specs("study", start_position=len(specs) + 1))
+            # Boundary entre fases independentes: apenas /clear. /model e /effort
+            # sao SUPRIMIDOS porque TODAS as fases do study rodam em opus/high
+            # (GROUP_MAP["study"]) — re-emiti-los viola a anti-redundancia
+            # (ai-forge/rules/workflow-app-command-lists.md secao 3.1, REGRA
+            # INVIOLAVEL). O primeiro grupo ja recebeu prep completo (secao 3.4).
+            specs.append(
+                CommandSpec(
+                    name="/clear",
+                    model=study_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=study_effort,
+                    position=len(specs) + 1,
+                )
+            )
             specs.append(
                 CommandSpec(
                     name=sub,
@@ -1457,6 +1484,9 @@ class CommandQueueWidget(QWidget):
         if loop_path:
             auq_name = f"/tools:auq-interview --optimize {loop_path}"
             if not specs or specs[-1].name != auq_name:
+                # Salto LEGITIMO de model/effort (opus/high -> sonnet/standard):
+                # aqui as diretivas DEVEM ser reemitidas (secao 4). Mantem o
+                # prep completo, diferente do boundary opus/high acima.
                 specs.extend(_build_prep_specs("study", start_position=len(specs) + 1))
                 specs.append(
                     CommandSpec(
@@ -1695,6 +1725,19 @@ class CommandQueueWidget(QWidget):
             flags_boolean=[],
             flags_with_value=[],
             fixed_flag="cmd-single",
+            mode_radio=["kimi analyse", "kimi certain"],
+            mode_radio_flags={"kimi analyse": "", "kimi certain": "--certain"},
+            mode_radio_summaries={
+                "kimi analyse": (
+                    "kimi-pair-analyse roda o gate de elegibilidade antes de "
+                    "adaptar (par analyse -> execute padrao)."
+                ),
+                "kimi certain": (
+                    "kimi-pair-analyse --force + kimi-pair-execute --force: "
+                    "pula o gate macro de elegibilidade (PROIBIDA continua "
+                    "barrando individualmente)."
+                ),
+            },
             pill=None,
             on_command_ready=self._on_unified_command_ready,
             parent=self,
@@ -2218,7 +2261,8 @@ class CommandQueueWidget(QWidget):
         self._use_codex_chk = QCheckBox("codex")
         self._use_codex_chk.setProperty("testid", "queue-chk-use-codex")
         self._use_codex_chk.setToolTip(
-            "Quando marcado, [Rodar proximo] envia comandos Claude elegiveis ao T3 Codex."
+            "Quando marcado, [Rodar proximo] envia ao T3 Codex apenas os itens com seta azul "
+            "(worker-elegiveis). Itens so com seta verde seguem no T1."
         )
         for _btn in (self._use_kimi_chk, self._use_codex_chk):
             _btn.setStyleSheet(_control_qss)
@@ -2265,6 +2309,7 @@ class CommandQueueWidget(QWidget):
         self._force_kimi_chk.toggled.connect(self._on_force_kimi_toggled)
         self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
         self._main_codex_radio.toggled.connect(self._on_main_codex_toggled)
+        self._main_claude_radio.toggled.connect(self._on_main_claude_toggled)
         self._use_codex_chk.toggled.connect(self._on_use_codex_toggled)
 
         main_layout.addWidget(play_bar)
@@ -2541,6 +2586,7 @@ class CommandQueueWidget(QWidget):
         signal_bus.autocast_step_requested.connect(self._on_autocast_step_requested)
         signal_bus.autocast_abort_requested.connect(self._on_autocast_abort_requested)
         signal_bus.interactive_input_requested.connect(self._cancel_pending_modal_enter)
+        signal_bus.request_recovery_command.connect(self._on_request_recovery_command)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
 
     def _on_autocast_abort_requested(self, cause: str, channel: str) -> None:
@@ -3549,6 +3595,46 @@ class CommandQueueWidget(QWidget):
             prefix_commands=None,
         )
 
+    def _load_condition_context(
+        self,
+        ctx: "DcpBuildContext",
+        config: "PipelineConfig",
+    ) -> "tuple[Optional[dict], Optional[dict]]":
+        """Load (enriched MODULE-META, project.json) for consumer defense-in-depth.
+
+        Best-effort: returns (None, project) — or (None, None) — on any failure
+        so `derive_queue_from_matrix` falls back to filter-bits-only (the exact
+        pre-change behavior). When it succeeds, the MODULE-META is enriched with
+        the same delivery runtime snapshot the producer uses, so the consumer's
+        condition re-evaluation never diverges from the materialized filter.
+        """
+        project = getattr(config, "raw", None)
+        meta: Optional[dict] = None
+        try:
+            import json as _json
+            meta_path = ctx.wbs_root / "modules" / ctx.cm_id / "MODULE-META.json"
+            if meta_path.exists() and project is not None:
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                try:
+                    import sys as _sys
+                    from pathlib import Path as _P
+                    _lib = _P(__file__).resolve().parents[5] / ".claude" / "commands" / "_lib"
+                    if str(_lib) not in _sys.path:
+                        _sys.path.insert(0, str(_lib))
+                    from specific_flow.generator import _enrich_meta_with_delivery_state
+                    delivery = getattr(ctx, "delivery", None)
+                    delivery_dict = (
+                        delivery.model_dump(by_alias=True)
+                        if hasattr(delivery, "model_dump") else delivery
+                    )
+                    meta = _enrich_meta_with_delivery_state(meta, delivery_dict, ctx.cm_id)
+                except Exception as exc:  # enrichment optional; raw meta covers static predicates
+                    logger.debug("[dcp] meta enrichment skipped (%s); using raw meta.", exc)
+        except Exception as exc:
+            logger.debug("[dcp] condition context unavailable (%s); filter-bits only.", exc)
+            meta = None
+        return meta, project
+
     def _derive_queue_from_matrix_inmemory(
         self,
         ctx: "DcpBuildContext",
@@ -3722,6 +3808,16 @@ class CommandQueueWidget(QWidget):
         commit_variant = getattr(config, "commit_type", "") or "simple"
         wbs_root = ctx.wbs_root
 
+        # Defense-in-depth context: pass enriched MODULE-META + project.json so
+        # the consumer can drop any command whose canonical condition resolves
+        # False, even if a stale matrix left its filter bit at 1. Enrichment
+        # mirrors the producer (generator._enrich_meta_with_delivery_state) so
+        # runtime-state predicates (tdd.gate_ready, review.*, module.state.*)
+        # never diverge between producer and consumer. Strictly best-effort: on
+        # ANY failure meta stays None and the consumer trusts the
+        # (producer-materialized) filter bits — exact pre-change behavior.
+        cond_meta, cond_project = self._load_condition_context(ctx, config)
+
         try:
             queue = derive_queue_from_matrix(
                 matrix,
@@ -3730,6 +3826,8 @@ class CommandQueueWidget(QWidget):
                 config_path=getattr(config, "config_path", "") or "",
                 commit_variant=commit_variant,
                 include_directives=True,
+                meta=cond_meta,
+                project=cond_project,
             )
         except Exception as exc:
             signal_bus.toast_requested.emit(
@@ -3779,14 +3877,108 @@ class CommandQueueWidget(QWidget):
     # Mirrors `ai-forge/scripts/_dcp_canonical.py:115-125` so the widget can
     # reject bare names without importing from ai-forge/scripts (not on the
     # workflow-app sys.path). Kept in sync via tests/test_dcp_fail_closed_bare_name.py.
+    #
+    # A bare rendered name is ILLEGITIMATE only when the command's canonical
+    # template REQUIRES a placeholder (e.g. /create-task {task} collapsed to
+    # /create-task — the loop 05-27 regression). Commands that are CANONICALLY
+    # bare by design (e.g. /create-task-layout, /data-test-id, every /nextjs:*
+    # review) are legitimate and MUST pass — this matches the validator, which
+    # only flags BARE_NON_EXECUTABLE_NAME when the canonical template has "{".
+    # The authoritative allowlist is derived live from profiles.FULL_PROFILE
+    # (queue_derivation.canonical_bare_command_names); the static snapshot below
+    # is the fail-safe used only when that import is unavailable. The two are
+    # locked in sync by tests/test_dcp_canonical_bare_snapshot.py.
     _BARE_SLASH_NAME_RE = re.compile(r"^/[a-z][a-z0-9-]*(:[a-z0-9-]+)*$")
-    _BARE_SLASH_ALLOWLIST = frozenset({"/clear", "/model {tier}", "/effort {level}"})
+    # Directives injected at consumption time (not in FULL_PROFILE): always bare-OK.
+    _BARE_DIRECTIVE_ALLOWLIST = frozenset({"/clear", "/model {tier}", "/effort {level}"})
+    # Static fail-safe snapshot of profiles.FULL_PROFILE canonically-bare slash
+    # commands (template carries NO placeholder). Regenerate + verify drift via
+    # tests/test_dcp_canonical_bare_snapshot.py.
+    _CANONICAL_BARE_FALLBACK = frozenset({
+        "/android:accessibility", "/android:architecture", "/android:compose",
+        "/android:configuration", "/android:data-layer", "/android:di",
+        "/android:hardcodes", "/android:kotlin", "/android:lifecycle",
+        "/android:navigation", "/android:performance", "/android:resources",
+        "/android:scalability", "/android:security", "/android:testing",
+        "/assets:create", "/brief-vs-frontend-review", "/build-verify",
+        "/ci-cd-create", "/compliance-check", "/create-task-layout",
+        "/create-test-user", "/data-test-id", "/db-migration-create",
+        "/delivery:sync-progress", "/dependency-audit", "/deploy-checklist",
+        "/dev-bootstrap-create", "/docker-create", "/env-creation",
+        "/gate:frontend-runtime", "/hostinger:update-bd", "/infra-create",
+        "/infra-smoke-check", "/integration-test-create", "/load-test-create",
+        "/marketing-readiness-check", "/mobile-first-build", "/monitoring-setup",
+        "/next-modules-skeleton-update", "/nextjs:accessibility",
+        "/nextjs:anti-hacking-review", "/nextjs:anti-loop", "/nextjs:architecture",
+        "/nextjs:boundaries", "/nextjs:configuration", "/nextjs:data-fetching",
+        "/nextjs:error-handling", "/nextjs:forms", "/nextjs:hardcodes",
+        "/nextjs:nextjs-components", "/nextjs:performance", "/nextjs:scalability",
+        "/nextjs:security", "/nextjs:seo", "/nextjs:server-actions",
+        "/nextjs:styling", "/nextjs:typescript", "/npm-run", "/pending-actions-mcp",
+        "/post-deploy-verify", "/pre-deploy-testing", "/python:api",
+        "/python:architecture", "/python:async", "/python:ci-cd",
+        "/python:configuration", "/python:data-handling", "/python:dependencies",
+        "/python:error-handling", "/python:hardcodes", "/python:packaging",
+        "/python:performance", "/python:scalability", "/python:security",
+        "/python:testing", "/python:typing", "/python:web-framework",
+        "/reactnative:accessibility", "/reactnative:architecture",
+        "/reactnative:ci-cd", "/reactnative:configuration",
+        "/reactnative:data-fetching", "/reactnative:error-handling",
+        "/reactnative:hardcodes", "/reactnative:navigation",
+        "/reactnative:performance", "/reactnative:scalability",
+        "/reactnative:security", "/reactnative:state-management",
+        "/reactnative:styling", "/reactnative:testing", "/reactnative:typescript",
+        "/review-language", "/secrets-scan", "/seed-data-create", "/slo-create",
+        "/staging-validate", "/supabase-sql-editor", "/sync:github", "/sync:mcp",
+        "/tech-debt-audit", "/typescript:accessibility", "/typescript:architecture",
+        "/typescript:configuration", "/typescript:data-fetching",
+        "/typescript:dom-components", "/typescript:error-handling",
+        "/typescript:forms", "/typescript:hardcodes", "/typescript:performance",
+        "/typescript:scalability", "/typescript:security", "/typescript:seo",
+        "/typescript:styling", "/typescript:typescript", "/validation-remediate",
+    })
+    _bare_allowlist_cache: Optional[frozenset] = None
+
+    @classmethod
+    def _bare_allowlist(cls) -> frozenset:
+        """Names that are legitimately bare: directives + canonically-bare cmds.
+
+        Authoritative source is profiles.FULL_PROFILE (live, single source of
+        truth shared with the validator). Falls back to the static snapshot with
+        a WARN (Zero Silencio) if profiles cannot be imported — never silently
+        fail-open, so a genuine bare-name regression is still caught even in a
+        degraded environment.
+        """
+        if cls._bare_allowlist_cache is not None:
+            return cls._bare_allowlist_cache
+        canonical: Optional[frozenset] = None
+        try:
+            from workflow_app.dcp.queue_derivation import canonical_bare_command_names
+            canonical = canonical_bare_command_names()
+        except Exception as exc:  # pragma: no cover - import guard
+            logger.warning(
+                "[DCP] canonical_bare_command_names indisponivel (%s); usando "
+                "snapshot estatico.", exc,
+            )
+            canonical = None
+        if canonical is None:
+            logger.warning(
+                "[DCP] canonical-bare set vindo do snapshot estatico de fallback "
+                "(profiles.FULL_PROFILE nao importavel)."
+            )
+            canonical = cls._CANONICAL_BARE_FALLBACK
+        cls._bare_allowlist_cache = cls._BARE_DIRECTIVE_ALLOWLIST | canonical
+        return cls._bare_allowlist_cache
 
     @classmethod
     def _is_bare_slash_name(cls, name: str) -> bool:
-        """True when `name` is a slash bare ilegitimo (token unico, sem args)."""
+        """True when `name` is a slash bare ILEGITIMO (placeholder lost).
+
+        Canonically-bare commands (in the FULL_PROFILE allowlist) and directives
+        return False — a bare render of them is correct.
+        """
         normalized = re.sub(r"\s+", " ", name or "").strip()
-        if normalized in cls._BARE_SLASH_ALLOWLIST:
+        if normalized in cls._bare_allowlist():
             return False
         return bool(cls._BARE_SLASH_NAME_RE.match(normalized))
 
@@ -3803,10 +3995,18 @@ class CommandQueueWidget(QWidget):
         and a toast. The popup body identifies the offender(s) so the
         operator can correlate with `DCP-COMMAND-MATRIX.json`.
         """
-        offenders = [
-            spec.name for spec in specs
-            if self._is_bare_slash_name(spec.name)
-        ]
+        offenders: list[str] = []
+        for spec in specs:
+            # Validate the RENDERED command name on its own. config_path is NOT
+            # concatenated here: a placeholder-loss bug (e.g. /create-task without
+            # its {task} arg) must be caught even when config_path is set, and
+            # appending config_path would MASK it — "/create-task .claude/projects/
+            # foo.json" looks non-bare but the {task} arg is still gone, and the
+            # executor would feed the project json where the TASK path belongs.
+            # Legitimately-bare commands pass via the canonical-bare allowlist
+            # (_is_bare_slash_name), not via a config_path side-channel.
+            if self._is_bare_slash_name(spec.name):
+                offenders.append(spec.name)
         if not offenders:
             return True
 
@@ -5155,48 +5355,35 @@ class CommandQueueWidget(QWidget):
         model = cfg["model"]
         effort_standard = cfg["effort"]
 
-        def _prep(start: int, effort: EffortLevel = effort_standard) -> list[CommandSpec]:
-            model_str = model.value.lower()
-            effort_str = effort.value
-            return [
-                CommandSpec(
-                    name="/clear", model=model,
-                    interaction_type=InteractionType.AUTO, position=start,
-                ),
-                CommandSpec(
-                    name=f"/model {model_str}", model=model,
-                    interaction_type=InteractionType.AUTO, position=start + 1,
-                ),
-                CommandSpec(
-                    name=f"/effort {effort_str}", model=model,
-                    interaction_type=InteractionType.AUTO, position=start + 2,
-                ),
-            ]
-
         def _cmd(name: str, start: int, effort: EffortLevel = effort_standard) -> CommandSpec:
             return CommandSpec(
                 name=name, model=model, effort=effort,
                 interaction_type=InteractionType.AUTO, position=start,
             )
 
-        specs: list[CommandSpec] = []
-        pos = 1
-        # Step 1-2: detect (aborta V1/V2 com instrucao manual; ver docstring)
-        specs.extend(_prep(pos)); pos += 3
-        specs.append(_cmd(f"/legacy:detect {path}", pos)); pos += 1
-        # Step 3-4: delivery init/migrate (idempotente)
-        specs.extend(_prep(pos)); pos += 3
-        specs.append(_cmd(f"/delivery:init --if-missing {path}", pos)); pos += 1
-        # Step 5-6: modules-from-features
-        specs.extend(_prep(pos)); pos += 3
-        specs.append(_cmd(f"/legacy:modules-from-features {path}", pos)); pos += 1
-        # Step 7-8: meta-completeness com auto-fix-p0 em todos modulos
-        specs.extend(_prep(pos)); pos += 3
-        specs.append(_cmd(f"/dcp:meta-completeness --all --auto-fix-p0 {path}", pos))
-        pos += 1
-        # Step 9-10: enqueue-all-modules (expande dinamicamente em runtime)
-        specs.extend(_prep(pos, EffortLevel.HIGH)); pos += 3
-        specs.append(_cmd(f"/legacy:enqueue-all-modules {path}", pos, EffortLevel.HIGH))
+        # Constroi APENAS os comandos reais; a injecao de /clear /model /effort
+        # com anti-redundancia (ai-forge/rules/workflow-app-command-lists.md
+        # secao 3.1 + 3.4) e delegada a _inject_clears — mesmo helper canonico
+        # usado por queue-btn-dcp-build. O _prep() unconditional anterior
+        # reemitia /model sonnet /effort medium antes de CADA step (steps 1-4
+        # identicos), violando a secao 3.1. _inject_clears emite o triplet
+        # completo so no primeiro comando e, no salto de effort medium->high do
+        # step final, reemite SO /effort high (model sonnet inalterado, suprimido).
+        from workflow_app.templates.quick_templates import _inject_clears
+
+        real_specs: list[CommandSpec] = [
+            # Step 1: detect (aborta V1/V2 com instrucao manual; ver docstring)
+            _cmd(f"/legacy:detect {path}", 1),
+            # Step 2: delivery init/migrate (idempotente)
+            _cmd(f"/delivery:init --if-missing {path}", 2),
+            # Step 3: modules-from-features
+            _cmd(f"/legacy:modules-from-features {path}", 3),
+            # Step 4: meta-completeness com auto-fix-p0 em todos modulos
+            _cmd(f"/dcp:meta-completeness --all --auto-fix-p0 {path}", 4),
+            # Step 5: enqueue-all-modules (expande dinamicamente em runtime; high)
+            _cmd(f"/legacy:enqueue-all-modules {path}", 5, EffortLevel.HIGH),
+        ]
+        specs = _inject_clears(real_specs)
 
         slug = Path(path).stem
         logger.info(
@@ -5586,6 +5773,12 @@ class CommandQueueWidget(QWidget):
             self._items_layout.addWidget(item)
             self._items.append(item)
 
+        # Garantir positions 1-based únicas — specs carregados em lote
+        # (ex.: rocksmash expander) chegam com position=0; sem renumeração,
+        # _on_remove_requested filtra todos os itens ao deletar qualquer um.
+        for i, it in enumerate(self._items, start=1):
+            it.get_spec().position = i
+
         # Re-add stretch at end
         self._items_layout.addStretch()
 
@@ -5606,6 +5799,9 @@ class CommandQueueWidget(QWidget):
         item = self._make_item(spec)
         self._items_layout.addWidget(item)
         self._items.append(item)
+
+        # Assign unique 1-based position so _on_remove_requested filter is correct.
+        item.get_spec().position = len(self._items)
 
         # Re-add stretch at end
         if stretch_item:
@@ -5893,9 +6089,154 @@ class CommandQueueWidget(QWidget):
             delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
         signal_bus.kimi_blue_arrow_dispatched.emit(kimi_prompt, delay)
 
+    # ───────────────────── Listener recovery dispatch ───────────────────── #
+    # Loop 06-01-listener-recovery-command, TASK 08. A command queue vira a dona
+    # do roteamento do payload de recuperacao: o builder PURO
+    # (recovery_prompt.build_recovery_prompt) deixa de embutir
+    # `/tools:listener-recovery`; em vez disso o MetricsBar (TASK 07) emite o
+    # sinal semantico `request_recovery_command(channel, reason, context_file)`
+    # e este handler monta+valida+roteia o comando real por canal/LLM antes de
+    # qualquer paste. Fonte: ai-forge/rules/workflow-app-listeners.md.
+    _RECOVERY_VALID_CHANNELS = ("interactive", "workspace", "workspace_xterm")
+
+    def _resolve_interactive_main_llm(self) -> str:
+        """Qual LLM ocupa o terminal interactive (T1) AGORA.
+
+        Espelha a precedencia de `_dispatch_green_arrow`/`_on_btn_next_clicked`:
+        radio Main Codex > checkbox Main Kimi (--force) > Claude (default)."""
+        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
+            return "codex"
+        if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
+            return "kimi"
+        return "claude"
+
+    @staticmethod
+    def _build_recovery_base_command(
+        channel: str, reason: str, context_file: str
+    ) -> str:
+        """Monta o comando-cru de recuperacao (slash + args), sem roteamento.
+
+        O roteamento por LLM/canal acontece DEPOIS, no handler. Manter o slash
+        cru aqui (e nunca no builder puro) e o contrato do aceite da TASK 08."""
+        return (
+            f"/tools:listener-recovery --channel {channel} "
+            f"--reason {reason} --context-file {context_file}"
+        )
+
+    def _reject_recovery_command(
+        self, channel: str | None, message: str
+    ) -> None:
+        """Contrato de violacao: toast warning + failure/BLOCKED no canal.
+
+        Zero Silencio / Zero Estados Indefinidos: nunca cola um comando
+        malformado; sempre sinaliza o porque. Quando o canal e invalido nao ha
+        dot para falhar, entao apenas o toast e emitido."""
+        signal_bus.toast_requested.emit(message, "warning")
+        if channel in self._RECOVERY_VALID_CHANNELS:
+            signal_bus.terminal_force_failed.emit(channel, "BLOCKED")
+
+    def _on_request_recovery_command(
+        self, channel: str, reason: str, context_file: str
+    ) -> None:
+        """Handler do sinal semantico de recuperacao do red-listener (TASK 08).
+
+        Valida o contrato de `request_recovery_command`, monta o comando
+        `/tools:listener-recovery ...` e o roteia por canal/LLM:
+          - interactive + Claude -> slash cru (run_command_in_terminal);
+          - interactive + Codex  -> _build_codex_slash_executor_prompt(interactive);
+          - interactive + Kimi   -> /skill:slash-executor + slash cru;
+          - workspace            -> Kimi blue-arrow (kimi_blue_arrow_dispatched, T2);
+          - workspace_xterm      -> _build_codex_slash_executor_prompt(workspace_xterm).
+
+        O canal e marcado busy pelo CAMINHO EXISTENTE: o MetricsBar ja conecta
+        run_command_in_terminal / run_command_in_workspace_xterm /
+        kimi_blue_arrow_dispatched aos seus `_on_command_dispatched_*`, que
+        chamam dot.set_busy(True) (failed->busy = "novo dispatch explicito" de
+        §1.2). Por isso este handler NAO chama `_on_run_command` nem
+        `_mark_as_sent`: recovery sintetico NAO e item de fila."""
+        # --- Contrato (espelha o docstring de request_recovery_command) --- #
+        if channel not in self._RECOVERY_VALID_CHANNELS:
+            self._reject_recovery_command(
+                None,
+                f"Auto-recuperacao abortada: canal invalido ({channel}).",
+            )
+            return
+        if reason not in RECOVERY_REASONS:
+            self._reject_recovery_command(
+                channel,
+                f"Auto-recuperacao abortada: motivo invalido ({reason}) "
+                f"fora de RECOVERY_REASONS.",
+            )
+            return
+        if not context_file or not context_file.endswith(".md") or not os.path.exists(
+            context_file
+        ):
+            self._reject_recovery_command(
+                channel,
+                f"Auto-recuperacao abortada: context-file invalido "
+                f"({context_file}) — esperado .md existente em disco.",
+            )
+            return
+
+        base = self._build_recovery_base_command(channel, reason, context_file)
+
+        # --- Roteamento por canal/LLM --- #
+        if channel == "workspace":
+            # T2 Parallel Worker Kimi: o paste real e a seta azul (TASK 09),
+            # via kimi_blue_arrow_dispatched. O payload usa o executor universal.
+            payload = self._build_kimi_slash_executor_invocation(base)
+            self._dispatch_blue_arrow(payload)
+        elif channel == "workspace_xterm":
+            # T3 Parallel Worker Codex.
+            payload = self._build_codex_slash_executor_prompt(
+                base, listener_channel="workspace_xterm"
+            )
+            if payload is None:
+                self._reject_recovery_command(
+                    channel,
+                    "Auto-recuperacao abortada: comando Claude "
+                    "/tools:listener-recovery nao encontrado em "
+                    ".claude/commands/ para o canal Codex.",
+                )
+                return
+            signal_bus.run_command_in_workspace_xterm.emit(payload)
+        else:  # channel == "interactive" — roteia pelo Main LLM (T1)
+            llm = self._resolve_interactive_main_llm()
+            if llm == "codex":
+                payload = self._build_codex_slash_executor_prompt(
+                    base, listener_channel="interactive"
+                )
+                if payload is None:
+                    self._reject_recovery_command(
+                        channel,
+                        "Auto-recuperacao abortada: comando Claude "
+                        "/tools:listener-recovery nao encontrado em "
+                        ".claude/commands/ para o Main LLM Codex.",
+                    )
+                    return
+            elif llm == "kimi":
+                payload = self._build_kimi_slash_executor_invocation(base)
+            else:  # claude — slash cru, sem transformacao
+                payload = base
+            signal_bus.run_command_in_terminal.emit(payload)
+
+        label_map = {
+            "interactive": "Terminal 1",
+            "workspace": "Terminal 2",
+            "workspace_xterm": "Terminal 3",
+        }
+        signal_bus.toast_requested.emit(
+            f"AUTO-RECUPERACAO: comando colado em "
+            f"{label_map.get(channel, channel)} (motivo {reason}, "
+            f"snapshot {os.path.basename(context_file)}).",
+            "info",
+        )
+
     def _on_force_kimi_toggled(self, checked: bool) -> None:
         """Main LLM Kimi preserves the old force-Kimi routing behavior."""
         self._refresh_kimi_btn_visibility()
+        if checked:
+            signal_bus.main_llm_changed.emit("kimi")
 
     def _on_use_kimi_toggled(self, checked: bool) -> None:
         """Parallel Worker Kimi keeps the legacy play-next preference toggle."""
@@ -5904,6 +6245,17 @@ class CommandQueueWidget(QWidget):
     def _on_main_codex_toggled(self, checked: bool) -> None:
         """Hook kept explicit for symmetry with Main Kimi."""
         self._refresh_kimi_btn_visibility()
+        if checked:
+            signal_bus.main_llm_changed.emit("codex")
+
+    def _on_main_claude_toggled(self, checked: bool) -> None:
+        """Main LLM Claude is the default raw-dispatch path (T1 interactive).
+
+        Emits main_llm_changed so MetricsBar can phrase the red-listener
+        auto-recovery prompt for Claude (uses /skill:auq-interview on the
+        ask path). See ai-forge/rules/llm-routing-div.md."""
+        if checked:
+            signal_bus.main_llm_changed.emit("claude")
 
     def _on_use_codex_toggled(self, checked: bool) -> None:
         """Parallel Worker Codex has no per-item control to refresh."""
@@ -5936,6 +6288,14 @@ class CommandQueueWidget(QWidget):
         "ai-forge/MCP/agents/executor-de-slash-commands-rules.md"
     )
     _LISTENER_RULES_PATH = "ai-forge/rules/workflow-app-listeners.md"
+    _KIMI_SLASH_EXECUTOR_SKILL = "slash-executor"
+    _KIMI_WRAPPER_ONLY_MARKERS = (
+        "daily-loop-autocast",
+        "WF_CHANNEL_OVERRIDE=workspace",
+        "After executing the bash block from the command file",
+        "NUNCA processe mais de 1 item",
+        "NUNCA execute o bloco bash mais de UMA vez",
+    )
 
     @classmethod
     def _candidate_search_roots(cls) -> list[Path]:
@@ -5957,8 +6317,8 @@ class CommandQueueWidget(QWidget):
         return roots
 
     @classmethod
-    def _resolve_skill_target(cls, slug: str) -> bool:
-        """True quando existe arquivo `{slug}.md` em qualquer skill dir.
+    def _resolve_skill_file(cls, slug: str) -> Path | None:
+        """Return `{slug}.md` from any Kimi skill dir, when present.
 
         slug = parte apos `/skill:` e antes do primeiro espaco/argumento.
         Suporta dois formatos de disco:
@@ -5966,19 +6326,42 @@ class CommandQueueWidget(QWidget):
           - colon-flat: blog:competitor-spy.md  (.agents/skills/ usa ":" no nome do arquivo)
         """
         if not slug:
-            return False
+            return None
         rel_subdir = slug.replace(":", "/") + ".md"  # qa/trace.md
         rel_flat   = slug + ".md"                    # blog:competitor-spy.md
         for root in cls._candidate_search_roots():
             for base in cls._SKILL_SEARCH_DIRS:
                 subdir_path = root / base / rel_subdir
                 if os.path.exists(subdir_path):
-                    return True
+                    return subdir_path
                 if rel_flat != rel_subdir:
                     flat_path = root / base / rel_flat
                     if os.path.exists(flat_path):
-                        return True
-        return False
+                        return flat_path
+        return None
+
+    @classmethod
+    def _resolve_skill_target(cls, slug: str) -> bool:
+        """True quando existe arquivo `{slug}.md` em qualquer skill dir."""
+        return cls._resolve_skill_file(slug) is not None
+
+    @classmethod
+    def _kimi_requires_specific_wrapper(cls, slug: str) -> bool:
+        """Preserve Kimi wrappers that carry command-specific runtime behavior.
+
+        The universal slash executor fixes false failure finalization for generic
+        wrappers, but a few wrappers intentionally add channel binding, dedupe,
+        or standalone autocast scripts. Those must keep the old `/skill:<slug>`
+        route or the Kimi path bypasses their extra contract.
+        """
+        skill_file = cls._resolve_skill_file(slug)
+        if skill_file is None:
+            return False
+        try:
+            text = skill_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        return any(marker in text for marker in cls._KIMI_WRAPPER_ONLY_MARKERS)
 
     @classmethod
     def _resolve_claude_command_file(cls, slug: str) -> Path | None:
@@ -6029,6 +6412,23 @@ class CommandQueueWidget(QWidget):
         leading = cmd_text[: len(cmd_text) - len(stripped)]
         return f"{leading}/skill:{stripped[1:]}"
 
+    @classmethod
+    def _build_kimi_slash_executor_invocation(cls, cmd_text: str) -> str:
+        """Route Main Kimi slash commands through one hardened executor skill.
+
+        The older path rewrote `/foo` to `/skill:foo`, which delegated to
+        hundreds of generated wrappers. Some wrappers let Kimi run the literal
+        Claude final block (`__exit_code=$?`), so a nonzero helper/search shell
+        command could emit a false `wf-notify --status failure` before the
+        eventual success. The universal executor keeps Kimi on the skill path
+        while centralizing the listener finalization contract in one file.
+        """
+        stripped = cmd_text.lstrip()
+        if not stripped.startswith("/") or stripped.startswith("/skill:"):
+            return cmd_text
+        leading = cmd_text[: len(cmd_text) - len(stripped)]
+        return f"{leading}/skill:{cls._KIMI_SLASH_EXECUTOR_SKILL} {stripped}"
+
     @staticmethod
     def _command_head(cmd_text: str) -> str:
         return cmd_text.strip().split(None, 1)[0].lower() if cmd_text.strip() else ""
@@ -6071,6 +6471,35 @@ class CommandQueueWidget(QWidget):
             f"Command: {stripped}\n"
             f"Command markdown: {command_file}\n"
             f"Arguments: {args.strip() or '(none)'}\n\n"
+            "Listener finalization contract:\n"
+            "- Emit exactly one final listener status for this command.\n"
+            "- Decide that status from the command-level outcome, not from an "
+            "incidental shell `$?` left by the last exploratory/read/check command.\n"
+            "- Treat `BLOCKED`, `RESSALVAS`, rejected/reproved verdicts, missing "
+            "required inputs, and failed required verification/install/action as "
+            "semantic failure. These outcomes MUST notify failure/red, even when "
+            "the last shell command exited 0.\n"
+            "- Success is allowed only when the final report is not blocked and "
+            "contains no unresolved blocker. If your final answer says `BLOCKED`, "
+            "`RESSALVAS`, or equivalent, the listener status must be failure, not "
+            "success.\n"
+            "- On command success, notify only success. Do not run or preserve a "
+            "failure path first, and do not let a previous nonzero helper command "
+            "produce `wf-notify --status failure`.\n"
+            "- Emit failure only for a real blocker: missing required input, "
+            "BLOCKED/RESSALVAS verdict, failed verification, failed required "
+            "install/action, or another command-level failure that must stop the "
+            "queue.\n"
+            "- Use the canonical failure reason: `BLOCKED` for blocked gates or "
+            "missing required capability after execution has started, `MISSING_ARG` "
+            "for missing required arguments, `RESSALVAS` for human-decision "
+            "reviews, `VERIFY_FAILED` for failed/reproved verification, and "
+            "`EXIT_NONZERO` for other terminal command failures.\n"
+            "- If the markdown final block captures `__exit_code=$?`, treat it as "
+            "a Claude-shell implementation detail. For Codex execution, run the "
+            "semantically equivalent `wf-notify.sh --status success --exit-code 0` "
+            "after success, or the matching failure notify after a real blocker. "
+            "Never run the success branch of that block after a semantic blocker.\n\n"
             "Protocol:\n"
             "1. Read the executor rules file first.\n"
             "2. Read the listener rules file before running any finalization block.\n"
@@ -6084,8 +6513,13 @@ class CommandQueueWidget(QWidget):
             "prefix the pasted command with WF_CHANNEL_OVERRIDE and do not hardcode "
             "a different channel.\n"
             "7. If a required variable, file, or MCP-only capability is missing, "
-            "stop with BLOCKED and list the missing inputs.\n"
-            "8. Do the work; do not summarize the command instead of executing it."
+            "emit exactly one failure notify with reason BLOCKED or MISSING_ARG "
+            "before the final response, then stop with BLOCKED and list the missing "
+            "inputs. Do not emit success for this case.\n"
+            "8. Before your final response, verify the invariant: a response that "
+            "contains BLOCKED/RESSALVAS/reproved/failure has already emitted "
+            "failure/red, and a response that emitted success contains no blocker.\n"
+            "9. Do the work; do not summarize the command instead of executing it."
         )
 
     def _dispatch_codex_command(self, cmd_text: str, *, to_t1: bool = False) -> bool:
@@ -6097,6 +6531,13 @@ class CommandQueueWidget(QWidget):
         )
         head = self._command_head(cmd_text)
         if head.startswith("/model") or head.startswith("/effort"):
+            # Claude-specific directives: NOT sent to Codex (would error), but
+            # the listener still pulses yellow→green so the autocast loop
+            # advances exactly as it does under Claude. Channel matches the
+            # terminal Codex actually runs in (T1 when to_t1, else T3 xterm).
+            signal_bus.listener_helper_pulse.emit(
+                "interactive" if to_t1 else "workspace_xterm"
+            )
             return True
         if head == "/clear":
             emit(cmd_text)
@@ -6125,21 +6566,36 @@ class CommandQueueWidget(QWidget):
         """Dispatch through the Main LLM Kimi path. Returns False on abort."""
         head = self._command_head(cmd_text)
         if head.startswith("/model") or head.startswith("/effort"):
+            # Claude-specific directives: NOT sent to Kimi (would error), but
+            # the listener still pulses yellow→green so the autocast loop
+            # advances exactly as it does under Claude. Main Kimi runs in T1.
+            signal_bus.listener_helper_pulse.emit("interactive")
             return True
         if head == "/clear":
             signal_bus.run_command_in_terminal.emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
+        if head.startswith("/skill:"):
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
         if head.startswith("/"):
             slug = head[1:].split()[0] if head else ""
-            if slug and not self._resolve_skill_target(slug):
+            has_command = self._resolve_claude_command_file(slug) is not None
+            has_skill = self._resolve_skill_target(slug)
+            if slug and not has_command and not has_skill:
                 signal_bus.toast_requested.emit(
-                    f"Main LLM Kimi: skill '{slug}' nao encontrada em "
-                    ".claude/commands/skill/ nem .agents/skills/ — dispatch abortado.",
+                    f"Main LLM Kimi: comando/skill '{slug}' nao encontrado em "
+                    ".claude/commands/ ou .agents/skills/ — dispatch abortado.",
                     "warning",
                 )
                 return False
-        transformed = self._inject_skill_prefix(cmd_text)
+            if slug and (not has_command or self._kimi_requires_specific_wrapper(slug)):
+                transformed = self._inject_skill_prefix(cmd_text)
+            else:
+                transformed = self._build_kimi_slash_executor_invocation(cmd_text)
+        else:
+            transformed = cmd_text
         signal_bus.run_command_in_terminal.emit(transformed)
         self._on_run_command(cmd_text)
         return True
@@ -6152,7 +6608,7 @@ class CommandQueueWidget(QWidget):
         `/clear`+Use Kimi tambem roda aqui (substitui o slot separado que
         existia antes do refactor).
 
-        Main LLM Kimi path: roteia para terminal interactive com prefixo /skill:;
+        Main LLM Kimi path: roteia para terminal interactive via /skill:slash-executor;
         `/model` e `/effort` viram bolinha amarela SEM dispatch nem update de
         label/highlight (suprimidos pelo modo); `/clear` vai SO para interactive.
         Comandos sem skill wrapper existente disparam toast e abortam o
@@ -6546,23 +7002,30 @@ class CommandQueueWidget(QWidget):
 
         spec = next_item.get_spec()
 
-        # Dispatch via Kimi (blue arrow) or Claude (green arrow).
-        # Routing rule:
-        #   - checkbox checked AND command in kimi whitelist
-        #     AND item's _kimi_btn is actually visible -> kimi click
-        #   - otherwise -> claude (green) click
-        # The triple condition guards against whitelist/visibility divergence
-        # (real risk flagged by /mcp:kimi senior-reviewer): if the
-        # per-item _kimi_btn was hidden by some future spec mutation while
-        # is_kimi_compatible still returns True, fall back to claude rather
-        # than dispatch a kimi action with no visual feedback.
+        # Routing has TWO orthogonal axes (worker axis is the fix of
+        # 2026-05-30):
+        #   (1) Worker axis — does a Parallel Worker claim this command? A
+        #       blue-arrow (worker-eligible) command goes to the worker
+        #       terminal (T2 Kimi / T3 Codex) whenever the matching worker
+        #       checkbox is active. Evaluated FIRST and fully INDEPENDENT of
+        #       which Main LLM is selected.
+        #   (2) Main-LLM axis — everything the worker did NOT claim goes to
+        #       T1 in the Main LLM's own format (Claude raw / Codex executor
+        #       prompt / Kimi skill).
+        # Before this fix, Main Codex/Kimi short-circuited to T1 for EVERY
+        # command, so blue-arrow commands that belonged to the worker were
+        # silently pasted into T1 in the main format (the reported bug). The
+        # Claude-main path already routed workers correctly, so the fix is to
+        # make that same worker routing apply under any Main LLM.
         #
-        # Asymmetry note: kimi branch delegates to _on_kimi_clicked (which
-        # internally does signal emit + _mark_as_sent). Claude branch
-        # orchestrates manually. Contract: _on_kimi_clicked is the canonical
-        # handler of the blue arrow — do not inline its body here, mirror its
-        # invocation. If _on_kimi_clicked grows side effects, this routing
-        # automatically inherits them (single source of truth).
+        # use_kimi triple condition guards against whitelist/visibility
+        # divergence (risk flagged by /mcp:kimi senior-reviewer): if the
+        # per-item _kimi_btn was hidden by some future spec mutation while
+        # is_kimi_compatible still returns True, fall back rather than dispatch
+        # a kimi action with no visual feedback. _on_kimi_clicked is the
+        # canonical blue-arrow handler (does signal emit + _mark_as_sent) — do
+        # not inline its body here, mirror its invocation (single source of
+        # truth).
         cmd_text = next_item.command_text()
         cmd_head = spec.name.strip().split(None, 1)[0].lower()
         use_kimi = (
@@ -6571,9 +7034,28 @@ class CommandQueueWidget(QWidget):
             and getattr(next_item, "_kimi_btn", None) is not None
             and next_item._kimi_btn.isVisible()
         )
+        # use_codex now mirrors use_kimi's blue-arrow gating: the per-item blue
+        # arrow is the canonical "this item is worker-bound" marker
+        # (rules/llm-routing-div.md §3.1). Only blue-arrow items go to the
+        # selected Parallel Worker terminal; green-arrow-only items fall through
+        # to the Main-LLM axis (T1). Without this gate EVERY resolvable slash
+        # command was pasted into T3, ignoring the blue/green distinction
+        # (reported bug 2026-06-01).
+        #
+        # The gate uses the blue-arrow ELIGIBILITY predicate (is_kimi_compatible
+        # OR spec.kimi_eligible, non local-action) rather than the live
+        # _kimi_btn.isVisible(): under Main LLM Kimi every blue arrow is hidden
+        # by _make_item, yet Worker Codex must still divert eligible items to T3
+        # Codex (see test_main_kimi_worker_codex_routes_blue_arrow_to_t3). The
+        # eligibility predicate is the visibility rule minus that transient hide.
+        codex_blue_eligible = (
+            getattr(spec, "kind", "slash") != "local-action"
+            and (is_kimi_compatible(spec.name) or getattr(spec, "kimi_eligible", False))
+        )
         use_codex = (
             getattr(self, "_use_codex_chk", None) is not None
             and self._use_codex_chk.isChecked()
+            and codex_blue_eligible
             and cmd_head.startswith("/")
             and not cmd_head.startswith("/model")
             and not cmd_head.startswith("/effort")
@@ -6586,19 +7068,11 @@ class CommandQueueWidget(QWidget):
         # and silently select the default option.
         self._cancel_pending_modal_enter()
 
-        # Main LLM modes have precedence over optional worker preferences.
-        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
-            if self._dispatch_codex_command(cmd_text, to_t1=True):
-                next_item._mark_as_sent()
-            return
-
-        if self._force_kimi_chk.isChecked():
-            if self._dispatch_kimi_main_command(cmd_text):
-                next_item._mark_as_sent()
-            return
-
-        # Special case: /clear with Use Kimi checkbox active clears BOTH
-        # CLI sessions. Parallel Codex mirrors the same helper to T3.
+        # ── Worker axis (FIRST, independent of Main LLM) ──────────────── #
+        # Special case: /clear with a Parallel Worker active clears BOTH CLI
+        # sessions. T1 always receives /clear raw (Claude, Codex and Kimi all
+        # understand /clear unchanged); the active worker terminal mirrors it
+        # so both contexts reset together.
         clear_both = (
             cmd_head == "/clear"
             and (self._use_kimi_chk.isChecked() or self._use_codex_chk.isChecked())
@@ -6612,22 +7086,45 @@ class CommandQueueWidget(QWidget):
                 signal_bus.run_command_in_workspace_xterm.emit(cmd_text)
             self._on_run_command(cmd_text)
             next_item._mark_as_sent()
-        elif use_kimi:
+            return
+
+        # Blue-arrow (worker-eligible) command + matching worker checkbox →
+        # worker terminal. Kimi takes precedence over Codex when both workers
+        # are checked (legacy order preserved). This runs regardless of the
+        # Main LLM, so Main Codex/Kimi no longer swallow worker-bound commands.
+        if use_kimi:
             next_item._on_kimi_clicked()
             self._last_workspace_dispatch_was_clear = False  # consumed by blue arrow
-        elif use_codex:
-            if self._dispatch_codex_command(cmd_text):
+            return
+        if use_codex:
+            if self._dispatch_codex_command(cmd_text):  # to_t1=False → T3 xterm
                 next_item._mark_as_sent()
-        else:
-            signal_bus.run_command_in_terminal.emit(cmd_text)
-            self._on_run_command(cmd_text)
-            next_item._mark_as_sent()
-            # Pure interactive dispatch does not affect the workspace flag.
+            return
+
+        # ── Main-LLM axis ─────────────────────────────────────────────── #
+        # No worker claimed this command → dispatch to T1 in the Main LLM's
+        # own format.
+        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
+            if self._dispatch_codex_command(cmd_text, to_t1=True):
+                next_item._mark_as_sent()
+            return
+        if self._force_kimi_chk.isChecked():
+            if self._dispatch_kimi_main_command(cmd_text):
+                next_item._mark_as_sent()
+            return
+
+        # Claude main (default): raw dispatch to T1 interactive.
+        signal_bus.run_command_in_terminal.emit(cmd_text)
+        self._on_run_command(cmd_text)
+        next_item._mark_as_sent()
+        # Pure interactive dispatch does not affect the workspace flag.
 
         # /effort pede confirmação no Claude Code: agenda um Enter extra 1s
         # depois para aceitar o prompt automaticamente. O timer é cancelado
         # se um novo dispatch acontecer antes do Enter firar (proteção
-        # contra firar dentro de AskUserQuestion do próximo comando).
+        # contra firar dentro de AskUserQuestion do próximo comando). Só o
+        # caminho Claude main mostra esse modal (Codex/Kimi main suprimem
+        # /effort com pulse, sem dispatch — nada para confirmar).
         if spec.name.strip().lower().startswith("/effort"):
             self._arm_pending_modal_enter()
 

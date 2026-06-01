@@ -179,6 +179,15 @@ class SignalBus(QObject):
     # Emitted when user selects a CLI instance (e.g. "clauded", "clauded2")
     instance_selected = Signal(str)          # binary_name
 
+    # --- Main LLM routing (CommandQueueWidget → MetricsBar) ---
+    # Emitted whenever the Main LLM radio (queue-div-main-llm) changes.
+    # Lets MetricsBar know which CLI occupies T1 (interactive) so the
+    # red-listener auto-recovery prompt is phrased for the right agent.
+    # Values: "claude" | "codex" | "kimi". Workers are fixed by channel
+    # (T2/workspace=kimi, T3/workspace_xterm=codex) so only T1 needs a signal.
+    # See ai-forge/rules/llm-routing-div.md.
+    main_llm_changed = Signal(str)           # "claude" | "codex" | "kimi"
+
     # --- Remote Server (workflow-mobile feature) ---
     # Emitted when user toggles the remote mode button (True=start, False=stop)
     remote_mode_toggle_requested = Signal(bool)
@@ -205,12 +214,19 @@ class SignalBus(QObject):
 
     # --- Terminal activity / idle (status dots) ---
     # Emitted by OutputPanel._on_chunk() on every PTY data chunk — turns dot yellow.
-    terminal_activity = Signal(str)   # channel ("interactive" | "workspace")
+    terminal_activity = Signal(str)   # channel ("interactive" | "workspace" | "workspace_xterm")
     # Emitted on the legacy heuristic path (terminal_session_finished) — starts a
     # 2s hardening window. Authoritative skill notify files no longer route
     # through this signal; they call MetricsBar._enter_authoritative_idle()
     # directly via QFileSystemWatcher and set the dot green immediately.
-    terminal_force_idle = Signal(str) # channel ("interactive" | "workspace")
+    terminal_force_idle = Signal(str) # channel ("interactive" | "workspace" | "workspace_xterm")
+    # Listener-only pulse for Claude-specific directives (/model, /effort) that
+    # are deliberately NOT sent to the terminal when the Main LLM is Codex or
+    # Kimi (they would error in those CLIs). Mirrors a helper dispatch on the
+    # given channel — dot goes yellow then auto-greens after ~1s — WITHOUT any
+    # terminal write, so the autocast loop advances exactly as it does for
+    # Claude. channel values: "interactive" | "workspace" | "workspace_xterm".
+    listener_helper_pulse = Signal(str)  # channel
 
     # --- Listener failed/awaiting_user (ai-forge/rules/workflow-app-listeners.md) ---
     # Canonical signals for the 4-state dot (idle/busy/awaiting_user/failed).
@@ -218,18 +234,33 @@ class SignalBus(QObject):
     #   - QFileSystemWatcher reading ~/.workflow-app/terminal-notify-{channel}.json
     #     (payload state=failed -> terminal_force_failed; state=awaiting_user ->
     #     terminal_awaiting_user)
-    #   - autocast_marker_watcher (daily-loop) reading .autocast/*.failed.json
-    #   - Tripwire de timeout (90s sem PTY chunk + autocast ON)
-    # Backbone (TerminalStatusDot.set_failed/set_awaiting_user + MetricsBar
-    # handlers) is the next commit; these signals exist now so producers
-    # (wf-notify.sh v2, post-write self-checks, tripwires) can wire up
-    # against a stable contract.
+    #   - future autocast_marker_watcher (daily-loop) reading .autocast/*.failed.json
+    #   - OutputPanel fatal-pattern / EARLY_EXIT tripwires
+    # MetricsBar consumes these signals directly and owns the 4-state dot
+    # transition plus autocast abort path.
     terminal_force_failed = Signal(str, str)   # (channel, reason)
     terminal_awaiting_user = Signal(str)       # (channel)
     # Emitted by MetricsBar handler AFTER set_failed; consumed by
     # CommandQueueWidget to abort the autocast loop (autocast button -> unchecked).
     # Args: (cause, channel). cause examples: "listener-failure", "tripwire-timeout".
     autocast_abort_requested = Signal(str, str)
+
+    # --- Listener recovery command (loop 06-01-listener-recovery-command, TASK 05) ---
+    # Canal semantico que substitui o prompt-cru de recuperacao: em vez de colar
+    # texto livre quando um listener entra em failed/RESSALVAS, a UI emite uma
+    # intencao estruturada e o handler (TASK 08) monta+valida o comando antes de
+    # qualquer paste. Emitido por MetricsBar (TASK 07, ponto de emit) e consumido
+    # pelo handler de dispatch da fila (TASK 08, conexao do consumidor).
+    # Args: (channel, reason, context_file).
+    # Contrato que o consumidor (TASK 08) DEVE validar antes de colar:
+    #   - channel  em {"interactive", "workspace", "workspace_xterm"}
+    #   - reason   em RECOVERY_REASONS (frozenset em
+    #     workflow_app/metrics_bar/recovery_prompt.py:
+    #     {BLOCKED, RESSALVAS, VERIFY_FAILED, EXIT_NONZERO, MISSING_ARG, TIMEOUT})
+    #   - context_file existe em disco e termina em ".md"
+    # Qualquer violacao -> toast warning + failure/BLOCKED no canal, sem colar
+    # comando malformado (Zero Silencio / Zero Estados Indefinidos).
+    request_recovery_command = Signal(str, str, str)  # channel, reason, context_file
 
     # --- Autocast (header toggle) ---
     # Emitted by MetricsBar when the autocast loop wants to fire the next queue item.

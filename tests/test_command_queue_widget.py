@@ -529,8 +529,8 @@ class TestKimiBlueArrowDelay:
 class TestForceKimi:
     """Cobertura do modo Main LLM Kimi (testid legado queue-chk-force-kimi).
 
-    Quando ativo: a seta verde despacha para o terminal interactive com
-    prefixo /skill:; /model e /effort viram bolinha amarela sem dispatch;
+    Quando ativo: a seta verde despacha para o terminal interactive via
+    /skill:slash-executor; /model e /effort viram bolinha amarela sem dispatch;
     /clear vai SO para interactive; seta azul fica oculta. Quando Main LLM
     Claude esta ativo, comportamento legado preservado."""
 
@@ -550,12 +550,20 @@ class TestForceKimi:
         return [CommandSpec("/clear", ModelName.SONNET, position=1)]
 
     @pytest.fixture()
-    def force_kimi_widget(self, widget, monkeypatch):
-        """Widget com `_resolve_skill_target` monkeypatched para retornar True —
-        evita dependencia em arquivos reais de skill dentro dos testes."""
+    def force_kimi_widget(self, widget, monkeypatch, tmp_path):
+        """Widget com `_resolve_claude_command_file` monkeypatched para retornar
+        um markdown real fake — evita dependencia em arquivos do repo."""
+        command_file = tmp_path / ".claude" / "commands" / "create-task.md"
+        command_file.parent.mkdir(parents=True)
+        command_file.write_text("# create task", encoding="utf-8")
         monkeypatch.setattr(
             type(widget), "_resolve_skill_target",
             classmethod(lambda cls, slug: True),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: command_file),
         )
         return widget
 
@@ -612,7 +620,7 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
-        assert emitted_interactive == ["/skill:create-task"]
+        assert emitted_interactive == ["/skill:slash-executor /create-task"]
         assert emitted_workspace == [], "Main LLM Kimi nao deve tocar T2"
 
     def test_force_on_step_btn_injects_skill_prefix_to_interactive(
@@ -629,7 +637,7 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
-        assert emitted_interactive == ["/skill:create-task"]
+        assert emitted_interactive == ["/skill:slash-executor /create-task"]
         assert emitted_workspace == []
 
     def test_force_on_keeps_colon_namespace_when_injecting_skill_prefix(
@@ -645,7 +653,71 @@ class TestForceKimi:
             force_kimi_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
-        assert emitted_interactive == ["/skill:blog:init-strategy"]
+        assert emitted_interactive == ["/skill:slash-executor /blog:init-strategy"]
+
+    def test_force_on_direct_skill_command_passes_through(self, force_kimi_widget):
+        emitted_interactive: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline([
+                CommandSpec("/skill:daily --check", ModelName.SONNET, position=1)
+            ])
+            force_kimi_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+        assert emitted_interactive == ["/skill:daily --check"]
+
+    def test_force_on_skill_only_command_keeps_legacy_skill_route(
+        self, widget, monkeypatch
+    ):
+        emitted_interactive: list[str] = []
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: None),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_skill_target",
+            classmethod(lambda cls, slug: slug == "prompt-to-md"),
+        )
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        try:
+            widget._force_kimi_chk.setChecked(True)
+            widget.load_pipeline([
+                CommandSpec("/prompt-to-md --name demo", ModelName.SONNET, position=1)
+            ])
+            widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+        assert emitted_interactive == ["/skill:prompt-to-md --name demo"]
+
+    def test_force_on_preserves_special_kimi_wrapper(
+        self, force_kimi_widget, monkeypatch
+    ):
+        emitted_interactive: list[str] = []
+        monkeypatch.setattr(
+            type(force_kimi_widget),
+            "_kimi_requires_specific_wrapper",
+            classmethod(lambda cls, slug: slug == "daily-loop:do"),
+        )
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        try:
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget.load_pipeline([
+                CommandSpec(
+                    "/daily-loop:do --slug inbox --item 001",
+                    ModelName.SONNET,
+                    position=1,
+                )
+            ])
+            force_kimi_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+        assert emitted_interactive == [
+            "/skill:daily-loop:do --slug inbox --item 001"
+        ]
 
     # ---- /model e /effort suprimidos -----------------------------------
 
@@ -656,8 +728,10 @@ class TestForceKimi:
         nem interactive nem workspace."""
         emitted_interactive: list[str] = []
         emitted_workspace: list[str] = []
+        pulses: list[str] = []
         signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
         signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
+        signal_bus.listener_helper_pulse.connect(pulses.append)
         try:
             force_kimi_widget._force_kimi_chk.setChecked(True)
             force_kimi_widget.load_pipeline(model_effort_specs)
@@ -668,8 +742,12 @@ class TestForceKimi:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
+            signal_bus.listener_helper_pulse.disconnect(pulses.append)
         assert emitted_interactive == []
         assert emitted_workspace == []
+        # NAO enviado ao terminal, MAS o listener pulsa verde para o autocast
+        # avancar — kimi main roda em T1 (interactive).
+        assert pulses == ["interactive", "interactive"]
         # Bolinha amarela: items marcados como sent
         assert force_kimi_widget._items[0].is_pending_run() is False
         assert force_kimi_widget._items[1].is_pending_run() is False
@@ -726,11 +804,16 @@ class TestForceKimi:
     # ---- Skill existence validation -------------------------------------
 
     def test_force_on_unknown_skill_aborts_with_toast(self, widget, task_specs, monkeypatch):
-        """Comando sem wrapper de skill (.claude/commands/skill ou .agents/skills)
+        """Comando sem markdown em .claude/commands
         deve abortar dispatch com toast (review HIGH 2)."""
         monkeypatch.setattr(
             type(widget), "_resolve_skill_target",
             classmethod(lambda cls, slug: False),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: None),
         )
         emitted_interactive: list[str] = []
         emitted_workspace: list[str] = []
@@ -770,6 +853,36 @@ class TestForceKimi:
         )
         assert CommandQueueWidget._resolve_skill_target("blog:init-strategy") is True
 
+    def test_kimi_requires_specific_wrapper_detects_runtime_contract(
+        self, tmp_path, monkeypatch
+    ):
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+
+        repo_root = tmp_path / "repo"
+        nested_cwd = repo_root / "ai-forge" / "workflow-app"
+        nested_cwd.mkdir(parents=True)
+        skills_dir = repo_root / ".agents" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "daily-loop:do.md").write_text(
+            "Run daily-loop-autocast with WF_CHANNEL_OVERRIDE=workspace",
+            encoding="utf-8",
+        )
+        (skills_dir / "create-task.md").write_text(
+            "Read .claude/commands/create-task.md",
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(nested_cwd)
+        monkeypatch.setattr(
+            CommandQueueWidget,
+            "_SKILL_SEARCH_DIRS",
+            (".agents/skills",),
+            raising=False,
+        )
+
+        assert CommandQueueWidget._kimi_requires_specific_wrapper("daily-loop:do") is True
+        assert CommandQueueWidget._kimi_requires_specific_wrapper("create-task") is False
+
     # ---- /skill: prefix idempotente -------------------------------------
 
     def test_inject_skill_prefix_idempotent(self):
@@ -778,6 +891,17 @@ class TestForceKimi:
         assert f("/skill:create-task") == "/skill:create-task"
         assert f("/create-task") == "/skill:create-task"
         assert f("/create-task arg") == "/skill:create-task arg"
+        assert f("") == ""
+        assert f("prompt livre sem barra") == "prompt livre sem barra"
+
+    def test_kimi_slash_executor_invocation_preserves_original_command(self):
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        f = CommandQueueWidget._build_kimi_slash_executor_invocation
+        assert f("/skill:create-task") == "/skill:create-task"
+        assert f("/create-task") == "/skill:slash-executor /create-task"
+        assert f("/blog:init-strategy --x y") == (
+            "/skill:slash-executor /blog:init-strategy --x y"
+        )
         assert f("") == ""
         assert f("prompt livre sem barra") == "prompt livre sem barra"
 
@@ -841,7 +965,7 @@ class TestForceKimi:
         force_kimi_widget.load_pipeline(task_specs)
         force_kimi_widget._on_step_btn_clicked()
         # Item deve estar destacado (highlighted) — comparacao internal usa
-        # cmd_text original `/create-task`, NAO `/skill:create-task`.
+        # cmd_text original `/create-task`, NAO `/skill:slash-executor /create-task`.
         assert force_kimi_widget._items[0]._highlighted is True
 
 
@@ -902,12 +1026,20 @@ class TestCodexLlmRouting:
         assert "Listener rules:" in emitted_t1[0]
         assert "Expected listener channel: interactive" in emitted_t1[0]
         assert "execute/preserve it so it notifies channel `interactive`" in emitted_t1[0]
+        assert "Emit exactly one final listener status" in emitted_t1[0]
+        assert "not from an incidental shell `$?`" in emitted_t1[0]
+        assert "On command success, notify only success" in emitted_t1[0]
+        assert "These outcomes MUST notify failure/red" in emitted_t1[0]
+        assert "If your final answer says `BLOCKED`" in emitted_t1[0]
+        assert "Do not emit success for this case" in emitted_t1[0]
 
     def test_main_codex_model_effort_are_suppressed(self, codex_widget):
         emitted_t1: list[str] = []
         emitted_t3: list[str] = []
+        pulses: list[str] = []
         signal_bus.run_command_in_terminal.connect(emitted_t1.append)
         signal_bus.run_command_in_workspace_xterm.connect(emitted_t3.append)
+        signal_bus.listener_helper_pulse.connect(pulses.append)
         try:
             codex_widget._main_codex_radio.setChecked(True)
             codex_widget.load_pipeline([
@@ -919,9 +1051,13 @@ class TestCodexLlmRouting:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
             signal_bus.run_command_in_workspace_xterm.disconnect(emitted_t3.append)
+            signal_bus.listener_helper_pulse.disconnect(pulses.append)
 
         assert emitted_t1 == []
         assert emitted_t3 == []
+        # NAO enviado ao terminal, MAS o listener pulsa verde para o autocast
+        # avancar — codex main roda em T1 (interactive).
+        assert pulses == ["interactive", "interactive"]
         assert codex_widget._items[0].is_pending_run() is False
         assert codex_widget._items[1].is_pending_run() is False
 
@@ -949,6 +1085,223 @@ class TestCodexLlmRouting:
         assert "Listener rules:" in emitted_t3[0]
         assert "Expected listener channel: workspace_xterm" in emitted_t3[0]
         assert "execute/preserve it so it notifies channel `workspace_xterm`" in emitted_t3[0]
+        assert "Emit exactly one final listener status" in emitted_t3[0]
+        assert "not from an incidental shell `$?`" in emitted_t3[0]
+        assert "These outcomes MUST notify failure/red" in emitted_t3[0]
+        assert "Never run the success branch" in emitted_t3[0]
+
+
+class TestWorkerRoutingExpandedToAllMainLlms:
+    """Fix 2026-05-30 — blue-arrow (worker-bound) commands route to the worker
+    terminal (T2 Kimi / T3 Codex) under ANY Main LLM, not only Claude.
+
+    Bug before the fix: when Main LLM was Codex (or Kimi), `_on_step_btn_clicked`
+    short-circuited EVERY command to T1 in the main format, silently swallowing
+    blue-arrow commands that belonged to the Parallel Worker. The Claude-main
+    worker routing was correct; this expands the SAME behavior to all main LLMs.
+
+    Goal contract:
+      - No Parallel Worker checked → all commands go to T1 in the Main LLM
+        format (even commands that COULD run on a worker).
+      - A Parallel Worker checked → blue-arrow commands go to the worker
+        terminal in the worker's format; green-arrow commands stay on T1.
+    """
+
+    @pytest.fixture()
+    def routed_widget(self, widget, tmp_path, monkeypatch):
+        """widget with claude command files resolvable for the slugs used
+        below, so the Codex executor-prompt builder succeeds."""
+        files: dict[str, object] = {}
+        # commit:simple is resolvable but NOT kimi-compatible (no blue arrow):
+        # used by the green-arrow-only regression test below.
+        for slug in ("blog:init-strategy", "qa:prep", "commit:simple"):
+            f = tmp_path / ".claude" / "commands" / (slug.replace(":", "/") + ".md")
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("# cmd", encoding="utf-8")
+            files[slug] = f
+        agent_file = tmp_path / "executor.md"
+        agent_file.write_text("# executor", encoding="utf-8")
+        listener_file = tmp_path / "listeners.md"
+        listener_file.write_text("# listeners", encoding="utf-8")
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: files.get(slug)),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_codex_executor_agent_file",
+            classmethod(lambda cls: agent_file),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_listener_rules_file",
+            classmethod(lambda cls: listener_file),
+        )
+        return widget
+
+    def test_main_codex_worker_kimi_routes_blue_arrow_to_t2(self, routed_widget):
+        """Main Codex + Worker Kimi: a Kimi-compatible (blue-arrow) command
+        goes to T2 Kimi (kimi_blue_arrow_dispatched), NOT to T1 Codex."""
+        t1: list[str] = []
+        t3: list[str] = []
+        blue: list[str] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append(prompt)
+
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            routed_widget._main_codex_radio.setChecked(True)
+            routed_widget._use_kimi_chk.setChecked(True)
+            routed_widget.load_pipeline(
+                [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+            )
+            assert routed_widget._items[0]._kimi_btn.isVisible()
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+
+        assert t1 == [], "blue-arrow command must NOT leak into T1 under Main Codex"
+        assert t3 == []
+        assert len(blue) == 1
+        assert blue[0].startswith("/skill:")
+        assert routed_widget._items[0].is_pending_run() is False
+
+    def test_main_codex_worker_codex_routes_blue_arrow_to_t3(self, routed_widget):
+        """Main Codex + Worker Codex: an eligible (blue-arrow) command goes to
+        T3 Codex worker (channel workspace_xterm), NOT to T1."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            routed_widget._main_codex_radio.setChecked(True)
+            routed_widget._use_codex_chk.setChecked(True)
+            routed_widget.load_pipeline(
+                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+            )
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t1 == [], "blue-arrow command must NOT leak into T1 under Main Codex"
+        assert len(t3) == 1
+        assert "Command: /blog:init-strategy" in t3[0]
+        assert "Expected listener channel: workspace_xterm" in t3[0]
+
+    def test_main_kimi_worker_codex_routes_blue_arrow_to_t3(self, routed_widget):
+        """Main Kimi + Worker Codex: an eligible (blue-arrow) command goes to
+        T3 Codex worker, NOT to T1 Kimi."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            routed_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
+            routed_widget._use_codex_chk.setChecked(True)
+            routed_widget.load_pipeline(
+                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+            )
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t1 == [], "blue-arrow command must NOT leak into T1 under Main Kimi"
+        assert len(t3) == 1
+        assert "Command: /blog:init-strategy" in t3[0]
+        assert "Expected listener channel: workspace_xterm" in t3[0]
+
+    def test_main_codex_no_worker_keeps_blue_arrow_on_t1(self, routed_widget):
+        """Goal rule #1 — Main Codex + NO worker: even a Kimi-eligible
+        (blue-arrow) command goes to T1 in the Codex executor format, with
+        nothing leaking to the worker terminals."""
+        t1: list[str] = []
+        t3: list[str] = []
+        blue: list[str] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append(prompt)
+
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            routed_widget._main_codex_radio.setChecked(True)
+            routed_widget._use_kimi_chk.setChecked(False)
+            routed_widget._use_codex_chk.setChecked(False)
+            routed_widget.load_pipeline(
+                [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+            )
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+
+        assert len(t1) == 1
+        assert "Command: /qa:prep" in t1[0]
+        assert "Expected listener channel: interactive" in t1[0]
+        assert t3 == []
+        assert blue == []
+
+    def test_main_claude_worker_codex_green_arrow_only_stays_on_t1(self, routed_widget):
+        """Reported bug 2026-06-01 — Main Claude + Worker Codex: a command that
+        is NOT blue-arrow eligible (green-arrow only, e.g. /commit:simple, not in
+        the kimi whitelist) must stay on T1 raw, NOT be swallowed by T3 Codex.
+
+        Before the fix, use_codex routed EVERY resolvable slash command to T3,
+        ignoring the blue/green distinction."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            routed_widget._main_claude_radio.setChecked(True)
+            routed_widget._use_codex_chk.setChecked(True)
+            routed_widget.load_pipeline(
+                [CommandSpec("/commit:simple", ModelName.SONNET, position=1)]
+            )
+            # No blue arrow on a non-whitelisted command.
+            assert routed_widget._items[0]._kimi_btn.isVisible() is False
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t3 == [], "green-arrow-only command must NOT be routed to T3 Codex"
+        assert t1 == ["/commit:simple"], "green-arrow-only command stays raw on T1"
+
+    def test_main_claude_worker_codex_blue_arrow_goes_to_t3(self, routed_widget):
+        """Companion to the green-arrow regression: under the SAME Main Claude +
+        Worker Codex, a blue-arrow eligible command (/blog:init-strategy) DOES go
+        to T3 Codex. Together the two tests pin the blue/green split."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            routed_widget._main_claude_radio.setChecked(True)
+            routed_widget._use_codex_chk.setChecked(True)
+            routed_widget.load_pipeline(
+                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+            )
+            assert routed_widget._items[0]._kimi_btn.isVisible() is True
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t1 == [], "blue-arrow command must NOT leak into T1"
+        assert len(t3) == 1
+        assert "Command: /blog:init-strategy" in t3[0]
+        assert "Expected listener channel: workspace_xterm" in t3[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1372,7 +1725,10 @@ class TestStudyButtonExpandsByMode:
       - --deep: 9 fases (+triangulate, +debate).
       - --heavy: 9 fases (scope-decompose, enumerate, loop-research, loop-synth,
         consolidate-user, review-user, consolidate-tech, validate, publish).
-      - Cada fase precedida por bloco /clear + /model opus + /effort high.
+      - Primeira fase recebe bloco /clear + /model opus + /effort high (secao
+        3.4); demais fases recebem APENAS /clear (anti-redundancia secao 3.1,
+        pois todas rodam opus/high). Salto para sonnet/standard no --loop
+        reemite o bloco (secao 4).
       - --loop <path>: /study:publish recebe `--loop <path>` E auq-interview
         e anexado como ultimo item (Task-023 preservado).
       - --name explicito vence; senao deriva do path.md, senao slugifica prompt.
@@ -1419,17 +1775,26 @@ class TestStudyButtonExpandsByMode:
         assert study_phases[7] == "/study:validate --name foo"
         assert study_phases[8] == "/study:publish --name foo"
 
-    def test_each_phase_prefixed_by_clear_model_effort_block(self, widget):
+    def test_first_phase_full_block_rest_clear_only(self, widget):
         widget._on_study_command_ready('/study "duvida" --name foo')
         names = _spec_names(widget)
-        # Bloco prep canonico: /clear + /model opus + /effort high antes de cada fase.
-        # 7 fases => 7 blocos => total 7 fases + 7*3 = 28 itens.
-        assert len(names) == 7 + 7 * 3
-        for i in range(7):
-            base = i * 4
-            assert names[base] == "/clear"
-            assert names[base + 1] == "/model opus"
-            assert names[base + 2] == "/effort high"
+        # Anti-redundancia (ai-forge/rules/workflow-app-command-lists.md secao
+        # 3.1, REGRA INVIOLAVEL): todas as 7 fases rodam opus/high, entao /model
+        # e /effort sao emitidos UMA vez (primeira fase, secao 3.4); as demais
+        # recebem APENAS /clear. Total = 3 (prep) + 7 fases + 6 /clear = 16.
+        assert len(names) == 16
+        # Primeira fase: bloco completo.
+        assert names[0] == "/clear"
+        assert names[1] == "/model opus"
+        assert names[2] == "/effort high"
+        assert names[3].startswith("/study:scope ")
+        # secao 3.1: /model e /effort emitidos exatamente uma vez no total.
+        assert sum(1 for n in names if n.startswith("/model ")) == 1
+        assert sum(1 for n in names if n.startswith("/effort ")) == 1
+        # Cada fase real (7) precedida por exatamente um /clear (7 no total).
+        reals = [n for n in names if n.startswith("/study:")]
+        assert len(reals) == 7
+        assert sum(1 for n in names if n == "/clear") == 7
 
     def test_loop_propagates_to_publish_and_appends_auq_interview(self, widget):
         widget._on_study_command_ready('/study "duvida" --name foo --loop bar.md')
@@ -1648,3 +2013,87 @@ class TestLegacyToDcpButton:
         # Confirma directive final high
         effort_high_idx = [i for i, n in enumerate(names) if n == "/effort high"]
         assert effort_high_idx, "esperado pelo menos um /effort high para enqueue-all-modules"
+
+
+# ---------------------------------------------------------------------------
+# Cmd Single — radio "kimi analyse" | "kimi certain" + anti-redundancia §3.1
+# (ai-forge/rules/workflow-app-command-lists.md)
+# ---------------------------------------------------------------------------
+
+
+class TestCmdSingleKimiModes:
+    """Valida as duas variantes do cmd-single e a conformidade com §3.1
+    (model/effort emitidos uma unica vez; /clear entre grupos independentes).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_app_state(self):
+        # Outro teste deste arquivo (test_handler_uses_app_state_config_dir)
+        # deixa um SimpleNamespace sem project_dir em app_state.config. Sem
+        # config, o cmd-single resolve base_dir pelo walk-up do .md (caminho
+        # real testado aqui). Limpa antes e depois para nao vazar nem herdar.
+        from workflow_app.config.app_state import app_state
+        app_state.clear_config()
+        yield
+        app_state.clear_config()
+
+    def _md(self, tmp_path):
+        md = tmp_path / "cmd.md"
+        md.write_text("# /test:cmd\ncmd_target: /test:cmd\n", encoding="utf-8")
+        return md
+
+    def test_kimi_analyse_pair_has_no_force(self, widget, tmp_path):
+        md = self._md(tmp_path)
+        widget.clear_queue()
+        widget._on_loop_command_ready(f"/loop --cmd-single {md} --name test-cmd")
+        names = [item.get_spec().name for item in widget._items]
+        analyse = [n for n in names if n.startswith("/cmd:kimi-pair-analyse")]
+        execute = [n for n in names if n.startswith("/cmd:kimi-pair-execute")]
+        assert analyse == ["/cmd:kimi-pair-analyse /test:cmd"]
+        assert execute == [
+            "/cmd:kimi-pair-execute blacksmith/test:cmd-kimi-pair-report.md"
+        ]
+        assert not any("--force" in n for n in names)
+
+    def test_kimi_certain_forces_both_pair_steps(self, widget, tmp_path):
+        md = self._md(tmp_path)
+        widget.clear_queue()
+        widget._on_loop_command_ready(
+            f"/loop --cmd-single {md} --name test-cmd --certain"
+        )
+        names = [item.get_spec().name for item in widget._items]
+        assert "/cmd:kimi-pair-analyse --force /test:cmd" in names
+        assert (
+            "/cmd:kimi-pair-execute --force blacksmith/test:cmd-kimi-pair-report.md"
+            in names
+        )
+
+    def test_cmd_single_anti_redundancy_single_model_effort(self, widget, tmp_path):
+        """§3.1: model/effort sao emitidos UMA vez; grupos seguintes so /clear."""
+        md = self._md(tmp_path)
+        widget.clear_queue()
+        widget._on_loop_command_ready(f"/loop --cmd-single {md} --name test-cmd")
+        names = [item.get_spec().name for item in widget._items]
+        assert sum(1 for n in names if n.startswith("/model ")) == 1
+        assert sum(1 for n in names if n.startswith("/effort ")) == 1
+        # 4 grupos (create | review | kimi-pair | readme) => 4 /clear boundaries.
+        assert names.count("/clear") == 4
+        # Real commands na ordem canonica, par kimi-pair adjacente (sem /clear).
+        reais = [n for n in names if not n.startswith(("/clear", "/model", "/effort"))]
+        assert reais == [
+            f"/cmd:create {md}",
+            "/cmd:review /test:cmd " + str(md),
+            "/cmd:kimi-pair-analyse /test:cmd",
+            "/cmd:kimi-pair-execute blacksmith/test:cmd-kimi-pair-report.md",
+            "/cmd:readme-upd",
+        ]
+
+    def test_cmd_single_first_group_has_full_prep(self, widget, tmp_path):
+        """§3.4: primeiro grupo sempre /clear /model /effort na partida."""
+        md = self._md(tmp_path)
+        widget.clear_queue()
+        widget._on_loop_command_ready(f"/loop --cmd-single {md} --name test-cmd")
+        names = [item.get_spec().name for item in widget._items]
+        assert names[0] == "/clear"
+        assert names[1].startswith("/model ")
+        assert names[2].startswith("/effort ")

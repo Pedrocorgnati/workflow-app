@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -78,21 +77,38 @@ class TestAppState:
 
 
 class TestMainWindowStartup:
+    def test_startup_never_autoloads_config(self, qapp):
+        """Multi-instance safety: o startup NUNCA auto-carrega um projeto.
+
+        Mesmo com um lastConfigPath valido persistido em QSettings, abrir uma
+        nova MainWindow deve resultar em app_state sem config (pill sem selecao,
+        queue-command-list vazio). A escolha de contexto e sempre manual.
+        """
+        # Persistir um lastConfigPath valido ANTES de instanciar a janela.
+        from PySide6.QtCore import QSettings
+
+        from workflow_app.main_window import MainWindow
+        settings = QSettings("SystemForge", "WorkflowApp")
+        settings.setValue(MainWindow._SETTINGS_LAST_CONFIG, __file__)  # path existe
+
+        try:
+            window = MainWindow()
+            assert not app_state.has_config
+            assert window.windowTitle() == "SystemForge Desktop — Sem Projeto"
+        finally:
+            settings.remove(MainWindow._SETTINGS_LAST_CONFIG)
+
     def test_update_title_with_project(self, qapp):
         """MainWindow._update_title exibe título correto com projeto."""
-        import workflow_app.main_window as mw_module
-        with patch.object(mw_module, "detect_config", return_value=None):
-            from workflow_app.main_window import MainWindow
-            window = MainWindow()
+        from workflow_app.main_window import MainWindow
+        window = MainWindow()
 
         window._update_title("meu-app")
         assert window.windowTitle() == "meu-app — SystemForge Desktop"
 
     def test_update_title_without_project(self, qapp):
-        import workflow_app.main_window as mw_module
-        with patch.object(mw_module, "detect_config", return_value=None):
-            from workflow_app.main_window import MainWindow
-            window = MainWindow()
+        from workflow_app.main_window import MainWindow
+        window = MainWindow()
 
         window._update_title(None)
         assert window.windowTitle() == "SystemForge Desktop — Sem Projeto"
@@ -110,14 +126,10 @@ class TestMainWindowStartup:
             }
         }), encoding="utf-8")
 
-        import workflow_app.main_window as mw_module
+        from workflow_app.main_window import MainWindow
         from workflow_app.signal_bus import signal_bus
 
-        # Create MainWindow BEFORE connecting so QSettings startup emissions
-        # (from previous tests) do not pollute received_paths.
-        with patch.object(mw_module, "detect_config", return_value=None):
-            from workflow_app.main_window import MainWindow
-            window = MainWindow()
+        window = MainWindow()
 
         received_paths = []
         slot = received_paths.append
@@ -142,10 +154,8 @@ class TestMainWindowStartup:
             }
         }), encoding="utf-8")
 
-        import workflow_app.main_window as mw_module
-        with patch.object(mw_module, "detect_config", return_value=None):
-            from workflow_app.main_window import MainWindow
-            window = MainWindow()
+        from workflow_app.main_window import MainWindow
+        window = MainWindow()
 
         window._load_config(str(cfg_path))
         assert app_state.has_config
@@ -153,13 +163,11 @@ class TestMainWindowStartup:
 
     def test_load_config_invalid_shows_toast(self, qapp):
         """_load_config com path inválido exibe toast de erro e não altera estado."""
-        import workflow_app.main_window as mw_module
-        with patch.object(mw_module, "detect_config", return_value=None):
-            from workflow_app.main_window import MainWindow
-            window = MainWindow()
+        from workflow_app.main_window import MainWindow
+        window = MainWindow()
 
-        # Limpar estado APÓS criação da janela: MainWindow._on_startup pode ter
-        # carregado o último config via QSettings antes de chegarmos aqui.
+        # Startup nunca auto-carrega (multi-instance safety), mas mantemos o
+        # clear defensivo caso um teste anterior tenha deixado estado residual.
         app_state.clear_config()
 
         from workflow_app.signal_bus import signal_bus
@@ -176,12 +184,12 @@ class TestMainWindowStartup:
     def test_unload_config(self, qapp, tmp_path):
         """_unload_config limpa o AppState e emite config_unloaded."""
         cfg = _make_pipeline_config(tmp_path, "loaded-app")
-        app_state.set_config(cfg)
 
-        import workflow_app.main_window as mw_module
-        with patch.object(mw_module, "detect_config", return_value=None):
-            from workflow_app.main_window import MainWindow
-            window = MainWindow()
+        from workflow_app.main_window import MainWindow
+        window = MainWindow()
+
+        # Carregar manualmente apos o startup (que nunca auto-carrega).
+        app_state.set_config(cfg)
 
         from workflow_app.signal_bus import signal_bus
         unloaded = []

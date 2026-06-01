@@ -18,6 +18,46 @@ def test_main_window_title(qapp):
     assert "SystemForge Desktop" in window.windowTitle()
 
 
+def test_clear_button_in_pill_row_empties_queue(qapp):
+    """O botao Clear vive no pill-row e esvazia o queue-command-list."""
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+
+    btn = next(
+        b for b in window.findChildren(QPushButton)
+        if b.property("testid") == "main-command-queue-clear-btn"
+    )
+    assert btn.text() == "Clear"
+
+    # O botao deve viver dentro do pill-row (sequencia de botoes pedida).
+    # Caminhamos a cadeia de parents — evitamos findChildren(QWidget), que
+    # materializa wrappers de todos os widgets e corrompe o teardown do
+    # conftest (_cleanup_qt_widgets) com segfault no shiboken6.delete.
+    ancestor = btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "main-command-queue-pill-row":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None, "Botao Clear nao esta dentro do main-command-queue-pill-row"
+
+    state = [
+        {"name": "/foo", "model": "Sonnet", "interaction_type": "auto",
+         "position": 1, "phase": "F1"},
+        {"name": "/bar", "model": "Sonnet", "interaction_type": "auto",
+         "position": 2, "phase": "F1"},
+    ]
+    window._command_queue.restore_queue_snapshot(state)
+    assert len(window._command_queue.get_queue_snapshot()) == 2
+
+    btn.click()
+    assert window._command_queue.get_queue_snapshot() == []
+
+    # Idempotente: clicar com a fila vazia nao quebra.
+    btn.click()
+    assert window._command_queue.get_queue_snapshot() == []
+
+
 def test_layout_has_splitter(qapp):
     from workflow_app.main_window import MainWindow
 

@@ -35,10 +35,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app.app_instance import APP_SESSION_ID
 from workflow_app.output_panel.enhanced_screen import EnhancedScreen
 from workflow_app.output_panel.persistent_shell import PersistentShell
 from workflow_app.output_panel.terminal_canvas import Cell, TerminalCanvas
 from workflow_app.signal_bus import signal_bus
+from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
 
 def _find_systemforge_root() -> str | None:
@@ -117,10 +119,22 @@ _FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 class OutputPanel(QWidget):
     """Terminal panel: persistent shell + optional pipeline runner overlay."""
 
-    def __init__(self, parent: QWidget | None = None, workspace_mode: bool = False) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        workspace_mode: bool = False,
+        channel_override: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self._workspace_mode = workspace_mode
-        self._channel = "workspace" if workspace_mode else "interactive"
+        # Canal logico. Por padrao deriva de workspace_mode (T1=interactive,
+        # T2=workspace). `channel_override` permite um terceiro painel pyte
+        # (T3/Codex) declarar o canal "workspace_xterm" mantendo o wiring de
+        # workspace_mode, sem colidir/ecoar com o T2 (ver _connect_signals).
+        # O nome do canal e contrato com MetricsBar (dot _dot_workspace_xterm),
+        # notify (terminal-notify-workspace-xterm.json) e recovery_prompt.
+        default_channel = "workspace" if workspace_mode else "interactive"
+        self._channel = channel_override or default_channel
         self.setObjectName("WorkspacePanel" if workspace_mode else "OutputPanel")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -145,10 +159,11 @@ class OutputPanel(QWidget):
         self._render_timer.setInterval(50)  # 20 fps
         self._render_timer.timeout.connect(self._flush_pyte)
 
-        # ── Heuristic 2s idle timer (interactive channel only) ─ #
+        # ── Heuristic 2s idle timer (interactive + workspace_xterm) ─ #
         # Detects "PTY went silent for 2s" → fires terminal_force_idle.
-        # Used by Claude (interactive) which goes genuinely silent post-
-        # command. NOT used by workspace — see `_on_chunk` gate.
+        # Used by Claude (interactive/T1) and Codex (workspace_xterm/T3),
+        # both of which go genuinely silent post-command. NOT used by the
+        # plain workspace channel (Kimi/T2) — see `_on_chunk` gate.
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
         self._idle_timer.setInterval(2_000)
@@ -182,7 +197,15 @@ class OutputPanel(QWidget):
             cols=self._cols,
             rows=self._rows,
             cwd=_find_systemforge_root(),
-            extra_env={"WF_CHANNEL_OVERRIDE": "workspace" if workspace_mode else "interactive"},
+            extra_env={
+                "WF_CHANNEL_OVERRIDE": self._channel,
+                # Per-instance session ID so wf-notify.sh writes to this
+                # instance's IPC subdirectory (~/.workflow-app/session-<pid>/).
+                # Without this, every open workflow-app instance watches the
+                # same notify files and fires the recovery prompt simultaneously
+                # when any one instance encounters a failure.
+                "WF_APP_SESSION_ID": APP_SESSION_ID,
+            },
             parent=self,
         )
         self._shell.output_received.connect(self._on_chunk)
@@ -213,8 +236,14 @@ class OutputPanel(QWidget):
         layout.setSpacing(0)
 
         self._terminal = TerminalCanvas()
-        self._terminal.setProperty("testid",
-            "terminal-workspace-output" if self._workspace_mode else "terminal-interactive-output")
+        self._terminal.setProperty(
+            "testid",
+            {
+                "interactive": "terminal-interactive-output",
+                "workspace": "terminal-workspace-output",
+                "workspace_xterm": "terminal-codex-output-canvas",
+            }.get(self._channel, "terminal-interactive-output"),
+        )
         self._terminal.raw_key_pressed.connect(self._on_raw_key)
         layout.addWidget(self._terminal, stretch=1)
 
@@ -232,15 +261,19 @@ class OutputPanel(QWidget):
 
         QTimer.singleShot(0, self._schedule_resize)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        """Start the persistent shell only after real geometry is known.
+    def ensure_shell_started(self) -> None:
+        """Force-start the persistent shell, idempotently, without a showEvent.
 
-        On the first show, force the layout to settle, recompute cols/rows
-        from actual pixel size, apply that size synchronously to pyte + PTY,
-        and only then spawn the shell. This avoids the Claude Code / TUI
-        "banner rendered at 220 cols, visible area is 130 cols" breakage.
+        Normalmente o shell so inicia no primeiro showEvent com geometria real
+        (evita a quebra "banner renderizado a 220 cols, area visivel 130 cols"
+        do Claude Code / qualquer TUI). Mas o T3 (Codex, canal workspace_xterm)
+        nasce colapsado (sizes [1, 0]) e pode nunca receber um showEvent util,
+        entao a rota imperativa MainWindow._xterm_inject_text chama este metodo
+        antes de injetar. Geometria colapsada (recompute_grid == 0) cai no
+        fallback 80x24 — start() nunca spawna a CLI com width 0.
+
+        Idempotente: re-chamadas saem cedo via `_shell_started`.
         """
-        super().showEvent(event)
         if self._shell_started or self._shell is None:
             return
 
@@ -262,6 +295,17 @@ class OutputPanel(QWidget):
             self._shell.resize(cols, rows)
         self._shell.start()
         self._shell_started = True
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Start the persistent shell only after real geometry is known.
+
+        On the first show, force the layout to settle, recompute cols/rows
+        from actual pixel size, apply that size synchronously to pyte + PTY,
+        and only then spawn the shell. This avoids the Claude Code / TUI
+        "banner rendered at 220 cols, visible area is 130 cols" breakage.
+        """
+        super().showEvent(event)
+        self.ensure_shell_started()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -341,11 +385,17 @@ class OutputPanel(QWidget):
             signal_bus.run_command_in_terminal.connect(self._run_shell_command)
             signal_bus.paste_text_in_terminal.connect(self._on_paste_text)
             signal_bus.submit_enter_to_terminal.connect(self._send_enter_to_shell)
-        else:
+        elif self._channel == "workspace":
             signal_bus.run_command_in_workspace_terminal.connect(self._run_shell_command)
             signal_bus.paste_text_in_workspace_terminal.connect(self._on_paste_text)
             signal_bus.submit_enter_to_workspace_terminal.connect(self._send_enter_to_shell)
             signal_bus.kimi_blue_arrow_dispatched.connect(self._run_kimi_blue_arrow)
+        # T3 (workspace_xterm / Codex): NAO assina os sinais de dispatch do T2.
+        # O texto chega pela rota imperativa MainWindow._xterm_inject_text
+        # (-> _shell.send_raw direto), que tambem arma a janela de early-exit
+        # via arm_dispatch_window. Assinar os sinais do T2 aqui faria o T3
+        # ecoar todo comando/paste/Kimi-blue-arrow do T2 (bug de eco). Os
+        # sinais de chunk/sessao (acima) ja sao filtrados por self._channel.
 
     # ─────────────────────────────────────────────────────── Key routing ─ #
 
@@ -384,6 +434,23 @@ class OutputPanel(QWidget):
         if self._shell is not None:
             self._shell.send_raw(data)
 
+    # Helpers — no notify file, brief output, must NOT trigger early-exit.
+    # Canonical vocabulary lives in workflow_app.terminal_helpers; this is a
+    # back-compat alias so existing references keep resolving.
+    _HELPER_COMMANDS: tuple[str, ...] = HELPER_COMMANDS
+    # Delay before the submitting Enter (\r) is sent as a standalone keypress
+    # after a pasted command. Ink CLIs (Claude Code) buffer the bracketed
+    # paste block and swallow a same-tick \r; 80ms proved too tight under
+    # load and let directives stack unsubmitted in the prompt. A larger,
+    # named delay makes the Enter land reliably. Ver workflow-app-listeners.md
+    # §2.6b (anti command-stacking).
+    _ENTER_SUBMIT_DELAY_MS: int = 250
+
+    @staticmethod
+    def _is_helper_command(cmd: str) -> bool:
+        """Delegates to the canonical predicate (workflow_app.terminal_helpers)."""
+        return is_helper_command(cmd)
+
     def _run_shell_command(self, command: str) -> None:
         """Send a command to the persistent shell, when available.
 
@@ -401,9 +468,40 @@ class OutputPanel(QWidget):
         if _BRACKETED_PASTE_MODE in self._screen.mode:
             data = b"\x1b[200~" + data + b"\x1b[201~"
         self._shell.send_raw(data)
-        QTimer.singleShot(80, self._send_enter_to_shell)
+        QTimer.singleShot(self._ENTER_SUBMIT_DELAY_MS, self._send_enter_to_shell)
         # Camada 3: marca o dispatch para o early-exit watcher. Reset do
         # ultimo reason tambem — novo dispatch, nova janela de erro.
+        # Helpers (/clear, /model, /effort, cd, CLI launches) are exempt:
+        # they finish fast by design and would false-trigger EARLY_EXIT —
+        # vermelho sticky + autocast travado (workflow-app-listeners.md §16.1:
+        # EARLY_EXIT fica fora de RECOVERY_REASONS, entao nao auto-recupera).
+        if not self._is_helper_command(command):
+            self._dispatch_ts = time.monotonic()
+            self._bytes_since_dispatch = 0
+            self._last_failure_reason = None
+        else:
+            # Disarma explicitamente: um _dispatch_ts stale de um comando
+            # real anterior nao pode false-firar EARLY_EXIT durante o helper.
+            self._dispatch_ts = None
+
+    def arm_dispatch_window(self, command: str) -> None:
+        """Arma a janela do early-exit watcher (Camada 3) para um dispatch
+        imperativo externo, espelhando o bloco de `_run_shell_command`.
+
+        Usado pelo T3 (Codex / canal workspace_xterm): o texto chega via
+        MainWindow._xterm_inject_text -> _shell.send_raw direto, SEM passar por
+        `_run_shell_command`, entao sem isto `_dispatch_ts` nunca seria setado
+        e um Codex que morre cedo (auth/credit) iria para idle->verde silencioso
+        em vez de vermelho (EARLY_EXIT). Helpers (/clear, /model, launcher
+        codex/codex-high, cd) ficam isentos para nao false-firar EARLY_EXIT
+        (workflow-app-listeners.md §16.1: EARLY_EXIT fica fora de
+        RECOVERY_REASONS, entao nao auto-recupera).
+        """
+        if self._is_helper_command(command):
+            # Disarma: um _dispatch_ts stale de um comando real anterior nao
+            # pode false-firar EARLY_EXIT durante o helper.
+            self._dispatch_ts = None
+            return
         self._dispatch_ts = time.monotonic()
         self._bytes_since_dispatch = 0
         self._last_failure_reason = None
@@ -502,14 +600,16 @@ class OutputPanel(QWidget):
     def _on_chunk(self, chunk: str) -> None:
         """Feed a chunk (from shell or pipeline) to pyte and schedule render.
 
-        Heuristic 2s idle timer is armed ONLY for the interactive channel
-        (Claude Code). Claude's UI emits a "Bash..." indicator while a
-        bash tool is running (so intra-execution sleeps don't cause false
-        idle), and goes genuinely silent when the command finishes — so
-        the 2s timer + 3s soft fire correctly when there's nothing
-        emitting notify file for the interactive channel.
+        Heuristic 2s idle timer is armed for the interactive channel (Claude
+        Code, T1) AND the workspace_xterm channel (Codex, T3). Both go
+        genuinely silent when a command finishes, so the 2s timer + soft fire
+        correctly emit terminal_force_idle (dot green) when nothing else emits
+        a notify file for that channel. This is the heuristic green path that
+        MetricsBar documents for T1 + T3 (metrics_bar.py: "OutputPanel arm a
+        2s idle timer on output"). Sem isto, o dot do T3 fica preso em amarelo
+        (stuck-yellow) e o early-exit watcher do Codex nunca dispara.
 
-        Workspace (Kimi) does NOT use this heuristic: Kimi's input prompt
+        Workspace (Kimi, T2) does NOT use this heuristic: Kimi's input prompt
         emits subtle PTY bytes indefinitely (cursor, ANSI repaints), so a
         silence-based heuristic never fires AND collides with notify
         hardening. Workspace relies on the explicit 5s post-notify timer.
@@ -521,7 +621,7 @@ class OutputPanel(QWidget):
         self._has_pending_render = True
         if not self._render_timer.isActive():
             self._render_timer.start()
-        if not self._runner_active and self._channel == "interactive":
+        if not self._runner_active and self._channel in ("interactive", "workspace_xterm"):
             self._idle_timer.start()
         signal_bus.terminal_activity.emit(self._channel)
         if self._dispatch_ts is not None:
@@ -535,8 +635,8 @@ class OutputPanel(QWidget):
     # (slash command que so imprime ack) raramente ficam abaixo dos dois
     # limites simultaneamente. Janela conservadora para minimizar falsos
     # positivos — se nao bate, idle segue caminho normal.
-    _EARLY_EXIT_BYTES_THRESHOLD = 2048
-    _EARLY_EXIT_TIME_THRESHOLD_S = 8.0
+    _EARLY_EXIT_BYTES_THRESHOLD = 512   # crash real: 0-300 bytes; silencio normal: mais
+    _EARLY_EXIT_TIME_THRESHOLD_S = 4.0  # crash real: < 2s; primeira tool call: > 4s tipicamente
 
     def _on_idle_timeout(self) -> None:
         """Callback do _idle_timer (2s de silencio do PTY).

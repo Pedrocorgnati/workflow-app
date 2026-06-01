@@ -48,6 +48,11 @@ class TestOutputPanelChannelEnvBinding:
     command/wrapper having to set the env manually. Regression guard:
     a Kimi run in T2 used to default to `interactive` and leave
     listener-workspace stuck yellow.
+
+    Additionally, WF_APP_SESSION_ID must be bound to the current process
+    session ID. Without this, every open workflow-app instance watches the
+    same IPC notify files and fires the recovery prompt simultaneously when
+    only one instance encounters a failure.
     """
 
     def test_workspace_panel_binds_workspace_channel(self, qapp, qtbot):
@@ -63,6 +68,31 @@ class TestOutputPanelChannelEnvBinding:
         qtbot.addWidget(ia)
         assert ia._shell is not None
         assert ia._shell._extra_env.get("WF_CHANNEL_OVERRIDE") == "interactive"
+
+    def test_workspace_panel_binds_session_id(self, qapp, qtbot):
+        """WF_APP_SESSION_ID must be in the PTY env so wf-notify.sh
+        writes to this instance's subdirectory, not a shared path."""
+        from workflow_app.app_instance import APP_SESSION_ID
+        from workflow_app.output_panel.output_panel import OutputPanel
+        ws = OutputPanel(workspace_mode=True)
+        qtbot.addWidget(ws)
+        assert ws._shell is not None
+        assert ws._shell._extra_env.get("WF_APP_SESSION_ID") == APP_SESSION_ID
+
+    def test_interactive_panel_binds_session_id(self, qapp, qtbot):
+        from workflow_app.app_instance import APP_SESSION_ID
+        from workflow_app.output_panel.output_panel import OutputPanel
+        ia = OutputPanel(workspace_mode=False)
+        qtbot.addWidget(ia)
+        assert ia._shell is not None
+        assert ia._shell._extra_env.get("WF_APP_SESSION_ID") == APP_SESSION_ID
+
+    def test_session_id_format(self):
+        """APP_SESSION_ID must be 'session-<pid>' where <pid> is the
+        current process PID — so orphaned dirs are identifiable by PID."""
+        import os
+        from workflow_app.app_instance import APP_SESSION_ID
+        assert APP_SESSION_ID == f"session-{os.getpid()}"
 
 
 class TestOutputPanelHeuristicIdleByChannel:
@@ -175,3 +205,41 @@ class TestOutputPanelSignalIntegration:
     def test_on_pipeline_error_no_crash(self, panel):
         """_on_pipeline_error() does not crash."""
         panel._on_pipeline_error(1, "something went wrong")
+
+
+class TestOutputPanelHelperEarlyExitExemption:
+    """Regression (pure / Qt-free): the predicate that exempts queue helpers
+    (/model, /effort, /clear, cd, CLI launches) from the early-exit watcher.
+
+    A helper's tiny+fast ack (<2048 bytes, <8s) used to satisfy both
+    early-exit thresholds and fire terminal_force_failed(EARLY_EXIT),
+    painting the interactive listener red and locking autocast — EARLY_EXIT
+    is outside RECOVERY_REASONS so it never auto-recovers
+    (ai-forge/rules/workflow-app-listeners.md §3.3, §16.1). The dispatch
+    guard in _run_shell_command keys off _is_helper_command, so locking the
+    predicate locks the fix. Kept widget-free so it can never segfault the
+    headless Qt suite.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "/model opus",
+            "/effort high",
+            "/clear",
+            "cd foo",
+            "codex-high",
+            "  /MODEL opus",
+            "/CLEAR",
+        ],
+    )
+    def test_helper_classified_true(self, cmd):
+        assert OutputPanel._is_helper_command(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        ["/loop:iteraction:create-task --task x", "/dcp:build-and-load",
+         "/modelish", "", "   "],
+    )
+    def test_non_helper_classified_false(self, cmd):
+        assert OutputPanel._is_helper_command(cmd) is False
