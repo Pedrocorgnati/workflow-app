@@ -1,15 +1,22 @@
 """
 QueueExpander — Automatic queue expansion on trigger commands (module-12/TASK-5).
 
-When /modules:review-created or /auto-flow completes, glob TASK-*.md from
-wbs_root and add matching execute commands to the pipeline.
-When /deploy-flow completes, append post-deploy verification commands.
+When /modules:review-created or /auto-flow completes, enumerate the real
+executable task specs per module and add matching execute commands to the
+pipeline. When /deploy-flow completes, append post-deploy verification commands.
+
+Task enumeration routes through the canonical `enumerate_module_tasks` (same
+engine the DCP queue derivation + offline generator use): only
+`TASK-<int|decimal>.md` count as executable tasks; companion artifacts
+(`TASK-1-SCREENS.md`, `TASK-1-AUDIT.md`, `TASK-1-REVIEW.md`, ...) are excluded so
+`/auto-flow execute` never enqueues a non-task .md (loop 06-08).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from workflow_app.dcp.task_enum import enumerate_module_tasks
 from workflow_app.domain import CommandSpec, InteractionType, ModelName
 
 # Static expansion for deploy-flow trigger
@@ -64,25 +71,29 @@ class QueueExpander:
     # ─────────────────────────────────────────────────────── Helpers ─── #
 
     def _expand_from_modules(self, existing: list[str]) -> list[CommandSpec]:
-        """Glob TASK-*.md under wbs_root/modules and create execute specs."""
+        """Enumerate executable task specs per module and create execute specs.
+
+        Routes through the canonical `enumerate_module_tasks` per module dir
+        (numeric-ordered, companion artifacts excluded) instead of a flat
+        `glob("module-*/TASK-*.md")`, so `/auto-flow execute` only enqueues real
+        tasks. Modules are visited in sorted order for determinism.
+        """
         modules_dir = self._wbs_root / "modules"
         if not modules_dir.exists():
             return []
 
         existing_set = set(existing)
-        task_paths = sorted(modules_dir.glob("module-*/TASK-*.md"))
-
         new_specs: list[CommandSpec] = []
-        for path in task_paths:
-            cmd_name = f"/auto-flow execute {path.parent.name}/{path.name}"
-            if cmd_name not in existing_set:
-                spec = CommandSpec(
-                    name=cmd_name,
-                    model=ModelName.SONNET,
-                    interaction_type=InteractionType.AUTO,
-                    position=0,  # will be re-indexed by PipelineManager
-                )
-                new_specs.append(spec)
+        for module_dir in sorted(p for p in modules_dir.glob("module-*") if p.is_dir()):
+            for task_name in enumerate_module_tasks(module_dir):
+                cmd_name = f"/auto-flow execute {module_dir.name}/{task_name}"
+                if cmd_name not in existing_set:
+                    new_specs.append(CommandSpec(
+                        name=cmd_name,
+                        model=ModelName.SONNET,
+                        interaction_type=InteractionType.AUTO,
+                        position=0,  # will be re-indexed by PipelineManager
+                    ))
 
         return new_specs
 

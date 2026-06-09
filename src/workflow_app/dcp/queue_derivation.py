@@ -13,8 +13,13 @@ Algorithm summary (steps 1-17 of source.md):
     3.  Detect whether `cm_id` is the last module in `execution_order`.
     4.  Iterate `PHASE_ORDER`; for each phase iterate
         `matrix.phase_buckets[phase]`; skip indices whose `filter` bit is 0.
-    5.  For `per_task` entries in `A-creation` / `B3-execute`, expand
-        `loop_multiplier[phase]` times against TASK-{k}.md placeholders.
+    5.  For `per_task` entries in `A-creation` / `B3-execute`, expand against
+        the REAL executable task specs on disk (canonical `enumerate_module_tasks`
+        over `{wbs_root}/modules/{cm_id}`) — one command per real `TASK-*.md`,
+        numeric-ordered, companion artifacts excluded. `loop_multiplier[phase]`
+        is now a cross-check (WARN on drift, Zero Silencio) plus a fallback to
+        synthesizing `TASK-{k}.md` ONLY when `wbs_root` is None or the module
+        dir is missing (legacy/programmatic callers + tests).
     6.  Append fold_in_rules:
             H-commit          ALWAYS
             I-human-signoff   ALWAYS
@@ -53,6 +58,7 @@ from workflow_app.domain import (
     InteractionType,
     ModelName,
 )
+from workflow_app.dcp.task_enum import enumerate_module_tasks
 from workflow_app.models.dcp_command_matrix import (
     CommandIndexEntry,
     CommandRef,
@@ -504,6 +510,47 @@ def derive_queue_from_matrix(
 
     is_last = (cm_id == _last_module_id(matrix))
 
+    # Real task identity comes from the FILESYSTEM (single source of truth —
+    # delivery.json does not enumerate tasks). Synthesizing `TASK-{k}.md` from
+    # loop_multiplier breaks on TASK-0 starts, gaps, decimal indices, and
+    # companion-file over-count (loop 06-08). When a wbs_root is available and
+    # the module dir exists, enumerate the real executable specs and iterate
+    # those; loop_multiplier degrades to a drift cross-check. The synthetic
+    # fallback fires ONLY when wbs_root is None or the dir is missing.
+    real_tasks: Optional[list[str]] = None
+    if wbs_root is not None:
+        module_dir = Path(wbs_root) / "modules" / cm_id
+        if module_dir.is_dir():
+            real_tasks = enumerate_module_tasks(module_dir)
+            # Cross-check the baked loop_multiplier against reality (Zero
+            # Silencio): a mismatch means the matrix is stale — emit a WARN but
+            # trust the real files (covering every task is the safe failure
+            # mode; missing a task is the dangerous one). No truthiness guard on
+            # `_baked`: a baked 0 with real tasks present (0 -> N) IS drift worth
+            # surfacing; foundations-pure (0 == 0) produces no warning naturally.
+            for _ph in ("A-creation", "B3-execute"):
+                _baked = int(multiplier.get(_ph, 0) or 0)
+                if _baked != len(real_tasks):
+                    logger.warning(
+                        "[dcp-queue] modulo %s: loop_multiplier[%s]=%d difere de "
+                        "%d TASK-*.md reais; usando os arquivos reais. Rode "
+                        "/dcp:matrix-mark-loops para re-sincronizar a matrix.",
+                        cm_id, _ph, _baked, len(real_tasks),
+                    )
+
+    def _per_task_iter(phase: str) -> list[str]:
+        """Tasks to expand a per_task entry against, for `phase`.
+
+        Real executable filenames when available (may be empty -> zero per-task
+        commands, the correct result for a foundations-pure / companion-only
+        module); otherwise the legacy `TASK-{k}.md` count-synthesis driven by
+        loop_multiplier (wbs_root None / dir missing only).
+        """
+        if real_tasks is not None:
+            return list(real_tasks)
+        iters = max(1, int(multiplier.get(phase, 1)))
+        return [f"TASK-{k}.md" for k in range(1, iters + 1)]
+
     queue: list[CommandSpec] = []
     position = 0
 
@@ -552,31 +599,30 @@ def derive_queue_from_matrix(
             config_path=config_path,
         ))
 
-    # A-creation: dedicated PRE pass that consumes loop_multiplier["A-creation"]
-    # for per_task entries before falling into PHASE_ORDER (source.md L457-460).
+    # A-creation: dedicated PRE pass that expands per_task entries against the
+    # real executable task specs before falling into PHASE_ORDER (source.md
+    # L457-460). See `_per_task_iter` for the real-files-vs-synthesis contract.
     creation_bucket = matrix.phase_buckets.get("A-creation", [])
-    creation_iters = max(1, int(multiplier.get("A-creation", 1)))
     for idx in creation_bucket:
         if filter_bits[idx] == 0:
             continue
         entry = matrix.command_index[idx]
         if entry.per_task:
-            for k in range(1, creation_iters + 1):
-                emit(entry, task=f"TASK-{k}.md")
+            for task in _per_task_iter("A-creation"):
+                emit(entry, task=task)
         else:
             emit(entry)
 
     # B-tdd .. F2-stack-check
     for phase in PHASE_ORDER:
         bucket = matrix.phase_buckets.get(phase, [])
-        iters = max(1, int(multiplier.get(phase, 1))) if phase in PER_TASK_PHASES else 1
         for idx in bucket:
             if filter_bits[idx] == 0:
                 continue
             entry = matrix.command_index[idx]
             if phase in PER_TASK_PHASES and entry.per_task:
-                for k in range(1, iters + 1):
-                    emit(entry, task=f"TASK-{k}.md")
+                for task in _per_task_iter(phase):
+                    emit(entry, task=task)
             else:
                 emit(entry)
 
