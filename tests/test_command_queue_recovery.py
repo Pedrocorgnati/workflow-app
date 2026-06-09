@@ -124,18 +124,28 @@ class TestRecoveryDispatchRouting:
             "Command: /tools:listener-recovery --channel interactive "
             "--reason VERIFY_FAILED" in payload
         )
+        # recovery_mode EXPLICITO: o payload Codex carrega os marcadores de
+        # recovery (nao o contrato generico), para o Codex rodar a FASE FINAL.
+        assert "RECOVERY MODE" in payload
+        assert "Recovery mode: enabled by caller" in payload
+        assert "Recovery finalization contract" in payload
+        assert "RELATORIO (report written, no fix applied) -> failure/BLOCKED" in payload
+        # context-file e Markdown, nunca JSON (bug que falhava todo snapshot)
+        assert "Markdown (.md) diagnostic snapshot, NOT JSON" in payload
         assert rec.xterm == []
         assert rec.kimi_blue == []
 
     def test_t1_interactive_kimi_slash_executor(self, widget, rec, ctx_file):
-        """T1 Kimi: prefixa /skill:slash-executor antes do slash cru."""
+        """T1 Kimi: prefixa /skill:slash-executor + flag explicito --recovery-mode
+        antes do slash cru (recovery_mode sinalizado pela app, nao auto-detectado).
+        """
         widget._force_kimi_chk.setChecked(True)
         widget._on_request_recovery_command("interactive", "RESSALVAS", ctx_file)
 
         assert len(rec.interactive) == 1
         payload = rec.interactive[0]
         assert payload == (
-            f"/skill:slash-executor /tools:listener-recovery "
+            f"/skill:slash-executor --recovery-mode /tools:listener-recovery "
             f"--channel interactive --reason RESSALVAS --context-file {ctx_file}"
         )
         assert rec.xterm == []
@@ -155,7 +165,7 @@ class TestRecoveryDispatchRouting:
         assert len(rec.kimi_blue) == 1
         prompt, delay = rec.kimi_blue[0]
         assert prompt == (
-            f"/skill:slash-executor /tools:listener-recovery "
+            f"/skill:slash-executor --recovery-mode /tools:listener-recovery "
             f"--channel workspace --reason EXIT_NONZERO --context-file {ctx_file}"
         )
         # Delay DEFAULT preservado: exatamente 1000ms (sem /clear previo).
@@ -177,8 +187,123 @@ class TestRecoveryDispatchRouting:
             "Command: /tools:listener-recovery --channel workspace_xterm "
             "--reason TIMEOUT" in payload
         )
+        # recovery_mode explicito tambem no worker Codex (T3).
+        assert "Recovery mode: enabled by caller" in payload
+        assert "Recovery finalization contract" in payload
         assert rec.interactive == []
         assert rec.kimi_blue == []
+
+
+class TestRecoveryModeExplicitSignaling:
+    """Request 2026-06 (operador): a auto-recuperacao do red-listener so
+    funcionava com Claude (slash cru). Para Codex/Kimi o payload usava o
+    contrato GENERICO e o recovery_mode tinha que ser auto-detectado pelo agente
+    a partir das regras (fragil + contrato generico conflitante). Agora o app
+    sinaliza recovery_mode EXPLICITAMENTE: Codex recebe o contrato de recovery;
+    Kimi recebe o flag `--recovery-mode`. Estes testes travam essa paridade.
+    """
+
+    def test_codex_recovery_payload_has_recovery_markers(self, tmp_path):
+        ctx = tmp_path / "snap.md"
+        ctx.write_text("# diag", encoding="utf-8")
+        base = (
+            "/tools:listener-recovery --channel interactive --reason BLOCKED "
+            f"--context-file {ctx}"
+        )
+        payload = CommandQueueWidget._build_codex_slash_executor_prompt(
+            base, listener_channel="interactive", recovery_mode=True
+        )
+        assert payload is not None
+        assert "RECOVERY MODE" in payload
+        assert "Recovery mode: enabled by caller" in payload
+        assert "Recovery finalization contract" in payload
+        assert "SUSPENDED for this command" in payload
+        assert "Markdown (.md) diagnostic snapshot, NOT JSON" in payload
+
+    def test_codex_non_recovery_command_has_no_recovery_markers(
+        self, tmp_path, monkeypatch
+    ):
+        """Um comando comum NUNCA recebe o contrato/markers de recovery, mesmo
+        se recovery_mode=True for passado por engano (defesa: so vale para o
+        slug exato `tools:listener-recovery`). Hermetico: monkeypatcha o resolver
+        para um .md tmp, entao o payload SEMPRE e construido e as assercoes
+        negativas NUNCA passam vacuamente."""
+        cmd_md = tmp_path / "review.md"
+        cmd_md.write_text("# cmd", encoding="utf-8")
+        monkeypatch.setattr(
+            CommandQueueWidget,
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: cmd_md),
+        )
+        payload = CommandQueueWidget._build_codex_slash_executor_prompt(
+            "/cmd:review", listener_channel="interactive", recovery_mode=True
+        )
+        assert payload is not None, "payload deve ser construido (teste nao-vacuo)"
+        assert "Recovery mode: enabled by caller" not in payload
+        assert "Recovery finalization contract" not in payload
+        assert "RECOVERY MODE" not in payload
+
+    def test_kimi_recovery_invocation_has_flag(self):
+        base = (
+            "/tools:listener-recovery --channel workspace --reason TIMEOUT "
+            "--context-file /tmp/x.md"
+        )
+        out = CommandQueueWidget._build_kimi_slash_executor_invocation(
+            base, recovery_mode=True
+        )
+        assert out == (
+            "/skill:slash-executor --recovery-mode /tools:listener-recovery "
+            "--channel workspace --reason TIMEOUT --context-file /tmp/x.md"
+        )
+
+    def test_kimi_non_recovery_never_gets_flag(self):
+        """recovery_mode=True num slug que NAO e o recovery nao injeta o flag."""
+        out = CommandQueueWidget._build_kimi_slash_executor_invocation(
+            "/qa:prep --module 3", recovery_mode=True
+        )
+        assert "--recovery-mode" not in out
+        assert out == "/skill:slash-executor /qa:prep --module 3"
+
+    def test_kimi_default_is_non_recovery(self):
+        """Sem recovery_mode, o comando de recovery NAO ganha o flag (so o
+        dispatch de auto-recuperacao o passa)."""
+        out = CommandQueueWidget._build_kimi_slash_executor_invocation(
+            "/tools:listener-recovery --channel interactive --reason BLOCKED "
+            "--context-file /tmp/x.md"
+        )
+        assert "--recovery-mode" not in out
+
+    def test_codex_main_dispatch_of_recovery_slug_gets_recovery_mode(
+        self, widget, rec, ctx_file
+    ):
+        """Defesa-em-profundidade: o slug de recovery como item NORMAL de fila
+        sob Main Codex (to_t1) tambem recebe o contrato de recovery, nao o
+        generico (que conflitaria com a FASE FINAL/wf_verdict do recovery)."""
+        base = (
+            "/tools:listener-recovery --channel interactive --reason BLOCKED "
+            f"--context-file {ctx_file}"
+        )
+        ok = widget._dispatch_codex_command(base, to_t1=True)
+        assert ok is True
+        assert len(rec.interactive) == 1
+        assert "Recovery mode: enabled by caller" in rec.interactive[0]
+        assert "Recovery finalization contract" in rec.interactive[0]
+
+    def test_kimi_main_dispatch_of_recovery_slug_gets_flag(
+        self, widget, rec, ctx_file
+    ):
+        """Defesa-em-profundidade: o slug de recovery como item NORMAL de fila
+        sob Main Kimi tambem recebe o flag --recovery-mode."""
+        base = (
+            "/tools:listener-recovery --channel interactive --reason BLOCKED "
+            f"--context-file {ctx_file}"
+        )
+        ok = widget._dispatch_kimi_main_command(base)
+        assert ok is True
+        assert len(rec.interactive) == 1
+        assert rec.interactive[0].startswith(
+            "/skill:slash-executor --recovery-mode /tools:listener-recovery"
+        )
 
 
 # ───────────── gate do aceite TASK 09: sem regressao de whitelist ───────────── #
