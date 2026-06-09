@@ -1276,3 +1276,73 @@ class TestNotifyAuthoritativeFenceAntiCascade:
         assert mb._autocast_fire_timer.isActive()
         mb._autocast_fire_timer.timeout.emit()
         assert fires == [1], "exactly one next item fires, after the notify"
+
+
+class TestAutocastPassiveModeOnEnable:
+    """Request 2026-06: ligar o autocast manualmente NAO dispara o primeiro
+    [Rodar proximo]. O modo e passivo — so avanca quando o LISTENER chamar
+    (dot verde apos um comando concluir). O disparo AGENDADO mantem o kickoff."""
+
+    def test_manual_toggle_does_not_fire_first_step(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        fires: list[int] = []
+        bus.autocast_step_requested.connect(lambda: fires.append(1))
+
+        # Liga manualmente (como o usuario clicando no autocast-btn).
+        mb._btn_autocast.setChecked(True)
+
+        assert fires == [], (
+            "ligar o autocast manualmente NAO pode disparar o primeiro play"
+        )
+        assert mb._btn_autocast.isChecked() is True
+        assert mb._autocast_phase == "running", "fica armado/escutando"
+        # O arm-timer NAO foi iniciado (so inicia ao disparar um step), entao
+        # o autocast nao se auto-desliga por timeout enquanto espera o listener.
+        assert not (
+            hasattr(mb, "_autocast_arm_timer") and mb._autocast_arm_timer.isActive()
+        )
+
+    def test_advances_on_listener_green_after_manual_toggle(self, qapp, tmp_path):
+        import json, time
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        fires: list[int] = []
+        bus.autocast_step_requested.connect(lambda: fires.append(1))
+
+        # Liga passivo. Depois um comando ja em execucao conclui (listener).
+        mb._btn_autocast.setChecked(True)
+        assert fires == []
+
+        bus.run_command_in_terminal.emit("/skill:slash-executor /loop:iteraction:execute-task")
+        assert mb._dot_interactive.is_busy is True
+
+        notify_path = mb._notify_files["interactive"]
+        notify_path.write_text(json.dumps({
+            "channel": "interactive", "state": "idle",
+            "iat": time.time(), "exp": time.time() + 10.0,
+            "run_id": "run-passive-1",
+        }))
+        mb._on_notify_file_changed(str(notify_path))
+        mb._idle_timer_interactive.timeout.emit()
+        assert mb._dot_interactive.is_busy is False
+        assert mb._autocast_fire_timer.isActive(), "listener verde arma o proximo"
+        mb._autocast_fire_timer.timeout.emit()
+        assert fires == [1], "primeiro play dispara SO quando o listener chama"
+
+    def test_scheduled_autocast_kickoff_fires_first_step(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        fires: list[int] = []
+        bus.autocast_step_requested.connect(lambda: fires.append(1))
+
+        # O disparo AGENDADO mantem o kickoff (inicia a fila no horario marcado).
+        mb._fire_schedule_autocast()
+
+        assert mb._btn_autocast.isChecked() is True
+        assert fires == [1], "o autocast agendado dispara o primeiro play"
+        # E o flag de kickoff volta a False (so vale para o disparo agendado).
+        assert mb._autocast_kickoff_on_enable is False

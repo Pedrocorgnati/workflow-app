@@ -416,6 +416,10 @@ class MetricsBar(QWidget):
         self._active_view: int = 0
         self._selected_instance: int = 0
         self._autocast_phase: str = "off"  # off | awaiting-busy | running
+        # True apenas durante o disparo AGENDADO (`_fire_schedule_autocast`):
+        # autoriza `_on_autocast_toggled` a disparar o primeiro [Rodar proximo].
+        # O modo manual (clique no autocast-btn) e passivo e NAO dispara.
+        self._autocast_kickoff_on_enable: bool = False
         self._awaiting_user_input: bool = False
 
         # MARKER_SCHEDULE_AUTOCAST_STATE - schedule-autocast countdown state
@@ -1200,11 +1204,23 @@ class MetricsBar(QWidget):
         # Notify play_bar button to stay in sync (e.g., auto-stop via arm timeout).
         self._signal_bus.autocast_state_changed.emit(bool(checked))
         if checked:
-            self._autocast_phase = "awaiting-busy"
+            # Autocast e um MODO PASSIVO: ligar o botao NAO dispara o primeiro
+            # [Rodar proximo]. Ele apenas arma o loop em fase "running" para
+            # avancar quando o LISTENER chamar (dot verde apos um comando
+            # concluir). O primeiro play e responsabilidade do usuario (clique
+            # manual) ou de um comando ja em execucao — ver request do operador
+            # 2026-06 e ai-forge/rules/workflow-app-listeners.md.
+            #
+            # Excecao: o disparo agendado (`_fire_schedule_autocast`) seta
+            # `_autocast_kickoff_on_enable=True` antes de ligar o botao, porque o
+            # proposito do agendamento e iniciar a fila no horario marcado. So
+            # nesse caminho o primeiro step e disparado aqui.
+            self._autocast_phase = "running"
             self._btn_autocast.setText("parar")
             self._btn_autocast.setStyleSheet(_AUTOCAST_ON)
             self._ensure_autocast_timers()
-            self._fire_autocast_step()
+            if getattr(self, "_autocast_kickoff_on_enable", False):
+                self._fire_autocast_step()
         else:
             self._autocast_phase = "off"
             self._btn_autocast.setText("autocast")
@@ -2166,7 +2182,17 @@ class MetricsBar(QWidget):
         if channel in self._autocast_aborted_by_recovery:
             self._autocast_aborted_by_recovery.discard(channel)
             if not self._btn_autocast.isChecked():
-                self._btn_autocast.setChecked(True)
+                # Recovery re-arm PRESERVA o kickoff (igual ao disparo agendado,
+                # diferente do modo manual passivo): o canal acabou de ficar
+                # verde porque a recuperacao resolveu a falha, entao a fila deve
+                # RETOMAR imediatamente o proximo step — comportamento anterior
+                # ao modo passivo (request 2026-06). Sem isto, o autocast
+                # re-armaria mas ficaria parado (o verde ja aconteceu agora).
+                self._autocast_kickoff_on_enable = True
+                try:
+                    self._btn_autocast.setChecked(True)
+                finally:
+                    self._autocast_kickoff_on_enable = False
         if dot:
             dot.set_busy(False)
         self._update_overall_listener()
@@ -2718,7 +2744,14 @@ class MetricsBar(QWidget):
             "disparado", _SCHEDULE_FIRED, "Autocast disparado"
         )
         QTimer.singleShot(2000, self._reset_schedule_visual_to_idle)
-        self._btn_autocast.click()
+        # Kickoff explicito: o disparo AGENDADO deve iniciar a fila no horario
+        # marcado, entao sinaliza a `_on_autocast_toggled` para disparar o
+        # primeiro step (o modo manual passivo NAO dispara — request 2026-06).
+        self._autocast_kickoff_on_enable = True
+        try:
+            self._btn_autocast.click()
+        finally:
+            self._autocast_kickoff_on_enable = False
 
     def _reset_schedule_visual_to_idle(self) -> None:
         self._btn_schedule_autocast.setText("agendar")

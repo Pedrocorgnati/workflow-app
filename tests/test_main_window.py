@@ -134,6 +134,50 @@ def test_modal_test_button_lives_inside_active_dialog(qapp):
     assert all(overlay.parent() is dialog for overlay in window._modal_test_overlays)
 
 
+def test_modal_test_overlays_render_uncatalogued_testids(qapp):
+    """Regressao (2026-06): o botao ModalTest deve renderizar TODOS os testids
+    dos itens dentro do modal, inclusive ids que NUNCA estiveram no antigo
+    allowlist `_MODAL_TESTIDS`. Antes, qualquer modal novo/nao-catalogado nao
+    mostrava nada (onClick sem efeito)."""
+    from PySide6.QtWidgets import (
+        QDialog, QLineEdit, QMainWindow, QPushButton, QVBoxLayout, QWidget,
+    )
+
+    from workflow_app.main_window import MainWindow
+
+    class Harness(QMainWindow):
+        _show_modal_testid_overlays = MainWindow._show_modal_testid_overlays
+        _hide_modal_testid_overlays = MainWindow._hide_modal_testid_overlays
+
+    window = Harness()
+    window.setCentralWidget(QWidget(window))
+    window._modal_test_btn = QPushButton("ModalTest", window.centralWidget())
+    window._modal_test_overlays = []
+
+    dialog = QDialog(window)
+    dialog.setProperty("testid", "dialog-totalmente-novo")  # nunca no allowlist
+    dialog.setFixedSize(320, 200)
+    layout = QVBoxLayout(dialog)
+    field = QLineEdit(dialog)
+    field.setProperty("testid", "campo-inventado-xyz")      # nunca no allowlist
+    btn = QPushButton("Salvar", dialog)
+    btn.setProperty("testid", "botao-inventado-xyz")        # nunca no allowlist
+    layout.addWidget(field)
+    layout.addWidget(btn)
+
+    window._active_modal_dialog = dialog
+    dialog.show()
+    qapp.processEvents()
+
+    window._show_modal_testid_overlays()
+    qapp.processEvents()
+
+    rendered = {overlay.text() for overlay in window._modal_test_overlays}
+    assert "campo-inventado-xyz" in rendered
+    assert "botao-inventado-xyz" in rendered
+    assert "dialog-totalmente-novo" in rendered
+
+
 def test_prompts_config_path_browse_starts_in_brainstorm(qapp, monkeypatch):
     from PySide6.QtWidgets import QPushButton
 

@@ -770,59 +770,11 @@ _DATATEST_FILTERED_IDS = frozenset({
     "terminal-codex-output",
 })
 
-_MODAL_TESTIDS = frozenset({
-    "dialog-add-command",
-    "dialog-boilerplate-path",
-    "dialog-brief-template",
-    "dialog-confirm-cancel",
-    "dialog-confirm-regenerate",
-    "dialog-critical-error",
-    "dialog-edit-command-type",
-    "dialog-permission-request",
-    "dialog-qa-stack",
-    "dialog-resume",
-    "dialog-save-template",
-    "dialog-template-picker",
-    "dialog-schedule-autocast",
-    "boilerplate-path-input",
-    "boilerplate-path-submit",
-    "boilerplate-path-cancel",
-    "brief-template-name-input",
-    "brief-template-confirm",
-    "brief-template-cancel",
-    "confirm-cancel-yes",
-    "confirm-cancel-no",
-    "confirm-regenerate-btn-confirm",
-    "confirm-regenerate-btn-cancel",
-    "critical-error-close",
-    "critical-error-message",
-    "edit-command-type-combo",
-    "edit-command-type-confirm",
-    "edit-command-type-cancel",
-    "permission-request-allow",
-    "permission-request-deny",
-    "permission-request-details",
-    "qa-stack-confirm",
-    "qa-stack-cancel",
-    "resume-confirm",
-    "resume-cancel",
-    "save-template-name-input",
-    "save-template-confirm",
-    "save-template-cancel",
-    "template-picker-list",
-    "template-picker-confirm",
-    "template-picker-cancel",
-    "schedule-autocast-hours",
-    "schedule-autocast-minutes",
-    "schedule-autocast-confirm",
-    "schedule-autocast-cancel",
-    "queue-add-input-1",
-    "queue-add-input-2",
-    "queue-add-input-3",
-    "queue-add-json-1",
-    "queue-add-json-2",
-    "queue-add-json-3",
-})
+# NOTE (2026-06): o antigo `_MODAL_TESTIDS` (allowlist curado de testids de
+# modal) foi REMOVIDO. O botao ModalTest agora renderiza TODOS os testids
+# visiveis dentro do dialog ativo via `_show_modal_testid_overlays` — o
+# allowlist estatico ficava defasado e deixava o botao sem efeito em qualquer
+# modal novo/nao-catalogado. Espelha o overlay nao-modal (`_show_testid_overlays`).
 
 
 class ProgressSection(QWidget):
@@ -5490,8 +5442,13 @@ class MainWindow(QMainWindow):
             if not testid or widget.property("_is_testid_overlay"):
                 continue
             testid_str = str(testid)
-            if testid_str not in _MODAL_TESTIDS:
-                continue
+            # Renderiza TODOS os testids visiveis dentro do modal (os itens
+            # reais do dialog). Antes havia um allowlist estatico curado
+            # (`_MODAL_TESTIDS`) que vivia defasado: qualquer modal novo — ou
+            # qualquer item nao catalogado — caia fora do set e o botao ModalTest
+            # nao mostrava nada (onClick sem efeito). Igual ao overlay nao-modal
+            # (`_show_testid_overlays`), agora mostramos tudo que tem testid e
+            # esta visivel dentro do dialog.
             if not widget.isVisible():
                 continue
             try:
