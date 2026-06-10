@@ -621,6 +621,15 @@ PERSISTÊNCIA DE ESTADO: EXEMPLOS
 LECCAO: Omitir /clear entre comandos que QUEREM o mesmo modelo e effort e CORRETO.
 Omitir /clear quando ha MUDANCA de modelo e CRITICO (erro).
 
+ATENCAO (multiplicidade per-task — fix loop 06-08/06-09): os nomes TASK-1/2/3 acima sao
+ILUSTRATIVOS do agrupamento de diretivas. Ao construir uma lista real, a quantidade e os
+nomes dos comandos per-task (/create-task, /execute-task, /review-*-task) vem SEMPRE da
+enumeracao dos arquivos reais `TASK-*.md` do module ({wbs_root}/modules/{module_id}/,
+padrao `^TASK-(\\d+(?:\\.\\d+)?)\\.md$`, companions tipo TASK-1-REVIEW.md excluidos) — NUNCA
+de um contador, range(1..N) ou do loop_multiplier. Modules reais comecam em TASK-0, tem
+lacunas e indices decimais; sintetizar por contagem gera "task N nao existe" (fantasma)
+e deixa tasks reais descobertas. Regra completa: ai-forge/rules/dcp-cmd-list-build.md §21.
+
 ═══════════════════════════════════════════════════════════════════════════════
 
 QUANDO MUDAR DE MODELO NO MEIO DA LISTA?
@@ -674,6 +683,8 @@ FASE_D5_MODULE_REVIEW:
 ```
 
 Padrão: Opus para decisoes/reasoning (phases A, D5), Sonnet para implementacao (B, B2, B3).
+Nota: o `×N` acima = um comando POR ARQUIVO `TASK-*.md` real do module (enumerar o
+diretorio; nunca sintetizar de contagem/loop_multiplier — ver ATENCAO da secao anterior).
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1358,11 +1369,25 @@ class MainWindow(QMainWindow):
             "background: transparent; border: none; color: #FBBF24;"
             " font-size: 22px; font-weight: 700; font-family: monospace;"
         )
-        _count_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        _count_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        # Coluna direita do progress-section: contador de fila + memória RSS.
+        _mem_lbl = self._metrics_bar._lbl_memory
+        _mem_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _count_col = QWidget()
+        _count_col.setObjectName("QueueCountColumn")
+        _count_col.setProperty("testid", "queue-count-column")
+        _count_col_layout = QVBoxLayout(_count_col)
+        _count_col_layout.setContentsMargins(0, 0, 0, 0)
+        _count_col_layout.setSpacing(2)
+        _count_col_layout.addStretch(1)
+        _count_col_layout.addWidget(_count_lbl)
+        _count_col_layout.addWidget(_mem_lbl)
+        _count_col_layout.addStretch(1)
 
         _progress_section = ProgressSection(
             ring=self._metrics_bar._queue_progress_ring,
-            count_label=_count_lbl,
+            count_label=_count_col,
         )
         bar = DualStatusSection(
             progress_section=_progress_section,
@@ -1521,7 +1546,7 @@ class MainWindow(QMainWindow):
             import re as _re
             return _re.sub(r"[^a-z0-9]+", "-", lbl.lower()).strip("-") or "prompt"
 
-        # Entradas padrão (9 prompts). Usadas se QSettings nao tiver entries.
+        # Entradas padrão. Usadas se QSettings nao tiver entries.
         _DEFAULT_ENTRIES = [
             {"label": "MCP-test",        "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md",
              "description": "Pinga MCP Codex e Kimi para verificar conexão"},
@@ -1543,8 +1568,12 @@ class MainWindow(QMainWindow):
              "description": "Triagem DCP: congruence-check, temporality e meta-completeness"},
             {"label": "Codex Hardening", "path": "ai-forge/custom-prompts/prompts-subtab/codex-hardening.md",
              "description": "Review adversarial via Codex + aplica hardenings nao-destrutivos"},
+            {"label": "PDCA",            "path": "ai-forge/custom-prompts/prompts-subtab/pdca-task-recovery.md",
+             "description": "Pega o problema do contexto e gira P-D-C-A ate a solucao; sucesso emite o listener verde, falha reabre o ciclo"},
             {"label": "Study Tasks",     "path": "ai-forge/custom-prompts/prompts-subtab/study-tasklist-codex.md",
              "description": "Converte estudo simples em tasklist revisada"},
+            {"label": "turn-green",      "path": "ai-forge/custom-prompts/prompts-subtab/turn-green.md",
+             "description": "Força o listener deste terminal a ficar verde (idle)"},
         ]
 
         _pset = QSettings("systemForge", "workflow-app")
@@ -1726,9 +1755,25 @@ class MainWindow(QMainWindow):
 
         # Padding das sub-abas ja definido em 4px 8px nas funcoes de criacao.
 
+        # cmd: comandos avulsos (slash-commands pontuais fora de pipeline).
+        _cmd_btns = self._populate_header_cmd_subtab()
+
+        # auto-improove: melhoria continua de assets SystemForge.
+        _auto_improove_btns = self._populate_header_auto_improove_subtab()
+
+        # personal: comandos pessoais (curriculum, imbound, mkt).
+        _personal_btns = self._populate_header_personal_subtab()
+
+        # personas: arquivos .md de ai-forge/MCP/agents/.
+        _personas_btns = self._populate_header_personas_subtab()
+
         self._command_queue.populate_paths_subtab(_paths_btns, _paths_row2_btns)
         self._command_queue.populate_prompts_subtab(_prompts_btns)
         self._command_queue.populate_rules_subtab(_rules_btns)
+        self._command_queue.populate_cmd_subtab(_cmd_btns)
+        self._command_queue.populate_auto_improove_subtab(_auto_improove_btns)
+        self._command_queue.populate_personal_subtab(_personal_btns)
+        self._command_queue.populate_personas_subtab(_personas_btns)
         self._command_queue.attach_tab_bar_extras(_terminal_route_box)
         # Refactor 2026-05-24: gear migra do insertions_bar para o canto da
         # tab bar das sub-abas (PATHS/PROMPTS/RULES), na mesma row das abas.
@@ -1889,7 +1934,7 @@ class MainWindow(QMainWindow):
             # Label canonico (fix T021): extrai do title removendo o prefixo
             # "Seed - Botao N - " (regex que tolera espacos extras), conforme
             # mcp-flow-implantation-base-archive.md §4 (labels: "Criar md",
-            # "Pesquisar", ..., "Revisar QA" - sem numero prefixo).
+            # "Pesquisar", ..., "Loop prepare" - sem numero prefixo).
             raw_title = str(data.get("title") or slug).strip()
             canonical_label = re.sub(
                 r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
@@ -4144,10 +4189,10 @@ class MainWindow(QMainWindow):
         asq_user_btn = _make_action_btn(
             "asq-user", "output-btn-asq-user",
             "#F59E0B", "#D97706", "#B45309",
-            "/skill:auq-interview \u2014 Entrevista AUQ guiada",
+            "/tools:auq-interview \u2014 Entrevista AUQ guiada",
         )
         asq_user_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
-        asq_user_btn.clicked.connect(_paste_cmd("/skill:auq-interview"))
+        asq_user_btn.clicked.connect(_paste_cmd("/tools:auq-interview"))
 
         return [
             json_btn,
@@ -4336,6 +4381,30 @@ class MainWindow(QMainWindow):
             _paste_path("ai-forge/rules/main-llm-publish.md")
         )
 
+        kimi_skill_routing_rules_btn = _make_btn(
+            "Kimi-skill-routing-rules", "queue-btn-kimi-skill-routing-rules-path",
+            "#F59E0B", "#D97706", "#B45309",
+            "Cola o path ai-forge/rules/llms/kimi-skill-routing.md no terminal\n"
+            "(as duas familias de skill Kimi: elegiveis/whitelist auto-roteadas vs\n"
+            "pool de emergencia, que nunca tem preferencia mas fica pronto p/ uso\n"
+            "manual quando o Claude esta indisponivel)",
+        )
+        kimi_skill_routing_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/llms/kimi-skill-routing.md")
+        )
+
+        single_arrow_rules_btn = _make_btn(
+            "Single-arrow-rules", "queue-btn-single-arrow-rules-path",
+            "#F472B6", "#EC4899", "#DB2777",
+            "Cola o path ai-forge/rules/single-arrow-multifunction.md no terminal\n"
+            "(regras do botao unico per-item da queue: provider router como\n"
+            "autoridade, cor/destino por provider Claude/Kimi/Codex, paridade\n"
+            "clique/step/autocast e divergencias conhecidas)",
+        )
+        single_arrow_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/single-arrow-multifunction.md")
+        )
+
         loop_rules_btn = _make_btn(
             "Loop-rules", "queue-btn-loop-rules-path",
             "#84CC16", "#65A30D", "#4D7C0F",
@@ -4429,12 +4498,578 @@ class MainWindow(QMainWindow):
             terminal_rules_btn, listeners_rules_btn, cascade_bug_btn,
             indicators_rules_btn, prompt_rules_btn,
             build_render_rules_btn, matrix_spec_rules_btn, llm_routing_rules_btn,
-            main_llm_publish_rules_btn,
+            main_llm_publish_rules_btn, kimi_skill_routing_rules_btn,
+            single_arrow_rules_btn,
             loop_rules_btn, rocksmash_rules_btn,
             listener_amarelo_btn, listener_azul_btn, listener_verde_btn,
             listener_vermelho_btn,
             add_rules_btn,
         ]
+
+    # ── PERSONAS sub-aba (ai-forge/MCP/agents/) ───────────────────────────── #
+    # Diretorio canonico do registry de personas MCP (INDEX.md). Path
+    # repo-relativo usado tanto para resolver o diretorio (via
+    # _systemforge_root, cwd-independente) quanto para o texto colado no
+    # terminal (ex: ai-forge/MCP/agents/code-debugger.md).
+    _PERSONAS_RELDIR = Path("ai-forge/MCP/agents")
+
+    def _personas_dir(self) -> Path:
+        """Diretorio absoluto do registry de personas MCP (cwd-independente)."""
+        return self._systemforge_root() / self._PERSONAS_RELDIR
+
+    def _scan_persona_files(self) -> list[tuple[str, str]]:
+        """Varre ai-forge/MCP/agents/ e retorna [(slug, rel_path)] das personas
+        REAIS, em ordem alfabetica. `rel_path` e sempre repo-relativo.
+
+        Persona real = arquivo `<slug>.md` cujo frontmatter declara
+        `slug == nome_do_arquivo` E `provider_support`. Esse criterio exclui
+        os meta-docs do diretorio (INDEX.md, CHANGELOG.md, MIGRATION-*.md e
+        best-practices.md — cujo slug `mcp-agents-best-practices` nao casa com
+        o nome do arquivo), mantendo apenas as personas reais do registry.
+        """
+        found: list[tuple[str, str]] = []
+        agents_dir = self._personas_dir()
+        if not agents_dir.is_dir():
+            return found
+        for md_file in sorted(agents_dir.glob("*.md")):
+            slug = md_file.stem
+            if self._is_persona_md(md_file, slug):
+                rel_path = str(self._PERSONAS_RELDIR / md_file.name)
+                found.append((slug, rel_path))
+        return found
+
+    @staticmethod
+    def _is_persona_md(md_file: Path, slug: str) -> bool:
+        """True se `md_file` for uma persona canonica (ver _scan_persona_files)."""
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if not text.startswith("---"):
+            return False
+        # Frontmatter = primeiro bloco entre delimitadores `---`.
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return False
+        try:
+            fm = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            return False
+        if not isinstance(fm, dict):
+            return False
+        return fm.get("slug") == slug and "provider_support" in fm
+
+    _PERSONA_LABELS: dict[str, str] = {
+        "analista-delegador-rules": "Delegador",
+        "controversial-devils-advocate-rules": "Controversial",
+        "criar-md-rules": "MD Creator",
+        "criar-task-rules": "Task Creator",
+        "executar-task-rules": "Executor",
+        "executor-de-slash-commands-rules": "Slash Executor",
+        "hardening-engineer-rules": "Hardening Eng",
+        "revisar-execucao-rules": "Exec Reviewer",
+        "revisar-qa-rules": "QA Reviewer",
+        "revisar-task-rules": "Task Reviewer",
+        "study-researcher-rules": "Researcher",
+        "code-debugger": "Debugger",
+        "loop-preparer-rules": "Loop Preparer",
+        "orquestrador-pdca-rules": "PDCA Orchestrator",
+    }
+
+    def _persona_button_label(self, slug: str, rel_path: str) -> str:
+        """Label curto e legivel para botoes da sub-aba PERSONAS."""
+        if slug in self._PERSONA_LABELS:
+            return self._PERSONA_LABELS[slug]
+
+        path = Path(rel_path)
+        if not path.is_absolute():
+            path = self._systemforge_root() / path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    fm = yaml.safe_load(parts[1])
+                except yaml.YAMLError:
+                    fm = None
+                if isinstance(fm, dict):
+                    name = str(fm.get("name") or "").strip()
+                    if name:
+                        return re.sub(r"\s+", " ", name.replace("SystemForge", "")).strip()[:18]
+
+        words = [
+            w.capitalize()
+            for w in slug.replace("-rules", "").replace("-", " ").split()
+            if w not in {"de", "do", "da"}
+        ]
+        return " ".join(words)[:18] or slug[:18]
+
+    def _build_persona_buttons(
+        self, personas: list[tuple[str, str]],
+    ) -> list[QPushButton]:
+        """Constroi um botao por persona (slug, rel_path) AINDA NAO renderizada.
+
+        Pula slugs ja presentes em self._persona_rendered_slugs (idempotente) e
+        registra os novos no set. Cada botao cola o path da persona no terminal
+        via _publish_to_terminal (respeita terminal-route-toggles T1/T2).
+        """
+        out: list[QPushButton] = []
+        for slug, rel_path in personas:
+            if slug in self._persona_rendered_slugs:
+                continue
+            label = self._persona_button_label(slug, rel_path)
+            btn = QPushButton(label)
+            btn.setProperty("testid", f"queue-btn-persona-{slug}")
+            btn.setFixedHeight(34)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(
+                f"{label}\nCola o path da persona no terminal: {rel_path}"
+            )
+            btn.setStyleSheet(
+                "QPushButton { background-color: #8B5CF6; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "QPushButton:hover { background-color: #7C3AED; }"
+                "QPushButton:pressed { background-color: #6D28D9; }"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            btn.clicked.connect(self._make_persona_paste_handler(rel_path))
+            self._persona_rendered_slugs.add(slug)
+            out.append(btn)
+        return out
+
+    def _make_persona_paste_handler(self, path: str):
+        """Fabrica do slot de clique: copia + cola o path da persona no terminal."""
+        def _h() -> None:
+            QApplication.clipboard().setText(path)
+            self._publish_to_terminal(path)
+            signal_bus.toast_requested.emit(
+                f"Persona copiada e colada no terminal: {path}", "info",
+            )
+        return _h
+
+    def _populate_header_personas_subtab(self) -> list[QPushButton]:
+        """Constroi os botoes da sub-aba 'PERSONAS' a partir das personas reais
+        de ai-forge/MCP/agents/, seguido do botao 'update' 1:1 (verde).
+
+        Cada botao de persona cola o path relativo no terminal. O botao update
+        (sempre o ultimo widget do flow) re-varre a pasta ao vivo e adiciona
+        botoes para personas novas, sem reiniciar o app.
+        """
+        # Rastreia slugs ja renderizados para o botao 'update' detectar novos.
+        self._persona_rendered_slugs: set[str] = set()
+
+        btns: list[QPushButton] = self._build_persona_buttons(
+            self._scan_persona_files()
+        )
+
+        # Botao 'update' 1:1 (34x34) verde com seta de refresh branca dentro.
+        # Re-varre ai-forge/MCP/agents/ e cria botao para cada persona nova.
+        update_btn = QPushButton()
+        update_btn.setAccessibleName("Recarregar personas")
+        update_btn.setProperty("testid", "queue-btn-personas-update")
+        update_btn.setFixedSize(34, 34)
+        update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        update_btn.setToolTip(
+            "Recarregar personas\n"
+            "Varre ai-forge/MCP/agents/, adiciona apenas personas novas e\n"
+            "mantem este botao sempre no final da sub-aba."
+        )
+        _refresh_icon = Path(_WORKFLOW_APP_DIR) / "assets" / "refresh.svg"
+        if _refresh_icon.is_file():
+            update_btn.setIcon(QIcon(str(_refresh_icon)))
+            update_btn.setIconSize(QSize(18, 18))
+        else:
+            # Fallback textual: glifo de refresh (U+27F3) em branco.
+            update_btn.setText("⟳")
+        update_btn.setStyleSheet(
+            "QPushButton { background-color: #16A34A; color: #FFFFFF;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 18px; font-weight: 700; padding: 0; }"
+            "QPushButton:hover { background-color: #15803D; }"
+            "QPushButton:pressed { background-color: #166534; }"
+        )
+        update_btn.clicked.connect(self._on_personas_update_clicked)
+        self._persona_update_btn = update_btn
+
+        btns.append(update_btn)
+        return btns
+
+    def _on_personas_update_clicked(self) -> None:
+        """Slot do botao 'update' da sub-aba PERSONAS.
+
+        Re-varre ai-forge/MCP/agents/, detecta personas sem botao e materializa
+        um botao para cada uma, inserido ANTES do proprio botao update (que
+        permanece sempre o ultimo widget do flow).
+        """
+        new_btns = self._build_persona_buttons(self._scan_persona_files())
+        if not new_btns:
+            signal_bus.toast_requested.emit(
+                "Nenhuma persona nova em ai-forge/MCP/agents/.", "info",
+            )
+            return
+        self._command_queue.add_persona_buttons(
+            new_btns, keep_last=self._persona_update_btn,
+        )
+        signal_bus.toast_requested.emit(
+            f"{len(new_btns)} persona(s) adicionada(s) a aba PERSONAS.", "info",
+        )
+
+    def _populate_header_cmd_subtab(self) -> list[QPushButton]:
+        """Constroi os botoes da sub-aba 'CMD' (comandos avulsos).
+
+        Cada botao cola um slash-command literal no terminal via
+        _publish_to_terminal — respeita terminal-route-toggles (T1/T2) e
+        transfere foco conforme ai-forge/rules/workflow-app-terminal.md.
+        Sub-aba destinada a comandos pontuais que nao pertencem a uma
+        pipeline (DCP/loop/daily), disparados sob demanda pelo operador.
+        """
+        def _make_btn(
+            label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str,
+        ) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setFixedHeight(34)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {pressed}; }}"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            return btn
+
+        def _paste_command(command: str):
+            def _h() -> None:
+                QApplication.clipboard().setText(command)
+                # _publish_to_terminal consulta terminal-route-toggles e
+                # transfere foco — ver ai-forge/rules/workflow-app-terminal.md.
+                self._publish_to_terminal(command)
+                signal_bus.toast_requested.emit(
+                    f"Comando copiado e digitado no terminal: {command}", "info",
+                )
+            return _h
+
+        # ── Botões adicionados 2026-06-03 ─────────────────────────────────── #
+        _EXTRA_CMDS = [
+            (
+                "listener-recovery",
+                "queue-btn-cmd-listener-recovery",
+                "#0EA5E9", "#0284C7", "#0369A1",
+                "/tools:listener-recovery",
+                "Cola o comando /tools:listener-recovery no terminal\n"
+                "(aciona recuperacao do listener de canal)",
+            ),
+            (
+                "autocast-put",
+                "queue-btn-cmd-autocast-put",
+                "#8B5CF6", "#7C3AED", "#6D28D9",
+                "/cmd:autocast-put",
+                "Cola o comando /cmd:autocast-put no terminal\n"
+                "(injeta campo autocast em slash-commands)",
+            ),
+            (
+                "create-agent",
+                "queue-btn-cmd-mcp-create-agent",
+                "#10B981", "#059669", "#047857",
+                "/mcp:create-agent",
+                "Cola o comando /mcp:create-agent no terminal\n"
+                "(cria nova persona de agente MCP)",
+            ),
+            (
+                "troop-review",
+                "queue-btn-cmd-agents-troop-review",
+                "#F59E0B", "#D97706", "#B45309",
+                "/agents:troop-review",
+                "Cola o comando /agents:troop-review no terminal\n"
+                "(revisao de tropa pos-execucao: 3 checks sequenciais + correcao tasks [!])",
+            ),
+            (
+                "mcp:research",
+                "queue-btn-cmd-mcp-research",
+                "#06B6D4", "#0891B2", "#0E7490",
+                "/mcp:research",
+                "Cola o comando /mcp:research no terminal\n"
+                "(pesquisa via persona MCP Codex/Kimi)",
+            ),
+            (
+                "mcp:update",
+                "queue-btn-cmd-mcp-update",
+                "#6366F1", "#4F46E5", "#4338CA",
+                "/mcp:update",
+                "Cola o comando /mcp:update no terminal\n"
+                "(atualiza configuracoes de agentes MCP)",
+            ),
+            (
+                "loop:clear",
+                "queue-btn-cmd-loop-clear",
+                "#EC4899", "#DB2777", "#BE185D",
+                "/loop:clear",
+                "Cola o comando /loop:clear no terminal\n"
+                "(arquiva loops concluidos para blacksmith/done/)",
+            ),
+            (
+                "kimi-pair-analyse",
+                "queue-btn-cmd-kimi-pair-analyse",
+                "#F97316", "#EA580C", "#C2410C",
+                "/cmd:kimi-pair-analyse",
+                "Cola o comando /cmd:kimi-pair-analyse no terminal\n"
+                "(analisa slash-command para adaptacao Claude->Kimi com snapshot atomico)",
+            ),
+            (
+                "kimi-pair-execute",
+                "queue-btn-cmd-kimi-pair-execute",
+                "#EF4444", "#DC2626", "#B91C1C",
+                "/cmd:kimi-pair-execute",
+                "Cola o comando /cmd:kimi-pair-execute no terminal\n"
+                "(executa plano de adaptacao Claude->Kimi gerado pelo kimi-pair-analyse)",
+            ),
+            (
+                "cmd:delete",
+                "queue-btn-cmd-delete",
+                "#71717A", "#52525B", "#3F3F46",
+                "/cmd:delete",
+                "Cola o comando /cmd:delete no terminal\n"
+                "(remove slash-command do repositorio e dos indices)",
+            ),
+            (
+                "global-mgmt",
+                "queue-btn-cmd-global-management",
+                "#A78BFA", "#7C3AED", "#6D28D9",
+                "/cmd:global-management",
+                "Cola o comando /cmd:global-management no terminal\n"
+                "(gestao global de slash-commands: auditoria, limpeza, reorganizacao)",
+            ),
+            (
+                "whitelist",
+                "queue-btn-cmd-whitelist",
+                "#34D399", "#059669", "#047857",
+                "/cmd:whitelist",
+                "Cola o comando /cmd:whitelist no terminal\n"
+                "(classifica slash-command para Kimi/T2, Codex/T3 ou Claude-only/T1)",
+            ),
+        ]
+
+        extra_btns = []
+        for label, testid, bg, hover, pressed, cmd, tooltip in _EXTRA_CMDS:
+            btn = _make_btn(label, testid, bg, hover, pressed, tooltip)
+            btn.clicked.connect(_paste_command(cmd))
+            extra_btns.append(btn)
+
+        # ── Botoes de debug de listener (source.md secao 19) ──────────────── #
+        # Quatro botoes de debug colam /listener:analyse --<cor>; o quinto cola
+        # /listener:repair e mantem um contador persistente em
+        # blacksmith/listeners/.debug-counter. As cores dos 4 botoes de debug
+        # espelham as cores canonicas dos dots em listener-{cor}.md.
+        # IO do contador e auxiliar: try/except total, falha silenciosa com
+        # warning no log, nunca crash nem toast de erro (R-btn1/R-btn2).
+        _COUNTER_FILE = Path("blacksmith/listeners/.debug-counter")
+
+        def _read_debug_counter() -> int:
+            try:
+                return int(_COUNTER_FILE.read_text(encoding="utf-8").strip())
+            except Exception as exc:
+                logger.warning("listener debug-counter read falhou: %s", exc)
+                return 0
+
+        def _write_debug_counter(value: int) -> None:
+            try:
+                _COUNTER_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _COUNTER_FILE.write_text(str(value), encoding="utf-8")
+            except Exception as exc:
+                # contador auxiliar — falha nao e bloqueante.
+                logger.warning("listener debug-counter write falhou: %s", exc)
+
+        _DEBUG_CMDS = [
+            ("debug-green",  "queue-btn-cmd-debug-green",
+             "#22C55E", "#16A34A", "#15803D", "/listener:analyse --green",
+             "Debug: dot verde ligado mas autocast nao despachou"),
+            ("debug-yellow", "queue-btn-cmd-debug-yellow",
+             "#F59E0B", "#D97706", "#B45309", "/listener:analyse --yellow",
+             "Debug: dot amarelo persistiu apos sucesso"),
+            ("debug-red",    "queue-btn-cmd-debug-red",
+             "#EF4444", "#DC2626", "#B91C1C", "/listener:analyse --red",
+             "Debug: dot vermelho sem causa aparente"),
+            ("debug-blue",   "queue-btn-cmd-debug-blue",
+             "#3B82F6", "#2563EB", "#1D4ED8", "/listener:analyse --blue",
+             "Debug: AUQ na tela mas dot azul nao apareceu"),
+        ]
+
+        _counter = _read_debug_counter()
+
+        def _repair_label(n: int) -> str:
+            return "listener-repair" if n == 0 else f"listener-repair ({n})"
+
+        def _repair_tooltip(n: int) -> str:
+            if n == 0:
+                return "Nenhum caso pendente"
+            return (
+                f"{n} caso(s) pendente(s) de analise — clique para processar\n"
+                "(contador pode divergir entre instancias simultaneas)"
+            )
+
+        repair_btn = _make_btn(
+            _repair_label(_counter),
+            "queue-btn-cmd-listener-repair",
+            "#A855F7", "#9333EA", "#7E22CE",
+            _repair_tooltip(_counter),
+        )
+        self._listener_repair_btn = repair_btn
+
+        def _on_debug_click(cmd: str):
+            def _h() -> None:
+                nonlocal _counter
+                _counter += 1
+                _write_debug_counter(_counter)
+                self._listener_repair_btn.setText(_repair_label(_counter))
+                self._listener_repair_btn.setToolTip(_repair_tooltip(_counter))
+                QApplication.clipboard().setText(cmd)
+                self._publish_to_terminal(cmd)
+                signal_bus.toast_requested.emit(
+                    f"Comando copiado e digitado no terminal: {cmd}", "info",
+                )
+            return _h
+
+        def _on_repair_click() -> None:
+            nonlocal _counter
+            QApplication.clipboard().setText("/listener:repair")
+            self._publish_to_terminal("/listener:repair")
+            _counter = 0
+            _write_debug_counter(0)
+            self._listener_repair_btn.setText(_repair_label(0))
+            self._listener_repair_btn.setToolTip(_repair_tooltip(0))
+            signal_bus.toast_requested.emit(
+                "Comando copiado e digitado no terminal: /listener:repair", "info",
+            )
+
+        for label, testid, bg, hover, pressed, cmd, tooltip in _DEBUG_CMDS:
+            b = _make_btn(label, testid, bg, hover, pressed, tooltip)
+            b.clicked.connect(_on_debug_click(cmd))
+            extra_btns.append(b)
+
+        repair_btn.clicked.connect(_on_repair_click)
+        extra_btns.append(repair_btn)
+
+        return extra_btns
+
+    def _populate_header_auto_improove_subtab(self) -> list[QPushButton]:
+        """Constroi os botoes da sub-aba 'AUTO IMPROOVE'.
+
+        Cada botao cola um slash-command /auto-improove:* ou comandos de apoio
+        (mcp:research, mcp:update, mcp:cmd-best-practices, cmd:*-gaps) no
+        terminal via _publish_to_terminal.
+        """
+        def _make_btn(
+            label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str,
+        ) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setFixedHeight(34)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {pressed}; }}"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            return btn
+
+        def _paste_command(command: str):
+            def _h() -> None:
+                QApplication.clipboard().setText(command)
+                self._publish_to_terminal(command)
+                signal_bus.toast_requested.emit(
+                    f"Comando copiado e digitado no terminal: {command}", "info",
+                )
+            return _h
+
+        _CMDS = [
+            ("ai:cmd",          "queue-btn-ai-cmd",            "#6366F1", "#4F46E5", "#4338CA", "/auto-improove:cmd",                     "Melhoria continua de slash-commands"),
+            ("ai:fases",        "queue-btn-ai-fases",          "#8B5CF6", "#7C3AED", "#6D28D9", "/auto-improove:fases",                   "Melhoria continua de WORKFLOW-FASES"),
+            ("ai:templates",    "queue-btn-ai-templates",      "#A78BFA", "#7C3AED", "#6D28D9", "/auto-improove:templates",               "Melhoria continua de templates"),
+            ("ai:flow",         "queue-btn-ai-flow",           "#0EA5E9", "#0284C7", "#0369A1", "/auto-improove:flow",                    "Melhoria continua do flow geral"),
+            ("ai:blueprints",   "queue-btn-ai-blueprints",     "#06B6D4", "#0891B2", "#0E7490", "/auto-improove:blueprints",              "Melhoria continua de blueprints"),
+            ("ai:guardrails",   "queue-btn-ai-guardrails",     "#10B981", "#059669", "#047857", "/auto-improove:guardrails",              "Melhoria continua de guardrails"),
+            ("ai:anthropic",    "queue-btn-ai-anthropic",      "#F59E0B", "#D97706", "#B45309", "/auto-improove:anthropic",               "Melhoria continua do contexto Anthropic"),
+            ("ai:cli-bp",       "queue-btn-ai-cli-bp",         "#F97316", "#EA580C", "#C2410C", "/auto-improove:cli-bp",                  "Melhoria continua de CLI blueprints"),
+            ("ai:skills",       "queue-btn-ai-skills",         "#EC4899", "#DB2777", "#BE185D", "/auto-improove:skills",                  "Melhoria continua de skills"),
+            ("use-kimi-sweep",  "queue-btn-ai-use-kimi",       "#14B8A6", "#0D9488", "#0F766E", "/cmd:use-kimi",                          "Sweep sem-argumento: cria a versao Kimi (pool de emergencia) de 1 comando por execucao, fora da whitelist"),
+            ("ai:upd-wf",       "queue-btn-ai-update-wf",      "#EF4444", "#DC2626", "#B91C1C", "/auto-improove:update-workflow-template", "Atualiza template canonico de workflow"),
+            ("mcp:research",    "queue-btn-ai-mcp-research",   "#06B6D4", "#0891B2", "#0E7490", "/mcp:research",                          "Pesquisa via persona MCP Codex/Kimi"),
+            ("mcp:update",      "queue-btn-ai-mcp-update",     "#6366F1", "#4F46E5", "#4338CA", "/mcp:update",                            "Atualiza configuracoes de agentes MCP"),
+            ("cmd-best-prac",   "queue-btn-ai-cmd-best-prac",  "#8B5CF6", "#7C3AED", "#6D28D9", "/mcp:cmd-best-practices",                "Auditoria MCP de boas praticas em slash-commands"),
+            ("find-gaps",       "queue-btn-ai-find-gaps",      "#34D399", "#059669", "#047857", "/cmd:find-gaps",                         "Identifica gaps nos slash-commands"),
+            ("gap-to-task",     "queue-btn-ai-gap-to-task",    "#10B981", "#059669", "#047857", "/cmd:gap-to-task",                       "Converte gaps identificados em tasks"),
+            ("exec-gap-tasks",  "queue-btn-ai-exec-gap-tasks", "#F59E0B", "#D97706", "#B45309", "/cmd:execute-gap-tasks",                 "Executa tasks de correcao de gaps"),
+            ("gap-review",      "queue-btn-ai-gap-review",     "#F97316", "#EA580C", "#C2410C", "/cmd:gap-review",                        "Revisao de gaps apos execucao"),
+            ("ai:auq",          "queue-btn-ai-auq",            "#A78BFA", "#7C3AED", "#6D28D9", "/auto-improove:auq",                     "Auto-improove via AUQ interview"),
+        ]
+
+        btns = []
+        for label, testid, bg, hover, pressed, cmd, tooltip in _CMDS:
+            btn = _make_btn(label, testid, bg, hover, pressed, tooltip)
+            btn.clicked.connect(_paste_command(cmd))
+            btns.append(btn)
+        return btns
+
+    def _populate_header_personal_subtab(self) -> list[QPushButton]:
+        """Constroi os botoes da sub-aba 'PERSONAL'.
+
+        Comandos pessoais: curriculum, imbound e marketing pessoal.
+        """
+        def _make_btn(
+            label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str,
+        ) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setFixedHeight(34)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {pressed}; }}"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            return btn
+
+        def _paste_command(command: str):
+            def _h() -> None:
+                QApplication.clipboard().setText(command)
+                self._publish_to_terminal(command)
+                signal_bus.toast_requested.emit(
+                    f"Comando copiado e digitado no terminal: {command}", "info",
+                )
+            return _h
+
+        _CMDS = [
+            ("cv:create",      "queue-btn-personal-cv-create",   "#6366F1", "#4F46E5", "#4338CA", "/curriculum:create",  "Gera novo curriculum vitae"),
+            ("cv:print",       "queue-btn-personal-cv-print",    "#8B5CF6", "#7C3AED", "#6D28D9", "/curriculum:print",   "Exporta curriculum para PDF"),
+            ("imbound:query",  "queue-btn-personal-imb-query",   "#0EA5E9", "#0284C7", "#0369A1", "/imbound:query",      "Consulta leads/oportunidades no imbound"),
+            ("imbound:prep",   "queue-btn-personal-imb-prep",    "#06B6D4", "#0891B2", "#0E7490", "/imbound:prepare",    "Prepara proposta para lead imbound"),
+            ("imbound:lessie", "queue-btn-personal-imb-lessie",  "#10B981", "#059669", "#047857", "/imbound:lessie",     "Fluxo Lessie de onboarding imbound"),
+            ("my-pictures",    "queue-btn-personal-my-pics",     "#F59E0B", "#D97706", "#B45309", "/mkt:my-pictures",    "Gera fotos pessoais via gpt-image-1"),
+            ("realism-pass",   "queue-btn-personal-realism",     "#F97316", "#EA580C", "#C2410C", "/mkt:realism-pass",   "Aplica realism pass nas imagens geradas"),
+            ("mkt:clone",      "queue-btn-personal-mkt-clone",   "#EC4899", "#DB2777", "#BE185D", "/mkt:clone",          "Clona site de referencia para boilerplate mkt"),
+        ]
+
+        btns = []
+        for label, testid, bg, hover, pressed, cmd, tooltip in _CMDS:
+            btn = _make_btn(label, testid, bg, hover, pressed, tooltip)
+            btn.clicked.connect(_paste_command(cmd))
+            btns.append(btn)
+        return btns
 
     def _populate_header_paths_extras(self) -> list[QPushButton]:
         """Constroi 6 botoes para campos basic_flow do project.json ativo.
@@ -6061,7 +6696,7 @@ class PromptsConfigDialog(QDialog):
         outer.addWidget(_fixed_section_lbl)
 
         _FIXED_ENTRIES = [
-            ("asq-user", "/skill:auq-interview", "Entrevista AUQ guiada — abre no terminal"),
+            ("asq-user", "/tools:auq-interview", "Entrevista AUQ guiada — abre no terminal"),
             ("executar-tasks", "(prompt inline)", "Loop: execute tasklist com revisão adversarial via Codex"),
             ("+ Add prompt", "(meta-prompt)", "Envia meta-prompt ao terminal para criar novo .md em prompts-subtab"),
         ]

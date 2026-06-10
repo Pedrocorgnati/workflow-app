@@ -3,25 +3,25 @@
         docker-ws-test docker-ci-full docker-clean infra-install infra-tailscale-check
 
 install:
-	pip install -e ".[dev]"
+	uv pip install -e ".[dev]"
 
 run:
-	python -m workflow_app.main
+	uv run python -m workflow_app.main
 
 test:
-	python -m pytest tests/ -v --timeout=10
+	uv run pytest tests/ -v --timeout=10
 
 lint:
-	python -m ruff check src/ tests/ || python -m flake8 src/ tests/
+	uv run ruff check src/ tests/ || uv run flake8 src/ tests/
 
 e2e:
-	python -m pytest tests/e2e/ -v --timeout=30 --tb=short
+	uv run pytest tests/e2e/ -v --timeout=30 --tb=short
 
 integration:
 	uv run pytest tests/integration/ -v --timeout=30 --tb=short
 
 all-tests:
-	python -m pytest tests/ -v --timeout=30
+	uv run pytest tests/ -v --timeout=30
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \

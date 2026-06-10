@@ -334,6 +334,43 @@ def test_resolve_current_module_done_advances_to_next_pending(tmp_path: Path) ->
     assert action.reason == "novo pipeline"
 
 
+def test_resolve_done_advances_skips_dep_blocked_module(tmp_path: Path) -> None:
+    """Regression: the done-state auto-advance must DEP-GATE (mirror
+    dcp_closer._next_eligible_module). It must skip a lower-numbered pending
+    module whose deps are still pending and pick the true next-eligible one.
+    Reproduces the tecum-app shape that triggered the build-button strand:
+    module-4 done, module-6 eligible, module-10 dep-blocked by module-6/7.
+    The old naive selector returned the first non-done by number with no dep
+    check (would emit /build-module-pipeline for a dep-blocked module)."""
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    _write_delivery(
+        wbs_root,
+        current_module="module-4-capelas",
+        modules={
+            "module-4-capelas": _module("done"),
+            "module-6-intencoes": _module(
+                "pending", dependencies=["module-4-capelas"]
+            ),
+            "module-7-pagamentos": _module(
+                "pending", dependencies=["module-4-capelas"]
+            ),
+            "module-10-admin": _module(
+                "pending",
+                dependencies=["module-6-intencoes", "module-7-pagamentos"],
+            ),
+        },
+    )
+    cfg = _make_config(tmp_path, wbs_root)
+
+    action = resolve(cfg, reader=DeliveryReader())
+
+    assert action.command is not None
+    assert "--module 6" in action.command  # eligible
+    assert "--module 10" not in action.command  # deps still pending
+    assert action.reason == "novo pipeline"
+
+
 def test_resolve_all_modules_done_returns_no_active_module(tmp_path: Path) -> None:
     """Spec §107: when every module is done, treat as 'no active module'."""
     wbs_root = tmp_path / "wbs"
@@ -1316,7 +1353,8 @@ def test_handle_dcp_load_resolves_flow_and_calls_enqueue(
 
         captured: dict = {}
 
-        def fake_enqueue(*, flow_path, cm_id, default_project_name, prefix_commands):
+        def fake_enqueue(*, flow_path, cm_id, default_project_name, prefix_commands,
+                         project_dir=None):  # noqa: ARG001
             captured["flow_path"] = flow_path
             captured["cm_id"] = cm_id
             captured["default_project_name"] = default_project_name

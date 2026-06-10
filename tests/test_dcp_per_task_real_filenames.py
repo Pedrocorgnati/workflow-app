@@ -186,15 +186,17 @@ def test_wbs_root_none_falls_back_to_synthesis(tmp_path: Path) -> None:
     assert created == ["TASK-1.md", "TASK-2.md"]
 
 
-def test_missing_module_dir_falls_back_to_synthesis(tmp_path: Path) -> None:
-    # wbs_root set but module dir absent -> synthesis fallback (not a crash).
-    specs = derive_queue_from_matrix(
-        _matrix({"A-creation": 1, "B3-execute": 1}),
-        "module-1-x",
-        wbs_root=tmp_path,  # no modules/module-1-x created
-    )
-    created = _task_basenames(specs, "/create-task")
-    assert created == ["TASK-1.md"]
+def test_missing_module_dir_raises_fail_loud(tmp_path: Path) -> None:
+    # wbs_root set but module dir absent -> fail-loud ValueError (loop 06-09).
+    # Synthesizing from a stale multiplier here fabricates phantom tasks
+    # ("task N nao existe") and masks cm_id/dirname drift or a wrong wbs_root.
+    # The widget catches this, toasts, and falls back to SPECIFIC-FLOW.json.
+    with pytest.raises(ValueError, match="diretorio do modulo nao encontrado"):
+        derive_queue_from_matrix(
+            _matrix({"A-creation": 1, "B3-execute": 1}),
+            "module-1-x",
+            wbs_root=tmp_path,  # no modules/module-1-x created
+        )
 
 
 def test_loop_multiplier_drift_warns(tmp_path: Path, caplog) -> None:

@@ -130,6 +130,9 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     # Meta — cmd hardening
     "/cmd:autocast-hardening",      # 94 (KIMI_PREFERRED)
     "/cmd:autocast-put",            # 91 (KIMI_PREFERRED)
+    "/cmd:backlog-from-lessons",    # 87
+    "/cmd:gap-to-task",             # 70
+    "/cmd:tabu-guard",              # 87
     # DCP — matrix
     "/dcp:matrix-init",             # 86
     "/dcp:matrix-refine",           # 73
@@ -138,6 +141,34 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/dcp:matrix-filter-modules",   # 72
     # Legacy pipeline
     "/legacy:enqueue-all-modules",  # 73
+    # Pipeline research / governance ledger
+    "/pipeline:benchmark-init",     # 96
+    "/pipeline:run-scorecard",      # 95
+    "/pipeline:collect-lessons",    # 77
+    "/memory:record-run",           # 95
+    "/memory:retrieve-patterns",    # 97
+    "/memory:decay-and-prune",      # 92
+    # Meta — mechanism governance
+    "/meta:analyze-search-stall",   # 84
+    # Kimi-Loop pipeline (queue-btn-kimi-loop) — familia inteira desenhada
+    # para LLM fraca (ai-forge/rules/weak-llm-pipeline-rules.md; design em
+    # blacksmith/09-06-llm-dumb-use/KIMI-LOOP-DESIGN.md, decisoes D1..D10)
+    "/kimi-loop",                                    # 60
+    "/kimi-loop:init",                               # 95 (KIMI_PREFERRED)
+    "/kimi-loop:enumerate",                          # 82
+    "/kimi-loop:individual-analysis",                # 62
+    "/kimi-loop:integration",                        # 75
+    "/kimi-loop:review",                             # 80
+    "/kimi-loop:integrated-architecture",            # 68
+    "/kimi-loop:mark-type",                          # 85
+    "/kimi-loop:check-tasks-and-cmd",                # 82
+    "/kimi-loop:workflow-app",                       # 80
+    "/kimi-loop:noop-fallback",                      # 100 (KIMI_PREFERRED)
+    "/kimi-loop:iteraction:create-task",             # 70
+    "/kimi-loop:iteraction:review-created-task",     # 74
+    "/kimi-loop:iteraction:execute-task",            # 64
+    "/kimi-loop:iteraction:review-executed-task",    # 70
+    "/kimi-loop:iteraction:review-executed-loop",    # 76
 })
 
 

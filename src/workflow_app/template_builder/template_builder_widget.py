@@ -69,6 +69,7 @@ COMMAND_CATALOG_DCP: list[tuple[str, list[tuple[str, ModelName, InteractionType]
         ("/build-verify",               _H, _A),
         ("/db-migration-create",        _S, _I),
         ("/assets:create",              _H, _I),
+        ("/pictures-create",            _H, _I),
     ]),
     ("B.2 - Per-task", [
         ("/clear",                      _S, _A),
@@ -234,6 +235,7 @@ COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] 
         ("/execute-task",           _S, _A),
         ("/review-executed-task",   _S, _A),
         ("/assets:create",          _H, _A),
+        ("/pictures-create",        _H, _A),
         ("/create-mocks",           _S, _I),
         ("/github-linking",         _H, _A),
     ]),

@@ -91,13 +91,30 @@ def _sort_module_key(module_id: str) -> tuple:
 
 
 def _next_non_done_module_id(delivery: "Delivery") -> "Optional[str]":  # type: ignore[name-defined]
-    """Return the first non-done module key ordered by module number, or None.
+    """Return the next module to work on when `current_module` is done/stranded.
 
-    Called when `current_module` points to a `done` module so the button can
-    auto-advance to the next pending module instead of blocking the user.
+    Ordered by module number. Despite the legacy name, this is DEPENDENCY-GATED:
+    it mirrors `dcp_closer._next_eligible_module` (I-10). A `pending` module
+    whose in-set deps are not all `done` is SKIPPED — without this gate the
+    defensive auto-advance would emit `/build-module-pipeline --module N` for a
+    dep-blocked module (e.g. advance to `module-10` while `module-6/7` are still
+    pending), the exact class of bug the build button's Gate 4 was corrected
+    away from. A module already mid-flight (non-pending, non-done) is returned
+    as-is so a stranded pointer RESUMES the active module instead of skipping
+    it. External deps (not in the module set) are treated as satisfied, matching
+    `delivery/_lib/topo.py` and the canonical closer.
     """
-    candidates = [mid for mid, mod in delivery.modules.items() if mod.state != "done"]
-    return sorted(candidates, key=_sort_module_key)[0] if candidates else None
+    states = {mid: mod.state for mid, mod in delivery.modules.items()}
+    for mid in sorted(delivery.modules.keys(), key=_sort_module_key):
+        state = states[mid]
+        if state == "done":
+            continue
+        if state == "pending":
+            deps = getattr(delivery.modules[mid], "dependencies", None) or []
+            if not all(states.get(d) == "done" for d in deps if d in states):
+                continue
+        return mid
+    return None
 
 
 def _module_number(module_id: str) -> str:

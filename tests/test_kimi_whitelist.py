@@ -57,7 +57,19 @@ class TestWhitelist:
         # + 2 (Option D atomization: /blog:stockpile-finalize-package, score 88;
         #      /blog:stockpile-validate, score 90) = 87
         # + 1 (/blog:stockpile-push, score 65) = 88
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 88
+        # + 1 (/pipeline:benchmark-init, score 96) = 89
+        # + 1 (/pipeline:run-scorecard, score 95) = 90
+        # + 1 (/pipeline:collect-lessons, score 77) = 91
+        # + 1 (/cmd:backlog-from-lessons, score 87) = 92
+        # + 1 (/cmd:gap-to-task, score 70) = 93
+        # + 1 (/cmd:tabu-guard, score 87) = 94
+        # + 1 (/memory:record-run, score 95) = 95
+        # + 1 (/memory:retrieve-patterns, score 97) = 96
+        # + 1 (/memory:decay-and-prune, score 92) = 97
+        # + 1 (/meta:analyze-search-stall, score 84) = 98
+        # + 16 (familia /kimi-loop:*, Kimi-native, scores 60-100,
+        #       SC60-SC75 do apendice 2026-06-09) = 114
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 114
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):

@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Final, Mapping
 
-PROMPT_TEMPLATE_VERSION: Final[str] = "2026-05-24-v4"
+PROMPT_TEMPLATE_VERSION: Final[str] = "2026-06-03-v5"
 _FILE_OPS_RULES_PATH: Final[str] = "ai-forge/MCP/agents/brainstorm-file-ops-rules.md"
 
 _PLACEHOLDERS: Final[tuple[str, ...]] = (
@@ -55,35 +55,44 @@ _ACTIONS_RAW: dict[str, str] = {
     ),
     "Criar tasks": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
-        "apos analisar bem, crie tasks organizadas, sequenciais e logicas na mesma "
-        "pasta deste arquivo .md; as tasks devem ser salvas e mantidas nessa pasta "
-        "e voce DEVE prestar maxima atencao a esta pasta como destino de "
-        "implantacao das tasks (NAO usar outra pasta); "
-        "para que, quando forem executadas, 100% do conteudo deste arquivo esteja "
-        "implantado corretamente no codigo"
+        "este e um fluxo simplificado para uma feature simples (sem grande "
+        "engenharia): apos analisar bem, materialize TODAS as tasks em UM UNICO "
+        "arquivo companheiro chamado '<nome-base-deste-arquivo>-tasks.md', na MESMA "
+        "pasta deste arquivo .md (NAO criar pasta de tasks, NAO criar arquivos "
+        "task-NNN separados, NAO desviar para outra pasta); dentro desse unico "
+        "arquivo escreva as tasks organizadas, sequenciais e numeradas, cada uma "
+        "com Acao, Saida esperada (paths) e Aceite verificavel mais um marcador de "
+        "status; para que, ao executar esse arquivo, 100% do conteudo deste .md "
+        "esteja implantado corretamente no codigo"
     ),
     "Revisar tasks": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
-        "revise as tasks criadas na mesma pasta deste arquivo .md, validando "
-        "cobertura integral do conteudo, sequencia logica, dependencias, criterios "
-        "de aceite e ausencia de lacunas; corrija os proprios arquivos de tasks "
-        "quando aplicavel; confira explicitamente se a pasta de destino de "
-        "implantacao das tasks esta correta e consistente (mesma pasta do .md)"
+        "abra o arquivo unico de tasks companheiro deste .md (mesmo nome base mais "
+        "sufixo '-tasks.md', na MESMA pasta) e otimize esse mesmo arquivo in-place: "
+        "valide cobertura integral do conteudo, sequencia logica, dependencias, "
+        "atomicidade e criterios de aceite, corrigindo as proprias tasks quando "
+        "aplicavel; confirme explicitamente que existe apenas esse UNICO arquivo de "
+        "tasks na pasta correta (sem pasta de tasks nem arquivos task-NNN paralelos)"
     ),
     "Executar": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
-        "execute e implante tudo que constar nas tasks localizadas na mesma pasta "
-        "deste arquivo .md, da melhor forma possivel; atencao obrigatoria: use "
-        "exatamente esta pasta como destino/base das tasks para implantacao "
-        "(NAO desviar para outra pasta)"
+        "abra o arquivo unico de tasks companheiro deste .md (mesmo nome base mais "
+        "sufixo '-tasks.md', na MESMA pasta) e execute/implante no codigo TODO o "
+        "conteudo dele, task a task na ordem, marcando o status de cada task como "
+        "done dentro do proprio arquivo ao satisfazer o Aceite; atencao "
+        "obrigatoria: use exatamente esse arquivo unico de tasks como base (NAO "
+        "procurar pasta de tasks nem arquivos task-NNN, NAO desviar para outra pasta)"
     ),
     "Revisar execucao": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
-        "compare este arquivo com o que foi efetivamente implantado a partir das "
-        "tasks da mesma pasta deste arquivo .md; identifique divergencias, lacunas, "
-        "regressoes e itens parcialmente executados; reporte e corrija quando "
-        "aplicavel; verifique de forma explicita se a implantacao foi feita usando "
-        "a pasta correta das tasks (mesma pasta do .md)"
+        "abra o arquivo unico de tasks companheiro deste .md (mesmo nome base mais "
+        "sufixo '-tasks.md', na MESMA pasta) e audite a execucao das tasks desse "
+        "arquivo contra o que foi efetivamente implantado no codigo; para cada task "
+        "marcada done confirme evidencia real (paths mais diff), identifique "
+        "divergencias, lacunas, regressoes e itens parcialmente executados; reporte "
+        "e corrija quando aplicavel; verifique de forma explicita que a implantacao "
+        "usou esse UNICO arquivo de tasks (mesma pasta deste .md, sem pasta nem "
+        "arquivos de task paralelos)"
     ),
     "Criar arquivo": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
@@ -93,15 +102,16 @@ _ACTIONS_RAW: dict[str, str] = {
         "ai-forge/templates/mcp-flow/STARTER.md; nomeie no formato MM-DD-slug-simples.md "
         "usando a data de hoje"
     ),
-    "Revisar QA": (
+    "Loop prepare": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "
-        "compare este arquivo com o que foi implantado a partir das tasks da mesma "
-        "pasta deste arquivo .md, focando nao apenas se a task foi feita, mas na "
-        "qualidade do QA: cobertura de edge cases, testes, validacoes, "
-        "acessibilidade quando aplicavel, observabilidade e estados "
-        "loading/empty/error; reporte gaps e proponha correcoes; inclua checagem "
-        "explicita da pasta destino de implantacao das tasks (deve ser a mesma "
-        "pasta do .md)"
+        "depois prepare para o fluxo /loop do botao data-testid=\"queue-btn-loop\", "
+        "usando ai-forge/rules/loop-rules.md e "
+        "ai-forge/rules/workflow-app-command-lists.md como fontes operacionais, "
+        "sem executar /loop nem acionar queue-btn-loop; converta o .md em uma "
+        "fonte pronta para /loop --task, /loop --cmd ou /loop --both, declarando "
+        "modo recomendado, slug/nome, escopo, itens sequenciais, dependencias, "
+        "gates, criterios de aceite, paths, comandos esperados e handoff para "
+        "_LOOP-CONFIG.json; preservando a intencao original, reescreva"
     ),
 }
 

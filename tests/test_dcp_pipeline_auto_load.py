@@ -338,7 +338,8 @@ def test_handle_dcp_load_happy_path_enqueues_and_clears_context(
     widget = _setup_widget(qapp, monkeypatch, cfg)
     enqueue_calls: List[Dict[str, Any]] = []
 
-    def fake_enqueue(self, *, flow_path, cm_id, default_project_name, prefix_commands):  # noqa: ARG001
+    def fake_enqueue(self, *, flow_path, cm_id, default_project_name, prefix_commands,
+                     project_dir=None):  # noqa: ARG001
         enqueue_calls.append(
             {
                 "flow_path": flow_path,

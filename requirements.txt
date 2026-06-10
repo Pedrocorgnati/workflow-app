@@ -5,6 +5,7 @@ python-statemachine>=2.0.0
 pyte>=0.8.0
 pydantic>=2.5
 claude-agent-sdk>=0.1.48
+psutil>=5.9
 
 # Dependências de desenvolvimento
 pytest>=7.0

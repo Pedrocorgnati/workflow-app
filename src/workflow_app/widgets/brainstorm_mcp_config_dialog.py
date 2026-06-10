@@ -78,7 +78,7 @@ ACTION_COHERENCE: dict[str, dict[str, set]] = {
     "Revisar tasks":    {"target_path": {True},  "target_terminal": {"terminal-interactive-output"}},
     "Executar":         {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
     "Revisar execucao": {"target_path": {True},  "target_terminal": {"terminal-interactive-output"}},
-    "Revisar QA":       {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
+    "Loop prepare":     {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
 }
 
 CURRENT_SCHEMA_VERSION = 1

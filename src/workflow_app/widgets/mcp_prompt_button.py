@@ -65,7 +65,7 @@ ActionType = Literal[
     "Revisar tasks",
     "Executar",
     "Revisar execucao",
-    "Revisar QA",
+    "Loop prepare",
 ]
 
 # Catalogos canonicos compartilhados (widget + loader em main_window).
@@ -83,7 +83,7 @@ VALID_ACTIONS_PTBR: set[str] = {
     "Revisar tasks",
     "Executar",
     "Revisar execucao",
-    "Revisar QA",
+    "Loop prepare",
 }
 VALID_ACTIONS: set[str] = VALID_ACTIONS_LEGACY | VALID_ACTIONS_PTBR
 

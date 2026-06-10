@@ -703,6 +703,18 @@ class MetricsBar(QWidget):
         self._lbl_queue_count.setToolTip("Comandos executados / total")
         self._lbl_queue_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # ── Memory usage label (RSS, atualizado a cada 3s) ────────────── #
+        self._lbl_memory = QLabel("-- MB")
+        self._lbl_memory.setObjectName("MemoryUsageLabel")
+        self._lbl_memory.setProperty("testid", "memory-usage-label")
+        self._lbl_memory.setToolTip("Memória RSS deste processo (System Monitor)")
+        self._lbl_memory.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._mem_timer = QTimer(self)
+        self._mem_timer.setInterval(3000)
+        self._mem_timer.timeout.connect(self._update_memory_label)
+        self._mem_timer.start()
+        self._update_memory_label()
+
         # queue-count-toggles-row continua existindo (terminal-layout-toggle +
         # terminal-workspace-collapse populados via MainWindow), mas agora vive
         # em output-toolbar-queue-toggles (reparenteado por MainWindow). Mantemos
@@ -1187,6 +1199,27 @@ class MetricsBar(QWidget):
                 self._queue_progress_ring.set_progress(d, t)
             if hasattr(self, "_lbl_queue_count"):
                 self._lbl_queue_count.setText(f"{d}/{t}")
+        except Exception:  # noqa: BLE001 - UI nao deve quebrar
+            pass
+
+    def _update_memory_label(self) -> None:
+        """Atualiza _lbl_memory com RSS do processo; cor por threshold."""
+        try:
+            import psutil  # lazy import — evita crash se psutil ausente
+            mb = psutil.Process().memory_info().rss / (1024 * 1024)
+            if mb < 300:
+                color = "#22C55E"   # verde — seguro
+            elif mb < 800:
+                color = "#F59E0B"   # âmbar — atenção
+            else:
+                color = "#EF4444"   # vermelho — risco de travar
+            text = f"{mb:.0f} MB" if mb < 1024 else f"{mb / 1024:.1f} GB"
+            if hasattr(self, "_lbl_memory"):
+                self._lbl_memory.setText(text)
+                self._lbl_memory.setStyleSheet(
+                    f"background: transparent; border: none; color: {color};"
+                    " font-size: 13px; font-weight: 600; font-family: monospace;"
+                )
         except Exception:  # noqa: BLE001 - UI nao deve quebrar
             pass
 

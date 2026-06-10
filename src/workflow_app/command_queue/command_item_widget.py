@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.command_queue.kimi_whitelist import adapt_to_kimi, is_kimi_compatible
+from workflow_app.command_queue.provider_router import Provider
 from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
 from workflow_app.widgets.model_badge import ModelBadge
 
@@ -44,6 +45,26 @@ _STATUS_SYMBOL: dict[CommandStatus, str] = {
     CommandStatus.PULADO:     "─",
     CommandStatus.INCERTO:    "?",
 }
+
+# Botao unico adaptavel (source.md secao 9): cor/tooltip/destino derivam do
+# provider efetivo. Pares (cor, cor_hover) por provider.
+_PROVIDER_BTN_STYLE: dict[Provider, tuple[str, str]] = {
+    Provider.CLAUDE: ("#22C55E", "#86EFAC"),  # verde  -> T1
+    Provider.KIMI:   ("#3B82F6", "#93C5FD"),  # azul   -> T2
+    Provider.CODEX:  ("#A855F7", "#D8B4FE"),  # roxo   -> T3
+}
+_PROVIDER_LABEL: dict[Provider, str] = {
+    Provider.CLAUDE: "Claude",
+    Provider.KIMI:   "Kimi worker",
+    Provider.CODEX:  "Codex worker",
+}
+_PROVIDER_DEST: dict[Provider, str] = {
+    Provider.CLAUDE: "T1 terminal-interactive",
+    Provider.KIMI:   "T2 terminal-workspace",
+    Provider.CODEX:  "T3 terminal-codex-output",
+}
+# Cinza do estado Desabilitado (item nao executavel / recalculo falhou).
+_PROVIDER_DISABLED_COLOR = "#52525B"
 
 
 def _format_command_label(name: str, config_path: str, *, max_lines: int = 3) -> str:
@@ -117,6 +138,9 @@ class CommandItemWidget(QWidget):
     cancel_requested = Signal()             # no arg — cancel whole pipeline
     run_in_terminal_requested = Signal(str) # command name (Claude — interactive terminal)
     run_in_kimi_terminal_requested = Signal(str)  # Kimi-adapted prompt (workspace terminal)
+    run_in_codex_terminal_requested = Signal(str)  # Codex prompt (T3 codex-output terminal)
+    run_local_action_requested = Signal(object)    # CommandSpec — in-process local-action (kind=="local-action"); queue widget owns dispatch
+    kimi_adaptation_failed = Signal(str)    # command_text whose adapt_to_kimi raised ValueError (queue widget toasts — Zero Silencio)
     sent_state_changed = Signal(bool)       # _is_sent toggled (drives queue-progress-ring)
 
     # Minimum Manhattan distance before drag begins (px)
@@ -127,6 +151,8 @@ class CommandItemWidget(QWidget):
         spec: CommandSpec,
         can_reorder_fn: Callable[[int], bool] | None = None,
         parent: QWidget | None = None,
+        *,
+        provider_resolver: Callable[[CommandSpec], Provider] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("CommandItemWidget")
@@ -136,6 +162,14 @@ class CommandItemWidget(QWidget):
         self._highlighted: bool = False
         self._can_reorder_fn: Callable[[int], bool] = can_reorder_fn or (lambda _pos: True)
         self._drag_start_pos: QPoint | None = None
+        # Resolver injetado pelo queue widget: classifica o provider efetivo do
+        # item (Claude/Kimi/Codex) a partir do estado de worker + Main LLM. None
+        # => sempre Claude (verde/T1), preservando o comportamento legado e o
+        # criterio de aceite 3 (sem workers ativos, equivale ao verde atual).
+        self._provider_resolver: Callable[[CommandSpec], Provider] | None = (
+            provider_resolver
+        )
+        self._current_provider: Provider | None = Provider.CLAUDE
         self.setMinimumHeight(53)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -160,54 +194,33 @@ class CommandItemWidget(QWidget):
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
 
-        # Run in terminal button (green arrow)
-        self._run_btn = QPushButton("▶")
-        self._run_btn.setObjectName("IconButton")
-        self._run_btn.setFixedSize(16, 16)
-        self._run_btn.setToolTip("Executar no terminal")
-        self._run_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  color: #22C55E; font-size: 10px; }"
-            "QPushButton:hover { color: #86EFAC; }"
-        )
-        self._run_btn.clicked.connect(self._on_run_clicked)
-        layout.addWidget(self._run_btn)
-
-        # Kimi run button (blue arrow) — runs adapted prompt in workspace terminal.
-        # Visible only when the command is in the Kimi-compatible whitelist.
-        # objectName must be "IconButton" so it picks up the QPushButton#IconButton
-        # rule from theme.py (padding: 4px). Without that, the generic QPushButton
-        # rule applies padding: 6px 14px and clips the ▶ glyph on the 16x16 button.
-        # `testid` is the per-item identifier kept for tests.
-        self._kimi_btn = QPushButton("▶")
-        self._kimi_btn.setObjectName("IconButton")
-        self._kimi_btn.setProperty("testid", "queue-item-kimi-run")
-        self._kimi_btn.setFixedSize(16, 16)
-        self._kimi_btn.setToolTip(
-            "Executar versão Kimi no terminal workspace\n"
-            "(marca a seta verde como amarela sem disparar o terminal Claude)"
-        )
-        self._kimi_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  color: #3B82F6; font-size: 10px; }"
-            "QPushButton:hover { color: #93C5FD; }"
-            "QPushButton:disabled { color: transparent; }"
-        )
-        self._kimi_btn.clicked.connect(self._on_kimi_clicked)
-        # Visibility: whitelist match OR explicit kimi_eligible flag (usado por
-        # comandos injetados via [+] Adicionar Comando, que devem sempre
-        # mostrar a seta azul independente do whitelist).
+        # Single adaptive execution button (substitui o par verde+azul legado).
+        # Cor/tooltip/destino derivam do provider efetivo (provider_router),
+        # recalculados no clique e quando os workers mudam. Criterio de aceite 1
+        # (um unico botao por item) + criterio de rejeicao 5 (nao deixar dois
+        # botoes de execucao). objectName "IconButton" preserva o padding 4px do
+        # tema (sem ele o glifo ▶ e clipado no botao 16x16).
         _is_local_action = getattr(self._spec, "kind", "slash") == "local-action"
-        _kimi_visible = (
+        self._exec_btn = QPushButton("▶")
+        self._exec_btn.setObjectName("IconButton")
+        self._exec_btn.setProperty("testid", "queue-item-exec-run")
+        self._exec_btn.setFixedSize(16, 16)
+        self._exec_btn.clicked.connect(self._on_exec_clicked)
+        layout.addWidget(self._exec_btn)
+        # Alias retrocompativel: a logica de estado "enviado" (● ambar) e os
+        # handlers _on_run_clicked/reset_to_pending continuam operando sobre o
+        # MESMO QPushButton — nao existe um segundo botao de execucao.
+        self._run_btn = self._exec_btn
+        # Elegibilidade worker (eixo estatico identico a regra legada do
+        # _kimi_btn): whitelist Kimi OR spec.kimi_eligible, exceto local-action.
+        # Consumido pelo gate de play-next do queue widget via
+        # is_worker_arrow_visible(); o queue widget pode ocultar (Main Kimi) via
+        # set_worker_arrow_visible(False). Distinto da COR do botao, que segue o
+        # provider efetivo (resolver).
+        self._worker_arrow_visible = (
             not _is_local_action
             and (is_kimi_compatible(self._spec.name) or self._spec.kimi_eligible)
         )
-        sp = self._kimi_btn.sizePolicy()
-        sp.setRetainSizeWhenHidden(False)
-        self._kimi_btn.setSizePolicy(sp)
-        self._kimi_btn.setVisible(_kimi_visible)
-        # NOTA: kimi_btn e adicionado ao layout DEPOIS do delete_btn para
-        # respeitar a ordem visual: ▶ verde · copiar · ✕ · ▶ azul.
 
         # Copy button (blue clipboard icon) — copies the full command line
         self._copy_btn = QPushButton("\u29C9")
@@ -242,7 +255,6 @@ class CommandItemWidget(QWidget):
             lambda: self.remove_requested.emit(self._spec.position)
         )
         layout.addWidget(self._delete_btn)
-        layout.addWidget(self._kimi_btn)
 
         # Command name (+ optional config path) — capped at 3 visual rows.
         # Tokens beyond the cap are merged into existing rows so very long
@@ -339,6 +351,9 @@ class CommandItemWidget(QWidget):
         self._error_row.setVisible(False)
         root.addWidget(self._error_row)
 
+        # Pinta o botao unico conforme o provider efetivo inicial (verde/Claude
+        # por default; azul/roxo se um worker ja estiver ativo no resolver).
+        self.refresh_provider()
         self._update_appearance()
 
     # ──────────────────────────────────────────────────── Public API ─── #
@@ -398,12 +413,18 @@ class CommandItemWidget(QWidget):
             clipboard.setText(text)
 
     def _on_run_clicked(self) -> None:
-        """Toggle sent state: play → mark as sent; amber dot → reset to pending."""
+        """Toggle sent state: play → request dispatch; amber dot → reset to pending.
+
+        NÃO marca enviado aqui (fix D-1, 2026-06-02). O `_mark_as_sent` e
+        responsabilidade do slot do queue widget `_on_single_button_green_dispatch`,
+        que so marca quando `_dispatch_green_arrow` publica de fato (retorna True).
+        Sob Main Codex/Kimi o dispatch pode abortar (`.md`/skill ausente); marcar
+        aqui de forma incondicional deixaria o item ambar sem ter despachado —
+        mesma assimetria ja corrigida no caminho Codex (`_on_codex_clicked`)."""
         if self._is_sent:
             self.reset_to_pending()
             return
         self.run_in_terminal_requested.emit(self.command_text())
-        self._mark_as_sent()
 
     def _on_kimi_clicked(self) -> None:
         """Send Kimi-adapted prompt to the workspace terminal and mark as sent.
@@ -416,9 +437,139 @@ class CommandItemWidget(QWidget):
         try:
             kimi_prompt = adapt_to_kimi(self.command_text())
         except ValueError:
+            # Fix D-6: nao engolir em silencio (Zero Silencio). O queue widget
+            # emite um toast de warning; o item permanece pendente.
+            self.kimi_adaptation_failed.emit(self.command_text())
             return
         self.run_in_kimi_terminal_requested.emit(kimi_prompt)
         self._mark_as_sent()
+
+    def _on_codex_clicked(self) -> None:
+        """Despacha o item ao worker Codex (T3). NAO marca enviado aqui.
+
+        Espelha _on_kimi_clicked: emite o sinal dedicado consumido pelo queue
+        widget. A adaptacao Codex/dispatcher e o tratamento de falhas sao
+        responsabilidade do handler do queue widget (wiring de dispatch +
+        failure handling detalhados na task 006); aqui so emitimos o slash cru.
+
+        Diferente das setas Claude/Kimi, TODAS as condicoes de falha do Codex
+        (comando inexistente, T3 nao pronto, adaptacao vazia) vivem no
+        dispatcher do queue widget. Por isso o `_mark_as_sent()` e responsabi-
+        lidade do slot conectado (`_on_single_button_codex_dispatch`), que so
+        marca enviado quando `_dispatch_codex_command` publica de fato. Marcar
+        aqui de forma incondicional deixaria o item ambar mesmo num abort
+        (review-executed task 006, finding F2): o item ficaria 'enviado' e o
+        play-next o pularia apesar de nada ter sido despachado.
+        """
+        if self._is_sent:
+            return
+        self.run_in_codex_terminal_requested.emit(self.command_text())
+
+    # ─────────────────────────── Provider (botao unico) ──────────────────── #
+
+    def effective_provider(self) -> Provider | None:
+        """Provider efetivo deste item, recalculado on-demand (criterio 8).
+
+        Sem resolver injetado -> Provider.CLAUDE (verde/T1 legado, criterio de
+        aceite 3). Resolver que levanta excecao -> None == estado Desabilitado
+        (sad path do requisito visual 5: nunca crashar nem despachar provider
+        stale; o botao fica cinza e inerte).
+        """
+        if self._provider_resolver is None:
+            return Provider.CLAUDE
+        try:
+            prov = self._provider_resolver(self._spec)
+        except Exception:
+            return None
+        return prov if isinstance(prov, Provider) else Provider.CLAUDE
+
+    def _apply_exec_style(self, color: str, hover: str) -> None:
+        """Aplica cor/hover no botao unico e forca re-polish do stylesheet.
+
+        Sem o unpolish/polish a regra global QPushButton#IconButton do theme.py
+        mantem a cor anterior em cache (mesmo motivo de _mark_as_sent)."""
+        self._exec_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; border: none;"
+            f"  color: {color}; font-size: 10px; }}"
+            f"QPushButton:hover {{ color: {hover}; }}"
+            f"QPushButton:disabled {{ color: {_PROVIDER_DISABLED_COLOR}; }}"
+        )
+        style = self._exec_btn.style()
+        if style is not None:
+            style.unpolish(self._exec_btn)
+            style.polish(self._exec_btn)
+        self._exec_btn.update()
+
+    def refresh_provider(self) -> None:
+        """Recolore o botao unico conforme o provider efetivo + tooltip/destino.
+
+        No-op visual enquanto o item esta 'enviado' (o indicador ambar vence,
+        vide tabela secao 9 linha 'Enviado'). Conectado ao toggle de workers no
+        queue widget para recalcular sem reload manual (requisito visual 3)."""
+        self._current_provider = self.effective_provider()
+        if self._is_sent:
+            return
+        self._exec_btn.setText("▶")
+        prov = self._current_provider
+        if prov is None:
+            # Desabilitado: cinza, inerte, sem dispatch.
+            self._exec_btn.setEnabled(False)
+            self._exec_btn.setToolTip(
+                "Item nao executavel no estado atual (provider indefinido)"
+            )
+            self._apply_exec_style(
+                _PROVIDER_DISABLED_COLOR, _PROVIDER_DISABLED_COLOR
+            )
+            return
+        self._exec_btn.setEnabled(True)
+        base, hover = _PROVIDER_BTN_STYLE[prov]
+        self._exec_btn.setToolTip(
+            f"Enviar para {_PROVIDER_LABEL[prov]} ({_PROVIDER_DEST[prov]})"
+        )
+        self._apply_exec_style(base, hover)
+
+    def is_worker_arrow_visible(self) -> bool:
+        """Item esta apresentando seta de worker (azul/roxo).
+
+        Substitui o legado `_kimi_btn.isVisible()` como marcador 'item worker-
+        bound' consumido pelo gate de play-next (llm-routing-div.md §3.1)."""
+        return self._worker_arrow_visible
+
+    def set_worker_arrow_visible(self, visible: bool) -> None:
+        """Liga/desliga o marcador worker-bound (ex.: Main Kimi oculta todos).
+
+        Migra o legado `_kimi_btn.setVisible()`; recolore o botao unico para
+        refletir o provider efetivo apos a mudanca de estado de worker."""
+        self._worker_arrow_visible = bool(visible)
+        self.refresh_provider()
+
+    def _on_exec_clicked(self) -> None:
+        """Clique no botao unico: recalcula o provider AGORA (criterio de
+        rejeicao 8) e roteia ao handler do provider efetivo.
+
+        Sent -> toggle reset (paridade com a seta verde legada). Provider None
+        (Desabilitado) -> nao despacha; apenas reafirma o estado cinza."""
+        if self._is_sent:
+            self.reset_to_pending()
+            return
+        # Fix D-5: local-action NUNCA vai a um terminal (invariante 8). Roda
+        # in-process; o queue widget e dono do dispatch (dispatch_local_action)
+        # e do toast. O item so encaminha o spec, sem importar a logica de
+        # local-action nem colar `spec.name` no T1.
+        if getattr(self._spec, "kind", "slash") == "local-action":
+            self.run_local_action_requested.emit(self._spec)
+            return
+        prov = self.effective_provider()
+        self._current_provider = prov
+        if prov is None:
+            self.refresh_provider()  # garante cinza/disabled + tooltip
+            return
+        if prov is Provider.KIMI:
+            self._on_kimi_clicked()
+        elif prov is Provider.CODEX:
+            self._on_codex_clicked()
+        else:
+            self._on_run_clicked()
 
     def _mark_as_sent(self) -> None:
         """Visually mark this row as already sent to terminal."""
@@ -451,19 +602,11 @@ class CommandItemWidget(QWidget):
         was_sent = self._is_sent
         self._is_sent = False
         self._run_btn.setText("▶")
-        self._run_btn.setToolTip("Executar no terminal")
-        self._run_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none;"
-            "  color: #22C55E; font-size: 10px; }"
-            "QPushButton:hover { color: #86EFAC; }"
-        )
         self._run_btn.setEnabled(True)
-        # Mirror _mark_as_sent: force re-polish so the green color reapplies cleanly.
-        style = self._run_btn.style()
-        if style is not None:
-            style.unpolish(self._run_btn)
-            style.polish(self._run_btn)
-        self._run_btn.update()
+        # Recolore conforme o provider efetivo (verde Claude por default; azul
+        # Kimi / roxo Codex se um worker estiver ativo). refresh_provider ja faz
+        # o unpolish/polish, espelhando o que _mark_as_sent fazia para o ambar.
+        self.refresh_provider()
         self.set_status(CommandStatus.PENDENTE)
         if was_sent:
             self.sent_state_changed.emit(False)

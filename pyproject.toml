@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "workflow-app"
 version = "0.1.0"
 description = "Workflow App — Claude Code pipeline orchestrator"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "PySide6>=6.6.0",
     "SQLAlchemy>=2.0.0",
@@ -15,6 +15,7 @@ dependencies = [
     "pyte>=0.8.0",
     "pydantic>=2.5",
     "PyYAML>=6.0,<7",
+    "claude-agent-sdk>=0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -25,9 +26,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
-    "mutmut>=2.4",
+    "mutmut>=2.4,<3",  # 3.x e rewrite com schema de config incompativel ([tool.mutmut] aqui usa keys 2.x)
 ]
-xterm = ["PySide6-WebEngine>=6.6.0"]
 
 [project.scripts]
 workflow-app = "workflow_app.main:main"

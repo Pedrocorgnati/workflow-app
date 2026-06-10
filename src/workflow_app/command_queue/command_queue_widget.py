@@ -442,6 +442,15 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "model": ModelName.OPUS,
         "effort": EffortLevel.HIGH,
     },
+    # Lane Kimi do /loop (queue-btn-kimi-loop): comandos /kimi-loop:* sao
+    # QUICKSTART-mecanicos (ai-forge/rules/weak-llm-pipeline-rules.md), entao o
+    # fallback Claude roda em sonnet/medium — espelha o precedente do blog
+    # stockpile. Quando o seletor Kimi esta ativo, o roteamento via
+    # kimi_whitelist.py ignora model/effort (Kimi CLI).
+    "kimi_loop": {
+        "model": ModelName.SONNET,
+        "effort": EffortLevel.STANDARD,
+    },
     "daily_loop": {
         "model": ModelName.SONNET,
         "effort": EffortLevel.STANDARD,
@@ -1067,6 +1076,8 @@ class CommandQueueWidget(QWidget):
         base_cmd = tokens[0]
         if base_cmd == "/loop":
             self._on_loop_command_ready(command_line)
+        elif base_cmd == "/kimi-loop":
+            self._on_kimi_loop_command_ready(command_line)
         elif base_cmd == "/daily-loop":
             self._on_daily_loop_command_ready(command_line)
         else:
@@ -1348,6 +1359,171 @@ class CommandQueueWidget(QWidget):
         self._template_label.setText(label)
         self._template_label.setVisible(True)
         self._maybe_auto_save(auto_save_label)
+        signal_bus.pipeline_ready.emit(specs)
+        signal_bus.toast_requested.emit(
+            f"Fila renderizada: {len(specs)} comandos.", "success"
+        )
+
+    def _on_kimi_loop_command_ready(self, command_line: str) -> None:
+        """Expand `/kimi-loop --{mode} <path.md> [--name <slug>]` na lane Kimi.
+
+        Gemeo de `_on_loop_command_ready` para a familia `/kimi-loop:*`
+        (queue-btn-kimi-loop, 2026-06-09): mesmas regras de parse, collision
+        guard e slug canonico, mas sub-fases /kimi-loop:* em
+        GROUP_MAP["kimi_loop"] (sonnet/medium — weak-llm-pipeline-rules) e
+        split init+enumerate (7 fases em --task/--cmd, 9 em --both). Design:
+        blacksmith/09-06-llm-dumb-use/KIMI-LOOP-DESIGN.md (D1..D10).
+
+        --cmd-single delega INTEGRAL ao branch /loop (mesma sub-pipeline
+        /cmd:create|update -> /cmd:review -> kimi-pair -> readme-upd), que ja
+        e a lane kimi-pair canonica. --rocksmash nao e suportado nesta lane
+        (usar /loop --rocksmash).
+        """
+        tokens = command_line.strip().split()
+        mode = None
+        path_arg = ""
+        name_arg = ""
+
+        if len(tokens) >= 2 and tokens[0] == "/kimi-loop":
+            i = 1
+            while i < len(tokens):
+                t = tokens[i]
+                if t in ("--task", "--cmd", "--cmd-single", "--both"):
+                    mode = t
+                    if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                        path_arg = tokens[i + 1]
+                        i += 2
+                        continue
+                elif t == "--name" and i + 1 < len(tokens):
+                    name_arg = tokens[i + 1]
+                    i += 2
+                    continue
+                i += 1
+
+        if mode == "--cmd-single":
+            # Delegacao integral: a sub-pipeline cmd-single e compartilhada
+            # com /loop (ja e a lane kimi-pair). Reescreve apenas o head.
+            self._on_loop_command_ready(
+                command_line.replace("/kimi-loop", "/loop", 1)
+            )
+            return
+
+        if mode is None or not path_arg:
+            spec = CommandSpec(
+                name=command_line,
+                model=ModelName.SONNET,
+                interaction_type=InteractionType.INTERACTIVE,
+                position=len(self._items) + 1,
+            )
+            self.add_command(spec)
+            self._template_label.setText("  \U0001f4cb  Kimi-Loop")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save("Kimi-Loop")
+            return
+
+        # Collision guard + slug canonico: mesmos helpers do /loop (D1 do
+        # design — as duas lanes compartilham blacksmith/loop-archives/).
+        existing_slug = self._existing_loop_slug_from_path(path_arg)
+        if name_arg and existing_slug and name_arg != existing_slug:
+            signal_bus.toast_requested.emit(
+                f"Conflito: --name '{name_arg}' divergente do loop existente "
+                f"'{existing_slug}' em {path_arg}. Para reutilizar, omita "
+                f"--name ou use --name {existing_slug}. Para criar loop "
+                f"novo, aponte para um source.md fora desse diretorio.",
+                "error",
+            )
+            return
+
+        slug = self._canonical_loop_slug(name_arg or None, path_arg)
+        if slug is None:
+            signal_bus.toast_requested.emit(
+                "Erro ao normalizar nome do loop. Verifique "
+                "ai-forge/scripts/normalize_loop_name.py e tente novamente "
+                "com --name explicito.",
+                "error",
+            )
+            return
+
+        kimi_cfg = GROUP_MAP.get("kimi_loop", {})
+        kimi_model = kimi_cfg.get("model", ModelName.SONNET)
+        kimi_effort = kimi_cfg.get("effort", EffortLevel.STANDARD)
+
+        mode_flag = mode
+        if mode == "--task":
+            sub_names = [
+                f"/kimi-loop:init {mode_flag} {path_arg} --name {slug}",
+                f"/kimi-loop:enumerate --name {slug}",
+                f"/kimi-loop:individual-analysis --name {slug}",
+                f"/kimi-loop:integration --name {slug}",
+                f"/kimi-loop:review --name {slug}",
+                f"/kimi-loop:integrated-architecture --loop-slug {slug}",
+                f"/kimi-loop:workflow-app --name {slug}",
+            ]
+        elif mode == "--cmd":
+            sub_names = [
+                f"/kimi-loop:init {mode_flag} {path_arg} --name {slug}",
+                f"/kimi-loop:enumerate {mode_flag} --name {slug}",
+                f"/kimi-loop:individual-analysis {mode_flag} --name {slug}",
+                f"/kimi-loop:integration {mode_flag} --name {slug}",
+                f"/kimi-loop:review {mode_flag} --name {slug}",
+                f"/kimi-loop:integrated-architecture --loop-slug {slug}",
+                f"/kimi-loop:workflow-app {mode_flag} --name {slug}",
+            ]
+        else:  # --both
+            sub_names = [
+                f"/kimi-loop:init {mode_flag} {path_arg} --name {slug}",
+                f"/kimi-loop:enumerate {mode_flag} --name {slug}",
+                f"/kimi-loop:individual-analysis {mode_flag} --name {slug}",
+                f"/kimi-loop:integration {mode_flag} --name {slug}",
+                f"/kimi-loop:review {mode_flag} --name {slug}",
+                f"/kimi-loop:integrated-architecture --loop-slug {slug}",
+                f"/kimi-loop:mark-type --name {slug}",
+                f"/kimi-loop:check-tasks-and-cmd --name {slug}",
+                f"/kimi-loop:workflow-app {mode_flag} --name {slug}",
+            ]
+
+        specs: list[CommandSpec] = []
+        specs.extend(_build_prep_specs("kimi_loop", start_position=1))
+        specs.append(
+            CommandSpec(
+                name=sub_names[0],
+                model=kimi_model,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                effort=kimi_effort,
+                position=len(specs) + 1,
+            )
+        )
+        for sub in sub_names[1:]:
+            # Boundary entre fases independentes: apenas /clear. /model e
+            # /effort sao SUPRIMIDOS porque TODAS as fases rodam em
+            # sonnet/medium (GROUP_MAP["kimi_loop"]) — anti-redundancia
+            # (ai-forge/rules/workflow-app-command-lists.md secao 3.1).
+            specs.append(
+                CommandSpec(
+                    name="/clear",
+                    model=kimi_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=kimi_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.append(
+                CommandSpec(
+                    name=sub,
+                    model=kimi_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=kimi_effort,
+                    position=len(specs) + 1,
+                )
+            )
+
+        label = f"  \U0001f4cb  Kimi-Loop {mode}: {slug} ({len(sub_names)} fases)"
+        self._template_label.setText(label)
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"Kimi-Loop {mode} {slug}")
         signal_bus.pipeline_ready.emit(specs)
         signal_bus.toast_requested.emit(
             f"Fila renderizada: {len(specs)} comandos.", "success"
@@ -1736,6 +1912,45 @@ class CommandQueueWidget(QWidget):
         )
         loop_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
+        # kimi-loop — gemeo do loop_btn na lane Kimi (/kimi-loop:*). Pill
+        # REUSA _on_loop_clicked: o _LOOP-CONFIG.json e identico (D1/D2 do
+        # design blacksmith/09-06-llm-dumb-use/KIMI-LOOP-DESIGN.md); a lane se
+        # distingue pelos commands /kimi-loop:iteraction:* dentro do JSON.
+        kimi_loop_pill = self._AttachmentProxy(
+            self, self._on_loop_clicked
+        )
+        kimi_loop_spec = COMMAND_FLAG_SPECS.get("/kimi-loop")
+        kimi_loop_btn = DoublePhaseButton(
+            label="kimi-loop",
+            pipeline_name="/kimi-loop",
+            argument_hint="--task <path.md> [--name <slug>] | --cmd <path.md> [--name <slug>] | --cmd-single <path.md> | --both <path.md> [--name <slug>]",
+            default_md_dir="blacksmith/loop/",
+            radio_summaries={
+                "--task": "para iterar execucao de tasks ja criadas, na lane Kimi (sonnet/medium)",
+                "--cmd": "para criar ou atualizar varios slash-commands em batch, na lane Kimi",
+                "--cmd-single": "para um unico slash-command (delega a sub-pipeline /loop --cmd-single)",
+                "--both": "para fluxos com tasks variadas e criacao de comandos, na lane Kimi",
+            },
+            flags_boolean=kimi_loop_spec.flags_boolean if kimi_loop_spec else None,
+            flags_with_value=kimi_loop_spec.flags_with_value if kimi_loop_spec else None,
+            pill=kimi_loop_pill,
+            on_command_ready=self._on_unified_command_ready,
+            parent=self,
+        )
+        kimi_loop_btn.setProperty("testid", "queue-btn-kimi-loop")
+        kimi_loop_btn.setToolTip(
+            "Kimi-Loop — gemeo do Loop otimizado para LLM fraca "
+            "(ai-forge/rules/weak-llm-pipeline-rules.md). Prep em 7 fases "
+            "(--task/--cmd; split init+enumerate) ou 9 (--both), comandos "
+            "/kimi-loop:* QUICKSTART-mecanicos, zero MCP, scripts "
+            "deterministicos em kimi-loop/_scripts/. GROUP_MAP kimi_loop = "
+            "sonnet/medium; todos os /kimi-loop:* sao Kimi-whitelisted "
+            "(kimi_whitelist.py). Archives compartilham "
+            "blacksmith/loop-archives/ — a pill carrega o mesmo "
+            "_LOOP-CONFIG.json do Loop."
+        )
+        kimi_loop_btn.setStyleSheet(_SECTION_BTN_STYLE)
+
         study_pill = self._AttachmentProxy(
             self, lambda: self._load_quick_template(TEMPLATE_STUDY, name="Study")
         )
@@ -1858,6 +2073,7 @@ class CommandQueueWidget(QWidget):
             daily_btn,
             daily_loop_btn,
             loop_btn,
+            kimi_loop_btn,
             study_btn,
             ("rocksmash",
              "rocksmash — le metrics-project-pill (_LOOP-CONFIG.json kind=daily-loop), "
@@ -3966,6 +4182,7 @@ class CommandQueueWidget(QWidget):
             cm_id=ctx.cm_id,
             default_project_name=config.project_name,
             prefix_commands=None,
+            project_dir=config.project_dir,
         )
 
     def _load_condition_context(
@@ -4562,6 +4779,7 @@ class CommandQueueWidget(QWidget):
             cm_id=cm_id,
             default_project_name=config.project_name,
             prefix_commands=None,
+            project_dir=config.project_dir,
         )
 
     def _enqueue_specific_flow(
@@ -4570,6 +4788,7 @@ class CommandQueueWidget(QWidget):
         cm_id: str,
         default_project_name: str,
         prefix_commands: list[dict] | None = None,
+        project_dir: Path | None = None,
     ) -> bool:
         """Le SPECIFIC-FLOW.json e enfileira commands na fila do workflow-app.
 
@@ -4587,6 +4806,10 @@ class CommandQueueWidget(QWidget):
             (`{name, model, effort, phase, interaction}`) a prependar antes dos
             commands do flow. Usado por /dcp:build-and-load para injetar
             /dcp:congruence-check, /dcp:temporality-check, etc antes do flow.
+          project_dir: raiz do projeto usada para resolver paths relativos de
+            TASK-*.md na validacao de existencia (loop 06-09). Opcional —
+            quando ausente a validacao degrada para fail-open nos paths
+            relativos (so paths absolutos e basenames canonicos sao checados).
 
         Returns:
           True se enqueue foi bem sucedido (`signal_bus.pipeline_ready` emitido).
@@ -4655,6 +4878,40 @@ class CommandQueueWidget(QWidget):
                     "[DCP] overrides.skipped filtrou %d comandos (de %d para %d)",
                     removed, before, len(commands_raw),
                 )
+
+        # Loop 06-09: valida cada entry contra o disco ANTES do enqueue.
+        # SPECIFIC-FLOW.json stale (per-task sintetizado por contagem, pre-fix
+        # 06-08) ou stub do gerador com placeholder literal (`TASK-{k}`)
+        # produzia comandos para tasks inexistentes ("task N nao existe") que
+        # so estouravam em runtime do slash command. Drops sao SEMPRE visiveis
+        # (Zero Silencio): toast resumido + reason completo no log.
+        from workflow_app.dcp.flow_validation import validate_flow_commands
+
+        vres = validate_flow_commands(
+            commands_raw,
+            cm_id=cm_id,
+            project_dir=project_dir,
+            flow_path=flow_path,
+        )
+        if vres.dropped:
+            for d in vres.dropped:
+                logger.warning(
+                    "[DCP] comando descartado no load de %s: %r — %s",
+                    flow_path, d.name, d.reason,
+                )
+            shown = "; ".join(d.name for d in vres.dropped[:5])
+            extra = (
+                f" (+{len(vres.dropped) - 5} no log)"
+                if len(vres.dropped) > 5 else ""
+            )
+            signal_bus.toast_requested.emit(
+                f"SPECIFIC-FLOW.json: {len(vres.dropped)} comando(s) "
+                f"invalido(s) descartado(s) no load — {shown}{extra}. "
+                f"Motivos no log. Flow provavelmente stale: regenere via "
+                f"[DCP: Build Module Pipeline].",
+                "warning",
+            )
+        commands_raw = vres.valid
 
         _model_map = {
             "opus": ModelName.OPUS,
@@ -7582,12 +7839,35 @@ class CommandQueueWidget(QWidget):
         return result
 
     def restore_queue_snapshot(self, state: list[dict]) -> None:
-        """Restore queue from a saved state list, preserving statuses and sent flags."""
+        """Restore queue from a saved state list, preserving statuses and sent flags.
+
+        Loop 06-09 (brecha 3 — filas auto-salvas pre-fix): snapshots gravados
+        antes do fix 06-08 carregam comandos per-task sintetizados por contagem
+        (tasks fantasma, ex. `TASK-4.md` inexistente) ou placeholder literal
+        `TASK-{k}` nunca renderizado. Entradas ainda PENDENTES (nao enviadas)
+        passam pela mesma validacao pura de `flow_validation` usada no load do
+        SPECIFIC-FLOW.json antes de voltar a fila; entradas ja executadas sao
+        historico e restauram verbatim. Drops sao SEMPRE visiveis (Zero
+        Silencio): toast resumido + reason completo no log. `load_pipeline`
+        renumera positions 1-based, entao dropar nao quebra a remocao por
+        position.
+        """
+        from workflow_app.dcp.flow_validation import validate_flow_commands
         from workflow_app.domain import CommandStatus, InteractionType, ModelName
+
+        project_dir = None
+        try:
+            from workflow_app.config.app_state import app_state
+
+            if app_state.has_config and app_state.config is not None:
+                project_dir = getattr(app_state.config, "project_dir", None)
+        except Exception:  # noqa: BLE001 - contexto opcional; sem ele a
+            project_dir = None  # validacao fica fail-open p/ refs relativas
 
         specs = []
         statuses: list[CommandStatus] = []
         sent_flags: list[bool] = []
+        dropped: list = []
 
         for entry in state:
             try:
@@ -7598,6 +7878,27 @@ class CommandQueueWidget(QWidget):
                 interaction = InteractionType(entry.get("interaction_type", "auto"))
             except ValueError:
                 interaction = InteractionType.AUTO
+            try:
+                status = CommandStatus(entry.get("status", "pendente"))
+            except ValueError:
+                status = CommandStatus.PENDENTE
+            sent = bool(entry.get("sent", False))
+
+            # So valida o que ainda VAI rodar; um item executado com ref hoje
+            # ausente e registro historico, nao um dispatch futuro. Modo
+            # task-only: snapshots cobrem filas arbitrarias onde `{slug}` em
+            # texto-livre e legitimo (resolvido pelo LLM receptor) — so a
+            # assinatura `TASK-{k}` do stub do gerador derruba.
+            if status == CommandStatus.PENDENTE and not sent:
+                vres = validate_flow_commands(
+                    [{"name": entry.get("name", "")}],
+                    cm_id="",
+                    project_dir=project_dir,
+                    placeholder_mode="task-only",
+                )
+                if vres.dropped:
+                    dropped.extend(vres.dropped)
+                    continue
 
             spec = CommandSpec(
                 name=entry["name"],
@@ -7609,13 +7910,26 @@ class CommandQueueWidget(QWidget):
                 phase=entry.get("phase", "F?"),
             )
             specs.append(spec)
-
-            try:
-                status = CommandStatus(entry.get("status", "pendente"))
-            except ValueError:
-                status = CommandStatus.PENDENTE
             statuses.append(status)
-            sent_flags.append(entry.get("sent", False))
+            sent_flags.append(sent)
+
+        if dropped:
+            for d in dropped:
+                logger.warning(
+                    "[restore] comando descartado no snapshot restaurado: %r — %s",
+                    d.name, d.reason,
+                )
+            shown = "; ".join(d.name for d in dropped[:5])
+            extra = (
+                f" (+{len(dropped) - 5} no log)" if len(dropped) > 5 else ""
+            )
+            signal_bus.toast_requested.emit(
+                f"Snapshot restaurado: {len(dropped)} comando(s) pendente(s) "
+                f"invalido(s) descartado(s) — {shown}{extra}. Motivos no log. "
+                f"Fila salva pre-fix 06-08: regenere via "
+                f"[DCP: Build Module Pipeline].",
+                "warning",
+            )
 
         self.load_pipeline(specs)
 

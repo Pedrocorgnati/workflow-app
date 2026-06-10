@@ -12,6 +12,8 @@ Covers:
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
@@ -421,7 +423,7 @@ class TestKimiBlueArrowDelay:
         try:
             widget.load_pipeline(kimi_specs)
             item = widget._items[0]
-            assert item._kimi_btn.isVisible()
+            assert item.is_worker_arrow_visible()
             item._on_kimi_clicked()
             assert len(emissions) == 1
             prompt, delay = emissions[0]
@@ -926,33 +928,27 @@ class TestForceKimi:
             CommandSpec("/create-task", ModelName.SONNET, position=2),
         ]
         widget.load_pipeline(kimi_specs)
-        # Pre-condition: pelo menos um item tem seta azul visivel.
+        # Pre-condition: pelo menos um item tem seta de worker visivel.
         any_visible_before = any(
-            item._kimi_btn.isVisible() for item in widget._items
-            if getattr(item, "_kimi_btn", None) is not None
+            item.is_worker_arrow_visible() for item in widget._items
         )
         widget._force_kimi_chk.setChecked(True)
         for item in widget._items:
-            btn = getattr(item, "_kimi_btn", None)
-            if btn is not None:
-                assert btn.isVisible() is False, \
-                    "seta azul deve ficar oculta com --force Kimi"
+            assert item.is_worker_arrow_visible() is False, \
+                "seta de worker deve ficar oculta com --force Kimi"
         widget._main_claude_radio.setChecked(True)
         # Apos desligar: visibilidade restaurada pelo menos para um item
         # whitelisted (sanity — nao todos podem ser whitelisted).
         if any_visible_before:
             assert any(
-                item._kimi_btn.isVisible() for item in widget._items
-                if getattr(item, "_kimi_btn", None) is not None
-            ), "seta azul deve ser restaurada apos desligar --force Kimi"
+                item.is_worker_arrow_visible() for item in widget._items
+            ), "seta de worker deve ser restaurada apos desligar --force Kimi"
 
     def test_force_kimi_hides_blue_arrow_on_items_added_later(self, widget):
         widget._force_kimi_chk.setChecked(True)
         widget.load_pipeline([CommandSpec("/qa:prep", ModelName.SONNET, position=1)])
         item = widget._items[0]
-        btn = getattr(item, "_kimi_btn", None)
-        if btn is not None:
-            assert btn.isVisible() is False
+        assert item.is_worker_arrow_visible() is False
 
     # ---- Highlight usa cmd_text original, nao transformado --------------
 
@@ -977,16 +973,22 @@ class TestCodexLlmRouting:
         command_file = tmp_path / ".claude" / "commands" / "blog" / "init-strategy.md"
         command_file.parent.mkdir(parents=True)
         command_file.write_text("# init strategy", encoding="utf-8")
+        # /cmd:review e codex-compatible (whitelist Codex) mas NAO kimi-compatible:
+        # usado pelos testes de roteamento Codex/T3 sob o modelo router/whitelist.
+        review_file = tmp_path / ".claude" / "commands" / "cmd" / "review.md"
+        review_file.parent.mkdir(parents=True)
+        review_file.write_text("# review", encoding="utf-8")
         agent_file = tmp_path / "ai-forge" / "MCP" / "agents" / "executor.md"
         agent_file.parent.mkdir(parents=True)
         agent_file.write_text("# executor", encoding="utf-8")
         listener_file = tmp_path / "ai-forge" / "rules" / "workflow-app-listeners.md"
         listener_file.parent.mkdir(parents=True)
         listener_file.write_text("# listeners", encoding="utf-8")
+        _codex_files = {"blog:init-strategy": command_file, "cmd:review": review_file}
         monkeypatch.setattr(
             type(widget),
             "_resolve_claude_command_file",
-            classmethod(lambda cls, slug: command_file if slug == "blog:init-strategy" else None),
+            classmethod(lambda cls, slug: _codex_files.get(slug)),
         )
         monkeypatch.setattr(
             type(widget),
@@ -1071,8 +1073,10 @@ class TestCodexLlmRouting:
         try:
             codex_widget._main_claude_radio.setChecked(True)
             codex_widget._use_codex_chk.setChecked(True)
+            # /cmd:review e codex-compatible (whitelist Codex); o router o
+            # classifica como Provider.CODEX -> worker Codex/T3.
             codex_widget.load_pipeline([
-                CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)
+                CommandSpec("/cmd:review", ModelName.SONNET, position=1)
             ])
             codex_widget._on_step_btn_clicked()
         finally:
@@ -1081,7 +1085,7 @@ class TestCodexLlmRouting:
 
         assert emitted_t1 == []
         assert len(emitted_t3) == 1
-        assert "Command: /blog:init-strategy" in emitted_t3[0]
+        assert "Command: /cmd:review" in emitted_t3[0]
         assert "Listener rules:" in emitted_t3[0]
         assert "Expected listener channel: workspace_xterm" in emitted_t3[0]
         assert "execute/preserve it so it notifies channel `workspace_xterm`" in emitted_t3[0]
@@ -1114,7 +1118,9 @@ class TestWorkerRoutingExpandedToAllMainLlms:
         files: dict[str, object] = {}
         # commit:simple is resolvable but NOT kimi-compatible (no blue arrow):
         # used by the green-arrow-only regression test below.
-        for slug in ("blog:init-strategy", "qa:prep", "commit:simple"):
+        # cmd:review is codex-compatible (Codex whitelist) but NOT kimi-compatible:
+        # used by the Codex/T3 routing tests under the router/whitelist model.
+        for slug in ("blog:init-strategy", "qa:prep", "commit:simple", "cmd:review"):
             f = tmp_path / ".claude" / "commands" / (slug.replace(":", "/") + ".md")
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("# cmd", encoding="utf-8")
@@ -1159,7 +1165,7 @@ class TestWorkerRoutingExpandedToAllMainLlms:
             routed_widget.load_pipeline(
                 [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
             )
-            assert routed_widget._items[0]._kimi_btn.isVisible()
+            assert routed_widget._items[0].is_worker_arrow_visible()
             routed_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(t1.append)
@@ -1173,8 +1179,12 @@ class TestWorkerRoutingExpandedToAllMainLlms:
         assert routed_widget._items[0].is_pending_run() is False
 
     def test_main_codex_worker_codex_routes_blue_arrow_to_t3(self, routed_widget):
-        """Main Codex + Worker Codex: an eligible (blue-arrow) command goes to
-        T3 Codex worker (channel workspace_xterm), NOT to T1."""
+        """Main Codex + Worker Codex: a codex-compatible command (/cmd:review)
+        goes to T3 Codex worker (channel workspace_xterm), NOT to T1.
+
+        Modelo router/whitelist (decisao do operador 06-02): a elegibilidade do
+        worker Codex vem da whitelist Codex (is_codex_compatible), nao da
+        elegibilidade Kimi blue-arrow."""
         t1: list[str] = []
         t3: list[str] = []
         signal_bus.run_command_in_terminal.connect(t1.append)
@@ -1183,21 +1193,24 @@ class TestWorkerRoutingExpandedToAllMainLlms:
             routed_widget._main_codex_radio.setChecked(True)
             routed_widget._use_codex_chk.setChecked(True)
             routed_widget.load_pipeline(
-                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+                [CommandSpec("/cmd:review", ModelName.SONNET, position=1)]
             )
             routed_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(t1.append)
             signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
 
-        assert t1 == [], "blue-arrow command must NOT leak into T1 under Main Codex"
+        assert t1 == [], "codex command must NOT leak into T1 under Main Codex"
         assert len(t3) == 1
-        assert "Command: /blog:init-strategy" in t3[0]
+        assert "Command: /cmd:review" in t3[0]
         assert "Expected listener channel: workspace_xterm" in t3[0]
 
     def test_main_kimi_worker_codex_routes_blue_arrow_to_t3(self, routed_widget):
-        """Main Kimi + Worker Codex: an eligible (blue-arrow) command goes to
-        T3 Codex worker, NOT to T1 Kimi."""
+        """Main Kimi + Worker Codex: a codex-compatible command (/cmd:review)
+        goes to T3 Codex worker, NOT to T1 Kimi.
+
+        Modelo router/whitelist (decisao do operador 06-02): worker Codex
+        reivindica comandos da whitelist Codex, independente do Main LLM."""
         t1: list[str] = []
         t3: list[str] = []
         signal_bus.run_command_in_terminal.connect(t1.append)
@@ -1206,16 +1219,16 @@ class TestWorkerRoutingExpandedToAllMainLlms:
             routed_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
             routed_widget._use_codex_chk.setChecked(True)
             routed_widget.load_pipeline(
-                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+                [CommandSpec("/cmd:review", ModelName.SONNET, position=1)]
             )
             routed_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(t1.append)
             signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
 
-        assert t1 == [], "blue-arrow command must NOT leak into T1 under Main Kimi"
+        assert t1 == [], "codex command must NOT leak into T1 under Main Kimi"
         assert len(t3) == 1
-        assert "Command: /blog:init-strategy" in t3[0]
+        assert "Command: /cmd:review" in t3[0]
         assert "Expected listener channel: workspace_xterm" in t3[0]
 
     def test_main_codex_no_worker_keeps_blue_arrow_on_t1(self, routed_widget):
@@ -1269,7 +1282,7 @@ class TestWorkerRoutingExpandedToAllMainLlms:
                 [CommandSpec("/commit:simple", ModelName.SONNET, position=1)]
             )
             # No blue arrow on a non-whitelisted command.
-            assert routed_widget._items[0]._kimi_btn.isVisible() is False
+            assert routed_widget._items[0].is_worker_arrow_visible() is False
             routed_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(t1.append)
@@ -1280,8 +1293,13 @@ class TestWorkerRoutingExpandedToAllMainLlms:
 
     def test_main_claude_worker_codex_blue_arrow_goes_to_t3(self, routed_widget):
         """Companion to the green-arrow regression: under the SAME Main Claude +
-        Worker Codex, a blue-arrow eligible command (/blog:init-strategy) DOES go
-        to T3 Codex. Together the two tests pin the blue/green split."""
+        Worker Codex, a codex-compatible command (/cmd:review) DOES go to T3
+        Codex. Together the two tests pin the codex-whitelist/green split.
+
+        Modelo router/whitelist (decisao do operador 06-02): o item codex-only
+        nao tem a seta azul Kimi; o provider efetivo (botao unico) e CODEX."""
+        from workflow_app.command_queue.provider_router import Provider
+
         t1: list[str] = []
         t3: list[str] = []
         signal_bus.run_command_in_terminal.connect(t1.append)
@@ -1290,18 +1308,105 @@ class TestWorkerRoutingExpandedToAllMainLlms:
             routed_widget._main_claude_radio.setChecked(True)
             routed_widget._use_codex_chk.setChecked(True)
             routed_widget.load_pipeline(
-                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+                [CommandSpec("/cmd:review", ModelName.SONNET, position=1)]
             )
-            assert routed_widget._items[0]._kimi_btn.isVisible() is True
+            assert routed_widget._items[0].effective_provider() is Provider.CODEX
             routed_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(t1.append)
             signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
 
-        assert t1 == [], "blue-arrow command must NOT leak into T1"
+        assert t1 == [], "codex command must NOT leak into T1"
         assert len(t3) == 1
-        assert "Command: /blog:init-strategy" in t3[0]
+        assert "Command: /cmd:review" in t3[0]
         assert "Expected listener channel: workspace_xterm" in t3[0]
+
+    def test_kimi_eligible_non_codex_command_not_claimed_by_codex_worker(
+        self, routed_widget
+    ):
+        """Decisao do operador 06-02 (modelo router/whitelist): com SOMENTE o
+        worker Codex ligado, um comando kimi-elegivel mas NAO codex-compativel
+        (/blog:init-strategy) NAO e reivindicado pelo worker Codex — vai para T1
+        raw, nao para T3. Trava a mudanca de comportamento vs o gate legado
+        codex_blue_eligible (que mandava todo blue-arrow para o worker ativo).
+
+        Fecha a divergencia step-vs-clique que reprovou o loop
+        06-02-seta-unica-multi-llm-queue: agora o step concorda com o clique
+        direto (ambos usam a whitelist Codex via provider_router)."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            routed_widget._main_claude_radio.setChecked(True)
+            routed_widget._use_kimi_chk.setChecked(False)
+            routed_widget._use_codex_chk.setChecked(True)
+            routed_widget.load_pipeline(
+                [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+            )
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t3 == [], (
+            "comando kimi-elegivel-nao-codex NAO pode ir para o worker Codex/T3"
+        )
+        assert t1 == ["/blog:init-strategy"], (
+            "comando nao reivindicado por worker cai em Claude/T1 raw"
+        )
+
+    def test_kimi_eligible_only_command_routes_to_t2_in_step(self, routed_widget):
+        """Fix F-2 (recovery 06-02): paridade step-vs-clique do eixo Kimi. Um
+        item `kimi_eligible=True` que NAO esta na whitelist Kimi (ex.:
+        /execute-task vindo de um loop kimi_eligible) e classificado KIMI pelo
+        provider_router (regra 4: kimi_worker ativo E kimi_eligible). O step
+        agora consome o veredito do router para use_kimi (antes gateava so por
+        is_kimi_compatible e mandava o item para T1, divergindo do clique
+        direto). Com Worker Kimi ligado, o step deve despachar para T2 (seta
+        azul), NAO para T1.
+
+        Pre-F-2 este teste falharia: o item iria raw para T1 (use_kimi era False
+        porque is_kimi_compatible('/execute-task') e False)."""
+        from workflow_app.command_queue.provider_router import Provider
+
+        t1: list[str] = []
+        t3: list[str] = []
+        blue: list[str] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append(prompt)
+
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            routed_widget._main_claude_radio.setChecked(True)
+            routed_widget._use_kimi_chk.setChecked(True)
+            routed_widget._use_codex_chk.setChecked(False)
+            routed_widget.load_pipeline(
+                [CommandSpec(
+                    "/execute-task", ModelName.SONNET, position=1,
+                    kimi_eligible=True,
+                )]
+            )
+            assert routed_widget._items[0].is_worker_arrow_visible(), (
+                "item kimi_eligible deve mostrar a seta worker"
+            )
+            assert (
+                routed_widget._items[0].effective_provider() is Provider.KIMI
+            ), "clique direto ja classifica KIMI; o step deve concordar"
+            routed_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+
+        assert t1 == [], (
+            "item kimi_eligible NAO pode vazar para T1 no step (divergencia F-2)"
+        )
+        assert t3 == [], "worker Kimi vai para T2, nunca T3"
+        assert len(blue) == 1, "item kimi_eligible deve despachar a seta azul (T2)"
 
 
 # ---------------------------------------------------------------------------
@@ -2016,6 +2121,216 @@ class TestLegacyToDcpButton:
 
 
 # ---------------------------------------------------------------------------
+# Governance — botao queue-btn-governance
+# ---------------------------------------------------------------------------
+
+
+class TestGovernanceButton:
+    def _find_button_by_testid(self, widget: CommandQueueWidget, testid: str):
+        from PySide6.QtWidgets import QPushButton
+
+        header = getattr(widget, "header_widget", None)
+        search_root = header if header is not None else widget
+        for btn in search_root.findChildren(QPushButton):
+            if btn.property("testid") == testid:
+                return btn
+        return None
+
+    @pytest.fixture(autouse=True)
+    def _isolate_app_state(self):
+        from workflow_app.config.app_state import app_state
+
+        app_state.clear_config()
+        yield
+        app_state.clear_config()
+
+    def _set_config(self, tmp_path, *, docs_root: str = "docs"):
+        from types import SimpleNamespace
+
+        from workflow_app.config.app_state import app_state
+
+        cfg = SimpleNamespace(
+            config_path=str(tmp_path / ".claude" / "project.json"),
+            project_dir=tmp_path,
+            docs_root=docs_root,
+            raw={"name": "governance-test"},
+            project_name="governance-test",
+        )
+        app_state.set_config(cfg)  # type: ignore[arg-type]
+        return cfg
+
+    def _ledger(self, tmp_path):
+        ledger = tmp_path / "docs" / "_pipeline-research" / "PIPELINE-RUNS.tsv"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        return ledger
+
+    def _approved_dryrun(self, tmp_path):
+        report = (
+            tmp_path
+            / "scheduled-updates"
+            / "governance-dry-run"
+            / "GOVERNANCE-DRYRUN-20260604T000000Z.md"
+        )
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            "# Governance dry-run\n\nforbidden_writes: 0\n",
+            encoding="utf-8",
+        )
+        return report
+
+    def test_button_exists_with_testid(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+
+    def test_absent_ledger_disables_button_with_tooltip(self, widget, tmp_path):
+        self._set_config(tmp_path)
+        widget._refresh_governance_button_state()
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert not btn.isEnabled()
+        assert "PIPELINE-RUNS.tsv ausente" in btn.toolTip()
+
+    def test_header_only_ledger_disables_button_with_tooltip(self, widget, tmp_path):
+        self._set_config(tmp_path)
+        self._ledger(tmp_path).write_text("started_at\tstatus\n", encoding="utf-8")
+        widget._refresh_governance_button_state()
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert not btn.isEnabled()
+        assert "nao tem linhas de dados" in btn.toolTip()
+
+    def test_ledger_with_data_without_approved_dryrun_disables_button(
+        self, widget, tmp_path,
+    ):
+        self._set_config(tmp_path)
+        self._ledger(tmp_path).write_text(
+            "started_at\tstatus\n2026-06-03T00:00:00Z\tok\n",
+            encoding="utf-8",
+        )
+        widget._refresh_governance_button_state()
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert not btn.isEnabled()
+        assert "dry-run" in btn.toolTip()
+        assert "antes de aplicar" in btn.toolTip()
+
+    def test_ledger_with_data_and_approved_dryrun_enables_button(
+        self, widget, tmp_path,
+    ):
+        self._set_config(tmp_path)
+        self._ledger(tmp_path).write_text(
+            "started_at\tstatus\n2026-06-03T00:00:00Z\tok\n",
+            encoding="utf-8",
+        )
+        self._approved_dryrun(tmp_path)
+        widget._refresh_governance_button_state()
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert btn.isEnabled()
+
+    def test_aborted_dryrun_keeps_button_disabled(self, widget, tmp_path):
+        self._set_config(tmp_path)
+        self._ledger(tmp_path).write_text(
+            "started_at\tstatus\n2026-06-03T00:00:00Z\tok\n",
+            encoding="utf-8",
+        )
+        report = self._approved_dryrun(tmp_path)
+        report.write_text(
+            "# Governance dry-run\n\nforbidden_writes: 0\nABORTADO\n",
+            encoding="utf-8",
+        )
+        widget._refresh_governance_button_state()
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert not btn.isEnabled()
+
+    def test_config_loaded_signal_refreshes_governance_button(self, widget, tmp_path):
+        self._set_config(tmp_path)
+        self._ledger(tmp_path).write_text(
+            "started_at\tstatus\n2026-06-03T00:00:00Z\tok\n",
+            encoding="utf-8",
+        )
+        self._approved_dryrun(tmp_path)
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert not btn.isEnabled()
+
+        signal_bus.config_loaded.emit(str(tmp_path / ".claude" / "project.json"))
+
+        assert btn.isEnabled()
+
+    def test_config_unloaded_signal_disables_governance_button(self, widget, tmp_path):
+        from workflow_app.config.app_state import app_state
+
+        self._set_config(tmp_path)
+        self._ledger(tmp_path).write_text(
+            "started_at\tstatus\n2026-06-03T00:00:00Z\tok\n",
+            encoding="utf-8",
+        )
+        self._approved_dryrun(tmp_path)
+        widget._refresh_governance_button_state()
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        assert btn.isEnabled()
+
+        app_state.clear_config()
+        signal_bus.config_unloaded.emit()
+
+        assert not btn.isEnabled()
+        assert "project.json" in btn.toolTip()
+
+    def test_click_confirms_paths_and_enqueues_expanded_governance_chain(
+        self, widget, qtbot, tmp_path, monkeypatch,
+    ):
+        from PySide6.QtCore import Qt
+
+        from workflow_app.command_queue.command_queue_widget import (
+            GOVERNANCE_COMMANDS,
+            GOVERNANCE_WRITE_TARGETS,
+        )
+
+        self._set_config(tmp_path)
+        ledger = self._ledger(tmp_path)
+        ledger.write_text(
+            "started_at\tstatus\n2026-06-03T00:00:00Z\tok\n",
+            encoding="utf-8",
+        )
+        self._approved_dryrun(tmp_path)
+        widget._refresh_governance_button_state()
+
+        confirmed: list[str] = []
+
+        def _confirm(path):
+            assert path == ledger
+            confirmed.extend(GOVERNANCE_WRITE_TARGETS)
+            return True
+
+        monkeypatch.setattr(widget, "_confirm_governance_write_scope", _confirm)
+
+        pipelines: list[list] = []
+        signal_bus.pipeline_ready.connect(lambda specs: pipelines.append(list(specs)))
+
+        btn = self._find_button_by_testid(widget, "queue-btn-governance")
+        assert btn is not None
+        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+        assert confirmed
+        assert "docs_root/_pipeline-research/" in confirmed
+        assert pipelines, "esperado pipeline_ready emitido"
+        names = [spec.name for spec in pipelines[-1]]
+        for command in GOVERNANCE_COMMANDS:
+            assert command in names
+        assert "/auto-flow governance" not in names
+
+
+# ---------------------------------------------------------------------------
 # Cmd Single — radio "kimi analyse" | "kimi certain" + anti-redundancia §3.1
 # (ai-forge/rules/workflow-app-command-lists.md)
 # ---------------------------------------------------------------------------
@@ -2097,3 +2412,1063 @@ class TestCmdSingleKimiModes:
         assert names[0] == "/clear"
         assert names[1].startswith("/model ")
         assert names[2].startswith("/effort ")
+
+
+class TestStepPathInvokesProviderRouter:
+    """Task 004 (06-02-seta-unica-multi-llm-queue): o step path consome o router
+    PURO provider_router.classify_provider, montando o RoutingState a partir do
+    estado da queue (checkboxes de worker + Main LLM) e APOS o Worker axis
+    (invariante 2). Nesta task o resultado fica em _last_classified_provider e
+    NAO altera roteamento/UI; estes testes apenas garantem a integracao."""
+
+    @pytest.fixture()
+    def real_spec(self) -> list[CommandSpec]:
+        return [CommandSpec("/prd-create", ModelName.OPUS, EffortLevel.HIGH, position=1)]
+
+    def test_classify_provider_called_with_routing_state(self, widget, real_spec):
+        """O step path chama classify_provider com um RoutingState montado a
+        partir dos checkboxes de worker e do Main LLM (nunca route-toggles)."""
+        from unittest.mock import patch
+
+        from workflow_app.command_queue.provider_router import Provider, RoutingState
+
+        widget.load_pipeline(real_spec)
+        widget._use_kimi_chk.setChecked(True)
+        if getattr(widget, "_use_codex_chk", None) is not None:
+            widget._use_codex_chk.setChecked(False)
+
+        with patch(
+            "workflow_app.command_queue.command_queue_widget.classify_provider",
+            return_value=Provider.KIMI,
+        ) as mock_classify:
+            widget._on_step_btn_clicked()
+
+        assert mock_classify.called, (
+            "_on_step_btn_clicked deve invocar classify_provider no step path."
+        )
+        called_spec, called_state = mock_classify.call_args.args
+        assert called_spec is widget._items[0].get_spec() or \
+            called_spec.name == "/prd-create"
+        assert isinstance(called_state, RoutingState)
+        assert called_state.kimi_worker_enabled is True
+        assert called_state.codex_worker_enabled is False
+        assert called_state.main_llm == "claude"
+        assert widget._last_classified_provider == Provider.KIMI
+
+    def test_routing_state_reflects_codex_worker_and_main_llm(self, widget, real_spec):
+        """codex_worker_enabled e main_llm refletem o estado vivo da queue."""
+        from unittest.mock import patch
+
+        from workflow_app.command_queue.provider_router import Provider, RoutingState
+
+        if getattr(widget, "_use_codex_chk", None) is None or \
+                getattr(widget, "_force_kimi_chk", None) is None:
+            pytest.skip("widget sem checkboxes de worker codex / main kimi")
+
+        widget.load_pipeline(real_spec)
+        widget._use_kimi_chk.setChecked(False)
+        widget._use_codex_chk.setChecked(True)
+        widget._force_kimi_chk.setChecked(True)  # Main LLM = kimi
+
+        captured: dict[str, RoutingState] = {}
+
+        def _capture(spec, state):
+            captured["state"] = state
+            return Provider.CODEX
+
+        with patch(
+            "workflow_app.command_queue.command_queue_widget.classify_provider",
+            side_effect=_capture,
+        ):
+            widget._on_step_btn_clicked()
+
+        state = captured["state"]
+        assert state.kimi_worker_enabled is False
+        assert state.codex_worker_enabled is True
+        assert state.main_llm == "kimi"
+
+    def test_classify_runs_for_helper_items_too(self, widget):
+        """O router e avaliado para todo item do step path, inclusive helpers
+        (/clear, /model, /effort) — nenhum item escapa da classificacao."""
+        from unittest.mock import patch
+
+        from workflow_app.command_queue.provider_router import Provider
+
+        helpers = [
+            CommandSpec("/clear", ModelName.SONNET, position=1),
+            CommandSpec("/model opus", ModelName.OPUS, position=2),
+        ]
+        widget.load_pipeline(helpers)
+
+        with patch(
+            "workflow_app.command_queue.command_queue_widget.classify_provider",
+            return_value=Provider.CLAUDE,
+        ) as mock_classify:
+            widget._on_step_btn_clicked()
+            widget._on_step_btn_clicked()
+
+        assert mock_classify.call_count == 2, (
+            "classify_provider deve rodar uma vez por item do step path."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Item 006 — Dispatch Codex/T3 + condicoes de falha obrigatorias
+# (source.md secao 10 + casos 5, 6, 9, 10 da secao 14)
+# ---------------------------------------------------------------------------
+
+class TestSingleButtonDispatchFailureConditions:
+    """Botao unico (task 005) + dispatchers EXISTENTES (task 006).
+
+    Cobre as 4 condicoes de falha obrigatorias (source.md secao 10) e os casos
+    5, 6, 9, 10 da secao 14:
+      - C2/caso 5: worker desligado pos-render -> clique recalcula provider e
+        nao usa destino stale.
+      - caso 6: local-action nunca publica em worker (invariante 8).
+      - C1/caso 9: comando inexistente aborta com toast e nao publica texto
+        parcial (invariante 10).
+      - caso 10: Main LLM Kimi + worker Codex produz par emergente Kimi/T1 +
+        Codex/T3.
+      - C3: adaptacao Kimi/Codex vazia aborta.
+      - C4: terminal alvo Codex/T3 nao pronto aborta com feedback visivel.
+    """
+
+    @pytest.fixture()
+    def disp_widget(self, widget, tmp_path, monkeypatch):
+        """widget com command files resolviveis para os slugs usados aqui,
+        de modo que o builder do executor Codex e o gate de lookup tenham
+        comandos reais para encontrar."""
+        files: dict[str, object] = {}
+        # qa:prep / blog:init-strategy sao kimi-compatible (blue-arrow);
+        # commit:simple resolve mas NAO e kimi-compatible (green-arrow only);
+        # cmd:review e codex-compatible (Codex whitelist) mas NAO kimi-compatible.
+        for slug in ("qa:prep", "blog:init-strategy", "commit:simple", "cmd:review"):
+            f = tmp_path / ".claude" / "commands" / (slug.replace(":", "/") + ".md")
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("# cmd", encoding="utf-8")
+            files[slug] = f
+        agent_file = tmp_path / "executor.md"
+        agent_file.write_text("# executor", encoding="utf-8")
+        listener_file = tmp_path / "listeners.md"
+        listener_file.write_text("# listeners", encoding="utf-8")
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_claude_command_file",
+            classmethod(lambda cls, slug: files.get(slug)),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_codex_executor_agent_file",
+            classmethod(lambda cls: agent_file),
+        )
+        monkeypatch.setattr(
+            type(widget),
+            "_resolve_listener_rules_file",
+            classmethod(lambda cls: listener_file),
+        )
+        return widget
+
+    # ---- caso 5 — worker desligado pos-render --------------------------- #
+    def test_worker_off_after_render_recalculates_on_click(self, disp_widget):
+        """Caso 5: item renderizado com worker Kimi ON fica azul/T2; se o
+        worker e desligado ENTRE render e clique, o clique do botao unico
+        recalcula o provider AGORA e cai no destino correto (Claude/T1), nunca
+        no destino stale (Kimi/T2)."""
+        from workflow_app.command_queue.provider_router import Provider
+
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        # Renderizado azul/T2 enquanto o worker Kimi estava ativo.
+        assert item.effective_provider() is Provider.KIMI
+
+        # Worker desligado depois do render.
+        disp_widget._use_kimi_chk.setChecked(False)
+
+        t1: list[str] = []
+        blue: list[str] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append(prompt)
+
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            # Clique no botao unico recalcula o provider no momento do clique.
+            item._on_exec_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+
+        assert blue == [], "destino stale Kimi/T2 NAO pode ser usado apos worker off"
+        assert t1 == ["/qa:prep"], "clique recalculado cai em Claude/T1 (raw)"
+
+    # ---- caso 6 — local-action nunca publica em worker ------------------ #
+    def test_local_action_never_routes_to_worker(self, disp_widget):
+        """Caso 6 (invariante 8): um item local-action permanece Claude mesmo
+        com AMBOS os workers ativos — nunca azul/T2 nem roxo/T3."""
+        from workflow_app.command_queue.provider_router import Provider
+
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(True)
+        disp_widget._use_codex_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [
+                CommandSpec(
+                    "dcp-load-specific-flow",
+                    ModelName.SONNET,
+                    position=1,
+                    kind="local-action",
+                    local_action_id="dcp-load-specific-flow",
+                )
+            ]
+        )
+        item = disp_widget._items[0]
+        assert item.effective_provider() is Provider.CLAUDE
+
+    # ---- caso 9 — comando inexistente aborta com toast ------------------ #
+    def test_nonexistent_command_codex_aborts_with_toast(self, disp_widget):
+        """Caso 9 (invariante 10): um slash Claude que NAO existe em
+        .claude/commands/ aborta o dispatch Codex/T3 com toast e nao publica
+        texto parcial no terminal."""
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            result = disp_widget._dispatch_codex_command("/comando-que-nao-existe-xyz")
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert result is False
+        assert t3 == [], "comando inexistente nao pode publicar texto parcial em T3"
+        assert any("nao encontrado" in m for m, _ in toasts)
+
+    # ---- custom-prompt directive (/goal) sob Codex/Kimi ----------------- #
+    _GOAL_CMD = (
+        "/goal rode o prompt em ai-forge/custom-prompts/goal-review-prompt.md "
+        "para auditar a implantacao do module 8 usando "
+        ".claude/projects/foo.json."
+    )
+
+    @pytest.fixture()
+    def goal_widget(self, disp_widget, tmp_path, monkeypatch):
+        """disp_widget com `_resolve_custom_prompt_file` resolvendo `goal`."""
+        prompt_file = tmp_path / "ai-forge" / "custom-prompts" / "goal-review-prompt.md"
+        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+        prompt_file.write_text("# goal-review-prompt", encoding="utf-8")
+        monkeypatch.setattr(
+            type(disp_widget),
+            "_resolve_custom_prompt_file",
+            classmethod(
+                lambda cls, slug: prompt_file if slug == "goal" else None
+            ),
+        )
+        return disp_widget
+
+    def test_goal_directive_main_codex_t1_builds_custom_prompt(self, goal_widget):
+        """Main Codex: `/goal ...` NAO aborta como comando inexistente — vira
+        prompt de custom-prompt apontando ao arquivo em ai-forge/custom-prompts/
+        com o canal interactive (T1)."""
+        t1: list[str] = []
+        toasts: list[tuple[str, str]] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        try:
+            result = goal_widget._dispatch_codex_command(self._GOAL_CMD, to_t1=True)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+
+        assert result is True
+        assert len(t1) == 1
+        payload = t1[0]
+        assert "Custom prompt file:" in payload
+        assert "goal-review-prompt.md" in payload
+        assert "Expected listener channel: interactive" in payload
+        # nunca tenta resolver /goal como slash-command de .claude/commands/
+        assert "nao encontrado" not in " ".join(m for m, _ in toasts)
+
+    def test_goal_directive_worker_codex_t3_channel(self, goal_widget):
+        """Worker Codex (to_t1=False): `/goal ...` vai ao T3 com canal
+        workspace_xterm."""
+        t3: list[str] = []
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            result = goal_widget._dispatch_codex_command(self._GOAL_CMD)
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert result is True
+        assert len(t3) == 1
+        assert "Expected listener channel: workspace_xterm" in t3[0]
+        assert "Custom prompt file:" in t3[0]
+
+    def test_goal_directive_codex_missing_prompt_file_aborts(
+        self, disp_widget, monkeypatch
+    ):
+        """Codex: se o arquivo do custom-prompt nao existe, aborta com toast
+        que cita ai-forge/custom-prompts/ (Zero Silencio com a mensagem certa,
+        nao a de .claude/commands/)."""
+        toasts: list[tuple[str, str]] = []
+        t1: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            # Resolver no nivel da classe (o builder usa cls._resolve...): o
+            # arquivo do custom-prompt "some" (o resolver real acharia o
+            # goal-review-prompt.md do repo).
+            monkeypatch.setattr(
+                type(disp_widget),
+                "_resolve_custom_prompt_file",
+                classmethod(lambda cls, slug: None),
+            )
+            result = disp_widget._dispatch_codex_command(self._GOAL_CMD, to_t1=True)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+
+        assert result is False
+        assert t1 == []
+        assert any("ai-forge/custom-prompts/" in m for m, _ in toasts)
+
+    def test_goal_directive_main_kimi_routes_through_executor_skill(self, goal_widget):
+        """Main Kimi: `/goal ...` NAO aborta — roteia pelo executor universal
+        `/skill:slash-executor /goal ...` (a skill resolve o custom-prompt)."""
+        t1: list[str] = []
+        toasts: list[tuple[str, str]] = []
+        goal_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        try:
+            result = goal_widget._dispatch_kimi_main_command(self._GOAL_CMD)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+
+        assert result is True
+        assert len(t1) == 1
+        assert t1[0].startswith("/skill:slash-executor /goal ")
+        assert "nao encontrado" not in " ".join(m for m, _ in toasts)
+
+    def test_goal_directive_main_kimi_missing_prompt_file_aborts(
+        self, disp_widget, monkeypatch
+    ):
+        """Main Kimi: arquivo do custom-prompt ausente aborta com toast que cita
+        ai-forge/custom-prompts/."""
+        toasts: list[tuple[str, str]] = []
+        t1: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            monkeypatch.setattr(
+                type(disp_widget),
+                "_resolve_custom_prompt_file",
+                classmethod(lambda cls, slug: None),
+            )
+            disp_widget._main_kimi_radio.setChecked(True)
+            result = disp_widget._dispatch_kimi_main_command(self._GOAL_CMD)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+
+        assert result is False
+        assert t1 == []
+        assert any("ai-forge/custom-prompts/" in m for m, _ in toasts)
+
+    # ---- caso 10 — Main Kimi + worker Codex (par emergente) ------------- #
+    def test_main_kimi_worker_codex_emergent_pair(self, disp_widget):
+        """Caso 10: com Main LLM Kimi + worker Codex ativo, um comando
+        green-arrow-only (commit:simple) vai para Kimi/T1 e um comando
+        codex-compatible (cmd:review) vai para Codex/T3 — o par emergente
+        Kimi/T1 + Codex/T3 na mesma fila.
+
+        Modelo router/whitelist (decisao do operador 06-02): o item de T3 e um
+        comando da whitelist Codex (is_codex_compatible), nao um blue-arrow
+        Kimi."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            disp_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
+            disp_widget._use_codex_chk.setChecked(True)
+            disp_widget.load_pipeline([
+                CommandSpec("/commit:simple", ModelName.SONNET, position=1),
+                CommandSpec("/cmd:review", ModelName.SONNET, position=2),
+            ])
+            disp_widget._on_step_btn_clicked()  # commit:simple -> Kimi/T1
+            disp_widget._on_step_btn_clicked()  # cmd:review -> Codex/T3
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert len(t1) == 1, "green-arrow-only deve ir para Main Kimi/T1"
+        assert t1[0].startswith("/skill:"), "Main Kimi publica em formato skill"
+        assert len(t3) == 1, "codex command deve ir para worker Codex/T3"
+        assert "Command: /cmd:review" in t3[0]
+        assert "Expected listener channel: workspace_xterm" in t3[0]
+
+    # ---- C3 — adaptacao vazia aborta ------------------------------------ #
+    def test_blue_arrow_empty_adaptation_aborts(self, disp_widget):
+        """C3: payload Kimi vazio/whitespace aborta com toast e nao emite
+        kimi_blue_arrow_dispatched (defense-in-depth no dispatcher)."""
+        toasts: list[tuple[str, str]] = []
+        blue: list[str] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append(prompt)
+
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            disp_widget._dispatch_blue_arrow("   ")
+        finally:
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+
+        assert blue == []
+        assert any("texto vazio" in m for m, _ in toasts)
+
+    def test_codex_empty_transform_aborts(self, disp_widget):
+        """C3: texto vazio no dispatch Codex aborta com toast antes de qualquer
+        emit (invariante 10: nunca publica texto parcial)."""
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            result = disp_widget._dispatch_codex_command("")
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert result is False
+        assert t3 == []
+        assert any("texto vazio" in m for m, _ in toasts)
+
+    # ---- C4 — terminal alvo Codex/T3 nao pronto ------------------------- #
+    def test_codex_t3_not_ready_aborts_with_toast(self, disp_widget):
+        """C4: quando o T3 (terminal-codex-output) sinaliza indisponivel via
+        codex_availability_changed(False), o dispatch Worker Codex aborta com
+        toast visivel e nao publica no terminal inexistente."""
+        disp_widget._on_codex_availability_changed(False)
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            result = disp_widget._dispatch_codex_command("/blog:init-strategy")
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert result is False
+        assert t3 == [], "dispatch para T3 nao pronto nao pode publicar"
+        assert any("nao esta pronto" in m for m, _ in toasts)
+
+    def test_codex_t3_ready_again_allows_dispatch(self, disp_widget):
+        """C4 (recuperacao): apos codex_availability_changed(True) o dispatch
+        Worker Codex volta a publicar normalmente em T3 (Zero Estados
+        Indefinidos: o gate nao trava para sempre)."""
+        disp_widget._on_codex_availability_changed(False)
+        disp_widget._on_codex_availability_changed(True)
+        t3: list[str] = []
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            result = disp_widget._dispatch_codex_command("/blog:init-strategy")
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert result is True
+        assert len(t3) == 1
+        assert "Command: /blog:init-strategy" in t3[0]
+
+    def test_main_codex_t1_unaffected_by_t3_readiness(self, disp_widget):
+        """C4 escopo: o gate de prontidao do T3 NAO afeta o caminho Main Codex
+        (to_t1=True), que publica no T1 interactive — sempre presente."""
+        disp_widget._on_codex_availability_changed(False)
+        t1: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            result = disp_widget._dispatch_codex_command(
+                "/blog:init-strategy", to_t1=True
+            )
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+
+        assert result is True
+        assert len(t1) == 1
+        assert "Command: /blog:init-strategy" in t1[0]
+        assert "Expected listener channel: interactive" in t1[0]
+
+    # ---- F2 — botao unico nao marca enviado quando o dispatch aborta ----- #
+    def test_single_button_codex_abort_keeps_item_pending(self, disp_widget):
+        """F2 (review-executed task 006): clicar o botao unico roxo num item
+        Codex quando o T3 nao esta pronto deve ABORTAR o dispatch (toast) e
+        deixar o item PENDENTE — nunca ambar. Antes do fix, _on_codex_clicked
+        marcava enviado incondicionalmente, e o play-next pulava um item que
+        nada despachou (assimetria vs o gate do step path)."""
+        disp_widget._on_codex_availability_changed(False)
+        disp_widget.load_pipeline(
+            [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            # Emite o sinal do botao unico -> slot _on_single_button_codex_dispatch.
+            item._on_codex_clicked()
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert item._is_sent is False, (
+            "item deve permanecer pendente quando o dispatch Codex aborta"
+        )
+        assert t3 == [], "abort nao pode publicar texto parcial em T3"
+        assert any("nao esta pronto" in m for m, _ in toasts)
+
+    def test_single_button_codex_success_marks_item_sent(self, disp_widget):
+        """F2 (caminho feliz): com T3 pronto, o clique no botao unico publica em
+        T3 e SO ENTAO marca o item como enviado (gate via retorno do dispatcher,
+        espelhando o step path)."""
+        disp_widget._on_codex_availability_changed(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/blog:init-strategy", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        t3: list[str] = []
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            item._on_codex_clicked()
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert item._is_sent is True, "publicacao bem-sucedida deve marcar enviado"
+        assert len(t3) == 1
+        assert "Command: /blog:init-strategy" in t3[0]
+
+    # ---- F3 — /clear worker Codex respeita o gate de T3 pronto ----------- #
+    def test_clear_both_codex_t3_not_ready_skips_mirror(self, disp_widget):
+        """F3 (review-executed task 006): /clear com worker Codex ativo NAO
+        espelha para o T3 quando o terminal-codex-output nao esta pronto; emite
+        toast (Zero Silencio) em vez de publicar num xterm inexistente. O T1
+        ainda recebe /clear raw."""
+        disp_widget._on_codex_availability_changed(False)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_codex_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/clear", ModelName.SONNET, position=1)]
+        )
+        toasts: list[tuple[str, str]] = []
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            disp_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t3 == [], "/clear nao pode ir para um T3 nao pronto"
+        assert "/clear" in t1, "T1 (Claude) sempre recebe /clear raw"
+        assert any("nao esta pronto" in m for m, _ in toasts)
+
+    def test_clear_both_codex_t3_ready_mirrors(self, disp_widget):
+        """F3 (caminho feliz): com T3 pronto, /clear com worker Codex ativo
+        espelha para o workspace_xterm normalmente."""
+        disp_widget._on_codex_availability_changed(True)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_codex_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/clear", ModelName.SONNET, position=1)]
+        )
+        t3: list[str] = []
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            disp_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+
+        assert t3 == ["/clear"], "/clear deve espelhar para o T3 quando pronto"
+
+    # ===================================================================== #
+    # Divergencias D-1..D-7 (revisao /mcp:codex 2026-06-02) — paridade
+    # clique vs step vs autocast. Decisao: o provider_router e a fonte unica;
+    # cada caminho converge nele preservando Zero Silencio + invariante 2.
+    # ===================================================================== #
+
+    def test_d1_green_click_abort_under_main_codex_keeps_item_pending(self, disp_widget):
+        """D-1: clique CLAUDE/T1 sob Main Codex cujo `.md` nao existe -> o
+        dispatch Codex(to_t1=True) aborta com toast e o item PERMANECE pendente
+        (nao vira ambar). Antes, `_on_run_clicked` marcava enviado antes do
+        dispatch. Agora so o slot `_on_single_button_green_dispatch` marca, e so
+        em sucesso."""
+        toasts: list[tuple[str, str]] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        disp_widget._main_codex_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_codex_chk.setChecked(False)
+        disp_widget.load_pipeline(
+            [CommandSpec("/nao-existe-xyz", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        item._on_exec_clicked()  # provider CLAUDE (sem worker) -> green dispatch
+
+        assert item.is_pending_run() is True, (
+            "abort do dispatch nao pode marcar o item como enviado (D-1)"
+        )
+        assert any("nao encontrado" in m for m, _ in toasts)
+
+    def test_d1_green_click_success_marks_sent(self, disp_widget):
+        """D-1 companion: Main Claude raw (sempre publica) -> o item vira ambar
+        via o slot, preservando o comportamento de sucesso."""
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_codex_chk.setChecked(False)
+        disp_widget.load_pipeline(
+            [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        t1: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            item._on_exec_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+        assert t1 == ["/qa:prep"]
+        assert item.is_pending_run() is False, "dispatch ok deve marcar enviado"
+
+    def test_d2_clear_under_main_codex_goes_raw_and_mirrors(self, disp_widget):
+        """D-2: `/clear` no clique sob Main Codex vai RAW ao T1 (nao embrulhado
+        por _dispatch_codex_command) e espelha para o worker Kimi/T2."""
+        disp_widget._main_codex_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(True)
+        t1: list[str] = []
+        t2: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_terminal.connect(t2.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            ok = disp_widget._dispatch_green_arrow("/clear")
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(t2.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert ok is True
+        assert t1 == ["/clear"], "/clear raw ao T1 sob Main Codex (nao codex-wrapped)"
+        assert t2 == ["/clear"], "/clear espelhado ao worker Kimi/T2"
+        assert all("Command:" not in x for x in t1), "nao pode virar prompt executor Codex"
+
+    def test_d3_main_kimi_plus_worker_kimi_routes_to_t2(self, disp_widget):
+        """D-3 (Position A, invariante 2): Main Kimi + Worker Kimi -> a seta
+        worker NAO e escondida e um comando kimi-elegivel roteia ao T2 no step
+        (clique e step concordam), nao cai em T1 Kimi."""
+        disp_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
+        disp_widget._use_kimi_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        assert item.is_worker_arrow_visible() is True, (
+            "Main Kimi + Worker Kimi nao deve esconder a seta worker (D-3)"
+        )
+        t1: list[str] = []
+        blue: list[str] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append(prompt)
+
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            disp_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+        assert len(blue) == 1, "comando kimi-elegivel deve ir ao worker Kimi/T2"
+        assert t1 == [], "nao pode cair em T1 Kimi (divergencia D-3)"
+
+    def test_d3_main_kimi_alone_still_hides_worker_arrow(self, disp_widget):
+        """D-3 guard: Main Kimi SOZINHO (Worker Kimi off) continua escondendo a
+        seta worker — tudo vai a T1 Kimi (comportamento legado preservado)."""
+        disp_widget._main_kimi_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget.load_pipeline(
+            [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+        )
+        assert disp_widget._items[0].is_worker_arrow_visible() is False
+
+    def test_d4_codex_missing_md_in_step_aborts_not_fallthrough(self, disp_widget):
+        """D-4: comando codex-compativel sem `.md` (/python:py-review nao esta no
+        fixture) no step com Worker Codex -> `_dispatch_codex_command` aborta com
+        toast; NAO cai no Main-LLM axis colando raw em T1. step == clique."""
+        toasts: list[tuple[str, str]] = []
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_codex_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/python:py-review", ModelName.SONNET, position=1)]
+        )
+        try:
+            disp_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert t1 == [], "codex sem .md NAO pode cair raw em T1 (D-4)"
+        assert t3 == [], "nada publicado em T3 no abort"
+        assert any("nao encontrado" in m for m, _ in toasts)
+        assert disp_widget._items[0].is_pending_run() is True
+
+    def test_d5_local_action_click_runs_in_process_not_t1(self, disp_widget):
+        """D-5: clique no botao unico de um local-action roda a action in-process
+        (dispatch_local_action) e NUNCA cola o nome em T1 (invariante 8)."""
+        from workflow_app.command_queue.local_actions import (
+            register_local_action,
+            unregister_local_action,
+        )
+
+        called: list[str] = []
+        register_local_action("test-d5-action", lambda spec: called.append(spec.name) or True)
+        t1: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            disp_widget.load_pipeline([
+                CommandSpec(
+                    "test-d5-action", ModelName.SONNET, position=1,
+                    kind="local-action", local_action_id="test-d5-action",
+                )
+            ])
+            item = disp_widget._items[0]
+            item._on_exec_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            unregister_local_action("test-d5-action")
+        assert called == ["test-d5-action"], "local-action deve rodar in-process"
+        assert t1 == [], "local-action NUNCA cola em T1 (invariante 8)"
+        assert disp_widget._items[0].is_pending_run() is False
+
+    def test_d5_local_action_step_runs_in_process(self, disp_widget):
+        """D-5: o step manual sobre um local-action tambem roda in-process,
+        nao cola em T1."""
+        from workflow_app.command_queue.local_actions import (
+            register_local_action,
+            unregister_local_action,
+        )
+
+        called: list[str] = []
+        register_local_action("test-d5-step", lambda spec: called.append(spec.name) or True)
+        t1: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            disp_widget.load_pipeline([
+                CommandSpec(
+                    "test-d5-step", ModelName.SONNET, position=1,
+                    kind="local-action", local_action_id="test-d5-step",
+                )
+            ])
+            disp_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            unregister_local_action("test-d5-step")
+        assert called == ["test-d5-step"]
+        assert t1 == []
+
+    def test_d6_kimi_adaptation_failure_emits_toast(self, disp_widget, monkeypatch):
+        """D-6: quando adapt_to_kimi levanta ValueError, o item emite
+        `kimi_adaptation_failed` e o queue widget toasta (Zero Silencio); o item
+        NAO e marcado enviado."""
+        import workflow_app.command_queue.command_item_widget as ciw
+
+        def _boom(_cmd):
+            raise ValueError("malformed")
+
+        monkeypatch.setattr(ciw, "adapt_to_kimi", _boom)
+        toasts: list[tuple[str, str]] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        item._on_kimi_clicked()
+        assert any("Adaptacao Kimi falhou" in m for m, _ in toasts)
+        assert item.is_pending_run() is True
+
+    def test_d7_clear_mirror_t3_gated_when_unavailable(self, disp_widget):
+        """D-7: mirror de `/clear` ao T3 respeita `_codex_t3_available`; quando o
+        T3 nao esta pronto, emite toast e NAO publica no xterm inexistente."""
+        disp_widget._on_codex_availability_changed(False)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_codex_chk.setChecked(True)
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            disp_widget._mirror_clear_to_workspace_if_kimi_checked("/clear")
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert t3 == [], "T3 indisponivel: /clear nao espelhado (D-7)"
+        assert any("nao esta pronto" in m for m, _ in toasts)
+
+    def test_d2_clear_mirrors_to_worker_under_main_kimi(self, disp_widget):
+        """D-2/D-7 ressalva (close-out): `/clear` sob Main Kimi + Worker Kimi
+        deve espelhar ao T2 (paridade com o step `clear_both`). Antes, o
+        early-return de Main Kimi em `_mirror_clear_to_workspace_if_kimi_checked`
+        pulava o espelhamento e divergia do step."""
+        disp_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
+        disp_widget._use_kimi_chk.setChecked(True)
+        t1: list[str] = []
+        t2: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_terminal.connect(t2.append)
+        try:
+            ok = disp_widget._dispatch_green_arrow("/clear")
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_terminal.disconnect(t2.append)
+        assert ok is True
+        assert t1 == ["/clear"], "/clear raw ao T1 (Kimi main entende /clear)"
+        assert t2 == ["/clear"], "/clear espelhado ao Worker Kimi/T2 sob Main Kimi"
+
+    # ---- Regra capacidade exclusiva (image-gen) — enforce mecanico ---------- #
+    def test_image_gen_command_refused_in_step_without_codex_worker(self, disp_widget):
+        """So o Codex gera imagem: um comando de image-gen (/pictures-create)
+        roteado a provider != Codex (aqui Main Claude, sem Worker Codex) e
+        RECUSADO no step — nada vai ao T1, item permanece pendente, toast emitido."""
+        toasts: list[tuple[str, str]] = []
+        t1: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_codex_chk.setChecked(False)
+        disp_widget.load_pipeline(
+            [CommandSpec("/pictures-create", ModelName.SONNET, position=1)]
+        )
+        try:
+            disp_widget._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+        assert t1 == [], "image-gen NAO pode ir ao Claude/T1 (so o Codex gera imagem)"
+        assert disp_widget._items[0].is_pending_run() is True
+        assert any("Worker Codex" in m for m, _ in toasts)
+
+    def test_image_gen_green_dispatch_refused(self, disp_widget):
+        """O caminho verde (Claude/T1) recusa um comando de image-gen e retorna
+        False (Zero Silencio: toast em vez de colar no Claude)."""
+        toasts: list[tuple[str, str]] = []
+        t1: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        try:
+            ok = disp_widget._dispatch_green_arrow("/pictures-create")
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+        assert ok is False
+        assert t1 == []
+        assert any("Worker Codex" in m for m, _ in toasts)
+
+
+class TestRestoreSnapshotValidation:
+    """Loop 06-09 (brecha 3): snapshots auto-salvos pre-fix 06-08 carregam
+    comandos per-task sintetizados por contagem (tasks fantasma) ou placeholder
+    literal. `restore_queue_snapshot` valida entradas PENDENTES contra o disco
+    (mesma passada de flow_validation do load do SPECIFIC-FLOW.json); entradas
+    ja enviadas sao historico e restauram verbatim. Drops geram toast."""
+
+    @staticmethod
+    def _entry(name: str, *, status: str = "pendente", sent: bool = False) -> dict:
+        return {
+            "name": name,
+            "model": "Sonnet",
+            "interaction_type": "auto",
+            "position": 1,
+            "is_optional": False,
+            "config_path": "",
+            "phase": "B.3",
+            "status": status,
+            "sent": sent,
+        }
+
+    def test_pending_phantom_task_dropped_with_toast(self, widget, tmp_path):
+        module_dir = tmp_path / "modules" / "module-7-auth"
+        module_dir.mkdir(parents=True)
+        (module_dir / "TASK-1.md").write_text("# t1", encoding="utf-8")
+        real = f"/execute-task --module 7 --task {module_dir / 'TASK-1.md'}"
+        phantom = f"/execute-task --module 7 --task {module_dir / 'TASK-4.md'}"
+
+        toasts: list[tuple[str, str]] = []
+        handler = lambda m, k: toasts.append((m, k))  # noqa: E731
+        signal_bus.toast_requested.connect(handler)
+        try:
+            widget.restore_queue_snapshot(
+                [self._entry(real), self._entry(phantom)]
+            )
+        finally:
+            signal_bus.toast_requested.disconnect(handler)
+
+        names = [it.get_spec().name for it in widget._items]
+        assert names == [real], "fantasma pendente deve ser dropado no restore"
+        assert any("descartado" in m for m, _ in toasts), (
+            "drop deve ser visivel via toast (Zero Silencio)"
+        )
+
+    def test_sent_phantom_kept_as_history(self, widget, tmp_path):
+        phantom = f"/execute-task --module 7 --task {tmp_path / 'TASK-99.md'}"
+        widget.restore_queue_snapshot(
+            [self._entry(phantom, status="concluido", sent=True)]
+        )
+        names = [it.get_spec().name for it in widget._items]
+        assert names == [phantom], (
+            "entrada ja executada e registro historico — restaura verbatim"
+        )
+
+    def test_pending_literal_placeholder_dropped(self, widget):
+        widget.restore_queue_snapshot(
+            [
+                self._entry("/execute-task --module 7 --task TASK-{k}"),
+                self._entry("/qa:prep --module 7"),
+            ]
+        )
+        names = [it.get_spec().name for it in widget._items]
+        assert names == ["/qa:prep --module 7"], (
+            "placeholder literal pendente nao pode voltar para a fila"
+        )
+
+    def test_relative_ref_without_project_dir_fails_open(self, widget, monkeypatch):
+        from workflow_app.config.app_state import app_state
+
+        monkeypatch.setattr(app_state, "_config", None)
+        rel = "/execute-task --module 7 --task wbs/modules/m7/TASK-9.md"
+        widget.restore_queue_snapshot([self._entry(rel)])
+        names = [it.get_spec().name for it in widget._items]
+        assert names == [rel], (
+            "ref relativa sem contexto de resolucao e inverificavel — manter "
+            "(fail-open evita falso drop)"
+        )
+
+    def test_statuses_and_sent_flags_stay_aligned_after_drop(self, widget, tmp_path):
+        module_dir = tmp_path / "modules" / "module-2-core"
+        module_dir.mkdir(parents=True)
+        (module_dir / "TASK-1.md").write_text("# t1", encoding="utf-8")
+        done = f"/execute-task --module 2 --task {module_dir / 'TASK-1.md'}"
+        phantom = f"/execute-task --module 2 --task {module_dir / 'TASK-3.md'}"
+        pending = "/qa:prep --module 2"
+
+        widget.restore_queue_snapshot(
+            [
+                self._entry(done, status="concluido", sent=True),
+                self._entry(phantom),
+                self._entry(pending),
+            ]
+        )
+
+        from workflow_app.domain import CommandStatus
+
+        assert [it.get_spec().name for it in widget._items] == [done, pending]
+        assert widget._items[0]._status == CommandStatus.CONCLUIDO
+        assert widget._items[0].is_pending_run() is False, "sent preservado"
+        assert widget._items[1]._status == CommandStatus.PENDENTE
+        assert widget._items[1].is_pending_run() is True, (
+            "flags nao podem desalinhar apos drop no meio do snapshot"
+        )
+
+    def test_freetext_placeholder_survives_restore_task_only_mode(self, widget):
+        """Caso real (pipeline-position/site-barato.json): prompt /mcp:codex
+        pendente com `{slug}` em texto livre e legitimo — o LLM receptor
+        resolve contextualmente. So a assinatura `TASK-{k}` do stub derruba."""
+        freetext = (
+            "/mcp:codex revisar a gaplist gerada por "
+            "/intake-review:create-gaplist (output/wbs/{slug}/intake-review/)"
+        )
+        widget.restore_queue_snapshot([self._entry(freetext)])
+        names = [it.get_spec().name for it in widget._items]
+        assert names == [freetext], (
+            "placeholder de texto-livre nao pode ser dropado no restore "
+            "(falso positivo observado em snapshot real)"
+        )
+
+
+class TestEnqueueSpecificFlowValidationIntegration:
+    """Loop 06-09 (P2 do critic): exercita o _enqueue_specific_flow REAL contra
+    um SPECIFIC-FLOW.json fantasma em disco — glue load -> validate -> drop ->
+    toast -> enqueue dos validos (as outras suites mockam o helper)."""
+
+    def test_phantom_and_placeholder_dropped_valid_enqueued(self, widget, tmp_path):
+        module_dir = tmp_path / "wbs" / "modules" / "module-7-auth"
+        module_dir.mkdir(parents=True)
+        (module_dir / "TASK-1.md").write_text("# t1", encoding="utf-8")
+
+        valid = f"/execute-task --module 7 --task {module_dir / 'TASK-1.md'}"
+        phantom = f"/execute-task --module 7 --task {module_dir / 'TASK-4.md'}"
+        stub = "/execute-task --module 7 --task TASK-{k}"
+        flow_path = module_dir / "SPECIFIC-FLOW.json"
+        flow_path.write_text(json.dumps({
+            "project": "proj-x",
+            "commands": [
+                {"name": valid, "model": "sonnet", "effort": "medium",
+                 "phase": "B.3", "interaction": "auto"},
+                {"name": phantom, "model": "sonnet", "effort": "medium",
+                 "phase": "B.3", "interaction": "auto"},
+                {"name": stub, "model": "sonnet", "effort": "medium",
+                 "phase": "B.3", "interaction": "auto"},
+            ],
+        }), encoding="utf-8")
+
+        toasts: list[tuple[str, str]] = []
+        handler = lambda m, k: toasts.append((m, k))  # noqa: E731
+        signal_bus.toast_requested.connect(handler)
+        try:
+            ok = widget._enqueue_specific_flow(
+                flow_path,
+                cm_id="module-7-auth",
+                default_project_name="proj-x",
+                project_dir=tmp_path,
+            )
+        finally:
+            signal_bus.toast_requested.disconnect(handler)
+
+        assert ok is True
+        names = [it.get_spec().name for it in widget._items]
+        assert valid in names
+        assert phantom not in names, "TASK fantasma nao pode ser enfileirada"
+        assert stub not in names, "placeholder do stub nao pode ser enfileirado"
+        assert any("descartado" in m for m, _ in toasts), (
+            "drop deve ser visivel via toast (Zero Silencio)"
+        )
+
+    def test_all_phantom_flow_returns_false_with_empty_toast(self, widget, tmp_path):
+        module_dir = tmp_path / "wbs" / "modules" / "module-7-auth"
+        module_dir.mkdir(parents=True)
+        flow_path = module_dir / "SPECIFIC-FLOW.json"
+        flow_path.write_text(json.dumps({
+            "commands": [
+                {"name": f"/execute-task --module 7 --task {module_dir / 'TASK-9.md'}",
+                 "model": "sonnet", "effort": "medium",
+                 "phase": "B.3", "interaction": "auto"},
+            ],
+        }), encoding="utf-8")
+
+        toasts: list[tuple[str, str]] = []
+        handler = lambda m, k: toasts.append((m, k))  # noqa: E731
+        signal_bus.toast_requested.connect(handler)
+        try:
+            ok = widget._enqueue_specific_flow(
+                flow_path,
+                cm_id="module-7-auth",
+                default_project_name="proj-x",
+                project_dir=tmp_path,
+            )
+        finally:
+            signal_bus.toast_requested.disconnect(handler)
+
+        assert ok is False, "flow 100%% fantasma nao pode enfileirar nada"
+        assert widget._items == []

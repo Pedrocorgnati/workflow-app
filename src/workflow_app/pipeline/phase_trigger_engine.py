@@ -14,9 +14,14 @@ Design goals:
 from __future__ import annotations
 
 import json
+import logging
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from workflow_app.domain import CommandSpec, InteractionType, ModelName
+
+logger = logging.getLogger(__name__)
 
 
 class PhaseTriggerEngine:
@@ -36,7 +41,9 @@ class PhaseTriggerEngine:
                 root / "ai-forge" / "pipeline-contracts" / "PHASE-CONTRACTS.json"
             )
         self._contracts_path = Path(contracts_path)
+        self._benchmark_path = self._contracts_path.with_name("BENCHMARK-CONTRACTS.json")
         self._contracts = self._load_contracts()
+        self.last_pending_notice: dict[str, str] | None = None
 
     def _load_contracts(self) -> dict:
         if not self._contracts_path.exists():
@@ -55,6 +62,165 @@ class PhaseTriggerEngine:
             self._base_command(command_line),
             self._DEFAULT_MODEL,
         )
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        )
+
+    @staticmethod
+    def _pending_key(trigger_id: str, missing_artifact: str) -> str:
+        safe_trigger = re.sub(r"[^A-Za-z0-9_.:@-]+", "_", trigger_id)
+        safe_artifact = re.sub(r"[^A-Za-z0-9_.:@/-]+", "_", missing_artifact)
+        return f"{safe_trigger}|{safe_artifact}"
+
+    def _pipeline_research_dir(self, config_path: str) -> Path:
+        docs_root = self._docs_root_from_config(config_path)
+        if docs_root is not None:
+            return docs_root / "_pipeline-research"
+        return self._contracts_path.parent / "_pipeline-research"
+
+    def _docs_root_from_config(self, config_path: str) -> Path | None:
+        if not config_path:
+            return None
+        path = Path(config_path)
+        if not path.exists():
+            return None
+        try:
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        docs_root = None
+        if isinstance(cfg.get("basic_flow"), dict):
+            docs_root = cfg["basic_flow"].get("docs_root")
+        if not docs_root:
+            docs_root = cfg.get("docs_root")
+        if not isinstance(docs_root, str) or not docs_root.strip():
+            return None
+        return Path(docs_root)
+
+    def _pending_path(self, config_path: str) -> Path:
+        return self._pipeline_research_dir(config_path) / "_PENDING.md"
+
+    def _remove_pending_entry(
+        self,
+        *,
+        trigger_id: str,
+        missing_artifact: str,
+        config_path: str,
+    ) -> None:
+        pending_path = self._pending_path(config_path)
+        if not pending_path.exists():
+            return
+        key = self._pending_key(trigger_id, missing_artifact)
+        try:
+            content = pending_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        pattern = re.compile(
+            rf"\n?<!-- phase-trigger-pending: {re.escape(key)} -->.*?"
+            rf"<!-- /phase-trigger-pending: {re.escape(key)} -->\n?",
+            re.DOTALL,
+        )
+        updated = pattern.sub("\n", content).rstrip() + "\n"
+        if updated != content:
+            pending_path.write_text(updated, encoding="utf-8")
+
+    def _write_pending_entry(
+        self,
+        *,
+        trigger_id: str,
+        missing_artifact: str,
+        config_path: str,
+    ) -> bool:
+        pending_path = self._pending_path(config_path)
+        key = self._pending_key(trigger_id, missing_artifact)
+        timestamp = self._utc_now()
+        notice = {
+            "trigger_id": trigger_id,
+            "missing_artifact": missing_artifact,
+            "config_path": config_path,
+            "pending_path": str(pending_path),
+        }
+        action = (
+            "Restaurar ou validar o artefato de bootstrap antes de permitir "
+            "injecao automatica de phase_triggers."
+        )
+        entry = (
+            f"<!-- phase-trigger-pending: {key} -->\n"
+            f"## Pending phase trigger - {trigger_id}\n\n"
+            f"- trigger_id: `{trigger_id}`\n"
+            f"- missing_artifact: `{missing_artifact}`\n"
+            f"- config_path: `{config_path}`\n"
+            f"- timestamp_utc: `{timestamp}`\n"
+            f"- acao_recomendada: {action}\n"
+            f"<!-- /phase-trigger-pending: {key} -->\n"
+        )
+        try:
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            if pending_path.exists():
+                content = pending_path.read_text(encoding="utf-8")
+            else:
+                content = "# Pipeline Research Pending\n\n"
+            if f"<!-- phase-trigger-pending: {key} -->" not in content:
+                if not content.endswith("\n"):
+                    content += "\n"
+                pending_path.write_text(
+                    content.rstrip() + "\n\n" + entry,
+                    encoding="utf-8",
+                )
+        except OSError as exc:
+            notice["pending_error"] = str(exc)
+            self.last_pending_notice = notice
+            logger.warning(
+                "PhaseTriggerEngine: pending write failed; suppressing injection "
+                "trigger_id=%s missing_artifact=%s config_path=%s pending_path=%s "
+                "error=%s",
+                trigger_id,
+                missing_artifact,
+                config_path,
+                pending_path,
+                exc,
+            )
+            return False
+
+        self.last_pending_notice = notice
+        return True
+
+    def _bootstrap_guard_ready(self, *, trigger_id: str, config_path: str) -> bool:
+        missing_artifact = str(self._benchmark_path)
+        if self._benchmark_path.exists():
+            self._remove_pending_entry(
+                trigger_id=trigger_id,
+                missing_artifact=missing_artifact,
+                config_path=config_path,
+            )
+            return True
+
+        wrote_pending = self._write_pending_entry(
+            trigger_id=trigger_id,
+            missing_artifact=missing_artifact,
+            config_path=config_path,
+        )
+        logger.warning(
+            "PhaseTriggerEngine: bootstrap guard absent; suppressing injection "
+            "trigger_id=%s missing_artifact=%s config_path=%s pending_path=%s",
+            trigger_id,
+            missing_artifact,
+            config_path,
+            self.last_pending_notice["pending_path"] if self.last_pending_notice else "",
+        )
+        if not wrote_pending:
+            logger.warning(
+                "PhaseTriggerEngine: bootstrap guard pending marker unavailable; "
+                "injection remains suppressed trigger_id=%s missing_artifact=%s "
+                "config_path=%s",
+                trigger_id,
+                missing_artifact,
+                config_path,
+            )
+        return False
 
     def check_and_expand(
         self,
@@ -84,6 +250,9 @@ class PhaseTriggerEngine:
                 continue
             if cfg.get("on_command_success") != completed_command:
                 continue
+
+            if not self._bootstrap_guard_ready(trigger_id=trigger_id, config_path=config_path):
+                return trigger_id, []
 
             actions = cfg.get("auto_actions", [])
             if not isinstance(actions, list):
@@ -159,6 +328,19 @@ class PhaseTriggerEngine:
 
             cfg = trigger_by_checkpoint.get(spec.name)
             if not cfg:
+                continue
+
+            trigger_id = ""
+            for candidate_id, candidate_cfg in phase_triggers.items():
+                if candidate_cfg is cfg:
+                    trigger_id = str(candidate_id)
+                    break
+            if not trigger_id:
+                trigger_id = spec.name
+            if not self._bootstrap_guard_ready(
+                trigger_id=trigger_id,
+                config_path=spec.config_path,
+            ):
                 continue
 
             actions = cfg.get("auto_actions", [])

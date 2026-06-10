@@ -55,11 +55,11 @@ def _materialize_9_seeds(repo_root: Path) -> Path:
         ("02", "pesquisar"),
         ("03", "controversial"),
         ("04", "hardening"),
-        ("05", "criar-task"),
-        ("06", "revisar-task"),
-        ("07", "executar-task"),
-        ("08", "revisar-execucao"),
-        ("09", "revisar-qa"),
+        ("05", "loop-prepare"),
+        ("06", "criar-task"),
+        ("07", "revisar-task"),
+        ("08", "executar-task"),
+        ("09", "revisar-execucao"),
     ]
     for prefix, slug in slugs:
         (agents_dir / f"{slug}-rules.md").write_text(
@@ -108,11 +108,11 @@ def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
         "pesquisar",
         "controversial",
         "hardening",
+        "loop-prepare",
         "criar-task",
         "revisar-task",
         "executar-task",
         "revisar-execucao",
-        "revisar-qa",
     ]
     for s in seeds:
         # Campos canonicos do widget.
@@ -149,8 +149,8 @@ def test_seed_loader_ignores_date_prefixed_output_siblings(tmp_path):
     seeds = fake._load_brainstorm_seeds()
     assert len(seeds) == 9
     assert [s["slug"] for s in seeds] == [
-        "criar-md", "pesquisar", "controversial", "hardening", "criar-task",
-        "revisar-task", "executar-task", "revisar-execucao", "revisar-qa",
+        "criar-md", "pesquisar", "controversial", "hardening", "loop-prepare",
+        "criar-task", "revisar-task", "executar-task", "revisar-execucao",
     ]
 
 
@@ -159,7 +159,7 @@ def test_seed_loader_still_fails_when_a_real_seed_is_missing(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     seeds_dir = _materialize_9_seeds(repo_root)
-    (seeds_dir / "09-revisar-qa.md").unlink()
+    (seeds_dir / "09-revisar-execucao.md").unlink()
     fake = _FakeMainWindow(repo_root)
     with pytest.raises(_BrainstormSeedError, match="esperado exatamente 9"):
         fake._load_brainstorm_seeds()

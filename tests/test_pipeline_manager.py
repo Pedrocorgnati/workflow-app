@@ -68,13 +68,11 @@ def test_set_queue_resets_index(manager):
     assert manager._current_index == 0
 
 
-def test_set_queue_compile_time_injection_for_prd_checkpoint(manager):
+def test_set_queue_respects_deprecated_phase_triggers(manager):
     specs = [_spec("/review-prd-flow"), _spec("/next")]
     manager.set_queue(specs)
     names = [s.name for s in manager._queue]
-    assert "/pipeline:run-scorecard --phase f2" in names
-    assert "/pipeline:collect-lessons --phase f2" in names
-    assert "/cmd:backlog-from-lessons --phase f2" in names
+    assert names == ["/review-prd-flow", "/next"]
 
 
 # ── start ─────────────────────────────────────────────────────────────────────
@@ -233,8 +231,8 @@ def test_interactive_advance_wrong_state_is_noop(manager, mock_bus):
     assert manager._current_index == 0
 
 
-def test_phase_trigger_engine_appends_actions_once(manager):
-    """Runtime trigger should not duplicate actions already injected at compile time."""
+def test_phase_trigger_engine_deprecated_triggers_do_not_append(manager):
+    """Runtime phase_triggers depreciados nao injetam comandos avulsos."""
     base = _spec("/review-prd-flow")
     base.config_path = ".claude/projects/demo.json"
     manager.set_queue([base, _spec("/next")])
@@ -245,13 +243,46 @@ def test_phase_trigger_engine_appends_actions_once(manager):
 
     assert first_len == original_len
     names = [c.name for c in manager._queue]
-    assert "/pipeline:run-scorecard --phase f2" in names
-    assert "/pipeline:collect-lessons --phase f2" in names
-    assert "/cmd:backlog-from-lessons --phase f2" in names
+    assert names == ["/review-prd-flow", "/next"]
 
-    # Second call with same trigger must not duplicate in same execution.
+    # Second call with same trigger must keep the queue unchanged.
     manager._try_expand_phase_triggers(base)
     assert len(manager._queue) == first_len
+
+
+def test_phase_trigger_pending_notice_emits_warning_toast(manager, mock_bus):
+    manager._emit_phase_trigger_pending_toast(
+        {
+            "trigger_id": "f2_post_review",
+            "missing_artifact": "BENCHMARK-CONTRACTS.json",
+            "config_path": ".claude/projects/demo.json",
+            "pending_path": "_pipeline-research/_PENDING.md",
+        }
+    )
+
+    mock_bus.toast_requested.emit.assert_called_once()
+    message, level = mock_bus.toast_requested.emit.call_args.args
+    assert "injecao suprimida" in message
+    assert "f2_post_review" in message
+    assert "BENCHMARK-CONTRACTS.json" in message
+    assert level == "warning"
+
+
+def test_phase_trigger_pending_toast_includes_write_error(manager, mock_bus):
+    manager._emit_phase_trigger_pending_toast(
+        {
+            "trigger_id": "f2_post_review",
+            "missing_artifact": "BENCHMARK-CONTRACTS.json",
+            "config_path": ".claude/projects/demo.json",
+            "pending_path": "_pipeline-research/_PENDING.md",
+            "pending_error": "permission denied",
+        }
+    )
+
+    message, level = mock_bus.toast_requested.emit.call_args.args
+    assert "falha ao registrar pendencia" in message
+    assert "permission denied" in message
+    assert level == "warning"
 
 
 # ── check_resume ──────────────────────────────────────────────────────────────

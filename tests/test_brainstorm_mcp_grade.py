@@ -71,9 +71,19 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "05-criar-task.md": {
+    "05-loop-prepare.md": {
+        "slug": "loop-prepare",
+        "title": "Seed - Botao 5 - Loop prepare",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "loop-prepare",
+        "agent_path": "agents/loop-prepare-rules.md",
+        "action": "Loop prepare",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
+    "06-criar-task.md": {
         "slug": "criar-task",
-        "title": "Seed - Botao 5 - Criar task",
+        "title": "Seed - Botao 6 - Criar task",
         "button_type": "type-selector-radio-input",
         "agent_name": "criar-task",
         "agent_path": "agents/criar-task-rules.md",
@@ -81,9 +91,9 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "06-revisar-task.md": {
+    "07-revisar-task.md": {
         "slug": "revisar-task",
-        "title": "Seed - Botao 6 - Revisar task",
+        "title": "Seed - Botao 7 - Revisar task",
         "button_type": "Claude",
         "agent_name": "revisar-task",
         "agent_path": "agents/revisar-task-rules.md",
@@ -91,9 +101,9 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "terminal-interactive-output",
     },
-    "07-executar-task.md": {
+    "08-executar-task.md": {
         "slug": "executar-task",
-        "title": "Seed - Botao 7 - Executar task",
+        "title": "Seed - Botao 8 - Executar task",
         "button_type": "type-selector-radio-input",
         "agent_name": "executar-task",
         "agent_path": "agents/executar-task-rules.md",
@@ -101,25 +111,15 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "08-revisar-execucao.md": {
+    "09-revisar-execucao.md": {
         "slug": "revisar-execucao",
-        "title": "Seed - Botao 8 - Revisar execucao",
+        "title": "Seed - Botao 9 - Revisar execucao",
         "button_type": "Claude",
         "agent_name": "revisar-execucao",
         "agent_path": "agents/revisar-execucao-rules.md",
         "action": "Revisar execucao",
         "target_path": "true",
         "target_terminal": "terminal-interactive-output",
-    },
-    "09-revisar-qa.md": {
-        "slug": "revisar-qa",
-        "title": "Seed - Botao 9 - Revisar QA",
-        "button_type": "type-selector-radio-input",
-        "agent_name": "revisar-qa",
-        "agent_path": "agents/revisar-qa-rules.md",
-        "action": "Revisar QA",
-        "target_path": "true",
-        "target_terminal": "depende-do-radio",
     },
 }
 
@@ -197,11 +197,11 @@ def test_load_seeds_happy_path_9_valid(tmp_path):
         "pesquisar",
         "controversial",
         "hardening",
+        "loop-prepare",
         "criar-task",
         "revisar-task",
         "executar-task",
         "revisar-execucao",
-        "revisar-qa",
     ]
     assert [s["slug"] for s in seeds] == expected_order
     # Cada seed tem campos canonicos
@@ -342,8 +342,8 @@ def test_compat_layer_target_path_boolean(tmp_path):
 def test_glob_rejects_renamed_seed(tmp_path):
     repo_root = _write_seeds(tmp_path)
     # Renomeia 09 -> 10 (fora do range 0[1-9])
-    old = repo_root / "blacksmith" / "brainstorm-mcp" / "09-revisar-qa.md"
-    new = old.parent / "10-revisar-qa.md"
+    old = repo_root / "blacksmith" / "brainstorm-mcp" / "09-revisar-execucao.md"
+    new = old.parent / "10-revisar-execucao.md"
     old.rename(new)
     fake = _FakeMainWindow(repo_root)
     # 09 renomeado para 10 (fora do range 0[1-9]) -> so 8 seeds canonicos.
@@ -392,7 +392,7 @@ def test_widget_accepts_ptbr_actions(qtbot):
         "Revisar tasks",
         "Executar",
         "Revisar execucao",
-        "Revisar QA",
+        "Loop prepare",
     ):
         btn = MCPPromptButton(
             label=action,

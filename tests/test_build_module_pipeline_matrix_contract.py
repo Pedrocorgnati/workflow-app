@@ -496,3 +496,80 @@ def test_build_module_pipeline_corrupted_matrix_exits_nonzero_and_preserves_deli
         "delivery.json must be byte-equal after corrupted-matrix run; "
         "Guard 1 fired AFTER an unsafe mutation"
     )
+
+
+# --- Loop 06-09: cross-check loop_multiplier vs TASK-*.md reais ------------- #
+
+_CROSSCHECK_SHIM = r"""
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, sys.argv[1])  # .claude/commands/_lib
+import build_module_pipeline as bmp
+
+cm_id = sys.argv[2]
+wbs_root = Path(sys.argv[3])
+baked = int(sys.argv[4])
+
+entry = SimpleNamespace(
+    filter=[1, 1],
+    loop_multiplier={"A-creation": baked, "B3-execute": baked},
+)
+matrix = SimpleNamespace(command_index=[None, None], modules={cm_id: entry})
+bmp._validate_matrix_module(
+    matrix, cm_id, {"module_type": "feature"}, wbs_root=wbs_root
+)
+print("validate-ok")
+"""
+
+
+def _run_crosscheck_shim(wbs_root: Path, cm_id: str, baked: int) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", _CROSSCHECK_SHIM,
+         str(BUILD_PIPELINE_LIB), cm_id, str(wbs_root), str(baked)],
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def _make_module_dir(wbs_root: Path, cm_id: str) -> Path:
+    """3 tasks executaveis (TASK-0/1/2) + 2 companions que NAO contam."""
+    d = wbs_root / "modules" / cm_id
+    d.mkdir(parents=True)
+    for name in ("TASK-0.md", "TASK-1.md", "TASK-2.md",
+                 "TASK-1-REVIEW.md", "TASK-0-CHECKLIST.md"):
+        (d / name).write_text("# t", encoding="utf-8")
+    return d
+
+
+def test_multiplier_drift_emits_warn_with_real_count(tmp_path):
+    """baked=5 vs 3 executaveis reais (companions excluidos) -> WARN por fase
+    com a contagem canonica e remediacao /dcp:matrix-mark-loops; advisory
+    (exit 0, validacao passa)."""
+    _make_module_dir(tmp_path, "module-9-feature")
+    proc = _run_crosscheck_shim(tmp_path, "module-9-feature", baked=5)
+    assert proc.returncode == 0, proc.stderr
+    assert "validate-ok" in proc.stdout
+    warns = [l for l in proc.stderr.splitlines() if "difere de 3 TASK-*.md" in l]
+    assert len(warns) == 2, f"esperava WARN p/ A-creation e B3-execute: {proc.stderr}"
+    assert "/dcp:matrix-mark-loops" in proc.stderr
+
+
+def test_multiplier_parity_emits_no_warn(tmp_path):
+    """baked == contagem real -> silencio (sem ruido no caminho saudavel)."""
+    _make_module_dir(tmp_path, "module-9-feature")
+    proc = _run_crosscheck_shim(tmp_path, "module-9-feature", baked=3)
+    assert proc.returncode == 0, proc.stderr
+    assert "difere de" not in proc.stderr
+    assert "pulado" not in proc.stderr
+
+
+def test_module_dir_missing_emits_skip_warn(tmp_path):
+    """wbs_root dado mas diretorio do modulo ausente -> WARN explicito de
+    cross-check pulado (Zero Silencio; simetrico ao fail-loud do consumer),
+    sem abortar (advisory)."""
+    (tmp_path / "modules").mkdir()
+    proc = _run_crosscheck_shim(tmp_path, "module-9-feature", baked=3)
+    assert proc.returncode == 0, proc.stderr
+    assert "cross-check de loop_multiplier pulado" in proc.stderr
+    assert "module-9-feature" in proc.stderr

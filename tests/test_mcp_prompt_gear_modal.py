@@ -26,7 +26,7 @@ from workflow_app.widgets.brainstorm_mcp_config_dialog import (
 
 
 _SEED_TEMPLATE = """---
-schema_version: "1.0"
+schema_version: 1
 slug: {slug}
 label: {label}
 button_type: {button_type}
@@ -57,11 +57,11 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
         ("02-pesquisar", "pesquisar", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("03-controversial", "controversial", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("04-hardening", "hardening", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("05-criar-task", "criar-task", "Claude", "Criar tasks", True, "terminal-interactive-output"),
-        ("06-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
-        ("07-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
-        ("08-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
-        ("09-revisar-qa", "revisar-qa", "Claude", "Revisar QA", True, "terminal-interactive-output"),
+        ("05-loop-prepare", "loop-prepare", "Claude", "Loop prepare", True, "terminal-interactive-output"),
+        ("06-criar-task", "criar-task", "Claude", "Criar tasks", True, "terminal-interactive-output"),
+        ("07-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
+        ("08-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
+        ("09-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
     ]
     for fname, slug, btype, action, tp, tt in specs:
         agent_path = f"agents/{slug}-rules.md"
@@ -116,7 +116,7 @@ def test_gear_modal_persists_seed_edits_to_disk(qtbot, tmp_path):
         "button_type": "Kimi",
         "agent_name": "novo agent",
         "agent_path": "agents/criar-md-rules.md",
-        "action": "Revisar QA",
+        "action": "Loop prepare",
         "target_path": True,
         "target_terminal": "terminal-workspace-output",
         "schema_version": original_meta.get("schema_version", "1.0"),
@@ -126,7 +126,7 @@ def test_gear_modal_persists_seed_edits_to_disk(qtbot, tmp_path):
     meta_after, body_after = load_seed(seed_path)
     assert meta_after["label"] == "novo-label"
     assert meta_after["button_type"] == "Kimi"
-    assert meta_after["action"] == "Revisar QA"
+    assert meta_after["action"] == "Loop prepare"
     assert meta_after["target_path"] is True
     assert "novo prompt body" in body_after
 

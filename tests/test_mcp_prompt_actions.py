@@ -40,7 +40,7 @@ _EXPECTED_KEYS = frozenset(
         "Executar",
         "Revisar execucao",
         "Criar arquivo",
-        "Revisar QA",
+        "Loop prepare",
     }
 )
 
@@ -93,6 +93,27 @@ def test_hardened_template_renders_correctly(tmp_path):
     assert "{action}" not in out
 
 
+def test_loop_prepare_action_targets_queue_loop(tmp_path):
+    """Loop prepare explica o handoff para queue-btn-loop sem executar /loop."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    md_path = "blacksmith/brainstorm-mcp/06-03-plano.md"
+    seed_meta = {
+        "agent_name": "Preparador",
+        "agent_path": "ai-forge/MCP/agents/loop-preparer-rules.md",
+        "action": "Loop prepare",
+        "target_path": True,
+    }
+    out = build_prompt(seed_meta, md_path, repo_root)
+    assert 'data-testid="queue-btn-loop"' in out
+    assert "ai-forge/rules/loop-rules.md" in out
+    assert "/loop --task" in out
+    assert "/loop --cmd" in out
+    assert "/loop --both" in out
+    assert "sem executar /loop" in out
+    assert "_LOOP-CONFIG.json" in out
+
+
 def test_build_prompt_raises_for_invalid_action(tmp_path):
     """Action fora de ACTION_LITERALS levanta ValueError byte-a-byte."""
     repo_root = tmp_path / "repo"
@@ -126,7 +147,7 @@ def test_build_prompt_appends_second_phase(tmp_path):
         "target_path": False,
         "agent2_name": "Phase2Agent",
         "agent2_path": "agents/phase2.md",
-        "action2": "Revisar QA",
+        "action2": "Loop prepare",
     }
     out = build_prompt(seed_meta, None, repo_root)
     # Primeira fase (TEMPLATE_SHORT).
@@ -134,7 +155,7 @@ def test_build_prompt_appends_second_phase(tmp_path):
     assert ACTION_LITERALS["Criar arquivo"] in out
     # Segunda fase (anexada apos `---`).
     assert "Phase2Agent" in out
-    assert ACTION_LITERALS["Revisar QA"] in out
+    assert ACTION_LITERALS["Loop prepare"] in out
     assert out.count("---") >= 1
     # Sanity: ambos templates importados (smoke do contrato do modulo).
     assert isinstance(TEMPLATE_HARDENED, str) and TEMPLATE_HARDENED

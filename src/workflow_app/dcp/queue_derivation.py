@@ -18,8 +18,12 @@ Algorithm summary (steps 1-17 of source.md):
         over `{wbs_root}/modules/{cm_id}`) — one command per real `TASK-*.md`,
         numeric-ordered, companion artifacts excluded. `loop_multiplier[phase]`
         is now a cross-check (WARN on drift, Zero Silencio) plus a fallback to
-        synthesizing `TASK-{k}.md` ONLY when `wbs_root` is None or the module
-        dir is missing (legacy/programmatic callers + tests).
+        synthesizing `TASK-{k}.md` ONLY when `wbs_root` is None (legacy/
+        programmatic callers + tests). When `wbs_root` IS provided but the
+        module dir does not resolve, derivation raises ValueError (fail-loud,
+        loop 06-09): synthesizing from a possibly-stale multiplier there
+        fabricates phantom tasks ("task N nao existe") and masks the real
+        problem (cm_id <-> dirname drift / wrong wbs_root resolution).
     6.  Append fold_in_rules:
             H-commit          ALWAYS
             I-human-signoff   ALWAYS
@@ -252,12 +256,26 @@ def _sort_module_key(module_id: str) -> tuple:
 
 
 def _next_non_done_module_id(delivery: Any) -> Optional[str]:
-    """First non-done module key sorted by module number, or None."""
-    candidates = [
-        mid for mid, mod in delivery.modules.items()
-        if getattr(mod, "state", None) != "done"
-    ]
-    return sorted(candidates, key=_sort_module_key)[0] if candidates else None
+    """Next module to work on when current_module is done/stranded, ordered by
+    module number. DEPENDENCY-GATED (mirrors dcp_closer._next_eligible_module /
+    the specific_flow_handler twin): a `pending` module whose in-set deps are
+    not all `done` is skipped (cannot start yet); a mid-flight (non-pending,
+    non-done) module is returned so a stranded pointer resumes it. External deps
+    (not in the module set) are treated as satisfied, matching topo.py.
+    """
+    states = {
+        mid: getattr(mod, "state", None) for mid, mod in delivery.modules.items()
+    }
+    for mid in sorted(delivery.modules.keys(), key=_sort_module_key):
+        state = states[mid]
+        if state == "done":
+            continue
+        if state == "pending":
+            deps = getattr(delivery.modules[mid], "dependencies", None) or []
+            if not all(states.get(d) == "done" for d in deps if d in states):
+                continue
+        return mid
+    return None
 
 
 def _last_module_id(matrix: DcpCommandMatrix) -> Optional[str]:
@@ -513,30 +531,47 @@ def derive_queue_from_matrix(
     # Real task identity comes from the FILESYSTEM (single source of truth —
     # delivery.json does not enumerate tasks). Synthesizing `TASK-{k}.md` from
     # loop_multiplier breaks on TASK-0 starts, gaps, decimal indices, and
-    # companion-file over-count (loop 06-08). When a wbs_root is available and
-    # the module dir exists, enumerate the real executable specs and iterate
-    # those; loop_multiplier degrades to a drift cross-check. The synthetic
-    # fallback fires ONLY when wbs_root is None or the dir is missing.
+    # companion-file over-count (loop 06-08). When a wbs_root is available,
+    # enumerate the real executable specs and iterate those; loop_multiplier
+    # degrades to a drift cross-check. The synthetic fallback fires ONLY when
+    # wbs_root is None (legacy callers/tests).
     real_tasks: Optional[list[str]] = None
     if wbs_root is not None:
         module_dir = Path(wbs_root) / "modules" / cm_id
-        if module_dir.is_dir():
-            real_tasks = enumerate_module_tasks(module_dir)
-            # Cross-check the baked loop_multiplier against reality (Zero
-            # Silencio): a mismatch means the matrix is stale — emit a WARN but
-            # trust the real files (covering every task is the safe failure
-            # mode; missing a task is the dangerous one). No truthiness guard on
-            # `_baked`: a baked 0 with real tasks present (0 -> N) IS drift worth
-            # surfacing; foundations-pure (0 == 0) produces no warning naturally.
-            for _ph in ("A-creation", "B3-execute"):
-                _baked = int(multiplier.get(_ph, 0) or 0)
-                if _baked != len(real_tasks):
-                    logger.warning(
-                        "[dcp-queue] modulo %s: loop_multiplier[%s]=%d difere de "
-                        "%d TASK-*.md reais; usando os arquivos reais. Rode "
-                        "/dcp:matrix-mark-loops para re-sincronizar a matrix.",
-                        cm_id, _ph, _baked, len(real_tasks),
-                    )
+        if not module_dir.is_dir():
+            # Fail-loud (Zero Silencio + Zero Assumido, loop 06-09): wbs_root
+            # foi fornecido mas o diretorio do modulo nao resolve. Sintetizar
+            # `TASK-{k}.md` a partir do loop_multiplier (possivelmente stale)
+            # aqui FABRICA tasks fantasma ("task N nao existe nos modules") e
+            # esconde o problema real — drift cm_id <-> nome do diretorio,
+            # wbs_root resolvido errado, ou estrutura do modulo ausente. O
+            # widget captura esta excecao, emite toast e cai para o caminho
+            # transicional SPECIFIC-FLOW.json (validado contra o disco no
+            # load), entao a degradacao e visivel e sem fantasmas.
+            raise ValueError(
+                f"diretorio do modulo nao encontrado: {module_dir} "
+                f"(wbs_root={wbs_root}, cm_id={cm_id!r}). Sem os arquivos "
+                "TASK-*.md reais nao da para expandir comandos per_task sem "
+                "fabricar tasks fantasma. Verifique o wbs_root do projeto e o "
+                "nome do diretorio do modulo; regenere via "
+                "[DCP: Build Module Pipeline]."
+            )
+        real_tasks = enumerate_module_tasks(module_dir)
+        # Cross-check the baked loop_multiplier against reality (Zero
+        # Silencio): a mismatch means the matrix is stale — emit a WARN but
+        # trust the real files (covering every task is the safe failure
+        # mode; missing a task is the dangerous one). No truthiness guard on
+        # `_baked`: a baked 0 with real tasks present (0 -> N) IS drift worth
+        # surfacing; foundations-pure (0 == 0) produces no warning naturally.
+        for _ph in ("A-creation", "B3-execute"):
+            _baked = int(multiplier.get(_ph, 0) or 0)
+            if _baked != len(real_tasks):
+                logger.warning(
+                    "[dcp-queue] modulo %s: loop_multiplier[%s]=%d difere de "
+                    "%d TASK-*.md reais; usando os arquivos reais. Rode "
+                    "/dcp:matrix-mark-loops para re-sincronizar a matrix.",
+                    cm_id, _ph, _baked, len(real_tasks),
+                )
 
     def _per_task_iter(phase: str) -> list[str]:
         """Tasks to expand a per_task entry against, for `phase`.
@@ -544,7 +579,7 @@ def derive_queue_from_matrix(
         Real executable filenames when available (may be empty -> zero per-task
         commands, the correct result for a foundations-pure / companion-only
         module); otherwise the legacy `TASK-{k}.md` count-synthesis driven by
-        loop_multiplier (wbs_root None / dir missing only).
+        loop_multiplier (wbs_root None only — dir missing now raises upstream).
         """
         if real_tasks is not None:
             return list(real_tasks)

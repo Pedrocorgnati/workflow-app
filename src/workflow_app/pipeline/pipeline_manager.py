@@ -109,7 +109,9 @@ class PipelineManager:
         try:
             from workflow_app.pipeline.phase_trigger_engine import PhaseTriggerEngine
 
-            queue = PhaseTriggerEngine().inject_phase_actions_into_queue(queue)
+            engine = PhaseTriggerEngine()
+            queue = engine.inject_phase_actions_into_queue(queue)
+            self._emit_phase_trigger_pending_toast(engine.last_pending_notice)
         except Exception:  # noqa: BLE001
             logger.debug("PhaseTriggerEngine compile-time injection skipped", exc_info=True)
         self._queue = queue
@@ -632,6 +634,7 @@ class PipelineManager:
                 fired_triggers=self._fired_phase_triggers,
                 config_path=spec.config_path or "",
             )
+            self._emit_phase_trigger_pending_toast(engine.last_pending_notice)
             if trigger_id is None:
                 return
             self._fired_phase_triggers.add(trigger_id)
@@ -652,6 +655,27 @@ class PipelineManager:
             )
         except Exception:  # noqa: BLE001
             logger.debug("PhaseTriggerEngine: expansion skipped due to error", exc_info=True)
+
+    def _emit_phase_trigger_pending_toast(
+        self,
+        pending_notice: dict[str, str] | None,
+    ) -> None:
+        """Surface bootstrap guard gaps detected by PhaseTriggerEngine."""
+        if not pending_notice:
+            return
+        trigger_id = pending_notice.get("trigger_id", "")
+        missing_artifact = pending_notice.get("missing_artifact", "")
+        message = (
+            "PhaseTriggerEngine: injecao suprimida; bootstrap ausente "
+            f"({trigger_id}: {missing_artifact})"
+        )
+        pending_error = pending_notice.get("pending_error")
+        if pending_error:
+            message = f"{message}; falha ao registrar pendencia: {pending_error}"
+        try:
+            self._signal_bus.toast_requested.emit(message, "warning")
+        except Exception:  # noqa: BLE001
+            logger.warning("PhaseTriggerEngine pending toast failed: %s", message)
 
     # ── Internal: pipeline completion ────────────────────────────────── #
 

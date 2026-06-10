@@ -1,7 +1,18 @@
 {
-  "version": "1.7.0-pre",
-  "updated_at": "2026-05-19",
-  "updated_note": "HT-05 mitigation — meta-loop estrategia-de-separacao prep: declared 4 new /dcp:* advisory gates (congruence-check, temporality-check, meta-completeness, directive-injector) que serao consumidos pelo /dcp:build-and-load apos item 006 do meta-loop. Versao bumpeada para 1.7.0-pre — final 1.7.0 sera marcada apos item 007 com smoke test verde. 2026-05-19: adicionada secao top-level `tripwires[]` com HT-RS-01 (idempotencia de `/loop-rocksmash:integrate`) — escopo, descricao, script de verificacao e exit code esperado (4 = no-op). Item B11 do loop 05-19-tasks-faltantes.",
+  "version": "1.7.0-pre.2",
+  "updated_at": "2026-06-03",
+  "updated_note": "HT-05 mitigation — meta-loop estrategia-de-separacao prep: declared 4 new /dcp:* advisory gates (congruence-check, temporality-check, meta-completeness, directive-injector) que serao consumidos pelo /dcp:build-and-load apos item 006 do meta-loop. Versao bumpeada para 1.7.0-pre — final 1.7.0 sera marcada apos item 007 com smoke test verde. 2026-05-19: adicionada secao top-level `tripwires[]` com HT-RS-01 (idempotencia de `/loop-rocksmash:integrate`) — escopo, descricao, script de verificacao e exit code esperado (4 = no-op). Item B11 do loop 05-19-tasks-faltantes. 2026-06-03 (item 004 do loop 06-03-estudo-integracao-lessons-loop-no-dcp, acao de mantenedor; bump 1.7.0-pre -> 1.7.0-pre.2): governanca de continuous-improvement migrada do dispatcher automatico do PhaseTriggerEngine para o ledger in-process `dcp_closer._fire_governance_ledger` (best-effort, fora do DeliveryLock; wiring real no item 006). (b) TODOS os `phase_triggers` (f2/f5/f7/f9/f11 + f8b) DEPRECIADOS no mesmo release: `auto_actions` esvaziado para [] e `deprecated:true` + `realized_by` anotados, de modo que o engine puro pare de injetar comandos avulsos na fila (verificavel por test_phase_trigger_engine sem alterar o engine). Acoes originais preservadas em `_legacy_auto_actions` para auditoria. (a) `/cmd:backlog-from-lessons --phase f8b` NAO foi adicionado porque a decisao f8b e REMOCAO TOTAL no mesmo release (ver `deprecations.phase_triggers`), nao janela hibrida ativa — manter f8b ativo violaria o aceite 'comandos avulsos nao aparecem na fila'. (c) `dcp_triggers[post-commit-record]` anotado com `realized_by:'dcp_closer._fire_governance_ledger'` e `run:[]` (acao original preservada em `_legacy_run`); o engine continua sem dispatcher de `dcp_triggers` (le apenas `phase_triggers`).",
+  "deprecations": {
+    "phase_triggers": {
+      "deprecated_in": "1.7.0-pre.2",
+      "decision": "REMOCAO_TOTAL_MESMO_RELEASE",
+      "rationale": "A familia de continuous-improvement operava como caminho morto: o PhaseTriggerEngine injetava comandos avulsos (run-scorecard, collect-lessons, backlog-from-lessons) na fila do workflow-app sem produtor de ledger e sem dispatcher de dcp_triggers. A governanca passa a ser realizada in-process por `dcp_closer._fire_governance_ledger` (append best-effort no ledger `{docs_root}/_pipeline-research/PIPELINE-RUNS.tsv`, fora do DeliveryLock; wiring real no item 006). Manter qualquer trigger ativo (incl. f8b) recriaria a injecao de comandos avulsos na fila — proibido pelo aceite do item 004.",
+      "f8b_decision": "REMOCAO_TOTAL — f8b_post_sign_off depreciado junto com f2..f11 no mesmo release 1.7.0-pre.2; SEM janela hibrida indefinida e SEM adicao de /cmd:backlog-from-lessons --phase f8b (a sub-acao (a) do item 004 nao se aplica porque f8b nao permanece ativo).",
+      "removal_criterion": "Remocao ja efetivada (auto_actions=[] + deprecated:true). As chaves dos triggers permanecem no contrato apenas como registro auditavel (Zero Silencio) com `_legacy_auto_actions`; podem ser excluidas fisicamente em release major futuro apos confirmar que nenhum consumidor referencia os trigger_ids.",
+      "realized_by": "dcp_closer._fire_governance_ledger",
+      "introduced_by": "item 004 do loop 06-03-estudo-integracao-lessons-loop-no-dcp"
+    }
+  },
   "gates": [
     {
       "gate_id": "B-dcp.exit",
@@ -311,62 +322,88 @@
     }
   },
   "phase_triggers": {
+    "_deprecation_note": "TODOS os phase_triggers depreciados em 1.7.0-pre.2 (item 004). auto_actions=[] forca o PhaseTriggerEngine (check_and_expand + inject_phase_actions_into_queue) a NAO injetar comandos avulsos na fila, sem alterar o engine. Governanca realizada por dcp_closer._fire_governance_ledger. Ver `deprecations.phase_triggers`.",
     "f2_post_review_prd_flow": {
       "on_command_success": "/review-prd-flow",
-      "auto_actions": [
+      "auto_actions": [],
+      "_legacy_auto_actions": [
         "/pipeline:run-scorecard --phase f2",
         "/pipeline:collect-lessons --phase f2",
         "/cmd:backlog-from-lessons --phase f2"
       ],
+      "deprecated": true,
+      "deprecated_in": "1.7.0-pre.2",
+      "realized_by": "dcp_closer._fire_governance_ledger",
       "blocking": false,
       "cooldown_runs": 1
     },
     "f5_post_validate_pipeline": {
       "on_command_success": "/validate-pipeline",
-      "auto_actions": [
+      "auto_actions": [],
+      "_legacy_auto_actions": [
         "/pipeline:run-scorecard --phase f5",
         "/pipeline:collect-lessons --phase f5",
         "/cmd:backlog-from-lessons --phase f5"
       ],
+      "deprecated": true,
+      "deprecated_in": "1.7.0-pre.2",
+      "realized_by": "dcp_closer._fire_governance_ledger",
       "blocking": false,
       "cooldown_runs": 1
     },
     "f7_post_build_verify": {
       "on_command_success": "/build-verify",
-      "auto_actions": [
+      "auto_actions": [],
+      "_legacy_auto_actions": [
         "/pipeline:run-scorecard --phase f7",
         "/pipeline:collect-lessons --phase f7",
         "/cmd:backlog-from-lessons --phase f7"
       ],
+      "deprecated": true,
+      "deprecated_in": "1.7.0-pre.2",
+      "realized_by": "dcp_closer._fire_governance_ledger",
       "blocking": false,
       "cooldown_runs": 1
     },
     "f9_post_brief_vs_frontend_review": {
       "on_command_success": "/brief-vs-frontend-review",
-      "auto_actions": [
+      "auto_actions": [],
+      "_legacy_auto_actions": [
         "/pipeline:run-scorecard --phase f9",
         "/pipeline:collect-lessons --phase f9",
         "/cmd:backlog-from-lessons --phase f9"
       ],
+      "deprecated": true,
+      "deprecated_in": "1.7.0-pre.2",
+      "realized_by": "dcp_closer._fire_governance_ledger",
       "blocking": false,
       "cooldown_runs": 1
     },
     "f11_post_deploy_verify": {
       "on_command_success": "/post-deploy-verify",
-      "auto_actions": [
+      "auto_actions": [],
+      "_legacy_auto_actions": [
         "/pipeline:run-scorecard --phase f11",
         "/pipeline:collect-lessons --phase f11",
         "/cmd:backlog-from-lessons --phase f11"
       ],
+      "deprecated": true,
+      "deprecated_in": "1.7.0-pre.2",
+      "realized_by": "dcp_closer._fire_governance_ledger",
       "blocking": false,
       "cooldown_runs": 1
     },
     "f8b_post_sign_off": {
       "on_command_success": "/delivery:sign-off",
-      "auto_actions": [
+      "auto_actions": [],
+      "_legacy_auto_actions": [
         "/pipeline:run-scorecard --phase f8b",
         "/pipeline:collect-lessons --phase f8b"
       ],
+      "deprecated": true,
+      "deprecated_in": "1.7.0-pre.2",
+      "realized_by": "dcp_closer._fire_governance_ledger",
+      "f8b_decision": "REMOCAO_TOTAL_MESMO_RELEASE — depreciado junto com f2..f11; sub-acao (a) /cmd:backlog-from-lessons --phase f8b NAO aplicada (f8b nao permanece ativo).",
       "blocking": false,
       "cooldown_runs": 1
     }
@@ -382,7 +419,12 @@
     {
       "id": "post-commit-record",
       "after": "/commit:*",
-      "run": ["/memory:record-run", "/pipeline:collect-lessons"],
+      "run": [],
+      "_legacy_run": ["/memory:record-run", "/pipeline:collect-lessons"],
+      "realized_by": "dcp_closer._fire_governance_ledger",
+      "realized_by_note": "Governanca pos-commit (registro de run + coleta de licoes) realizada in-process pelo ledger best-effort `dcp_closer._fire_governance_ledger` (append em {docs_root}/_pipeline-research/PIPELINE-RUNS.tsv fora do DeliveryLock; wiring real no item 006), NAO por dispatcher de fila. O PhaseTriggerEngine nunca leu `dcp_triggers` (apenas `phase_triggers`), portanto `run:[]` mantem o contrato sem dispatcher automatico.",
+      "deprecated_dispatch": true,
+      "deprecated_in": "1.7.0-pre.2",
       "max_per_session": 5,
       "conditional": "module.state in ['done'] && last_transition_to == 'done'"
     },
