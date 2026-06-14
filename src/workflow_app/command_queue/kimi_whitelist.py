@@ -169,6 +169,12 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/kimi-loop:iteraction:execute-task",            # 64
     "/kimi-loop:iteraction:review-executed-task",    # 70
     "/kimi-loop:iteraction:review-executed-loop",    # 76
+    # Multibackend pipeline (estatica multitenant) — pre-flight scan
+    "/multibackend:scan",                            # 72
+    "/multibackend:link-auth",                       # 63
+    "/multibackend:env-wire",                        # 74
+    "/multibackend:build-verify",                    # 68
+    "/multibackend:verify-prod",                     # 66
 })
 
 

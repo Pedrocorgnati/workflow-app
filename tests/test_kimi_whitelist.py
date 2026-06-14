@@ -69,7 +69,12 @@ class TestWhitelist:
         # + 1 (/meta:analyze-search-stall, score 84) = 98
         # + 16 (familia /kimi-loop:*, Kimi-native, scores 60-100,
         #       SC60-SC75 do apendice 2026-06-09) = 114
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 114
+        # + 1 (/multibackend:scan, score 72, SC76 do apendice 2026-06-13) = 115
+        # + 1 (/multibackend:link-auth, score 63, SC77 do apendice 2026-06-13) = 116
+        # + 1 (/multibackend:env-wire, score 74, SC78 do apendice 2026-06-13) = 117
+        # + 1 (/multibackend:build-verify, score 68, SC79 do apendice 2026-06-13) = 118
+        # + 1 (/multibackend:verify-prod, score 66, SC80 do apendice 2026-06-13) = 119
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 119
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):

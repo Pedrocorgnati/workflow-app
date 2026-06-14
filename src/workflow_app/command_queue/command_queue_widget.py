@@ -475,6 +475,17 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "model": ModelName.OPUS,
         "effort": EffortLevel.HIGH,
     },
+    # Pipeline multibackend (queue-btn-multibackend): vincula uma pagina
+    # estatica HTML/CSS/JS ja hospedada (Hostinger) ao backend central
+    # multi-tenant, adiciona login funcional (Zero Orfaos) e deixa em
+    # producao. Os 6 subcomandos /multibackend:* sao todos opus/high (cada
+    # um e um passo de pipeline que comunica via scan-report.json em disco,
+    # nao via contexto de conversa), entao _inject_clears emite o triplet
+    # completo so no primeiro e um /clear isolado antes dos demais.
+    "multibackend": {
+        "model": ModelName.OPUS,
+        "effort": EffortLevel.HIGH,
+    },
     # NOTA: o pipeline /book-legacy NAO entra no GROUP_MAP porque cada
     # subcomando tem model/effort proprio (3 tiers do Bloco I-34). GROUP_MAP
     # so expressa um par model/effort unico por grupo. O builder
@@ -2167,6 +2178,24 @@ class CommandQueueWidget(QWidget):
              "(wf-notify.sh).",
              self._on_publish_micro_sites_multilingue_clicked,
              "queue-btn-publish-micro-sites-multilingue"),
+            ("multibackend",
+             "Multibackend — vincula uma pagina estatica HTML/CSS/JS ja "
+             "hospedada (Hostinger) ao backend central multi-tenant do bloco "
+             "06-03, injeta um botao de login OIDC funcional (Zero Orfaos) e "
+             "deixa o site em PRODUCAO. Le o project.json do metrics-project-pill "
+             "como $1. Pipeline (6 itens opus/high, cada um gate do seguinte via "
+             "scan-report.json em disco): /multibackend:scan (resolve identidade/"
+             "OIDC/arquitetura/deploy-dest) -> /multibackend:link-auth (injeta o "
+             "elemento de login idempotente com marker data-testid estavel) -> "
+             "/multibackend:env-wire (audita valores OIDC, gera env-config sem "
+             "secret em texto plano) -> /multibackend:build-verify (smoke local "
+             "ramificando por arquitetura OIDC) -> /multibackend:deploy (rsync "
+             "com snapshot + rollback verificado) -> /multibackend:verify-prod "
+             "(HTTP 200, marker de login, login real via Playwright; veredito "
+             "APROVADO/BLOQUEADO/AVISO). Sem project.json carregado -> toast "
+             "verbose pt-BR, nada enfileira.",
+             self._on_multibackend_clicked,
+             "queue-btn-multibackend"),
             _maintenance_btn,
         ])
         header_layout.addWidget(auxiliar_content)
@@ -6025,6 +6054,92 @@ class CommandQueueWidget(QWidget):
         )
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"legacy-to-dcp {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+
+    def _on_multibackend_clicked(self) -> None:
+        """Enfileira a pipeline multibackend para o project.json carregado.
+
+        Le `metrics-project-pill` (project.json, qualquer schema V1/V2/V3) e
+        passa `config.config_path` como `$1` aos 6 subcomandos. Vincula uma
+        pagina estatica HTML/CSS/JS ja hospedada na Hostinger ao backend
+        central multi-tenant (bloco 06-03), injeta login OIDC funcional e
+        deixa o site em producao.
+
+        Gate 1 (has_config): toast verboso pt-BR quando ausente, sugere o
+        botao `queue-btn-json` (/project-json). Gate 2 (config_path): toast
+        verboso pt-BR quando o config carregado nao expoe config_path.
+
+        Sequencia enfileirada (todos opus/high, GROUP_MAP["multibackend"]):
+          1. /multibackend:scan <path>        (resolve identidade/OIDC/arq)
+          2. /multibackend:link-auth <path>   (injeta login idempotente)
+          3. /multibackend:env-wire <path>    (audita OIDC, gera env-config)
+          4. /multibackend:build-verify <path>(smoke local por arquitetura)
+          5. /multibackend:deploy <path>      (rsync + snapshot + rollback)
+          6. /multibackend:verify-prod <path> (verifica producao, veredito)
+
+        Cada subcomando comunica com o anterior via scan-report.json em
+        disco (nao via contexto de conversa), por isso _inject_clears poe um
+        /clear entre cada um. Idempotente: re-rodar nao quebra o que ja foi
+        aplicado (cada /multibackend:* e idempotente por sentinela/snapshot).
+        """
+        from workflow_app.config.app_state import app_state
+
+        # Gate 1: has_config — verbose pt-BR (feedback_workflow_app_gate_verbose)
+        if not app_state.has_config or app_state.config is None:
+            signal_bus.toast_requested.emit(
+                "multibackend requer project.json carregado na pill superior. "
+                "Use o botao [json] (queue-btn-json) para criar ou carregar um "
+                "project.json antes de rodar este pipeline.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        path = str(config.config_path)
+        if not path:
+            signal_bus.toast_requested.emit(
+                "project.json carregado nao expoe config_path. Recarregue o "
+                "projeto via botao [json] (queue-btn-json) e tente novamente.",
+                "error",
+            )
+            return
+
+        group = "multibackend"
+        cfg = GROUP_MAP[group]
+        model = cfg["model"]
+        effort = cfg["effort"]
+
+        def _cmd(name: str, start: int) -> CommandSpec:
+            return CommandSpec(
+                name=name, model=model, effort=effort,
+                interaction_type=InteractionType.AUTO, position=start,
+            )
+
+        # Constroi APENAS os comandos reais; a injecao de /clear /model /effort
+        # com anti-redundancia e delegada a _inject_clears (mesmo helper canonico
+        # usado por queue-btn-legacy-to-dcp e queue-btn-dcp-build).
+        from workflow_app.templates.quick_templates import _inject_clears
+
+        real_specs: list[CommandSpec] = [
+            _cmd(f"/multibackend:scan {path}", 1),
+            _cmd(f"/multibackend:link-auth {path}", 2),
+            _cmd(f"/multibackend:env-wire {path}", 3),
+            _cmd(f"/multibackend:build-verify {path}", 4),
+            _cmd(f"/multibackend:deploy {path}", 5),
+            _cmd(f"/multibackend:verify-prod {path}", 6),
+        ]
+        specs = _inject_clears(real_specs)
+
+        slug = Path(path).stem
+        logger.info(
+            "[multibackend] enqueued %d specs for project=%s",
+            len(specs), slug,
+        )
+        self._template_label.setText(
+            f"  \U0001f50c  multibackend: {slug} ({len(specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"multibackend {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
     def _on_boilerplate_clicked(self) -> None:

@@ -2121,6 +2121,148 @@ class TestLegacyToDcpButton:
 
 
 # ---------------------------------------------------------------------------
+# Multibackend — botao queue-btn-multibackend
+# ---------------------------------------------------------------------------
+
+
+class TestMultibackendButton:
+    """Cobertura do botao `queue-btn-multibackend` (pipeline multibackend).
+
+    Garante:
+      - botao existe em queue-tab-auxiliar com testid esperado;
+      - sem project.json carregado (Gate 1) emite toast pt-BR e nao enfileira;
+      - com project.json valido enfileira os 6 subcomandos /multibackend:* na
+        ordem canonica (scan -> link-auth -> env-wire -> build-verify ->
+        deploy -> verify-prod), cada um com config_path como $1, todos
+        opus/high (GROUP_MAP["multibackend"]).
+    """
+
+    def _find_button_by_testid(self, widget: CommandQueueWidget, testid: str):
+        from PySide6.QtWidgets import QPushButton
+        header = getattr(widget, "header_widget", None)
+        search_root = header if header is not None else widget
+        for btn in search_root.findChildren(QPushButton):
+            if btn.property("testid") == testid:
+                return btn
+        return None
+
+    def test_button_exists_with_testid(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-multibackend")
+        assert btn is not None, "queue-btn-multibackend ausente em queue-tab-auxiliar"
+
+    def test_button_tooltip_mentions_pipeline(self, widget):
+        btn = self._find_button_by_testid(widget, "queue-btn-multibackend")
+        assert btn is not None
+        tip = btn.toolTip()
+        assert "Multibackend" in tip
+        assert "/multibackend:scan" in tip
+        assert "/multibackend:verify-prod" in tip
+        assert "metrics-project-pill" in tip
+
+    def test_group_map_multibackend_is_opus_high(self):
+        from workflow_app.command_queue.command_queue_widget import GROUP_MAP
+
+        group = GROUP_MAP["multibackend"]
+        assert group["model"] == ModelName.OPUS
+        assert group["effort"] == EffortLevel.HIGH
+
+    def test_click_without_config_emits_verbose_pt_br_toast(self, widget, qtbot):
+        from PySide6.QtCore import Qt
+
+        from workflow_app.config.app_state import app_state
+
+        toasts: list[tuple[str, str]] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        pipelines: list[list] = []
+        signal_bus.pipeline_ready.connect(lambda specs: pipelines.append(list(specs)))
+
+        # Force has_config False (no project loaded).
+        app_state.clear_config()
+        assert not app_state.has_config
+
+        btn = self._find_button_by_testid(widget, "queue-btn-multibackend")
+        assert btn is not None
+        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+        assert pipelines == [], "nao deve enfileirar quando sem config"
+        assert toasts, "esperado toast verboso quando sem config"
+        msg, kind = toasts[-1]
+        assert "project.json" in msg
+        assert "queue-btn-json" in msg
+        assert kind == "warning"
+
+    def test_click_with_config_enqueues_six_subcommands_with_path(
+        self, widget, qtbot, tmp_path,
+    ):
+        from PySide6.QtCore import Qt
+
+        from workflow_app.command_queue.command_queue_widget import GROUP_MAP
+        from workflow_app.config.app_state import app_state
+
+        project_json = tmp_path / "test-project.json"
+        project_json.write_text(
+            '{"name":"test-project","basic_flow":{"wbs_root":"wbs"}}',
+            encoding="utf-8",
+        )
+        from types import SimpleNamespace
+
+        fake_cfg = SimpleNamespace(
+            config_path=str(project_json),
+            raw={"name": "test-project"},
+            project_name="test-project",
+        )
+        app_state.clear_config()
+        app_state.set_config(fake_cfg)  # type: ignore[arg-type]
+        assert app_state.has_config
+
+        pipelines: list[list] = []
+        signal_bus.pipeline_ready.connect(lambda specs: pipelines.append(list(specs)))
+
+        btn = self._find_button_by_testid(widget, "queue-btn-multibackend")
+        assert btn is not None
+        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+
+        assert pipelines, "esperado pipeline_ready emitido"
+        specs = pipelines[-1]
+        names = [s.name for s in specs]
+        path_str = str(project_json)
+
+        # Os 6 subcomandos reais na ordem canonica, cada um com $1 = config_path.
+        expected_subcmds = [
+            f"/multibackend:scan {path_str}",
+            f"/multibackend:link-auth {path_str}",
+            f"/multibackend:env-wire {path_str}",
+            f"/multibackend:build-verify {path_str}",
+            f"/multibackend:deploy {path_str}",
+            f"/multibackend:verify-prod {path_str}",
+        ]
+        real = [n for n in names if n.startswith("/multibackend:")]
+        assert real == expected_subcmds, (
+            f"ordem/contrato dos subcomandos incorreto: {real}"
+        )
+        # Cada subcomando carrega o path do project.json como $1.
+        assert all(path_str in n for n in real)
+        assert len(real) == 6
+
+        # Todos os specs reais sao opus/high (GROUP_MAP["multibackend"]).
+        real_specs = [s for s in specs if s.name.startswith("/multibackend:")]
+        group = GROUP_MAP["multibackend"]
+        assert group["model"] == ModelName.OPUS
+        assert group["effort"] == EffortLevel.HIGH
+        for s in real_specs:
+            assert s.model == ModelName.OPUS
+            assert s.effort == EffortLevel.HIGH
+
+        # _inject_clears poe um /clear antes de cada subcomando (6 ao todo) +
+        # o triplet model/effort uma unica vez (grupo unico opus/high).
+        assert names.count("/clear") == 6, (
+            f"esperado 6 /clear (1 por subcomando), achei {names.count('/clear')}"
+        )
+        assert names.count("/model opus") == 1
+        assert names.count("/effort high") == 1
+
+
+# ---------------------------------------------------------------------------
 # Governance — botao queue-btn-governance
 # ---------------------------------------------------------------------------
 
