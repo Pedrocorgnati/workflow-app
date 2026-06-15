@@ -4423,6 +4423,19 @@ class MainWindow(QMainWindow):
         )
         rocksmash_rules_btn.clicked.connect(_paste_path("ai-forge/rules/rocksmash.md"))
 
+        multibackend_rules_btn = _make_btn(
+            "Multibackend-rules", "queue-btn-multibackend-rules-path",
+            "#0EA5E9", "#0284C7", "#0369A1",
+            "Cola o path ai-forge/rules/multibackend-rules.md no terminal\n"
+            "(contrato canonico do pipeline multibackend: arq B/C, per-host issuer,\n"
+            "bounce host-safe (resolveRequestIssuer, nunca request.url), anti-cascade,\n"
+            "X-Forwarded-Host, /register em PUBLIC_PATHS + REGISTER_ENABLED, modos de\n"
+            "falha F-1..F-5 e tensoes T-01..T-09)",
+        )
+        multibackend_rules_btn.clicked.connect(
+            _paste_path("ai-forge/rules/multibackend-rules.md")
+        )
+
         listener_amarelo_btn = _make_btn(
             "Listener-amarelo", "queue-btn-listener-amarelo-rules-path",
             "#FBBF24", "#F59E0B", "#D97706",
@@ -4500,7 +4513,7 @@ class MainWindow(QMainWindow):
             build_render_rules_btn, matrix_spec_rules_btn, llm_routing_rules_btn,
             main_llm_publish_rules_btn, kimi_skill_routing_rules_btn,
             single_arrow_rules_btn,
-            loop_rules_btn, rocksmash_rules_btn,
+            loop_rules_btn, rocksmash_rules_btn, multibackend_rules_btn,
             listener_amarelo_btn, listener_azul_btn, listener_verde_btn,
             listener_vermelho_btn,
             add_rules_btn,
