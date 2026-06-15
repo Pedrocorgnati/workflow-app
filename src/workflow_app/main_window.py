@@ -2135,38 +2135,54 @@ class MainWindow(QMainWindow):
         )
         mcps_layout.addWidget(provider_row)
 
+        # Personas/agentes (output-mcp-persona-checkboxes*): grade de 4 por linha
+        # x 3 linhas (12 agentes). Os checkboxes marcados tem seus prompts
+        # anexados ao comando MCP via _compose_mcp_text na ORDEM da UI (row-major).
+        # Os 6 primeiros testids sao estaveis (contrato de teste). Os 6 ultimos sao
+        # os mais importantes de queue-subtab-insertions-personas (ai-forge/MCP/agents/):
+        # criar-md (estruturador), revisar-task, revisar-qa, code-debugger,
+        # executor de slash-commands e analista-delegador.
         persona_specs = (
-            (
-                "researcher",
-                "output-mcp-persona-researcher",
-                "no papel de researcher, conforme regras em "
-                "ai-forge/MCP/agents/study-researcher-rules.md",
-            ),
-            (
-                "controversial",
-                "output-mcp-persona-controversial",
-                "no papel de controversial, conforme regras em "
-                "ai-forge/MCP/agents/controversial-devils-advocate-rules.md",
-            ),
-            (
-                "hardening",
-                "output-mcp-persona-hardening",
-                "no papel de engenheiro de hardening, conforme regras em "
-                "ai-forge/MCP/agents/hardening-engineer-rules.md",
-            ),
+            # Linha 1 — analise / brainstorm
+            ("researcher", "output-mcp-persona-researcher",
+             "no papel de researcher, conforme regras em "
+             "ai-forge/MCP/agents/study-researcher-rules.md"),
+            ("controversial", "output-mcp-persona-controversial",
+             "no papel de controversial, conforme regras em "
+             "ai-forge/MCP/agents/controversial-devils-advocate-rules.md"),
+            ("hardening", "output-mcp-persona-hardening",
+             "no papel de engenheiro de hardening, conforme regras em "
+             "ai-forge/MCP/agents/hardening-engineer-rules.md"),
+            ("criar-md", "output-mcp-persona-criar-md",
+             "no papel de estruturador de ideias (criar md), conforme regras em "
+             "ai-forge/MCP/agents/criar-md-rules.md"),
+            # Linha 2 — ciclo de task
+            ("criar-task", "output-mcp-persona-criar-task",
+             "no papel de criador de tasks, conforme regras em "
+             "ai-forge/MCP/agents/criar-task-rules.md"),
+            ("revisar-task", "output-mcp-persona-revisar-task",
+             "no papel de revisor de tasks criadas, conforme regras em "
+             "ai-forge/MCP/agents/revisar-task-rules.md"),
+            ("executor", "output-mcp-persona-executor",
+             "no papel de executor de tasks, conforme regras em "
+             "ai-forge/MCP/agents/executar-task-rules.md"),
+            ("rev-exec", "output-mcp-persona-rev-exec",
+             "no papel de revisor de execucao, conforme regras em "
+             "ai-forge/MCP/agents/revisar-execucao-rules.md"),
+            # Linha 3 — especializados (mais importantes das personas)
+            ("revisar-qa", "output-mcp-persona-revisar-qa",
+             "no papel de revisor de QA, conforme regras em "
+             "ai-forge/MCP/agents/revisar-qa-rules.md"),
+            ("code-debugger", "output-mcp-persona-code-debugger",
+             "no papel de code-debugger, conforme regras em "
+             "ai-forge/MCP/agents/code-debugger.md"),
+            ("exec-slash", "output-mcp-persona-exec-slash",
+             "no papel de executor de slash-commands, conforme regras em "
+             "ai-forge/MCP/agents/executor-de-slash-commands-rules.md"),
+            ("delegador", "output-mcp-persona-delegador",
+             "no papel de analista-delegador, conforme regras em "
+             "ai-forge/MCP/agents/analista-delegador-rules.md"),
         )
-        persona_row = QWidget()
-        persona_row.setObjectName("McpPersonaRow")
-        persona_row.setProperty("testid", "output-mcp-persona-checkboxes")
-        persona_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        persona_row.setStyleSheet(
-            "QWidget#McpPersonaRow { background-color: #202027;"
-            "  border: 1px solid #3F3F46; border-radius: 5px; }"
-        )
-        persona_layout = QHBoxLayout(persona_row)
-        persona_layout.setContentsMargins(8, 0, 8, 0)
-        persona_layout.setSpacing(7)
-        persona_row.setFixedHeight(26)
         checkbox_style = (
             "QCheckBox { color: #D4D4D8; font-size: 10px;"
             "  font-weight: 700; background: transparent; border: none; }"
@@ -2178,61 +2194,34 @@ class MainWindow(QMainWindow):
             "QCheckBox::indicator:hover { border-color: #86EFAC; }"
         )
         self._mcp_persona_checkboxes: list[QCheckBox] = []
-        for label, testid, prompt in persona_specs:
-            chk = QCheckBox(label)
-            chk.setProperty("testid", testid)
-            chk.setProperty("persona_prompt", prompt)
-            chk.setToolTip(prompt)
-            chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            chk.setStyleSheet(checkbox_style)
-            persona_layout.addWidget(chk)
-            self._mcp_persona_checkboxes.append(chk)
-        persona_layout.addStretch(1)
-        mcps_layout.addWidget(persona_row)
-
-        persona_specs_2 = (
-            (
-                "criar-task",
-                "output-mcp-persona-criar-task",
-                "no papel de criador de tasks, conforme regras em "
-                "ai-forge/MCP/agents/criar-task-rules.md",
-            ),
-            (
-                "executor",
-                "output-mcp-persona-executor",
-                "no papel de executor de tasks, conforme regras em "
-                "ai-forge/MCP/agents/executar-task-rules.md",
-            ),
-            (
-                "rev-exec",
-                "output-mcp-persona-rev-exec",
-                "no papel de revisor de execucao, conforme regras em "
-                "ai-forge/MCP/agents/revisar-execucao-rules.md",
-            ),
-        )
-        persona_row_2 = QWidget()
-        persona_row_2.setObjectName("McpPersonaRow2")
-        persona_row_2.setProperty("testid", "output-mcp-persona-checkboxes-2")
-        persona_row_2.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        persona_row_2.setStyleSheet(
-            "QWidget#McpPersonaRow2 { background-color: #202027;"
-            "  border: 1px solid #3F3F46; border-radius: 5px; }"
-        )
-        persona_layout_2 = QHBoxLayout(persona_row_2)
-        persona_layout_2.setContentsMargins(8, 0, 8, 0)
-        persona_layout_2.setSpacing(7)
-        persona_row_2.setFixedHeight(26)
-        for label, testid, prompt in persona_specs_2:
-            chk = QCheckBox(label)
-            chk.setProperty("testid", testid)
-            chk.setProperty("persona_prompt", prompt)
-            chk.setToolTip(prompt)
-            chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            chk.setStyleSheet(checkbox_style)
-            persona_layout_2.addWidget(chk)
-            self._mcp_persona_checkboxes.append(chk)
-        persona_layout_2.addStretch(1)
-        mcps_layout.addWidget(persona_row_2)
+        # 4 checkboxes por linha (stretch igual); testids das linhas estaveis
+        # (output-mcp-persona-checkboxes, -2, -3).
+        _persona_rows = [persona_specs[i:i + 4] for i in range(0, len(persona_specs), 4)]
+        for _row_idx, _row_specs in enumerate(_persona_rows):
+            _suffix = "" if _row_idx == 0 else f"-{_row_idx + 1}"
+            _obj = "McpPersonaRow" if _row_idx == 0 else f"McpPersonaRow{_row_idx + 1}"
+            row = QWidget()
+            row.setObjectName(_obj)
+            row.setProperty("testid", f"output-mcp-persona-checkboxes{_suffix}")
+            row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            row.setStyleSheet(
+                f"QWidget#{_obj} {{ background-color: #202027;"
+                "  border: 1px solid #3F3F46; border-radius: 5px; }"
+            )
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 0, 8, 0)
+            row_layout.setSpacing(7)
+            row.setFixedHeight(26)
+            for label, testid, prompt in _row_specs:
+                chk = QCheckBox(label)
+                chk.setProperty("testid", testid)
+                chk.setProperty("persona_prompt", prompt)
+                chk.setToolTip(prompt)
+                chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                chk.setStyleSheet(checkbox_style)
+                row_layout.addWidget(chk, stretch=1)
+                self._mcp_persona_checkboxes.append(chk)
+            mcps_layout.addWidget(row)
 
         def _compose_mcp_text(base_text: str) -> str:
             prompts = [
@@ -3750,7 +3739,7 @@ class MainWindow(QMainWindow):
             "QPushButton:pressed { background-color: #166534; }"
         )
         _exec_tasks_btn.clicked.connect(
-            lambda _c=False: self._publish_to_terminal(_EXECUTAR_TASKS_PROMPT)
+            lambda _c=False: self._publish_insertion_llm_aware(_EXECUTAR_TASKS_PROMPT)
         )
         btns.append(_exec_tasks_btn)
 
@@ -4017,6 +4006,89 @@ class MainWindow(QMainWindow):
             except AttributeError:
                 pass
 
+    def _publish_insertion_llm_aware(self, text: str) -> bool:
+        """Publica uma insercao LLM-aware: renderiza o payload para o LLM de
+        destino ANTES de colar (paste/no-Enter), reusando o renderer puro
+        `CommandQueueWidget.render_for_llm`. Separa renderizacao (no widget da
+        fila) de transporte (aqui), sem tocar na fila.
+
+        Contrato (blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md
+        §5.1/§8.2/§9.3/§10):
+        - payload neutro (path, texto livre, `/clear`) -> delega ao
+          `_publish_to_terminal` (passthrough byte-identico ao legado);
+        - payload LLM-especifico (slash-command/custom-prompt directive, exceto
+          `/clear`) -> corte Phase-1: so T1 (+ Notes T1). Se T2/T3 tambem marcados,
+          aborta com toast (fan-out heterogeneo nao suportado neste MVP, §9.3).
+          Renderiza para o Main LLM do T1 e cola sem Enter; em `abort_reason`,
+          toast e nada publicado (Zero Silencio).
+
+        NUNCA chama `_on_run_command`, `_dispatch_*`, marca item de fila, usa
+        `run_command_in_*` ou prefixa `WF_CHANNEL_OVERRIDE=` (§8.2/§11.1).
+        Retorna True quando publicou (ou copiou via Notes), False em abort/no-op.
+        """
+        cq = self._command_queue
+        head = cq._command_head(text)
+        is_llm_specific = head.startswith("/") and head != "/clear"
+        if not is_llm_specific:
+            # path / texto livre / /clear -> comportamento legado (passthrough).
+            self._publish_to_terminal(text)
+            return True
+
+        t1 = bool(self._chk_route_t1.isChecked()) if hasattr(self, "_chk_route_t1") else True
+        t2 = bool(self._chk_route_t2.isChecked()) if hasattr(self, "_chk_route_t2") else False
+        t3 = bool(self._chk_route_t3.isChecked()) if hasattr(self, "_chk_route_t3") else False
+        n1 = bool(self._chk_notes_t1.isChecked()) if hasattr(self, "_chk_notes_t1") else False
+        n2 = bool(self._chk_notes_t2.isChecked()) if hasattr(self, "_chk_notes_t2") else False
+        if not (t1 or t2 or t3):
+            return False  # nenhum destino -> no-op (igual _publish_to_terminal)
+
+        # Notes D6 (§10): Notes T1 + Notes T2 simultaneos para payload LLM-especifico
+        # -> abort com toast. (No corte Phase-1 isto tambem cai na guarda de fan-out
+        # abaixo, ja que exige T2 marcado; mantido explicito para a regra valer.)
+        if t1 and t2 and n1 and n2:
+            signal_bus.toast_requested.emit(
+                "Notes multiplo nao suportado para payload LLM-especifico.", "warning",
+            )
+            return False
+
+        # Guarda Phase-1 (§9.3): fan-out heterogeneo (T2/T3) ainda nao suportado.
+        if t2 or t3:
+            signal_bus.toast_requested.emit(
+                "Fan-out heterogeneo (T2/T3) ainda nao suportado para payload "
+                "LLM-especifico — deixe apenas T1 marcado.", "warning",
+            )
+            return False
+
+        # T1 unico: renderiza para o Main LLM efetivo do T1.
+        llm = cq.current_main_llm()
+        rendered = cq.render_for_llm(
+            text, llm, listener_channel="interactive", mode="insert",
+        )
+        if rendered.abort_reason or rendered.text is None:
+            signal_bus.toast_requested.emit(
+                "Insercao LLM-aware abortada: "
+                f"{rendered.abort_reason or 'nada a publicar'}.",
+                "warning",
+            )
+            return False
+
+        payload = rendered.text
+        if t1 and n1:
+            # Notes T1 (D6): clipboard recebe o texto RENDERIZADO para o destino.
+            QApplication.clipboard().setText(payload)
+            signal_bus.toast_requested.emit(
+                "Notas (T1): texto renderizado copiado para clipboard.", "info",
+            )
+            return True
+        # Cola no T1 SEM Enter (semantica de insercao), foca e da feedback.
+        QApplication.clipboard().setText(payload)
+        signal_bus.paste_text_in_terminal.emit(payload)
+        signal_bus.focus_interactive_terminal.emit()
+        signal_bus.toast_requested.emit(
+            f"Insercao LLM-aware ({llm}) publicada no T1.", "info",
+        )
+        return True
+
     def _populate_header_actions(self) -> list[QPushButton]:
         """Constroi botoes da actions-tab: JSON, WS, MCPs Claude-side (laranja),
         skills Kimi-side (azul), skills Codex-side (roxo) e asq-user.
@@ -4192,7 +4264,9 @@ class MainWindow(QMainWindow):
             "/tools:auq-interview \u2014 Entrevista AUQ guiada",
         )
         asq_user_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
-        asq_user_btn.clicked.connect(_paste_cmd("/tools:auq-interview"))
+        asq_user_btn.clicked.connect(
+            lambda _c=False: self._publish_insertion_llm_aware("/tools:auq-interview")
+        )
 
         return [
             json_btn,
@@ -4760,13 +4834,11 @@ class MainWindow(QMainWindow):
 
         def _paste_command(command: str):
             def _h() -> None:
-                QApplication.clipboard().setText(command)
-                # _publish_to_terminal consulta terminal-route-toggles e
-                # transfere foco — ver ai-forge/rules/workflow-app-terminal.md.
-                self._publish_to_terminal(command)
-                signal_bus.toast_requested.emit(
-                    f"Comando copiado e digitado no terminal: {command}", "info",
-                )
+                # Insercao LLM-aware: o transportador renderiza por Main LLM (T1) e
+                # da todo o feedback (clipboard/toast/abort). Botoes neutros (paths)
+                # seguem em _publish_to_terminal. Ver
+                # blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing-tasks.md.
+                self._publish_insertion_llm_aware(command)
             return _h
 
         # ── Botões adicionados 2026-06-03 ─────────────────────────────────── #
@@ -4998,11 +5070,9 @@ class MainWindow(QMainWindow):
 
         def _paste_command(command: str):
             def _h() -> None:
-                QApplication.clipboard().setText(command)
-                self._publish_to_terminal(command)
-                signal_bus.toast_requested.emit(
-                    f"Comando copiado e digitado no terminal: {command}", "info",
-                )
+                # Insercao LLM-aware: o transportador renderiza por Main LLM (T1) e
+                # da todo o feedback (clipboard/toast/abort).
+                self._publish_insertion_llm_aware(command)
             return _h
 
         _CMDS = [
@@ -5059,11 +5129,9 @@ class MainWindow(QMainWindow):
 
         def _paste_command(command: str):
             def _h() -> None:
-                QApplication.clipboard().setText(command)
-                self._publish_to_terminal(command)
-                signal_bus.toast_requested.emit(
-                    f"Comando copiado e digitado no terminal: {command}", "info",
-                )
+                # Insercao LLM-aware: o transportador renderiza por Main LLM (T1) e
+                # da todo o feedback (clipboard/toast/abort).
+                self._publish_insertion_llm_aware(command)
             return _h
 
         _CMDS = [

@@ -654,6 +654,26 @@ class _DroppableContainer(QWidget):
         painter.end()
 
 
+@dataclass(frozen=True)
+class RenderedInsertion:
+    """Resultado PURO de `CommandQueueWidget.render_for_llm`.
+
+    Contrato (ver blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md
+    §6/§8.1 e ai-forge/rules/main-llm-publish.md):
+    - `text` setado e `abort_reason is None`  -> publicar `text` (Enter conforme o caller).
+    - `text is None` e `abort_reason` setado  -> caller emite toast e nao publica (Zero Silencio).
+    - exclusividade: nunca `text` e `abort_reason` ambos setados; com payload nao-vazio
+      nunca os dois `None`.
+    - `helper_pulse` so e True em `mode="dispatch"` para `/model`//`/effort` (a fila pulsa o
+      listener); em `mode="insert"` e SEMPRE False (insercao nao tem ciclo de listener).
+    """
+
+    text: str | None
+    abort_reason: str | None = None
+    helper_pulse: bool = False
+    listener_channel: str | None = None
+
+
 class CommandQueueWidget(QWidget):
     """Right sidebar showing the pipeline command queue."""
 
@@ -6940,6 +6960,16 @@ class CommandQueueWidget(QWidget):
             return "kimi"
         return "claude"
 
+    def current_main_llm(self) -> str:
+        """Acessor publico read-only do Main LLM efetivo do T1 (`claude|codex|kimi`).
+
+        Superficie UNICA para o `main_window` (insercoes LLM-aware) ler o Main LLM
+        sem instanciar radio proprio nem ler o cache `MetricsBar._main_llm`. Encapsula
+        `_resolve_interactive_main_llm()` (precedencia canonica codex > kimi > claude).
+        Ver blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §11.1/D1.
+        """
+        return self._resolve_interactive_main_llm()
+
     @staticmethod
     def _build_recovery_base_command(
         channel: str, reason: str, context_file: str
@@ -7599,6 +7629,144 @@ class CommandQueueWidget(QWidget):
             "failure/red, and a response that emitted success contains no blocker.\n"
             "9. Do the work; do not summarize the command instead of executing it."
         )
+
+    @classmethod
+    def render_for_llm(
+        cls,
+        text: str,
+        llm: str,
+        *,
+        listener_channel: str = "interactive",
+        mode: str = "insert",
+    ) -> RenderedInsertion:
+        """Renderiza um payload para o LLM de destino, SEM efeito colateral.
+
+        Funcao PURA: nao chama `_on_run_command`, `_dispatch_*`, `emit` de PTY nem
+        toast; so retorna `RenderedInsertion`. Levanta a arvore de decisao dos
+        dispatchers de fila (`_dispatch_kimi_main_command`/`_dispatch_codex_command`)
+        para que insercoes (paste/no-Enter no `main_window`) compartilhem a MESMA
+        adaptacao de publicacao por Main LLM. Contrato/invariantes:
+        blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §6/§8.1.
+
+        `llm`: "claude" | "codex" | "kimi" (LLM efetivo do terminal de destino).
+        `mode`: "insert" (insercao, nunca pulsa) | "dispatch" (fila, pode pulsar).
+        """
+        head = cls._command_head(text)
+
+        # /model, /effort: diretivas Claude-only (D8).
+        if head.startswith("/model") or head.startswith("/effort"):
+            if llm == "claude":
+                return RenderedInsertion(text=text, listener_channel=listener_channel)
+            if mode == "dispatch":
+                # A fila pulsa o listener (amarelo->verde) sem escrever no PTY.
+                return RenderedInsertion(
+                    text=None, helper_pulse=True, listener_channel=listener_channel
+                )
+            # Insercao: sem ciclo de listener para pulsar -> abort (Zero Silencio).
+            return RenderedInsertion(
+                text=None,
+                abort_reason=(
+                    "diretiva /model//effort nao e insercao valida fora de Claude"
+                ),
+                listener_channel=listener_channel,
+            )
+
+        # /clear: raw para os tres LLM (todos entendem).
+        if head == "/clear":
+            return RenderedInsertion(text=text, listener_channel=listener_channel)
+
+        # Claude: publica o comando raw sempre (o REPL resolve). Sem checagem de existencia.
+        if llm == "claude":
+            return RenderedInsertion(text=text, listener_channel=listener_channel)
+
+        # Texto livre / path / persona (nao-slash): passthrough para qualquer LLM.
+        if not head.startswith("/"):
+            return RenderedInsertion(text=text, listener_channel=listener_channel)
+
+        slug = head[1:]
+
+        if llm == "kimi":
+            if head.startswith("/skill:"):
+                # Kimi entende /skill: nativamente -> raw.
+                return RenderedInsertion(text=text, listener_channel=listener_channel)
+            if slug in cls._CUSTOM_PROMPT_DIRECTIVES:
+                if cls._resolve_custom_prompt_file(slug) is None:
+                    return RenderedInsertion(
+                        text=None,
+                        abort_reason=(
+                            f"custom-prompt '{slug}' nao encontrado em "
+                            "ai-forge/custom-prompts/"
+                        ),
+                    )
+                return RenderedInsertion(
+                    text=cls._build_kimi_slash_executor_invocation(text),
+                    listener_channel=listener_channel,
+                )
+            has_command = cls._resolve_claude_command_file(slug) is not None
+            has_skill = cls._resolve_skill_target(slug)
+            if slug and not has_command and not has_skill:
+                return RenderedInsertion(
+                    text=None,
+                    abort_reason=(
+                        f"comando/skill '{slug}' nao encontrado em "
+                        ".claude/commands/ ou .agents/skills/"
+                    ),
+                )
+            if slug and (not has_command or cls._kimi_requires_specific_wrapper(slug)):
+                return RenderedInsertion(
+                    text=cls._inject_skill_prefix(text),
+                    listener_channel=listener_channel,
+                )
+            return RenderedInsertion(
+                text=cls._build_kimi_slash_executor_invocation(
+                    text,
+                    recovery_mode=(
+                        cls._normalized_slash_slug(text) == cls._RECOVERY_SLUG
+                    ),
+                ),
+                listener_channel=listener_channel,
+            )
+
+        if llm == "codex":
+            if head.startswith("/skill:"):
+                # D7: sem fonte canonica para adaptar /skill: ao Codex -> abort.
+                return RenderedInsertion(
+                    text=None,
+                    abort_reason="/skill: nao tem fonte para adaptar ao Codex",
+                )
+            if slug in cls._CUSTOM_PROMPT_DIRECTIVES:
+                transformed = cls._build_codex_custom_prompt_prompt(
+                    text, listener_channel=listener_channel
+                )
+                if transformed is None:
+                    return RenderedInsertion(
+                        text=None,
+                        abort_reason=(
+                            f"custom-prompt '{slug}' nao encontrado em "
+                            "ai-forge/custom-prompts/"
+                        ),
+                    )
+                return RenderedInsertion(
+                    text=transformed, listener_channel=listener_channel
+                )
+            transformed = cls._build_codex_slash_executor_prompt(
+                text,
+                listener_channel=listener_channel,
+                recovery_mode=(
+                    cls._normalized_slash_slug(text) == cls._RECOVERY_SLUG
+                ),
+            )
+            if transformed is None:
+                return RenderedInsertion(
+                    text=None,
+                    abort_reason=(
+                        f"comando Claude '{slug}' nao encontrado em .claude/commands/"
+                    ),
+                )
+            return RenderedInsertion(text=transformed, listener_channel=listener_channel)
+
+        # LLM desconhecido: defensivo -> raw (igual Claude).
+        return RenderedInsertion(text=text, listener_channel=listener_channel)
 
     def _dispatch_codex_command(self, cmd_text: str, *, to_t1: bool = False) -> bool:
         """Dispatch a command to Codex. Returns False when validation aborts."""
