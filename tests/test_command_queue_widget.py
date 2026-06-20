@@ -1027,7 +1027,9 @@ class TestCodexLlmRouting:
         assert "Command markdown:" in emitted_t1[0]
         assert "Listener rules:" in emitted_t1[0]
         assert "Expected listener channel: interactive" in emitted_t1[0]
-        assert "execute/preserve it so it notifies channel `interactive`" in emitted_t1[0]
+        assert "DO NOT execute that literal target block in normal Codex mode" in emitted_t1[0]
+        assert "semantic final notify for channel `interactive`" in emitted_t1[0]
+        assert "execute/preserve it so it notifies channel `interactive`" not in emitted_t1[0]
         assert "Emit exactly one final listener status" in emitted_t1[0]
         assert "not from an incidental shell `$?`" in emitted_t1[0]
         assert "On command success, notify only success" in emitted_t1[0]
@@ -1088,7 +1090,9 @@ class TestCodexLlmRouting:
         assert "Command: /cmd:review" in emitted_t3[0]
         assert "Listener rules:" in emitted_t3[0]
         assert "Expected listener channel: workspace_xterm" in emitted_t3[0]
-        assert "execute/preserve it so it notifies channel `workspace_xterm`" in emitted_t3[0]
+        assert "DO NOT execute that literal target block in normal Codex mode" in emitted_t3[0]
+        assert "semantic final notify for channel `workspace_xterm`" in emitted_t3[0]
+        assert "execute/preserve it so it notifies channel `workspace_xterm`" not in emitted_t3[0]
         assert "Emit exactly one final listener status" in emitted_t3[0]
         assert "not from an incidental shell `$?`" in emitted_t3[0]
         assert "These outcomes MUST notify failure/red" in emitted_t3[0]
@@ -2507,8 +2511,10 @@ class TestCmdSingleKimiModes:
         analyse = [n for n in names if n.startswith("/cmd:kimi-pair-analyse")]
         execute = [n for n in names if n.startswith("/cmd:kimi-pair-execute")]
         assert analyse == ["/cmd:kimi-pair-analyse /test:cmd"]
+        # report nomeado pelo alvo SANITIZADO (':' -> '_'), espelhando o produtor
+        # /cmd:kimi-pair-analyse (slug_sanitized). /test:cmd -> test_cmd.
         assert execute == [
-            "/cmd:kimi-pair-execute blacksmith/test:cmd-kimi-pair-report.md"
+            "/cmd:kimi-pair-execute blacksmith/test_cmd-kimi-pair-report.md"
         ]
         assert not any("--force" in n for n in names)
 
@@ -2521,7 +2527,7 @@ class TestCmdSingleKimiModes:
         names = [item.get_spec().name for item in widget._items]
         assert "/cmd:kimi-pair-analyse --force /test:cmd" in names
         assert (
-            "/cmd:kimi-pair-execute --force blacksmith/test:cmd-kimi-pair-report.md"
+            "/cmd:kimi-pair-execute --force blacksmith/test_cmd-kimi-pair-report.md"
             in names
         )
 
@@ -2541,7 +2547,7 @@ class TestCmdSingleKimiModes:
             f"/cmd:create {md}",
             "/cmd:review /test:cmd " + str(md),
             "/cmd:kimi-pair-analyse /test:cmd",
-            "/cmd:kimi-pair-execute blacksmith/test:cmd-kimi-pair-report.md",
+            "/cmd:kimi-pair-execute blacksmith/test_cmd-kimi-pair-report.md",
             "/cmd:readme-upd",
         ]
 
@@ -3614,3 +3620,58 @@ class TestEnqueueSpecificFlowValidationIntegration:
 
         assert ok is False, "flow 100%% fantasma nao pode enfileirar nada"
         assert widget._items == []
+
+
+class TestFix011BlueArrowUniversalRouting:
+    """FIX-011 Opt 1 — o dispatch blue-arrow (worker Kimi T2) roteia comandos
+    reais pelo executor universal (/skill:slash-executor, que carrega o
+    <LISTENER_FINALIZATION_CONTRACT>), espelhando o roteamento canonico de
+    insercao (L7729). Fecha o stuck-yellow do caso 011 sem tocar adapt_to_kimi.
+    """
+
+    @staticmethod
+    def _route(p):
+        return CommandQueueWidget._route_blue_arrow_through_universal(p)
+
+    def test_recovery_payload_is_idempotent(self):
+        # Payload de recovery (ja universal) -> intacto, sem double-wrap.
+        p = ("/skill:slash-executor --recovery-mode /tools:listener-recovery "
+             "--channel workspace --reason BLOCKED")
+        assert self._route(p) == p
+
+    def test_universal_payload_not_double_wrapped(self):
+        p = "/skill:slash-executor /qa:prep --module 1"
+        assert self._route(p) == p
+
+    def test_bare_real_command_routed_to_universal(self, monkeypatch):
+        # Comando real, NAO wrapper-only -> roteia pelo executor universal.
+        monkeypatch.setattr(CommandQueueWidget, "_resolve_claude_command_file",
+                            classmethod(lambda cls, slug: object()))
+        monkeypatch.setattr(CommandQueueWidget, "_kimi_requires_specific_wrapper",
+                            classmethod(lambda cls, slug: False))
+        out = self._route("/skill:blog:quality-gate --mode stockpile it-IT")
+        assert out == "/skill:slash-executor /blog:quality-gate --mode stockpile it-IT"
+
+    def test_wrapper_only_stays_bare(self, monkeypatch):
+        # _kimi_requires_specific_wrapper -> mantem BARE (identico a L7729).
+        monkeypatch.setattr(CommandQueueWidget, "_resolve_claude_command_file",
+                            classmethod(lambda cls, slug: object()))
+        monkeypatch.setattr(CommandQueueWidget, "_kimi_requires_specific_wrapper",
+                            classmethod(lambda cls, slug: True))
+        p = "/skill:daily-loop:do --x 1"
+        assert self._route(p) == p
+
+    def test_skill_only_without_command_stays_bare(self, monkeypatch):
+        # Sem .claude/command (skill-only) -> mantem BARE.
+        monkeypatch.setattr(CommandQueueWidget, "_resolve_claude_command_file",
+                            classmethod(lambda cls, slug: None))
+        monkeypatch.setattr(CommandQueueWidget, "_kimi_requires_specific_wrapper",
+                            classmethod(lambda cls, slug: False))
+        p = "/skill:some-skill-only"
+        assert self._route(p) == p
+
+    def test_raw_or_non_skill_prompt_untouched(self):
+        # blue-arrow sempre recebe /skill:... (item via adapt_to_kimi) ou o
+        # payload de recovery; um texto cru e deixado intacto (defensivo).
+        assert self._route("hello world") == "hello world"
+        assert self._route("/qa:prep") == "/qa:prep"

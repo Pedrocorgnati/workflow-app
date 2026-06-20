@@ -69,17 +69,32 @@ _BRACKETED_PASTE_MODE = 2004 << 5
 # isso, o CLI imprime a mensagem e morre, PTY vai amarelo->verde e o
 # autocast interpreta como "comando completou" e detona a fila inteira.
 # Regex compilado uma vez por modulo, case-insensitive, sem multiline.
-_FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+#
+# Severidade (3o campo) — fix dos falsos-VERMELHOS dos casos 004/010/013
+# (blacksmith/listeners/debug.md). Um crash real de auth/credit/rate do CLI
+# emite ~0-300 bytes em < 2s (a janela early-crash). As MESMAS palavras
+# ("unauthorized", "rate-limit", "429", "usage limit") aparecem o tempo todo
+# em conteudo BENIGNO que o agente renderiza (specs/codigo discutindo auth e
+# rate-limiting). Por isso cada pattern carrega uma severidade:
+#   "hard" -> frase muito especifica de morte do CLI; dispara em qualquer
+#             chunk (improvavel em conteudo benigno).
+#   "soft" -> palavra/expressao generica; so conta como fatal DENTRO da janela
+#             early-crash (ver _scan_chunk_for_fatal). Fora dela e tratada como
+#             conteudo, nao crash. O caminho autoritativo `wf-notify --status
+#             failure` NAO passa por este scanner e nao e afetado.
+_FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "AUTH_SUBSCRIPTION_DISABLED",
         re.compile(
             r"organization has disabled (?:Claude )?subscription access",
             re.IGNORECASE,
         ),
+        "hard",
     ),
     (
         "AUTH_API_KEY_REQUIRED",
         re.compile(r"Use an Anthropic API key instead", re.IGNORECASE),
+        "hard",
     ),
     (
         "AUTH_INVALID_API_KEY",
@@ -87,6 +102,7 @@ _FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"\b(invalid api key|authentication[_ ]error|unauthorized)\b",
             re.IGNORECASE,
         ),
+        "soft",
     ),
     (
         "AUTH_LOGIN_EXPIRED",
@@ -94,10 +110,12 @@ _FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(login (?:expired|required|to continue)|please (?:run|log) ?in|please log[ -]?in)",
             re.IGNORECASE,
         ),
+        "soft",
     ),
     (
         "CREDIT_BALANCE_LOW",
         re.compile(r"credit balance is too low", re.IGNORECASE),
+        "hard",
     ),
     (
         "USAGE_LIMIT_REACHED",
@@ -105,6 +123,7 @@ _FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(usage limit (?:reached|exceeded)|monthly limit|quota exceeded)",
             re.IGNORECASE,
         ),
+        "soft",
     ),
     (
         "RATE_LIMIT",
@@ -112,6 +131,7 @@ _FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(rate[ _-]?limit(?:ed)?|429 too many requests|too many requests)",
             re.IGNORECASE,
         ),
+        "soft",
     ),
 )
 
@@ -675,10 +695,24 @@ class OutputPanel(QWidget):
         Idempotente por chunk: se o mesmo reason ja foi emitido nesta
         sessao do PTY, ignora — evita re-disparar enquanto a mensagem
         ainda esta na tela e o PTY emite ANSI repaints.
+
+        Padroes "soft" (palavras genericas de auth/rate/usage) so contam
+        como crash DENTRO da janela early-crash — um crash real emite poucos
+        bytes em < 2s. Fora dela, as mesmas palavras sao conteudo benigno
+        renderizado (specs/codigo discutindo auth e rate-limiting) e NAO
+        devem forcar vermelho (casos 004/010/013 de debug.md). Padroes "hard"
+        (frases especificas de morte do CLI) permanecem incondicionais.
         """
         if not chunk:
             return
-        for reason, pattern in _FATAL_PATTERNS:
+        in_early_crash_window = (
+            self._dispatch_ts is not None
+            and self._bytes_since_dispatch < self._EARLY_EXIT_BYTES_THRESHOLD
+            and (time.monotonic() - self._dispatch_ts) < self._EARLY_EXIT_TIME_THRESHOLD_S
+        )
+        for reason, pattern, severity in _FATAL_PATTERNS:
+            if severity == "soft" and not in_early_crash_window:
+                continue
             if not pattern.search(chunk):
                 continue
             if self._last_failure_reason == reason:

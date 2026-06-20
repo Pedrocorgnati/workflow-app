@@ -1,4 +1,4 @@
-"""Dialog de configuracao dos 9 seeds `blacksmith/brainstorm-mcp/0[1-9]-*.md`.
+"""Dialog de configuracao dos seeds `blacksmith/brainstorm-mcp/NN-*.md`.
 
 Materializa T4 do loop 05-21-implantation-tasklist-aba-brainstorm (gear
 `brainstorm-mcp-config-gear`). Read+Update apenas (sem Create/Delete).
@@ -82,6 +82,7 @@ ACTION_COHERENCE: dict[str, dict[str, set]] = {
 }
 
 CURRENT_SCHEMA_VERSION = 1
+SEED_COUNT = 10
 
 _PROMPT_RX = re.compile(r"(^## Prompt canonico\s*$\n?)(.*?)(?=^## |\Z)", re.M | re.S)
 _FRONTMATTER_RX = re.compile(r"^---\n(.*?)\n---\n?(.*)\Z", re.S)
@@ -201,7 +202,7 @@ def _release_lock(fd: int | None) -> None:
 
 
 class BrainstormMcpConfigDialog(QDialog):
-    """Modal application-wide para editar os 9 seeds brainstorm-mcp."""
+    """Modal application-wide para editar os seeds brainstorm-mcp."""
 
     saved = Signal()  # Emitido apos save bem-sucedido (rebuild da grade).
 
@@ -213,7 +214,7 @@ class BrainstormMcpConfigDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setProperty("testid", "brainstorm-mcp-config-dialog")
-        self.setWindowTitle("Configurar 9 seeds brainstorm-mcp")
+        self.setWindowTitle(f"Configurar {SEED_COUNT} seeds brainstorm-mcp")
         self.setMinimumSize(900, 560)
 
         self.repo_root: Path = repo_root.resolve()
@@ -248,7 +249,7 @@ class BrainstormMcpConfigDialog(QDialog):
         list_layout = QVBoxLayout(list_panel)
         list_layout.setContentsMargins(0, 0, 0, 0)
         list_layout.setSpacing(4)
-        list_title = QLabel("Seeds (9)")
+        list_title = QLabel(f"Seeds ({SEED_COUNT})")
         list_title.setStyleSheet("color: #A1A1AA; font-size: 11px;")
         list_layout.addWidget(list_title)
         self._list_widget = QListWidget()
@@ -371,10 +372,20 @@ class BrainstormMcpConfigDialog(QDialog):
             self._save_btn.setEnabled(False)
             return
 
-        paths = sorted(self.seeds_dir.glob("0[1-9]-*.md"))
-        if len(paths) != 9:
+        seed_name_re = re.compile(r"^[0-9]{2}-[a-z][a-z0-9-]*\.md$")
+        all_numeric = sorted(self.seeds_dir.glob("[0-9][0-9]-*.md"))
+        paths = [p for p in all_numeric if seed_name_re.match(p.name)]
+        if len(paths) != SEED_COUNT:
             self._error_label.setText(
-                f"Esperados 9 seeds 0[1-9]-*.md; encontrados {len(paths)}",
+                f"Esperados {SEED_COUNT} seeds NN-<slug>.md; encontrados {len(paths)}",
+            )
+            self._save_btn.setEnabled(False)
+            return
+        expected_prefixes = [f"{i:02d}" for i in range(1, SEED_COUNT + 1)]
+        actual_prefixes = [p.name[:2] for p in paths]
+        if actual_prefixes != expected_prefixes:
+            self._error_label.setText(
+                f"Esperados prefixos {expected_prefixes}; encontrados {actual_prefixes}",
             )
             self._save_btn.setEnabled(False)
             return
@@ -556,7 +567,7 @@ class BrainstormMcpConfigDialog(QDialog):
         if not self._validate():
             return
 
-        # Persiste todos os 9 seeds (idempotente quando nao houve dirty per-seed,
+        # Persiste todos os seeds (idempotente quando nao houve dirty per-seed,
         # mas re-grava igual mesmo assim - simplificacao defensiva).
         try:
             for i, p in enumerate(self._seed_paths):

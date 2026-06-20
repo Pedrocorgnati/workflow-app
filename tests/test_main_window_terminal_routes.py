@@ -64,7 +64,8 @@ def test_mcp_toolbar_uses_provider_radio_and_three_actions(qtbot):
     assert _radio_by_testid(win, "output-mcp-provider-codex").text() == "Codex"
 
     personas = {
-        "output-mcp-persona-researcher": "researcher",
+        "output-mcp-persona-search-in": "seatch-in",
+        "output-mcp-persona-search-out": "search-out",
         "output-mcp-persona-controversial": "controversial",
         "output-mcp-persona-hardening": "hardening",
     }
@@ -149,15 +150,15 @@ def test_mcp_toolbar_joins_multiple_persona_prompts_in_ui_order(qtbot):
     signal_bus.paste_text_in_terminal.connect(sent_t1.append)
     try:
         _radio_by_testid(win, "output-mcp-provider-claude").setChecked(True)
-        _checkbox_by_testid(win, "output-mcp-persona-researcher").setChecked(True)
+        _checkbox_by_testid(win, "output-mcp-persona-search-in").setChecked(True)
         _checkbox_by_testid(win, "output-mcp-persona-hardening").setChecked(True)
         _button_by_testid(win, "output-mcp-action-main").click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
 
     assert sent_t1 == [
-        "/mcp:codex no papel de researcher, conforme regras em "
-        "ai-forge/MCP/agents/study-researcher-rules.md; e depois disso "
+        "/mcp:codex no papel de search-in, conforme regras em "
+        "ai-forge/MCP/agents/search-in-rules.md; e depois disso "
         "no papel de engenheiro de hardening, conforme regras em "
         "ai-forge/MCP/agents/hardening-engineer-rules.md"
     ]

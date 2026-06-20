@@ -19,6 +19,8 @@ Uses real on-disk commands for determinism:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
@@ -221,6 +223,15 @@ def _capture(signal):
     return out
 
 
+def _button_by_testid(win, testid: str):
+    from PySide6.QtWidgets import QPushButton
+
+    for btn in win.findChildren(QPushButton):
+        if btn.property("testid") == testid:
+            return btn
+    raise AssertionError(f"button not found: {testid}")
+
+
 class TestPublishInsertionLlmAware:
     def test_neutral_path_passthrough(self, qapp, qtbot):
         win = _new_window(qtbot)
@@ -308,3 +319,39 @@ class TestPublishInsertionLlmAware:
         runs = _capture(signal_bus.run_command_in_terminal)
         win._publish_insertion_llm_aware(REAL_CMD)
         assert not runs
+
+    def test_cmd_subtab_listener_debug_button_uses_codex_renderer(self, qapp, qtbot):
+        """CMD subtab buttons must not paste raw Claude slash under Main Codex."""
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_codex_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+
+        try:
+            _button_by_testid(win, "queue-btn-cmd-debug-green").click()
+        finally:
+            Path("blacksmith/listeners/.debug-counter").unlink(missing_ok=True)
+            for path in (Path("blacksmith/listeners"), Path("blacksmith")):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+
+        assert pastes
+        payload = pastes[-1][0]
+        assert payload != "/listener:analyse --green"
+        assert "Command: /listener:analyse --green" in payload
+
+    def test_personal_subtab_button_uses_codex_renderer(self, qapp, qtbot):
+        """PERSONAL subtab buttons share the same Codex insertion path."""
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_codex_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+
+        _button_by_testid(win, "queue-btn-personal-cv-create").click()
+
+        assert pastes
+        payload = pastes[-1][0]
+        assert payload != "/curriculum:create"
+        assert "Command: /curriculum:create" in payload

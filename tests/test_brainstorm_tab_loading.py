@@ -1,4 +1,4 @@
-"""Testes da aba brainstorm: carga dos 9 seeds + picker md + dispatch_result.
+"""Testes da aba brainstorm: carga dos 10 seeds + picker md + dispatch_result.
 
 Cobre 4 cenarios canonicos do T2/T1 (loop 05-21-implantation-tasklist-aba-brainstorm):
 - test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons: 9 botoes na grade.
@@ -52,7 +52,7 @@ def _materialize_9_seeds(repo_root: Path) -> Path:
     agents_dir.mkdir(parents=True)
     slugs = [
         ("01", "criar-md"),
-        ("02", "pesquisar"),
+        ("02", "search-in"),
         ("03", "controversial"),
         ("04", "hardening"),
         ("05", "loop-prepare"),
@@ -60,6 +60,7 @@ def _materialize_9_seeds(repo_root: Path) -> Path:
         ("07", "revisar-task"),
         ("08", "executar-task"),
         ("09", "revisar-execucao"),
+        ("10", "search-out"),
     ]
     for prefix, slug in slugs:
         (agents_dir / f"{slug}-rules.md").write_text(
@@ -101,11 +102,11 @@ def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
     _materialize_9_seeds(repo_root)
     fake = _FakeMainWindow(repo_root)
     seeds = fake._load_brainstorm_seeds()
-    assert len(seeds) == 9
+    assert len(seeds) == 10
     slugs = [s["slug"] for s in seeds]
     assert slugs == [
         "criar-md",
-        "pesquisar",
+        "search-in",
         "controversial",
         "hardening",
         "loop-prepare",
@@ -113,6 +114,7 @@ def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
         "revisar-task",
         "executar-task",
         "revisar-execucao",
+        "search-out",
     ]
     for s in seeds:
         # Campos canonicos do widget.
@@ -133,7 +135,7 @@ def test_seed_loader_ignores_date_prefixed_output_siblings(tmp_path):
     MM- casa o glob 0[1-9]-*.md e fazia len(paths) > 9 -> grade inteira sumia.
 
     O loader deve filtrar esses irmaos (slug nao-alfabetico apos 0N-) e ainda
-    retornar exatamente os 9 seeds canonicos. Regressao das duas sumiços de hoje.
+    retornar exatamente os 10 seeds canonicos. Regressao das duas sumiços de hoje.
     """
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -147,10 +149,11 @@ def test_seed_loader_ignores_date_prefixed_output_siblings(tmp_path):
     )
     fake = _FakeMainWindow(repo_root)
     seeds = fake._load_brainstorm_seeds()
-    assert len(seeds) == 9
+    assert len(seeds) == 10
     assert [s["slug"] for s in seeds] == [
-        "criar-md", "pesquisar", "controversial", "hardening", "loop-prepare",
+        "criar-md", "search-in", "controversial", "hardening", "loop-prepare",
         "criar-task", "revisar-task", "executar-task", "revisar-execucao",
+        "search-out",
     ]
 
 
@@ -161,7 +164,7 @@ def test_seed_loader_still_fails_when_a_real_seed_is_missing(tmp_path):
     seeds_dir = _materialize_9_seeds(repo_root)
     (seeds_dir / "09-revisar-execucao.md").unlink()
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 9"):
+    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 10"):
         fake._load_brainstorm_seeds()
 
 

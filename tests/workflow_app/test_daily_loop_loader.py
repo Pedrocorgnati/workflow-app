@@ -121,10 +121,11 @@ class TestResolveLoopPath:
             loop_root,
             label="progress_path",
         )
-        # Must resolve UNDER loop_root, never duplicating blacksmith/loop-archives prefix.
+        # Must resolve UNDER loop_root, never duplicating blacksmith/loop-archives prefix
+        # (the historic loop_root.parent bug).
         assert "blacksmith/loop-archives/blacksmith/loop-archives" not in str(result)
-        # Must be loop_root / declared_path:
-        assert result == (loop_root / "output" / "daily-loop"
+        # New contract (CONTRACT.md 2.2): relative resolves literally as loop_root / value.
+        assert result == (loop_root / "blacksmith" / "loop-archives"
                           / "fullprofile-hardening-onda8" / "PROGRESS.md").resolve()
 
     def test_subdir_relative_resolves_against_loop_root(self, loop_root: Path) -> None:
@@ -278,9 +279,9 @@ class TestBuildDailyLoopSpecs:
         loop_root.parent + multi-segment-relative. Now resolves under loop_root.
 
         We stage PROGRESS.md INSIDE loop_root/blacksmith/loop-archives/.../ to match
-        the new (deterministic) resolution rule.
+        the new (deterministic) resolution rule (loop_root / declared progress_path).
         """
-        nested = loop_root / "output" / "daily-loop" / "fullprofile-hardening-onda8"
+        nested = loop_root / "blacksmith" / "loop-archives" / "fullprofile-hardening-onda8"
         nested.mkdir(parents=True)
         _write_progress(nested, items=[("001", " ", "tgt", "T-sonnet-medium")])
         cfg = _base_config(
@@ -914,7 +915,7 @@ class TestOnda8RegressionReplay:
         (loop_root / "tasks").mkdir()
         # Legacy generator wrote progress_path with embedded loop_root prefix.
         # New resolver: that path is interpreted relative to loop_root.
-        nested = loop_root / "output" / "daily-loop" / "fullprofile-hardening-onda8"
+        nested = loop_root / "blacksmith" / "loop-archives" / "fullprofile-hardening-onda8"
         nested.mkdir(parents=True)
         _write_progress(nested, items=[("001", " ", "x", "T-sonnet-medium")])
         cfg = {

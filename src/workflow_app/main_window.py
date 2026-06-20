@@ -913,9 +913,9 @@ class MainWindow(QMainWindow):
     _SETTINGS_SPLITTER = "MainWindow/splitterSizes"
     _SETTINGS_LAST_CONFIG = "Project/lastConfigPath"
 
-    # Emitido quando os 9 seeds brainstorm-mcp foram regravados via gear modal
+    # Emitido quando os seeds brainstorm-mcp foram regravados via gear modal
     # (T4 do loop 05-21-implantation-tasklist-aba-brainstorm). Slot
-    # `_rebuild_brainstorm_grid` reconstroi a grade 3x3 sem mem leak.
+    # `_rebuild_brainstorm_grid` reconstroi a grade sem mem leak.
     _brainstorm_grid_invalidated = Signal()
 
     def __init__(self) -> None:
@@ -1787,13 +1787,14 @@ class MainWindow(QMainWindow):
 
         return bar, left_top
 
-    # Aba `brainstorm`: grade 3x3 seed-driven (T2 loop
-    # 05-21-implantation-tasklist-aba-brainstorm). 9 botoes MCPPromptButton
-    # carregados de blacksmith/brainstorm-mcp/0[1-9]-*.md.
+    # Aba `brainstorm`: grade seed-driven (T2 loop
+    # 05-21-implantation-tasklist-aba-brainstorm). Botoes MCPPromptButton
+    # carregados de blacksmith/brainstorm-mcp/NN-*.md.
     # Constantes legacy (hardcoded col styles, row labels, agents map,
     # agents prompt dir, slot por cor) removidas em T2.
 
     _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
+    _BRAINSTORM_SEED_COUNT = 10
 
     @staticmethod
     def _systemforge_root() -> Path:
@@ -1810,9 +1811,9 @@ class MainWindow(QMainWindow):
         return self._systemforge_root() / self._BRAINSTORM_SEEDS_RELDIR
 
     def _load_brainstorm_seeds(self) -> list[dict]:
-        """Carrega e valida os 9 seeds da grade brainstorm.
+        """Carrega e valida os seeds da grade brainstorm.
 
-        Glob `blacksmith/brainstorm-mcp/0[1-9]-*.md`, parse yaml frontmatter,
+        Glob `blacksmith/brainstorm-mcp/NN-*.md`, parse yaml frontmatter,
         valida schema fechado + resolvability de agent_path (gate G6),
         retorna lista ordenada por nome de arquivo.
 
@@ -1828,26 +1829,37 @@ class MainWindow(QMainWindow):
 
         # Hardening 2026-05-24: o diretorio brainstorm-mcp/ tambem hospeda os
         # OUTPUTS da acao "Criar arquivo" (ex: 05-24-foot-stock-....md). O
-        # prefixo de data MM- colide com o glob 0[1-9]-*.md e inflava len(paths)
-        # acima de 9 -> a politica fail-fast all-or-nothing fazia a grade INTEIRA
+        # prefixo de data MM- colide com o glob NN-*.md e inflava len(paths)
+        # acima do esperado -> a politica fail-fast all-or-nothing fazia a grade INTEIRA
         # sumir (root cause das duas sumiços observadas em 2026-05-24). Defesa:
-        # exigir slug ALFABETICO logo apos o prefixo 0N- (^0[1-9]-[a-z]...), o que
-        # exclui nomes com data (0N-NN-...) sem tocar nos 9 seeds reais (todos
-        # kebab-alpha: criar-md, pesquisar, controversial, ...).
-        _seed_name_re = re.compile(r"^0[1-9]-[a-z][a-z0-9-]*\.md$")
-        _all_numeric = sorted(seeds_dir.glob("0[1-9]-*.md"))
+        # exigir slug ALFABETICO logo apos o prefixo NN- (^[0-9]{2}-[a-z]...), o que
+        # exclui nomes com data (NN-NN-...) sem tocar nos seeds reais (todos
+        # kebab-alpha: criar-md, search-in, controversial, ...).
+        _seed_name_re = re.compile(r"^[0-9]{2}-[a-z][a-z0-9-]*\.md$")
+        _all_numeric = sorted(seeds_dir.glob("[0-9][0-9]-*.md"))
         paths = [p for p in _all_numeric if _seed_name_re.match(p.name)]
-        if len(paths) != 9:
+        seed_count = getattr(
+            self, "_BRAINSTORM_SEED_COUNT", MainWindow._BRAINSTORM_SEED_COUNT,
+        )
+        if len(paths) != seed_count:
             _ignored = [p.name for p in _all_numeric if p not in paths]
             _hint = (
-                f"; ignorados por nao casarem 0N-<slug-alpha>.md (provaveis "
+                f"; ignorados por nao casarem NN-<slug-alpha>.md (provaveis "
                 f"outputs de 'Criar arquivo'): {_ignored}"
                 if _ignored
                 else ""
             )
             raise _BrainstormSeedError(
-                f"esperado exatamente 9 seeds canonicos (0N-<slug>.md), "
+                f"esperado exatamente {seed_count} seeds canonicos "
+                f"(NN-<slug>.md), "
                 f"encontrado {len(paths)}{_hint}"
+            )
+        expected_prefixes = [f"{i:02d}" for i in range(1, seed_count + 1)]
+        actual_prefixes = [p.name[:2] for p in paths]
+        if actual_prefixes != expected_prefixes:
+            raise _BrainstormSeedError(
+                f"esperado exatamente {seed_count} seeds canonicos "
+                f"com prefixos {expected_prefixes}; encontrado {actual_prefixes}"
             )
 
         loaded: list[dict] = []
@@ -1934,7 +1946,7 @@ class MainWindow(QMainWindow):
             # Label canonico (fix T021): extrai do title removendo o prefixo
             # "Seed - Botao N - " (regex que tolera espacos extras), conforme
             # mcp-flow-implantation-base-archive.md §4 (labels: "Criar md",
-            # "Pesquisar", ..., "Loop prepare" - sem numero prefixo).
+            # "seatch-in", "search-out", etc. - sem numero prefixo).
             raw_title = str(data.get("title") or slug).strip()
             canonical_label = re.sub(
                 r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
@@ -1952,9 +1964,9 @@ class MainWindow(QMainWindow):
                 "seed_path": p,
             })
 
-        # Garantia final: 9 slugs unicos.
+        # Garantia final: slugs unicos.
         slugs = [s["slug"] for s in loaded]
-        if len(set(slugs)) != 9:
+        if len(set(slugs)) != seed_count:
             raise _BrainstormSeedError(
                 f"slugs nao unicos: {slugs}"
             )
@@ -2140,22 +2152,22 @@ class MainWindow(QMainWindow):
         # anexados ao comando MCP via _compose_mcp_text na ORDEM da UI (row-major).
         # Os 6 primeiros testids sao estaveis (contrato de teste). Os 6 ultimos sao
         # os mais importantes de queue-subtab-insertions-personas (ai-forge/MCP/agents/):
-        # criar-md (estruturador), revisar-task, revisar-qa, code-debugger,
+        # search-in/search-out, revisar-task, revisar-qa, code-debugger,
         # executor de slash-commands e analista-delegador.
         persona_specs = (
             # Linha 1 — analise / brainstorm
-            ("researcher", "output-mcp-persona-researcher",
-             "no papel de researcher, conforme regras em "
-             "ai-forge/MCP/agents/study-researcher-rules.md"),
+            ("seatch-in", "output-mcp-persona-search-in",
+             "no papel de search-in, conforme regras em "
+             "ai-forge/MCP/agents/search-in-rules.md"),
+            ("search-out", "output-mcp-persona-search-out",
+             "no papel de search-out, conforme regras em "
+             "ai-forge/MCP/agents/search-out-rules.md"),
             ("controversial", "output-mcp-persona-controversial",
              "no papel de controversial, conforme regras em "
              "ai-forge/MCP/agents/controversial-devils-advocate-rules.md"),
             ("hardening", "output-mcp-persona-hardening",
              "no papel de engenheiro de hardening, conforme regras em "
              "ai-forge/MCP/agents/hardening-engineer-rules.md"),
-            ("criar-md", "output-mcp-persona-criar-md",
-             "no papel de estruturador de ideias (criar md), conforme regras em "
-             "ai-forge/MCP/agents/criar-md-rules.md"),
             # Linha 2 — ciclo de task
             ("criar-task", "output-mcp-persona-criar-task",
              "no papel de criador de tasks, conforme regras em "
@@ -2503,7 +2515,7 @@ class MainWindow(QMainWindow):
         row_layout.addWidget(copy_md_path_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         gear_btn_brainstorm = _GearButton(
             testid="brainstorm-mcp-config-gear",
-            tooltip="Configurar 9 seeds brainstorm-mcp (label, prompt, agent, action, target)",
+            tooltip="Configurar seeds brainstorm-mcp (label, prompt, agent, action, target)",
         )
         gear_btn_brainstorm.clicked.connect(self._open_brainstorm_mcp_config_dialog)
         self._brainstorm_mcp_config_gear = gear_btn_brainstorm
@@ -2617,8 +2629,8 @@ class MainWindow(QMainWindow):
 
         page_layout.addWidget(radio_row)
 
-        # Grade 3x3 seed-driven (T2 loop 05-21-implantation-tasklist-aba-brainstorm).
-        # 9 MCPPromptButton, 1 por seed em blacksmith/brainstorm-mcp/0[1-9]-*.md,
+        # Grade seed-driven (T2 loop 05-21-implantation-tasklist-aba-brainstorm).
+        # 1 MCPPromptButton por seed em blacksmith/brainstorm-mcp/NN-*.md,
         # ordem deterministica por nome de arquivo.
         grid_widget = QWidget()
         grid_widget.setObjectName("BrainstormGrid")
@@ -2697,7 +2709,7 @@ class MainWindow(QMainWindow):
         return page
 
     def _open_brainstorm_mcp_config_dialog(self) -> None:
-        """Abre o modal de configuracao dos 9 seeds brainstorm-mcp (T4).
+        """Abre o modal de configuracao dos seeds brainstorm-mcp (T4).
 
         Lifecycle hardened (cf. hardening §5 task-005 loop
         05-21-implantation-tasklist-aba-brainstorm):
@@ -4658,6 +4670,8 @@ class MainWindow(QMainWindow):
         "revisar-qa-rules": "QA Reviewer",
         "revisar-task-rules": "Task Reviewer",
         "study-researcher-rules": "Researcher",
+        "search-in-rules": "seatch-in",
+        "search-out-rules": "search-out",
         "code-debugger": "Debugger",
         "loop-preparer-rules": "Loop Preparer",
         "orquestrador-pdca-rules": "PDCA Orchestrator",
@@ -4948,10 +4962,11 @@ class MainWindow(QMainWindow):
             extra_btns.append(btn)
 
         # ── Botoes de debug de listener (source.md secao 19) ──────────────── #
-        # Quatro botoes de debug colam /listener:analyse --<cor>; o quinto cola
+        # Cinco botoes de debug colam /listener:analyse --<flag>; o sexto cola
         # /listener:repair e mantem um contador persistente em
-        # blacksmith/listeners/.debug-counter. As cores dos 4 botoes de debug
-        # espelham as cores canonicas dos dots em listener-{cor}.md.
+        # blacksmith/listeners/.debug-counter. As cores dos botoes de debug
+        # espelham as cores canonicas dos dots em listener-{cor}.md
+        # (debug-blue-reverse usa um tom de sky para distinguir do debug-blue).
         # IO do contador e auxiliar: try/except total, falha silenciosa com
         # warning no log, nunca crash nem toast de erro (R-btn1/R-btn2).
         _COUNTER_FILE = Path("blacksmith/listeners/.debug-counter")
@@ -4984,6 +4999,9 @@ class MainWindow(QMainWindow):
             ("debug-blue",   "queue-btn-cmd-debug-blue",
              "#3B82F6", "#2563EB", "#1D4ED8", "/listener:analyse --blue",
              "Debug: AUQ na tela mas dot azul nao apareceu"),
+            ("debug-blue-reverse", "queue-btn-cmd-debug-blue-reverse",
+             "#0EA5E9", "#0284C7", "#0369A1", "/listener:analyse --blue-reverse",
+             "Debug: dot azul na tela mas sem AUQ (azul espurio)"),
         ]
 
         _counter = _read_debug_counter()
@@ -5010,28 +5028,24 @@ class MainWindow(QMainWindow):
         def _on_debug_click(cmd: str):
             def _h() -> None:
                 nonlocal _counter
+                ok = self._publish_insertion_llm_aware(cmd)
+                if not ok:
+                    return
                 _counter += 1
                 _write_debug_counter(_counter)
                 self._listener_repair_btn.setText(_repair_label(_counter))
                 self._listener_repair_btn.setToolTip(_repair_tooltip(_counter))
-                QApplication.clipboard().setText(cmd)
-                self._publish_to_terminal(cmd)
-                signal_bus.toast_requested.emit(
-                    f"Comando copiado e digitado no terminal: {cmd}", "info",
-                )
             return _h
 
         def _on_repair_click() -> None:
             nonlocal _counter
-            QApplication.clipboard().setText("/listener:repair")
-            self._publish_to_terminal("/listener:repair")
+            ok = self._publish_insertion_llm_aware("/listener:repair")
+            if not ok:
+                return
             _counter = 0
             _write_debug_counter(0)
             self._listener_repair_btn.setText(_repair_label(0))
             self._listener_repair_btn.setToolTip(_repair_tooltip(0))
-            signal_bus.toast_requested.emit(
-                "Comando copiado e digitado no terminal: /listener:repair", "info",
-            )
 
         for label, testid, bg, hover, pressed, cmd, tooltip in _DEBUG_CMDS:
             b = _make_btn(label, testid, bg, hover, pressed, tooltip)

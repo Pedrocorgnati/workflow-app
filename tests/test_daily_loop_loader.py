@@ -336,9 +336,14 @@ def test_cmd_single_expanded_commands_emitted_when_commands_empty(
     `commands` em buckets[*].items[*].
     """
     _write_progress(tmp_path)
+    # Forma canonica do par kimi-pair (contrato): analyse recebe o COMANDO-ALVO
+    # (slash slug); execute recebe o PATH DO REPORT em blacksmith/, nomeado pelo
+    # alvo sanitizado (':' -> '_', espelha slug_sanitized do produtor). Este teste
+    # so verifica o pass-through do loader, mas a fixture NAO deve ensinar o
+    # anti-padrao de passar um task file para os dois lados do par.
     expanded = [
-        "/cmd:kimi-pair-analyse --approved tasks/items/task-001.md",
-        "/cmd:kimi-pair-execute --approved tasks/items/task-001.md",
+        "/cmd:kimi-pair-analyse --approved /loop:mark-type",
+        "/cmd:kimi-pair-execute --approved blacksmith/loop_mark-type-kimi-pair-report.md",
     ]
     raw_config = _base_config(
         items=[{"id": "001", "commands": []}],

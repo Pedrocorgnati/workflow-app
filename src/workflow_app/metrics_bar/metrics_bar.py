@@ -753,6 +753,24 @@ class MetricsBar(QWidget):
         self._lbl_tokens.setVisible(False)
         layout.addWidget(self._lbl_tokens)
 
+        # ── Instance badge (DEC-014) — contagem PASSIVA de janelas no repo ── #
+        # Coexistencia de varias instancias no MESMO repo e o uso NORMAL
+        # (CLAUDE.md L146: multiplas pipelines em paralelo no mesmo workspace).
+        # Este badge apenas INFORMA a contagem; NUNCA toca fence/dot/notify e
+        # NUNCA prescreve "mantenha so uma" (o toast original foi rejeitado por
+        # ser ~100% falso-positivo). Visivel so quando N>1. Atualiza on-show/
+        # on-focus (sem QTimer de polling). Ver caso 014 / DEC-014.
+        self._lbl_instances = QLabel()
+        self._lbl_instances.setObjectName("MetricsBarInstances")
+        self._lbl_instances.setProperty("testid", "metrics-instances-label")
+        self._lbl_instances.setStyleSheet("color: #71717A; font-size: 12px;")
+        self._lbl_instances.setToolTip(
+            "Janelas do workflow-app abertas neste mesmo repositorio "
+            "(coexistencia same-repo e normal)"
+        )
+        self._lbl_instances.setVisible(False)
+        layout.addWidget(self._lbl_instances)
+
         # ── Tool use counter ──────────────────────────────────────────── #
         self._tool_use_label = QLabel()
         self._tool_use_label.setObjectName("MetricsBarLabel")
@@ -866,6 +884,11 @@ class MetricsBar(QWidget):
         # Files are created here so QFileSystemWatcher can watch them from the start.
         notify_dir = self._NOTIFY_FILE.parent
         notify_dir.mkdir(parents=True, exist_ok=True)
+        # DEC-014: registra esta instancia (owner.json) ANTES de o watcher armar,
+        # para o badge passivo contar janelas-irmas do mesmo install-dir. owner
+        # vive na PROPRIA session-dir (escrita unica no boot) -> nao dispara
+        # directoryChanged espurio no watcher (que so arma depois, abaixo).
+        self._write_instance_owner()
         self._notify_files: dict[str, Path] = {
             "interactive": notify_dir / "terminal-notify-interactive.json",
             "workspace":   notify_dir / "terminal-notify-workspace.json",
@@ -945,6 +968,14 @@ class MetricsBar(QWidget):
             "workspace": "",
             "workspace_xterm": "",
         }
+
+        # Observabilidade (FIX-009-012-OBS) — NAO altera estado/cor/fence.
+        # Ultima reason de falha + instante por canal: usados so para
+        # enriquecer o toolTip do dot vermelho ("falhou (REASON) ha Ns") e a
+        # telemetria jsonl, esclarecendo a confusao "success em disco + dot
+        # vermelho" (casos 009/012). Limpos quando o canal sai de failed.
+        self._fail_reason: dict[str, str] = {}
+        self._fail_since: dict[str, float] = {}
 
         # External-session fence: True between terminal_session_started and
         # terminal_session_finished. While active, authoritative notifies are
@@ -1483,6 +1514,80 @@ class MetricsBar(QWidget):
                 return cur
             cur = cur.parent
         return None
+
+    # ───────────────────────── Instance badge (DEC-014) ─────────────────── #
+    # Observabilidade PASSIVA de coexistencia same-repo. NUNCA escreve notify,
+    # NUNCA toca fence/_command_epoch/_idle_locked/set_state.
+    def _write_instance_owner(self) -> None:
+        """Grava owner.json (pid + install-dir) na session-dir desta instancia,
+        atomico (tmp+rename), fail-soft. Lido pelo badge para contar janelas-
+        irmas do MESMO install-dir."""
+        try:
+            install_dir = str(Path(__file__).resolve().parents[3])  # .../ai-forge/workflow-app
+            import time as _time_dec
+            d = self._NOTIFY_FILE.parent
+            d.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(
+                {"pid": os.getpid(), "install_dir": install_dir, "ts": _time_dec.time()}
+            )
+            tmp = d / f"owner.json.tmp-{os.getpid()}"
+            tmp.write_text(payload)
+            os.replace(tmp, d / "owner.json")  # atomico
+        except Exception:
+            pass
+
+    @staticmethod
+    def _count_live_instances(base_dir: "Path", install_dir: str) -> int:
+        """Puro/testavel: conta session-dirs cujo owner.json tem install_dir
+        igual E pid VIVO (/proc/<pid>, Linux). Minimo 1 (ao menos esta). Confirma
+        a instancia por CONTEUDO do owner (nao por mera existencia do dir, que
+        sofre de PID-reuse). Fail-soft."""
+        count = 0
+        try:
+            sessions = sorted(Path(base_dir).glob("session-*"))
+        except OSError:
+            return 1
+        for d in sessions:
+            try:
+                data = json.loads((d / "owner.json").read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get("install_dir") != install_dir:
+                continue
+            pid = data.get("pid")
+            if not isinstance(pid, int) or not Path(f"/proc/{pid}").exists():
+                continue
+            count += 1
+        return count if count > 0 else 1
+
+    def _count_repo_instances(self) -> int:
+        try:
+            install_dir = str(Path(__file__).resolve().parents[3])
+            base = self._NOTIFY_FILE.parent.parent  # ~/.workflow-app/
+            return self._count_live_instances(base, install_dir)
+        except Exception:
+            return 1
+
+    def _refresh_instance_badge(self) -> None:
+        """Atualiza o badge 'N janelas neste repo' (visivel so quando N>1).
+        Fail-soft; NUNCA toca fence/dot/notify."""
+        try:
+            n = self._count_repo_instances()
+            if n > 1:
+                self._lbl_instances.setText(f"{n} janelas neste repo")
+                self._lbl_instances.setVisible(True)
+            else:
+                self._lbl_instances.setVisible(False)
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        self._refresh_instance_badge()
+
+    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().focusInEvent(event)
+        self._refresh_instance_badge()
 
     def _open_config_picker(self, title: str, fallback_segments: tuple[str, ...]) -> None:
         """Shared picker for Projeto/Loop buttons.
@@ -2193,6 +2298,23 @@ class MetricsBar(QWidget):
             # Failure/awaiting_user are priority states. A later success/idle
             # notify, hardcap, or prompt repaint must not auto-clear them; only
             # explicit human action (or a new dispatch path) can move them on.
+            # Observabilidade (FIX-009-012-OBS): explica POR QUE o dot segue
+            # vermelho mesmo apos o canal atingir idle ("success em disco +
+            # dot vermelho" confunde o operador — casos 009/012). So texto de
+            # toolTip; NAO muda estado/cor/fence e NAO afirma "success
+            # descartado" (o failure-wins canonico de mesmo run_id e dropado
+            # pelo anti-duplicate em _on_notify_file_changed ANTES de chegar
+            # aqui — este branch dispara por timer de silencio sobre dot ja
+            # vermelho; afirmar "success" seria falso, viola Zero Assumido).
+            if dot.state == "failed":
+                import time as _time_obs
+                reason = self._fail_reason.get(channel, "desconhecido")
+                since = self._fail_since.get(channel)
+                age = int(_time_obs.time() - since) if since else 0
+                label = getattr(dot, "_label", channel)
+                dot.setToolTip(
+                    f"{label}: falhou ({reason}) ha {age}s; clique para limpar"
+                )
             self._idle_locked[channel] = False
             self._update_overall_listener()
             return
@@ -2512,8 +2634,15 @@ class MetricsBar(QWidget):
         # Authoritative terminal state reached — lower the notify fence (failed
         # does not funnel through _enter_authoritative_idle's green branch).
         self._awaiting_notify[channel] = False
+        # Observabilidade (FIX-009-012-OBS): registra reason + instante ANTES de
+        # pintar vermelho, para o toolTip e a telemetria explicarem o porque do
+        # red persistente. NAO muda a logica de estado.
+        import time as _time_obs
+        self._fail_reason[channel] = reason
+        self._fail_since[channel] = _time_obs.time()
         dot.set_state("failed")
         self._update_overall_listener()
+        self._append_failure_telemetry(channel, reason)
         self._signal_bus.autocast_abort_requested.emit("listener-failure", channel)
         # Auto-recovery: red → wait 2s → paste recovery prompt into the SAME
         # terminal. Gated on (1) autocast was on, (2) a SEMANTIC failure reason
@@ -2538,6 +2667,37 @@ class MetricsBar(QWidget):
         self._awaiting_notify[channel] = False
         dot.set_state("awaiting_user")
         self._update_overall_listener()
+
+    def _append_failure_telemetry(self, channel: str, reason: str) -> None:
+        """Observabilidade pura (FIX-009-012-OBS): grava UMA linha JSONL por
+        falha de listener em .claude/wf-failures/{YYYY-MM-DD}.jsonl. NUNCA
+        altera estado/cor/fence; fail-soft total (qualquer erro e engolido).
+        `command`/`duration_seconds` sao null (desconhecidos neste ponto;
+        Zero Assumido — nao inventa dado). Multi-instancia: append de uma
+        linha curta no mesmo arquivo diario e tolerado (sem garantia
+        transacional, mas linhas nao se corrompem em append O_APPEND)."""
+        try:
+            root = self._repo_root_path()
+            if root is None:
+                return
+            import json as _json_obs
+            import time as _time_obs
+            d = root / ".claude" / "wf-failures"
+            d.mkdir(parents=True, exist_ok=True)
+            day = _time_obs.strftime("%Y-%m-%d", _time_obs.gmtime())
+            rec = {
+                "ts": _time_obs.time(),
+                "channel": channel,
+                "reason": reason,
+                "exit_code": None,
+                "run_id": self._last_processed_run_id.get(channel, ""),
+                "command": None,
+                "duration_seconds": None,
+            }
+            with open(d / f"{day}.jsonl", "a", encoding="utf-8") as f:
+                f.write(_json_obs.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     # ─────────────────────────── Red-listener auto-recovery ─────────────── #
     # Canonical flow: ai-forge/rules/workflow-app-listeners.md (auto-recovery
@@ -2565,6 +2725,11 @@ class MetricsBar(QWidget):
             # defensive cleanup for the human-click path (failed->idle via
             # mousePressEvent) so a stale flag cannot re-arm on a future idle.
             self._autocast_aborted_by_recovery.discard(channel)
+            # Observabilidade (FIX-009-012-OBS): o canal saiu de um estado
+            # prioritario (clique humano OU verde autoritativo) — esquece a
+            # reason de falha para nao mostrar toolTip stale numa falha futura.
+            self._fail_reason.pop(channel, None)
+            self._fail_since.pop(channel, None)
 
     def _llm_for_channel(self, channel: str) -> str:
         return llm_for_channel(channel, self._main_llm)

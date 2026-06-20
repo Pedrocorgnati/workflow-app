@@ -319,3 +319,46 @@ def test_template_label_set_with_slug_and_count(qapp, tmp_path: Path) -> None:
     assert "site-repo" in label_text  # Path(config_path).stem
     assert "specs" in label_text
     assert label_hidden is False
+
+
+# ─── P6: no spec hardcodes an issuer/domain literal (migration guard) ─────── #
+
+
+def test_specs_do_not_hardcode_domain(qapp, tmp_path: Path) -> None:
+    """The handler must stay path-agnostic: it passes only config_path as $1.
+    The OIDC issuer/authority/domain is resolved at runtime by
+    /multibackend:scan from the project.json (R-03/R-05), never baked into the
+    enqueued spec names. This guards against a regression where someone injects
+    a literal issuer (corgnati / systemforgedashboard) into the handler, which
+    would break the corgnati->systemforgedashboard migration."""
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    cfg = _make_config(tmp_path)
+    app_state.set_config(cfg)
+
+    emitted: List[List[Any]] = []
+    signal_bus.pipeline_ready.connect(emitted.append)
+
+    try:
+        widget = CommandQueueWidget()
+        try:
+            widget._on_multibackend_clicked()
+        finally:
+            widget.deleteLater()
+    finally:
+        app_state.clear_config()
+        try:
+            signal_bus.pipeline_ready.disconnect(emitted.append)
+        except (RuntimeError, TypeError):
+            pass
+
+    forbidden = ("corgnati", "systemforge-dashboard", "systemforgedashboard",
+                 "https://", "oidc_issuer", "authority")
+    for spec in _real_specs(emitted[0]):
+        for token in forbidden:
+            assert token not in spec.name, (
+                f"spec {spec.name!r} hardcodes {token!r}; the issuer/domain must "
+                f"come from /multibackend:scan, not the handler"
+            )

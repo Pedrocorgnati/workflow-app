@@ -221,10 +221,22 @@ class XtermOutputPanel(QWidget):
 
         Idempotent per reason within a PTY session (dedupe via
         _last_failure_reason). Only emits for the workspace_xterm channel.
+
+        Soft patterns (generic auth/rate/usage words) only count as a crash
+        inside the early-crash window — beyond it the same words are benign
+        rendered content, not a CLI death (parity with OutputPanel; see
+        blacksmith/listeners/debug.md casos 004/010/013).
         """
         if not chunk or self._channel_name != "workspace_xterm":
             return
-        for reason, pattern in _FATAL_PATTERNS:
+        in_early_crash_window = (
+            self._dispatch_ts is not None
+            and self._bytes_since_dispatch < self._EARLY_EXIT_BYTES_THRESHOLD
+            and (time.monotonic() - self._dispatch_ts) < self._EARLY_EXIT_TIME_THRESHOLD_S
+        )
+        for reason, pattern, severity in _FATAL_PATTERNS:
+            if severity == "soft" and not in_early_crash_window:
+                continue
             if not pattern.search(chunk):
                 continue
             if self._last_failure_reason == reason:

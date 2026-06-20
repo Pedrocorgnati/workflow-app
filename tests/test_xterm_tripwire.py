@@ -68,6 +68,19 @@ def test_fatal_pattern_emits_red(panel, capture):
     assert ("workspace_xterm", "RATE_LIMIT") in fails
 
 
+def test_soft_pattern_suppressed_after_stream(panel, capture):
+    # Regressao casos 004/010/013 (paridade T3 com OutputPanel): depois de
+    # kilobytes de output benigno, uma mencao a rate-limit/auth e CONTEUDO
+    # renderizado, nao crash do CLI — pattern soft NAO pode forcar vermelho.
+    fails, _ = capture
+    panel._note_dispatch("cmd")
+    panel._on_shell_output("x" * 3000)  # passa do _EARLY_EXIT_BYTES_THRESHOLD
+    panel._on_shell_output(
+        "Error: 429 too many requests (rate limit); Unauthorized origin rejected"
+    )
+    assert not any(c == "workspace_xterm" for c, _ in fails)
+
+
 def test_fatal_pattern_dedupe_same_reason(panel, capture):
     fails, _ = capture
     panel._note_dispatch("cmd")

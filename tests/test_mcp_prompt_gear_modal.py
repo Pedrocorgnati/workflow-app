@@ -1,11 +1,11 @@
 """Testes do modal de configuracao gear (T4).
 
 Cobre 3 cenarios do T4 (loop 05-21-implantation-tasklist-aba-brainstorm):
-- test_gear_dialog_opens_with_seeds_loaded: dialog carrega 9 seeds com testid.
+- test_gear_dialog_opens_with_seeds_loaded: dialog carrega 10 seeds com testid.
 - test_gear_modal_persists_seed_edits_to_disk: save grava no .md (atomic write).
 - test_gear_modal_revert_discards_edits: reject() preserva conteudo do .md.
 
-Usa `tmp_path` para criar workspace temporario com 9 seeds canonicos.
+Usa `tmp_path` para criar workspace temporario com 10 seeds canonicos.
 """
 
 from __future__ import annotations
@@ -47,14 +47,14 @@ target_terminal: {target_terminal}
 
 
 def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
-    """Cria 9 seeds canonicos + diretorio de agentes. Retorna (seeds_dir, agents_dir)."""
+    """Cria 10 seeds canonicos + diretorio de agentes. Retorna (seeds_dir, agents_dir)."""
     seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
     agents_dir = repo_root / "agents"
     seeds_dir.mkdir(parents=True)
     agents_dir.mkdir(parents=True)
     specs = [
         ("01-criar-md", "criar-md", "Claude", "Criar arquivo", False, "terminal-interactive-output"),
-        ("02-pesquisar", "pesquisar", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("02-search-in", "search-in", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("03-controversial", "controversial", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("04-hardening", "hardening", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("05-loop-prepare", "loop-prepare", "Claude", "Loop prepare", True, "terminal-interactive-output"),
@@ -62,6 +62,7 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
         ("07-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
         ("08-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
         ("09-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
+        ("10-search-out", "search-out", "Claude", "Otimizar", True, "terminal-interactive-output"),
     ]
     for fname, slug, btype, action, tp, tt in specs:
         agent_path = f"agents/{slug}-rules.md"
@@ -82,7 +83,7 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
 
 
 def test_gear_dialog_opens_with_seeds_loaded(qtbot, tmp_path):
-    """Dialog inicializa com 9 seeds carregados na lista lateral."""
+    """Dialog inicializa com 10 seeds carregados na lista lateral."""
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     seeds_dir, _ = _materialize_seeds(repo_root)
@@ -92,10 +93,10 @@ def test_gear_dialog_opens_with_seeds_loaded(qtbot, tmp_path):
     )
     qtbot.addWidget(dlg)
     assert dlg.property("testid") == "brainstorm-mcp-config-dialog"
-    # Lista lateral tem 9 itens (1 por seed).
-    assert dlg._list_widget.count() == 9
-    # Os 9 paths foram registrados internamente.
-    assert len(dlg._seed_paths) == 9
+    # Lista lateral tem 10 itens (1 por seed).
+    assert dlg._list_widget.count() == 10
+    # Os 10 paths foram registrados internamente.
+    assert len(dlg._seed_paths) == 10
 
 
 def test_gear_modal_persists_seed_edits_to_disk(qtbot, tmp_path):

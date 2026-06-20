@@ -1130,6 +1130,13 @@ COMMAND_FLAG_SPECS: dict[str, CommandSpec] = {
         ],
         flags_boolean=[],
     ),
+    "/mkt-assets": CommandSpec(
+        name="/mkt-assets",
+        flags_with_value=[
+            FlagSpec(name="project", label="Project JSON", placeholder=".claude/projects/{slug}.json"),
+        ],
+        flags_boolean=[],
+    ),
     "/daily-loop": CommandSpec(
         name="/daily-loop",
         flags_with_value=[

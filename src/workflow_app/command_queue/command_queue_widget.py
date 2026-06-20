@@ -451,6 +451,17 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "model": ModelName.SONNET,
         "effort": EffortLevel.STANDARD,
     },
+    # Lane /mkt-assets (queue-btn-mkt-assets, 2026-06-18): familia gemea de
+    # /loop voltada a gerar 30 posts de feed Instagram a partir do project.json.
+    # Todos os subcomandos /mkt-assets:* rodam em sonnet/standard (a cadeia
+    # comunica via artefatos em output/mkt-assets/{slug}/runs/, nao via contexto
+    # de conversa), entao _build_prep_specs emite o triplet /clear+/model+/effort
+    # so na 1a fase e /clear isolado entre as demais (anti-redundancia
+    # ai-forge/rules/workflow-app-command-lists.md secao 3.1).
+    "mkt_assets": {
+        "model": ModelName.SONNET,
+        "effort": EffortLevel.STANDARD,
+    },
     "daily_loop": {
         "model": ModelName.SONNET,
         "effort": EffortLevel.STANDARD,
@@ -476,8 +487,9 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "effort": EffortLevel.HIGH,
     },
     # Pipeline multibackend (queue-btn-multibackend): vincula uma pagina
-    # estatica HTML/CSS/JS ja hospedada (Hostinger) ao backend central
-    # multi-tenant, adiciona login funcional (Zero Orfaos) e deixa em
+    # estatica HTML/CSS/JS ja hospedada (Hostinger) ao backend OIDC central
+    # systemforge-dashboard (systemforgedashboard.com), adiciona login
+    # funcional (Zero Orfaos) e deixa em
     # producao. Os 6 subcomandos /multibackend:* sao todos opus/high (cada
     # um e um passo de pipeline que comunica via scan-report.json em disco,
     # nao via contexto de conversa), entao _inject_clears emite o triplet
@@ -1109,6 +1121,8 @@ class CommandQueueWidget(QWidget):
             self._on_loop_command_ready(command_line)
         elif base_cmd == "/kimi-loop":
             self._on_kimi_loop_command_ready(command_line)
+        elif base_cmd == "/mkt-assets":
+            self._on_mkt_assets_command_ready(command_line)
         elif base_cmd == "/daily-loop":
             self._on_daily_loop_command_ready(command_line)
         else:
@@ -1263,7 +1277,12 @@ class CommandQueueWidget(QWidget):
             cmd_action = "update" if cmd_file_path.exists() else "create"
 
             md_path_str = str(md_path)
-            kimi_slug = cmd_target_slash.lstrip("/")
+            # Espelha a sanitizacao do produtor /cmd:kimi-pair-analyse (Passo 5.1:
+            # slug_sanitized = cmd_slash.lstrip('/').replace(':','_')). Sem o
+            # replace(':','_') o report_path diverge para alvos com namespace
+            # (ex: /mkt-assets:workflow-app -> mkt-assets:workflow-app-... em vez
+            # de mkt-assets_workflow-app-...), e o execute recebe path inexistente.
+            kimi_slug = cmd_target_slash.lstrip("/").replace(":", "_")
             report_path = f"blacksmith/{kimi_slug}-kimi-pair-report.md"
 
             def _clear_spec(position: int) -> CommandSpec:
@@ -1559,6 +1578,163 @@ class CommandQueueWidget(QWidget):
         signal_bus.toast_requested.emit(
             f"Fila renderizada: {len(specs)} comandos.", "success"
         )
+
+    def _on_mkt_assets_command_ready(self, command_line: str) -> None:
+        """Expand `/mkt-assets <project.json>` na cadeia canonica da familia.
+
+        Gemeo de `_on_kimi_loop_command_ready` para a familia `/mkt-assets:*`
+        (queue-btn-mkt-assets, 2026-06-18). Diferente de /loop e /kimi-loop, a
+        familia NAO tem modos (--task/--cmd/--both) nem normalizacao de slug: o
+        argumento unico canonico de TODOS os subcomandos e o path do
+        `project.json` (argument-hint `<project.json>` em cada
+        .claude/commands/mkt-assets/*.md). Expande a forma secao 8 (sem
+        centralizador) na ordem canonica scan -> research -> plan -> generate ->
+        review -> workflow-app, todas em GROUP_MAP["mkt_assets"]
+        (sonnet/standard). Os comandos /mkt-assets:iteraction:* NAO entram na
+        fila: sao dirigidos por /mkt-assets:generate em runtime (1 iteration por
+        post). Anti-redundancia (secao 3.1): _build_prep_specs emite o triplet
+        completo so na 1a fase; /clear isolado entre as demais (todas no mesmo
+        grupo, model/effort inalterados).
+        """
+        tokens = command_line.strip().split()
+        project_arg = ""
+        if tokens and tokens[0] == "/mkt-assets":
+            # Argumento unico = primeiro token nao-flag. Cobre os dois caminhos:
+            # `/mkt-assets <path>` (positional emitido pelo pill) e
+            # `/mkt-assets --project <path>` (dialog) — em ambos o <path> e o
+            # primeiro token que nao comeca por "--".
+            for t in tokens[1:]:
+                if not t.startswith("--"):
+                    project_arg = t
+                    break
+
+        if not project_arg:
+            spec = CommandSpec(
+                name=command_line,
+                model=ModelName.SONNET,
+                interaction_type=InteractionType.INTERACTIVE,
+                position=len(self._items) + 1,
+            )
+            self.add_command(spec)
+            self._template_label.setText("  \U0001f4cb  Mkt-Assets")
+            self._template_label.setVisible(True)
+            self._maybe_auto_save("Mkt-Assets")
+            return
+
+        mkt_cfg = GROUP_MAP.get("mkt_assets", {})
+        mkt_model = mkt_cfg.get("model", ModelName.SONNET)
+        mkt_effort = mkt_cfg.get("effort", EffortLevel.STANDARD)
+
+        # Cadeia canonica da familia (W6 de /mkt-assets:workflow-app + secao 8):
+        # cada subcomando e linha propria, na ordem da spec; NUNCA o
+        # centralizador `/mkt-assets <subindicador>`.
+        # /mkt-assets:generate cria o esqueleto ASSETS-TO-CREATE.md +
+        # _GENERATE-CHECKPOINT.json (necessario para os pares iteraction).
+        # O botao expande esta fase em 30 pares (generate-post + review-post)
+        # conforme documentado em /mkt-assets:generate (secao Nota de
+        # Configuracao). generate-post e idempotente (dedupe na reentrada);
+        # review-post e o QA por bloco que estava ausente neste botao.
+        # /mkt-assets:workflow-app e o fechador (handoff p/ /pictures-create).
+        slug = Path(project_arg).stem
+        _iteraction_pairs: list[str] = []
+        for _i in range(1, 31):
+            _post_id = f"post-{_i:02d}"
+            _iteraction_pairs.append(
+                f"/mkt-assets:iteraction:generate-post --slug {slug} --post {_post_id} --config {project_arg}"
+            )
+            _iteraction_pairs.append(
+                f"/mkt-assets:iteraction:review-post --slug {slug} --post {_post_id} --config {project_arg}"
+            )
+        sub_names = [
+            f"/mkt-assets:scan {project_arg}",
+            f"/mkt-assets:research {project_arg}",
+            f"/mkt-assets:plan {project_arg}",
+            f"/mkt-assets:generate {project_arg}",
+            *_iteraction_pairs,
+            f"/mkt-assets:review {project_arg}",
+            f"/mkt-assets:workflow-app {project_arg}",
+        ]
+
+        specs: list[CommandSpec] = []
+        specs.extend(_build_prep_specs("mkt_assets", start_position=1))
+        specs.append(
+            CommandSpec(
+                name=sub_names[0],
+                model=mkt_model,
+                interaction_type=InteractionType.AUTO,
+                config_path="",
+                effort=mkt_effort,
+                position=len(specs) + 1,
+            )
+        )
+        for sub in sub_names[1:]:
+            # Boundary entre fases independentes: apenas /clear. /model e
+            # /effort sao SUPRIMIDOS porque TODAS as fases rodam em
+            # sonnet/standard (GROUP_MAP["mkt_assets"]) — anti-redundancia
+            # (ai-forge/rules/workflow-app-command-lists.md secao 3.1).
+            specs.append(
+                CommandSpec(
+                    name="/clear",
+                    model=mkt_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=mkt_effort,
+                    position=len(specs) + 1,
+                )
+            )
+            specs.append(
+                CommandSpec(
+                    name=sub,
+                    model=mkt_model,
+                    interaction_type=InteractionType.AUTO,
+                    config_path="",
+                    effort=mkt_effort,
+                    position=len(specs) + 1,
+                )
+            )
+
+        label = f"  \U0001f4cb  Mkt-Assets: {len(sub_names)} itens (4+60+2)"
+        self._template_label.setText(label)
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Mkt-Assets")
+        signal_bus.pipeline_ready.emit(specs)
+        signal_bus.toast_requested.emit(
+            f"Fila renderizada: {len(specs)} comandos.", "success"
+        )
+
+    def _on_mkt_assets_clicked(self) -> None:
+        """Pill loader do queue-btn-mkt-assets: resolve o project.json ativo.
+
+        Le o project.json carregado na metrics-project-pill (app_state) e roteia
+        para `_on_mkt_assets_command_ready` com o path positional. Gate verboso
+        pt-BR quando nenhum projeto esta carregado (mirror rocksmash): sugere o
+        botao [json] (queue-btn-json). O `_AttachmentProxy.has_attachment` ja
+        exige has_config, mas a validacao de existencia em disco e repetida aqui
+        (defesa em profundidade, igual aos demais botoes project-scoped).
+        """
+        from workflow_app.config.app_state import app_state
+
+        if not app_state.has_config or app_state.config is None:
+            signal_bus.toast_requested.emit(
+                "mkt-assets requer um project.json carregado na "
+                "metrics-project-pill. Use o botao [json] (queue-btn-json) "
+                "para carregar ou criar um project.json antes de acionar "
+                "este botao.",
+                "warning",
+            )
+            return
+
+        json_path = str(app_state.config.config_path or "")
+        if not json_path or not Path(json_path).is_file():
+            signal_bus.toast_requested.emit(
+                "O project.json da metrics-project-pill nao foi localizado em "
+                f"disco ({json_path or 'caminho vazio'}). Recarregue o projeto "
+                "via botao [json] (queue-btn-json) e tente novamente.",
+                "error",
+            )
+            return
+
+        self._on_mkt_assets_command_ready(f"/mkt-assets {json_path}")
 
     def _on_study_command_ready(self, command_line: str) -> None:
         """Expand `/study "<prompt>" [path.md] [--name <slug>] [--simple|--deep|--heavy] [--loop <path.md>]`
@@ -1982,6 +2158,41 @@ class CommandQueueWidget(QWidget):
         )
         kimi_loop_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
+        # mkt-assets — familia gemea de /loop (lane mode: mkt_assets) voltada a
+        # gerar 30 posts de feed Instagram a partir do project.json
+        # (queue-btn-mkt-assets, 2026-06-18). Pill reusa o padrao project-scoped:
+        # _on_mkt_assets_clicked le o project.json ativo da metrics-project-pill;
+        # sem projeto carregado, o dialog coleta o path e roteia pelo
+        # _on_unified_command_ready (-> _on_mkt_assets_command_ready).
+        mkt_assets_pill = self._AttachmentProxy(
+            self, self._on_mkt_assets_clicked
+        )
+        mkt_assets_spec = COMMAND_FLAG_SPECS.get("/mkt-assets")
+        mkt_assets_btn = DoublePhaseButton(
+            label="mkt-assets",
+            pipeline_name="/mkt-assets",
+            argument_hint="<project.json>",
+            default_md_dir=".claude/projects/",
+            radio_summaries={},
+            flags_boolean=mkt_assets_spec.flags_boolean if mkt_assets_spec else None,
+            flags_with_value=mkt_assets_spec.flags_with_value if mkt_assets_spec else None,
+            pill=mkt_assets_pill,
+            on_command_ready=self._on_unified_command_ready,
+            parent=self,
+        )
+        mkt_assets_btn.setProperty("testid", "queue-btn-mkt-assets")
+        mkt_assets_btn.setToolTip(
+            "Mkt-Assets — familia gemea de /loop (lane mode: mkt_assets) que "
+            "recebe o project.json, analisa o repositorio em workspace_root, "
+            "pesquisa tendencias, planeja 30 dias de feed Instagram e entrega "
+            "30 prompts de arte em ASSETS-TO-CREATE.md + CAPTIONS-30D.md. "
+            "Expande a cadeia (forma secao 8, sem centralizador): /mkt-assets:scan "
+            "-> research -> plan -> generate (+iteraction:* em runtime) -> review "
+            "-> workflow-app. GROUP_MAP mkt_assets = sonnet/standard; /clear "
+            "dedupado entre fases. Handoff final para /pictures-create."
+        )
+        mkt_assets_btn.setStyleSheet(_SECTION_BTN_STYLE)
+
         study_pill = self._AttachmentProxy(
             self, lambda: self._load_quick_template(TEMPLATE_STUDY, name="Study")
         )
@@ -2105,6 +2316,7 @@ class CommandQueueWidget(QWidget):
             daily_loop_btn,
             loop_btn,
             kimi_loop_btn,
+            mkt_assets_btn,
             study_btn,
             ("rocksmash",
              "rocksmash — le metrics-project-pill (_LOOP-CONFIG.json kind=daily-loop), "
@@ -2200,8 +2412,9 @@ class CommandQueueWidget(QWidget):
              "queue-btn-publish-micro-sites-multilingue"),
             ("multibackend",
              "Multibackend — vincula uma pagina estatica HTML/CSS/JS ja "
-             "hospedada (Hostinger) ao backend central multi-tenant do bloco "
-             "06-03, injeta um botao de login OIDC funcional (Zero Orfaos) e "
+             "hospedada (Hostinger) ao backend OIDC central systemforge-dashboard "
+             "(systemforgedashboard.com) (loop de origem 06-03), injeta um botao "
+             "de login OIDC funcional (Zero Orfaos) e "
              "deixa o site em PRODUCAO. Le o project.json do metrics-project-pill "
              "como $1. Pipeline (6 itens opus/high, cada um gate do seguinte via "
              "scan-report.json em disco): /multibackend:scan (resolve identidade/"
@@ -2214,7 +2427,9 @@ class CommandQueueWidget(QWidget):
              "com snapshot + rollback verificado) -> /multibackend:verify-prod "
              "(HTTP 200, marker de login, login real via Playwright; veredito "
              "APROVADO/BLOQUEADO/AVISO). Sem project.json carregado -> toast "
-             "verbose pt-BR, nada enfileira.",
+             "verbose pt-BR, nada enfileira. As origens vinculadas por esta "
+             "pipeline aparecem inventariadas e com diagnostico de paridade na "
+             "aba admin Integracoes do backend central (systemforge-dashboard).",
              self._on_multibackend_clicked,
              "queue-btn-multibackend"),
             _maintenance_btn,
@@ -5079,10 +5294,20 @@ class CommandQueueWidget(QWidget):
             f"/cmd:{cmd_action} {md_path_str}",
             f"/cmd:review {cmd_target_slash} {md_path_str}",
         ]
+        # Contrato do par kimi-pair: analyse recebe o COMANDO-ALVO (slash slug);
+        # execute recebe o PATH DO RELATORIO em blacksmith/, nomeado pelo alvo
+        # sanitizado (espelha slug_sanitized do produtor, ':' -> '_'). Passar o
+        # spec (.md) para os dois e bug: analyse analisaria o arquivo errado e
+        # execute consumiria um spec em vez do report. cmd_target_slash e
+        # garantido nao-vazio pelo abort acima.
+        kimi_report_path = (
+            f"blacksmith/{cmd_target_slash.lstrip('/').replace(':', '_')}"
+            "-kimi-pair-report.md"
+        )
         commands.extend([
             "/clear",
-            f"/cmd:kimi-pair-analyse --approved {md_path_str}",
-            f"/cmd:kimi-pair-execute --approved {md_path_str}",
+            f"/cmd:kimi-pair-analyse --approved {cmd_target_slash}",
+            f"/cmd:kimi-pair-execute --approved {kimi_report_path}",
             "/clear",
             "/cmd:readme-upd",
         ])
@@ -6082,9 +6307,9 @@ class CommandQueueWidget(QWidget):
 
         Le `metrics-project-pill` (project.json, qualquer schema V1/V2/V3) e
         passa `config.config_path` como `$1` aos 6 subcomandos. Vincula uma
-        pagina estatica HTML/CSS/JS ja hospedada na Hostinger ao backend
-        central multi-tenant (bloco 06-03), injeta login OIDC funcional e
-        deixa o site em producao.
+        pagina estatica HTML/CSS/JS ja hospedada na Hostinger ao backend OIDC
+        central systemforge-dashboard / systemforgedashboard.com (loop de
+        origem 06-03), injeta login OIDC funcional e deixa o site em producao.
 
         Gate 1 (has_config): toast verboso pt-BR quando ausente, sugere o
         botao `queue-btn-json` (/project-json). Gate 2 (config_path): toast
@@ -6929,6 +7154,11 @@ class CommandQueueWidget(QWidget):
                 "warning",
             )
             return
+        # FIX-011 Opt 1: roteia o worker pelo executor universal (contrato de
+        # finalizacao do listener) quando aplicavel — fecha o stuck-yellow do
+        # caso 011 sem tocar `adapt_to_kimi`. Idempotente para o payload de
+        # recovery (ja `/skill:slash-executor ...`).
+        kimi_prompt = self._route_blue_arrow_through_universal(kimi_prompt)
         if self._last_workspace_dispatch_was_clear:
             delay = (
                 self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
@@ -7352,6 +7582,42 @@ class CommandQueueWidget(QWidget):
             flag = "--recovery-mode "
         return f"{leading}/skill:{cls._KIMI_SLASH_EXECUTOR_SKILL} {flag}{stripped}"
 
+    @classmethod
+    def _route_blue_arrow_through_universal(cls, kimi_prompt: str) -> str:
+        """FIX-011 Opt 1 — aplica ao dispatch blue-arrow (worker Kimi T2) a MESMA
+        decisao de roteamento do caminho de insercao interativo (`_render_*`,
+        L7702-7742): comandos reais passam pelo executor universal
+        (`/skill:slash-executor`, que carrega o `<LISTENER_FINALIZATION_CONTRACT>`),
+        em vez do wrapper BARE (`/skill:<slug>` produzido por `adapt_to_kimi`),
+        que NAO roda a FASE FINAL -> stuck-yellow (caso 011, debug.md).
+
+        Espelha EXATAMENTE as excecoes do roteamento canonico (L7729), para
+        nao romper contratos especificos de wrapper:
+          - `/skill:slash-executor ...` (recovery/programatico) -> intacto (idempotente);
+          - alvo sem `.claude/command` (skill-only) -> permanece BARE;
+          - `_kimi_requires_specific_wrapper(slug)` (channel-binding / dedupe /
+            autocast standalone) -> permanece BARE.
+        NAO toca `adapt_to_kimi` (funcao pura com testes de igualdade exata).
+        Canal do worker = `workspace` (injetado no PTY por output_panel.py)."""
+        stripped = kimi_prompt.lstrip()
+        if not stripped.startswith("/skill:"):
+            return kimi_prompt
+        leading = kimi_prompt[: len(kimi_prompt) - len(stripped)]
+        rest = stripped[len("/skill:"):]
+        parts = rest.split(None, 1)
+        head = parts[0] if parts else ""
+        if head == cls._KIMI_SLASH_EXECUTOR_SKILL:
+            return kimi_prompt  # ja universal -> intacto (nao re-envelopa)
+        slug = head  # adapt_to_kimi: `/<slug>` -> `/skill:<slug>`, logo head == slug
+        if (
+            not slug
+            or cls._resolve_claude_command_file(slug) is None
+            or cls._kimi_requires_specific_wrapper(slug)
+        ):
+            return kimi_prompt  # mantem BARE (identico a L7729)
+        raw = f"{leading}/{rest}"  # inverso exato do adapt_to_kimi
+        return cls._build_kimi_slash_executor_invocation(raw)
+
     @staticmethod
     def _command_head(cmd_text: str) -> str:
         return cmd_text.strip().split(None, 1)[0].lower() if cmd_text.strip() else ""
@@ -7405,6 +7671,13 @@ class CommandQueueWidget(QWidget):
         "semantically equivalent `wf-notify.sh --status success --exit-code 0` "
         "after success, or the matching failure notify after a real blocker. "
         "Never run the success branch of that block after a semantic blocker.\n\n"
+        "- For normal slash commands, never execute the target markdown's "
+        "literal `## FASE FINAL`, autocast, or `wf-notify` shell block. That "
+        "block reads the last helper shell `$?` and can emit false failure/red "
+        "after a successful Codex execution. Treat it as transport reference "
+        "only; emit the single semantic final notify yourself at the real end. "
+        "The only exception is the dedicated recovery-mode dispatch for "
+        "`tools:listener-recovery`.\n\n"
     )
 
     # Contrato de finalizacao ESPECIFICO de recovery — substitui o generico
@@ -7616,10 +7889,13 @@ class CommandQueueWidget(QWidget):
             "5. Resolve project variables from .claude/project.json and "
             ".codex/codex-project.json when present.\n"
             "6. Respect the listener contract: if the command has a "
-            "`## FASE FINAL`, autocast, or wf-notify block, execute/preserve it "
-            f"so it notifies channel `{channel}` via the PTY environment. Do not "
-            "prefix the pasted command with WF_CHANNEL_OVERRIDE and do not hardcode "
-            "a different channel.\n"
+            "`## FASE FINAL`, autocast, or wf-notify block, DO NOT execute that "
+            "literal target block in normal Codex mode. It is a Claude-shell "
+            "`$?` transport reference and can turn an incidental nonzero helper "
+            "command into false failure/red. Instead, emit exactly one "
+            f"semantic final notify for channel `{channel}` at the real end. "
+            "Do not prefix the pasted command with WF_CHANNEL_OVERRIDE and do "
+            "not hardcode a different channel.\n"
             "7. If a required variable, file, or MCP-only capability is missing, "
             "emit exactly one failure notify with reason BLOCKED or MISSING_ARG "
             "before the final response, then stop with BLOCKED and list the missing "

@@ -3,16 +3,16 @@
 Cobre o seed loader `_load_brainstorm_seeds` e o slot
 `_on_mcp_prompt_requested` sem depender da inicializacao completa da
 MainWindow (que requer QApplication + setup pesado). Os testes operam
-sobre um workspace temporario com 9 seeds materializados pelo helper
+sobre um workspace temporario com 10 seeds materializados pelo helper
 `_write_seeds`.
 
 Cenarios cobertos:
-1. 9 seeds validos -> grade 3x3 com 9 MCPPromptButton.
+1. 10 seeds validos -> grade com 10 MCPPromptButton.
 2. seed yaml malformado -> _BrainstormSeedError + grade vazia.
 3. seed com agent_path inexistente -> _BrainstormSeedError (G6).
 4. clique duplo rapido (debounce 300ms) -> 1 publish.
 5. compat layer: target_path:false + sem target_path_edit_inplace.
-6. glob com 8 seeds (1 renomeado p/ 10-) -> _BrainstormSeedError.
+6. glob com seed faltante -> _BrainstormSeedError.
 """
 
 from __future__ import annotations
@@ -41,12 +41,12 @@ _SEED_TEMPLATES = {
         "target_path": "false",
         "target_terminal": "terminal-interactive-output",
     },
-    "02-pesquisar.md": {
-        "slug": "pesquisar",
-        "title": "Seed - Botao 2 - Pesquisar",
+    "02-search-in.md": {
+        "slug": "search-in",
+        "title": "Seed - Botao 2 - seatch-in",
         "button_type": "type-selector-radio-input",
-        "agent_name": "pesquisador",
-        "agent_path": "agents/pesquisar-rules.md",
+        "agent_name": "search-in",
+        "agent_path": "agents/search-in-rules.md",
         "action": "Otimizar",
         "target_path": "true",
         "target_terminal": "depende-do-radio",
@@ -121,6 +121,16 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "terminal-interactive-output",
     },
+    "10-search-out.md": {
+        "slug": "search-out",
+        "title": "Seed - Botao 10 - search-out",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "search-out",
+        "agent_path": "agents/search-out-rules.md",
+        "action": "Otimizar",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
 }
 
 
@@ -136,7 +146,7 @@ def _frontmatter(d: dict) -> str:
 
 
 def _write_seeds(tmp_path: Path, overrides: dict[str, dict | None] | None = None) -> Path:
-    """Materializa 9 seeds (+ personas) em tmp_path. Overrides[fname]=None remove o seed."""
+    """Materializa 10 seeds (+ personas) em tmp_path. Overrides[fname]=None remove o seed."""
     overrides = overrides or {}
     repo_root = tmp_path / "repo"
     seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
@@ -184,17 +194,17 @@ class _FakeMainWindow:
         return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
 
 
-# Cenario 1: 9 seeds validos -> 9 carregam, ordem deterministica
+# Cenario 1: 10 seeds validos -> 10 carregam, ordem deterministica
 
 
 def test_load_seeds_happy_path_9_valid(tmp_path):
     repo_root = _write_seeds(tmp_path)
     fake = _FakeMainWindow(repo_root)
     seeds = fake._load_brainstorm_seeds()
-    assert len(seeds) == 9
+    assert len(seeds) == 10
     expected_order = [
         "criar-md",
-        "pesquisar",
+        "search-in",
         "controversial",
         "hardening",
         "loop-prepare",
@@ -202,6 +212,7 @@ def test_load_seeds_happy_path_9_valid(tmp_path):
         "revisar-task",
         "executar-task",
         "revisar-execucao",
+        "search-out",
     ]
     assert [s["slug"] for s in seeds] == expected_order
     # Cada seed tem campos canonicos
@@ -336,18 +347,17 @@ def test_compat_layer_target_path_boolean(tmp_path):
     assert s01["target_terminal"] == "terminal-interactive-output"
 
 
-# Cenario 6: 8 seeds (1 renomeado para 10-) -> grade bloqueada
+# Cenario 6: seed faltante -> grade bloqueada
 
 
 def test_glob_rejects_renamed_seed(tmp_path):
     repo_root = _write_seeds(tmp_path)
-    # Renomeia 09 -> 10 (fora do range 0[1-9])
-    old = repo_root / "blacksmith" / "brainstorm-mcp" / "09-revisar-execucao.md"
-    new = old.parent / "10-revisar-execucao.md"
+    # Renomeia 10 -> 11, deixando apenas 9 seeds canonicos.
+    old = repo_root / "blacksmith" / "brainstorm-mcp" / "10-search-out.md"
+    new = old.parent / "11-search-out.md"
     old.rename(new)
     fake = _FakeMainWindow(repo_root)
-    # 09 renomeado para 10 (fora do range 0[1-9]) -> so 8 seeds canonicos.
-    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 9"):
+    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 10"):
         fake._load_brainstorm_seeds()
 
 
@@ -371,17 +381,17 @@ def test_widget_testid_slug_brainstorm_format(qtbot):
 
 def test_widget_accepts_radio_button_type(qtbot):
     btn = MCPPromptButton(
-        label="pesquisar",
+        label="search-in",
         button_type="type-selector-radio-input",
         prompt="x",
-        agent_name="pesquisador",
+        agent_name="search-in",
         agent_path="agents/x.md",
         action="Otimizar",
         target_path="terminal-interactive-output",
-        testid_slug="pesquisar",
+        testid_slug="search-in",
     )
     qtbot.addWidget(btn)
-    assert btn.property("testid") == "mcp-prompt-btn-pesquisar"
+    assert btn.property("testid") == "mcp-prompt-btn-search-in"
 
 
 def test_widget_accepts_ptbr_actions(qtbot):

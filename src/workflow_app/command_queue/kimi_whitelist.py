@@ -175,6 +175,10 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/multibackend:env-wire",                        # 74
     "/multibackend:build-verify",                    # 68
     "/multibackend:verify-prod",                     # 66
+    # Marketing assets pipeline (loop /mkt-assets) — pre-flight scan
+    "/mkt-assets:scan",                              # 85
+    "/mkt-assets:plan",                              # 74
+    "/mkt-assets:noop-fallback",                     # 100 (KIMI_PREFERRED)
 })
 
 

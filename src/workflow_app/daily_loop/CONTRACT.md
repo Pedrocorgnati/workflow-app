@@ -113,6 +113,7 @@ Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader
 | `"cmd"`           | `/loop --cmd`                       | variavel               | `build_loop_specs`                                  |
 | `"cmd-single"`    | `/loop --cmd-single`                | variavel + expanded    | `build_loop_specs`                                  |
 | `"both"`          | `/loop --both`                      | variavel               | `build_loop_specs`                                  |
+| `"mkt_assets"`    | `/mkt-assets` (lane gemea de `/loop`)| variavel, tokens `/mkt-assets:*` | `build_loop_specs` (lane containment)    |
 | `"normal"`        | retro-compat (sem CLI flag)         | variavel               | `build_loop_specs` ou `build_daily_loop_specs`      |
 | ausente / null    | retro-compat V3 pre-2026-05-19      | tratado como `"normal"`| idem                                                |
 
@@ -122,13 +123,20 @@ Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader
 from workflow_app.daily_loop import (
     is_rocksmash_mode,
     assert_rocksmash_iteration_shape,
+    is_mkt_assets_mode,
+    assert_mkt_assets_iteration_shape,
 )
 
 if is_rocksmash_mode(raw_config):
     assert_rocksmash_iteration_shape(raw_config)  # raises DailyLoopConfigError
+
+if is_mkt_assets_mode(raw_config):
+    assert_mkt_assets_iteration_shape(raw_config)  # raises DailyLoopConfigError
 ```
 
-Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader.py`. Chamados internamente em `build_loop_specs` (lane `/loop`) e em `build_loop_rocksmash_specs` (lane `queue-btn-rocksmash`).
+Os quatro exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader.py`. Os helpers rocksmash sao chamados internamente em `build_loop_specs` (lane `/loop`) e em `build_loop_rocksmash_specs` (lane `queue-btn-rocksmash`); os helpers mkt-assets sao chamados em `build_loop_specs` (lane `/loop` / `queue-btn-mkt-assets`) e em `build_daily_loop_specs` (paridade defensiva).
+
+**mkt-assets lane (2026-06-18):** `mode == "mkt_assets"` declara a lane `/mkt-assets`, gemea de `/loop` (preparo -> iteration_template -> finalizacao) que reusa este motor a exemplo de `/kimi-loop`. Diferente de rocksmash, NAO ha contagem fixa de tokens: a lane mantem o shape variavel do `/loop` (`create-task` + `review-created-task` + `execute-task` + `review-executed-task`). O `assert_mkt_assets_iteration_shape` aplica **lane containment**: cada item `kind == "iteration"` (apos remover `/clear|/model|/effort`) so pode despachar tokens no namespace `/mkt-assets:*` — gate de discovery contra o execution_risk "botao aparece mas comando cai no handler errado / falha silenciosa". Itens `preparo`/`finalizacao` sao pulados (podem carregar housekeeping cross-lane, ex. `/loop:iteraction:review-executed-loop`). `commands == []` e tolerado apenas pre-integration (`metadata.integration_completed_at` ausente).
 
 **Producers (gravam `mode`):**
 

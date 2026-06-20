@@ -759,7 +759,8 @@ def is_rocksmash_mode(raw_config: dict[str, Any]) -> bool:
     The discriminator lives at top-level ``mode`` in ``_LOOP-CONFIG.json`` and
     is set by ``/loop --rocksmash`` (or by ``/legacy:detect`` when promoting a
     legacy rocksmash loop). All other values (``"normal"``, ``"task"``,
-    ``"cmd"``, ``"cmd-single"``, ``"both"``, missing) imply non-rocksmash.
+    ``"cmd"``, ``"cmd-single"``, ``"both"``, ``"mkt_assets"``, missing) imply
+    non-rocksmash.
 
     Missing or non-string ``mode`` defaults to non-rocksmash silently
     (retro-compat for V3 loops produced before 2026-05-19, per B6 contract).
@@ -846,6 +847,117 @@ def assert_rocksmash_iteration_shape(
                     f"Esperado 4 tokens canonicos {expected}; "
                     f"recebido {heads}. "
                     f"Re-rodar /loop:integration ou aplicar /legacy:detect."
+                )
+
+
+# Canonical lane namespace for the `/mkt-assets` family (mkt-assets pipeline,
+# 2026-06-18). The `/mkt-assets` loop is a twin of `/loop` (preparo ->
+# iteration_template -> finalizacao) that reuses this loader/engine, the same
+# way `/kimi-loop` does. It distinguishes itself with the top-level
+# discriminator ``mode == "mkt_assets"`` and per-iteration commands in the
+# ``/mkt-assets:*`` namespace. Unlike rocksmash, mkt_assets keeps the variable
+# /loop iteration shape (create-task / review-created-task / execute-task /
+# review-executed-task), so there is NO fixed token-count gate — only a
+# tolerant lane-containment check (see ``assert_mkt_assets_iteration_shape``)
+# that catches the execution_risk "botao aparece mas comando cai no handler
+# errado / falha silenciosa".
+_MKT_ASSETS_MODE = "mkt_assets"
+_MKT_ASSETS_NAMESPACE = "/mkt-assets:"
+
+
+def is_mkt_assets_mode(raw_config: dict[str, Any]) -> bool:
+    """Return True when raw_config declares the canonical mkt-assets lane mode.
+
+    The discriminator lives at top-level ``mode`` in ``_LOOP-CONFIG.json`` and
+    is set by ``/mkt-assets`` (preparation pipeline) when materializing the
+    family's loop config. All other values (``"normal"``, ``"task"``,
+    ``"cmd"``, ``"cmd-single"``, ``"both"``, ``"rocksmash"``, missing) imply
+    non-mkt-assets.
+
+    Missing or non-string ``mode`` defaults to non-mkt-assets silently
+    (retro-compat for every loop produced before 2026-06-18). The match is
+    case-insensitive and tolerant of surrounding whitespace.
+    """
+    mode = raw_config.get("mode")
+    if not isinstance(mode, str):
+        return False
+    return mode.strip().lower() == _MKT_ASSETS_MODE
+
+
+def assert_mkt_assets_iteration_shape(
+    raw_config: dict[str, Any],
+) -> None:
+    """Enforce lane containment for mkt-assets loops (discovery gate).
+
+    Behavior:
+      - Noop unless ``is_mkt_assets_mode(raw_config)`` returns True.
+      - For every item with ``kind == "iteration"`` (or missing kind, treated
+        as iteration), strip /clear/model/effort directives and assert every
+        remaining per-iteration token belongs to the ``/mkt-assets:`` namespace
+        (matched by its first whitespace-separated word). This is what prevents
+        a mkt-assets button from dispatching a command that "falls into the
+        wrong handler" or fails silently.
+      - Items with ``kind in {"preparo", "finalizacao"}`` are skipped: those
+        slots legitimately carry cross-lane housekeeping (e.g.
+        ``/loop:iteraction:review-executed-loop``).
+      - Empty ``commands`` is tolerated only when the loop is pre-integration
+        (``metadata.integration_completed_at`` absent); after integration the
+        empty list is rejected with a descriptive ``DailyLoopConfigError``.
+
+    Unlike ``assert_rocksmash_iteration_shape`` there is NO fixed token count:
+    mkt_assets keeps the variable /loop iteration shape.
+
+    Raises:
+        DailyLoopConfigError: on any divergence, with the offending item id and
+        the out-of-namespace token sequence.
+    """
+    if not is_mkt_assets_mode(raw_config):
+        return
+
+    daily_loop = raw_config.get("daily_loop")
+    if not isinstance(daily_loop, dict):
+        return
+
+    metadata = raw_config.get("metadata") or {}
+    integration_done = bool(
+        isinstance(metadata, dict) and metadata.get("integration_completed_at")
+    )
+
+    for bucket in daily_loop.get("buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        for item in bucket.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind", "iteration")).strip().lower()
+            if kind in ("preparo", "finalizacao"):
+                continue
+            iid = str(item.get("id", "?"))
+            cmds = item.get("commands")
+            if not isinstance(cmds, list):
+                raise DailyLoopConfigError(
+                    f"mkt_assets item {iid}: 'commands' deve ser list[str] "
+                    f"com tokens no namespace {_MKT_ASSETS_NAMESPACE!r}; "
+                    f"recebido {type(cmds).__name__}"
+                )
+            stripped = _strip_directives(cmds)
+            if not stripped and not integration_done:
+                # Pre-integration placeholder is tolerated.
+                continue
+            if not stripped and integration_done:
+                raise DailyLoopConfigError(
+                    f"mkt_assets item {iid}: 'commands' vazio apos integracao. "
+                    f"Re-rodar /loop:integration para materializar os tokens "
+                    f"{_MKT_ASSETS_NAMESPACE}*."
+                )
+            heads = [c.split(" ", 1)[0] for c in stripped]
+            out_of_lane = [h for h in heads if not h.startswith(_MKT_ASSETS_NAMESPACE)]
+            if out_of_lane:
+                raise DailyLoopConfigError(
+                    f"mkt_assets item {iid}: tokens fora da lane "
+                    f"{_MKT_ASSETS_NAMESPACE}*: {out_of_lane}. "
+                    f"Iteration items da lane mkt-assets so podem despachar "
+                    f"comandos {_MKT_ASSETS_NAMESPACE}* (Zero Fluxos Incompletos)."
                 )
 
 
@@ -970,6 +1082,12 @@ def build_daily_loop_specs(
         raise DailyLoopConfigError(
             "_LOOP-CONFIG.json sem bloco 'daily_loop' — gere via /daily-loop:enumerate"
         )
+
+    # mkt-assets lane (2026-06-18): recognize the discriminator here too so the
+    # legacy daily-loop entrypoint enforces lane containment instead of falling
+    # through to the silent "normal" default. Noop for other modes.
+    if is_mkt_assets_mode(raw_config):
+        assert_mkt_assets_iteration_shape(raw_config)
 
     # Reject /cmd:kimi-pair-* tokens orphaned in a --task loop or carrying the
     # --task contamination form (runtime guard, mirrors /loop:review C15 and
@@ -1410,6 +1528,12 @@ def build_loop_specs(
     # canonical 4-command per-iteration shape. Noop for other modes.
     if is_rocksmash_mode(raw_config):
         assert_rocksmash_iteration_shape(raw_config)
+
+    # mkt-assets lane (2026-06-18): when raw_config declares mode=='mkt_assets',
+    # enforce lane containment of per-iteration commands (discovery gate). Noop
+    # for other modes. Keeps the variable /loop iteration shape — no fixed count.
+    if is_mkt_assets_mode(raw_config):
+        assert_mkt_assets_iteration_shape(raw_config)
 
     # Reject /cmd:kimi-pair-* tokens orphaned in a --task loop or carrying the
     # --task contamination form (runtime guard, mirrors /loop:review C15 and

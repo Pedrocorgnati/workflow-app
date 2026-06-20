@@ -1,0 +1,423 @@
+{
+  "version": "1.7.0-pre",
+  "updated_at": "2026-05-19",
+  "updated_note": "HT-05 mitigation — meta-loop estrategia-de-separacao prep: declared 4 new /dcp:* advisory gates (congruence-check, temporality-check, meta-completeness, directive-injector) que serao consumidos pelo /dcp:build-and-load apos item 006 do meta-loop. Versao bumpeada para 1.7.0-pre — final 1.7.0 sera marcada apos item 007 com smoke test verde. 2026-05-19: adicionada secao top-level `tripwires[]` com HT-RS-01 (idempotencia de `/loop-rocksmash:integrate`) — escopo, descricao, script de verificacao e exit code esperado (4 = no-op). Item B11 do loop 05-19-tasks-faltantes.",
+  "gates": [
+    {
+      "gate_id": "B-dcp.exit",
+      "phase": "B-dcp",
+      "command": "/dcp:build-validate",
+      "condition": "SPECIFIC-FLOW.json valid AND condition_resolved emitted per step",
+      "blocks": ["B.2", "B.3"],
+      "on_fail": "abort with exit 1"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.congruence",
+      "phase": "B-dcp",
+      "command": "/dcp:congruence-check",
+      "condition": "every StepSpec.condition predicate evaluates True against current MODULE-META + delivery.json + project.json",
+      "blocks": ["B.2", "B.3"],
+      "on_fail": "abort with exit 6 (LOW_SIGNAL) — fila NAO recebe specs incoerentes",
+      "advisory": false,
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.temporality",
+      "phase": "B-dcp",
+      "command": "/dcp:temporality-check",
+      "condition": "marketing-ready AND foundations-first AND deploy-after-tests AND sign-off-only-on-done preservados na ordem do SPECIFIC-FLOW",
+      "blocks": ["B.2", "B.3"],
+      "on_fail": "abort with exit 6 (LOW_SIGNAL)",
+      "advisory": false,
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.meta-completeness",
+      "phase": "B-dcp",
+      "command": "/dcp:meta-completeness",
+      "condition": "MODULE-META.json tem todos os campos obrigatorios + campos novos relevantes (Tabela 2 do AUDIT-RESULTS) preenchidos para o modulo corrente",
+      "blocks": [],
+      "on_fail": "warning — lista campos faltantes com sugestoes de valor inferido; NAO bloqueia paste",
+      "advisory": true,
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    },
+    {
+      "gate_id": "B-dcp.pre-enqueue.directive-injector",
+      "phase": "B-dcp",
+      "command": "/dcp:directive-injector",
+      "condition": "SPECIFIC-FLOW.json com directives `/clear`, `/model`, `/effort` normalizadas conforme GROUP_MAP de WORKFLOW-APP-RULES.md:29-44",
+      "blocks": [],
+      "on_fail": "exit 1 — SPECIFIC-FLOW.json corrupted",
+      "advisory": false,
+      "idempotent": true,
+      "tripwire": "rodar UMA UNICA vez per build — re-emissao na mesma sessao proibida (HT-04 tripwire (1))",
+      "status": "draft — provisioned by item 006 do meta-loop estrategia-de-separacao"
+    }
+  ],
+  "tripwires": [
+    {
+      "tripwire_id": "HT-RS-01",
+      "scope": "loop-rocksmash:integrate",
+      "command_under_test": "/loop-rocksmash:integrate",
+      "subsystem": "rocksmash",
+      "version_introduced": "1.7.0-pre",
+      "status": "active",
+      "description": "Idempotencia de `/loop-rocksmash:integrate`: rodar duas vezes na mesma task com hash identico do bloco de pareamento JSON detecta no-op e NAO duplica `## ADR Log` nem reescreve `## Task atual`. A 2a execucao deve sair com exit 4 (no-op) e o documento alvo (rocksmash architecture doc) deve permanecer byte-identico apos a 2a invocacao.",
+      "dependencies": [
+        "B5 (loop-rocksmash:integrate precisa existir)",
+        "B3 (block hash JSON do pareamento)",
+        "B10 (telemetria JSONL para registrar a deteccao de no-op)"
+      ],
+      "verification_script": "set -euo pipefail; TARGET_TASK=\"${TARGET_TASK:?defina TARGET_TASK=path/para/task.md}\"; TARGET_DOC=\"${TARGET_DOC:?defina TARGET_DOC=path/para/architecture.md}\"; sha_before=$(sha256sum \"$TARGET_DOC\" | awk '{print $1}'); /loop-rocksmash:integrate --task \"$TARGET_TASK\" >/dev/null 2>&1; rc1=$?; if [ \"$rc1\" -ne 0 ] && [ \"$rc1\" -ne 4 ]; then echo \"HT-RS-01 FAIL: 1a execucao retornou $rc1 (esperado 0 ou 4)\" >&2; exit 1; fi; sha_mid=$(sha256sum \"$TARGET_DOC\" | awk '{print $1}'); /loop-rocksmash:integrate --task \"$TARGET_TASK\" >/dev/null 2>&1; rc2=$?; sha_after=$(sha256sum \"$TARGET_DOC\" | awk '{print $1}'); if [ \"$rc2\" -ne 4 ]; then echo \"HT-RS-01 FAIL: 2a execucao retornou $rc2 (esperado 4 = no-op)\" >&2; exit 1; fi; if [ \"$sha_mid\" != \"$sha_after\" ]; then echo \"HT-RS-01 FAIL: doc mudou entre 1a e 2a execucao identicas ($sha_mid -> $sha_after)\" >&2; exit 1; fi; grep -c '^## ADR Log' \"$TARGET_DOC\" | awk '$1!=1 {print \"HT-RS-01 FAIL: ## ADR Log apareceu \"$1\" vezes (esperado 1)\" > \"/dev/stderr\"; exit 1}'; echo \"HT-RS-01 PASS: idempotencia preservada (rc1=$rc1, rc2=$rc2, hash estavel, ADR Log unico)\"; exit 0",
+      "expected_exit_code": 4,
+      "exit_codes_acceptable_first_run": [0, 4],
+      "exit_code_required_second_run": 4,
+      "on_fail": "abort with exit 1 — duplicacao de `## ADR Log` ou reescrita de `## Task atual` em re-execucao identica viola contrato de idempotencia documentado em source.md linha 448-451 do loop 05-19-tasks-faltantes",
+      "secondary_conditions_runtime_warnings": [
+        "lock_pid orfao no cursor (proxima execucao limpa automaticamente; NAO bloqueia HT-RS-01)",
+        "hash mismatch entre `<!-- arch-seed:hash=... -->` e inputs atuais sem flag `--reseed` (regenera silenciosamente; NAO bloqueia HT-RS-01)",
+        "backfill conflict (legacy doc com `## Arquitetura semeada` divergente; aborta com exit 8 e exige `--force-backfill`; NAO eh HT-RS-01)"
+      ],
+      "warnings_telemetry": {
+        "stderr_format": "[WARN][rocksmash] <message>",
+        "jsonl_path": "{wbs_root}/.rocksmash-telemetry/{YYYY-MM}.jsonl",
+        "jsonl_schema_extension": "schema do B10 estendido com `level: 'info'|'warning'` e `message: <string>` opcionais (default level=info)",
+        "workflow_app_capture": "stderr capturado no console widget do canto inferior do workflow-app (operador GUI ve sem precisar do terminal)",
+        "toast_policy": "NAO criar toast amarelo — mantem decisao 'toast strict' verde+vermelho de source.md linha 166"
+      },
+      "introduced_by": "B11 do loop 05-19-tasks-faltantes (commit pendente)",
+      "consumed_by": [
+        "/dcp:directive-injector (smoke test pre-commit valida sem regressao)",
+        "/loop-rocksmash:integrate (auto-aplicacao da regra interna)"
+      ]
+    }
+  ],
+  "canonical_loop": {
+    "A": {
+      "name": "Creation",
+      "task_budget_tokens_default": 60000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 100000
+    },
+    "A.2": {
+      "name": "Criacao de TDD",
+      "condition": "modules.*.tdd.required == true",
+      "gates": [
+        "/tdd:test-plan",
+        "/tdd:contract-from-openapi",
+        "/tdd:behavior-from-specs",
+        "/tdd:unit-skeletons",
+        "/tdd:create-suite",
+        "/tdd:lock"
+      ],
+      "state_transition": "creation -> execution (via /tdd:lock)",
+      "enforces_invariant": "I-13",
+      "task_budget_tokens_default": 140000,
+      "task_budget_tokens_min": 60000,
+      "task_budget_tokens_max": 220000
+    },
+    "B": {
+      "name": "Execution",
+      "task_budget_tokens_default": 120000,
+      "task_budget_tokens_min": 40000,
+      "task_budget_tokens_max": 200000,
+      "entry_paths": [
+        "creation -> execution (via /tdd:lock when modules.*.tdd.required == true)",
+        "creation -> execution (via /execute-task lazy T02 when modules.*.tdd.required != true) — fires on first persist_files_touched call after task execution; owner is execute-task; preserves R01 (no attempt mutation), I-04 (no skipped states) and I-05 (timestamps)"
+      ],
+      "tdd_gate": {
+        "enabled_when": "modules.*.tdd.required == true",
+        "pre_implementation": "/execute-task PRE-0.5 asserts RED",
+        "post_implementation": "/build-verify --tdd-gate asserts GREEN + LOCK intact",
+        "enforces_invariant": "I-13"
+      }
+    },
+    "C": {
+      "name": "Linkage",
+      "task_budget_tokens_default": 40000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 60000,
+      "security_gate": {
+        "enabled_when": "modules.*.criticality in ['high','critical'] OR modules.*.qa.security_review_required == true",
+        "pre_linkage": "/skill:security-review-gate --module",
+        "post_linkage": "/scope-drift-detect --module",
+        "enforces_invariant": "I-18",
+        "blocking_if_failed": true
+      }
+    },
+    "D": {
+      "name": "F8 micro",
+      "task_budget_tokens_default": 80000,
+      "task_budget_tokens_min": 30000,
+      "task_budget_tokens_max": 120000
+    },
+    "D.5": {
+      "name": "Review executed",
+      "task_budget_tokens_default": 50000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 80000
+    },
+    "E": {
+      "name": "QA micro",
+      "task_budget_tokens_default": 60000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 100000
+    },
+    "F": {
+      "name": "Stack plan",
+      "task_budget_tokens_default": 40000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 60000
+    },
+    "F.2": {
+      "name": "Stack check",
+      "task_budget_tokens_default": 30000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 50000
+    },
+    "G": {
+      "name": "Deploy partial",
+      "task_budget_tokens_default": 30000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 50000
+    },
+    "H": {
+      "name": "Commit",
+      "task_budget_tokens_default": 20000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 30000
+    },
+    "I": {
+      "name": "Human analysis",
+      "task_budget_tokens_default": 40000,
+      "task_budget_tokens_min": 20000,
+      "task_budget_tokens_max": 60000
+    }
+  },
+  "phases": {
+    "pre_f7_gate": {
+      "required_commands": [
+        "/intake-conformity-check",
+        "/validate-pipeline"
+      ],
+      "blocking_if_missing": true
+    },
+    "f7_execution": {
+      "required_when_present": {
+        "triggers": ["/execute-task", "/auto-flow execute", "/front-end-build", "/back-end-build"],
+        "required_commands": ["/front-end-review", "/gate:frontend-runtime", "/build-verify"]
+      },
+      "order_constraints": [
+        {
+          "before": "/front-end-review",
+          "after": "/gate:frontend-runtime",
+          "severity": "error"
+        },
+        {
+          "before": "/gate:frontend-runtime",
+          "after": "/build-verify",
+          "severity": "error"
+        }
+      ]
+    },
+    "f9_intake_review": {
+      "required_when_present": {
+        "triggers": ["/intake-review:compare", "/intake-review:create-gaplist"],
+        "required_commands": [
+          "/intake-review:create-checklist",
+          "/intake-review:list-improove",
+          "/intake-review:compare"
+        ]
+      },
+      "order_constraints": [
+        {
+          "before": "/intake-review:create-checklist",
+          "after": "/intake-review:list-improove",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:list-improove",
+          "after": "/intake-review:compare",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:compare",
+          "after": "/intake-review:create-gaplist",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:create-gaplist",
+          "after": "/intake-review:execute-gaplist-p0",
+          "severity": "error"
+        },
+        {
+          "before": "/intake-review:execute-gaplist-p0",
+          "after": "/intake-review:execute-gaplist-p1",
+          "severity": "warning"
+        },
+        {
+          "before": "/intake-review:execute-gaplist-p1",
+          "after": "/intake-review:execute-gaplist-p2",
+          "severity": "warning"
+        },
+        {
+          "before": "/intake-review:execute-gaplist-p2",
+          "after": "/intake-review:review-executed",
+          "severity": "warning"
+        }
+      ],
+      "blocking_if_missing": false
+    },
+    "f9_qa": {
+      "required_when_present": {
+        "triggers": ["/qa:prep", "/qa:trace", "/qa:report"],
+        "required_commands": ["/brief-vs-frontend-review"]
+      },
+      "blocking_if_missing": false
+    },
+    "f8b_delivery": {
+      "required_when_present": {
+        "triggers": ["/delivery:identify-task", "/delivery:create-tasks", "/delivery:qa-gate", "/delivery:mcp-review", "/delivery:sign-off"],
+        "required_commands": ["/delivery:analyse"]
+      },
+      "order_constraints": [
+        {
+          "before": "/delivery:analyse",
+          "after": "/delivery:identify-task",
+          "severity": "error"
+        },
+        {
+          "before": "/delivery:identify-task",
+          "after": "/delivery:create-tasks",
+          "severity": "warning"
+        },
+        {
+          "before": "/delivery:qa-gate",
+          "after": "/delivery:mcp-review",
+          "severity": "error"
+        },
+        {
+          "before": "/delivery:mcp-review",
+          "after": "/delivery:sign-off",
+          "severity": "error"
+        },
+        {
+          "before": "/delivery:sign-off",
+          "after": "/delivery:pending-actions",
+          "severity": "warning"
+        }
+      ],
+      "blocking_if_missing": false
+    }
+  },
+  "phase_triggers": {
+    "f2_post_review_prd_flow": {
+      "on_command_success": "/review-prd-flow",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f2",
+        "/pipeline:collect-lessons --phase f2",
+        "/cmd:backlog-from-lessons --phase f2"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f5_post_validate_pipeline": {
+      "on_command_success": "/validate-pipeline",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f5",
+        "/pipeline:collect-lessons --phase f5",
+        "/cmd:backlog-from-lessons --phase f5"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f7_post_build_verify": {
+      "on_command_success": "/build-verify",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f7",
+        "/pipeline:collect-lessons --phase f7",
+        "/cmd:backlog-from-lessons --phase f7"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f9_post_brief_vs_frontend_review": {
+      "on_command_success": "/brief-vs-frontend-review",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f9",
+        "/pipeline:collect-lessons --phase f9",
+        "/cmd:backlog-from-lessons --phase f9"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f11_post_deploy_verify": {
+      "on_command_success": "/post-deploy-verify",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f11",
+        "/pipeline:collect-lessons --phase f11",
+        "/cmd:backlog-from-lessons --phase f11"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    },
+    "f8b_post_sign_off": {
+      "on_command_success": "/delivery:sign-off",
+      "auto_actions": [
+        "/pipeline:run-scorecard --phase f8b",
+        "/pipeline:collect-lessons --phase f8b"
+      ],
+      "blocking": false,
+      "cooldown_runs": 1
+    }
+  },
+  "dcp_triggers": [
+    {
+      "id": "post-build-validate",
+      "after": "/build-module-pipeline",
+      "run": ["/delivery:validate"],
+      "max_per_session": 3,
+      "scope": "module"
+    },
+    {
+      "id": "post-commit-record",
+      "after": "/commit:*",
+      "run": ["/memory:record-run", "/pipeline:collect-lessons"],
+      "max_per_session": 5,
+      "conditional": "module.state in ['done'] && last_transition_to == 'done'"
+    },
+    {
+      "id": "validation-summary-qa-done",
+      "after": "/validation-summary --module",
+      "run": [],
+      "conditional": "result == 'APROVADO' && module.deploy.target == 'none'",
+      "notes": "autoriza workflow-app a acionar /commit:* que transiciona qa->done"
+    },
+    {
+      "id": "validation-summary-qa-deploy",
+      "after": "/validation-summary --module",
+      "run": [],
+      "conditional": "result == 'APROVADO' && module.deploy.target != 'none'",
+      "notes": "autoriza workflow-app a acionar deploy e depois /post-deploy-verify"
+    },
+    {
+      "id": "post-deploy-verify-ok",
+      "after": "/post-deploy-verify",
+      "run": [],
+      "conditional": "result == 'OK'",
+      "notes": "autoriza workflow-app a acionar /commit:* que transiciona deploy->done"
+    },
+    {
+      "id": "post-unblock-validate",
+      "after": "/delivery:unblock",
+      "run": ["/delivery:validate"],
+      "max_per_session": 10
+    },
+    {
+      "id": "post-reopen-validate",
+      "after": "/delivery:reopen",
+      "run": ["/delivery:validate"],
+      "max_per_session": 10
+    }
+  ]
+}
