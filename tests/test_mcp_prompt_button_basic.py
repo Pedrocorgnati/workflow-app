@@ -150,7 +150,19 @@ def test_modal_opens_on_right_click(qtbot, monkeypatch):
 
     monkeypatch.setattr(MCPPromptConfigModal, "exec", _fake_exec)
 
-    qtbot.mouseClick(btn, Qt.MouseButton.RightButton)
+    # O modal abre via `contextMenuEvent` (DefaultContextMenu policy). Sob a
+    # plataforma `offscreen`, qtbot.mouseClick(RightButton) NAO sintetiza um
+    # QContextMenuEvent (verificado: 0 disparos), entao entregamos o evento
+    # diretamente — e o caminho real que o handler trata em producao.
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QContextMenuEvent
+    from PySide6.QtWidgets import QApplication
+
+    _pos = QPoint(btn.width() // 2, btn.height() // 2)
+    _ctx_event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, _pos, btn.mapToGlobal(_pos)
+    )
+    QApplication.sendEvent(btn, _ctx_event)
 
     assert len(exec_calls) == 1
     modal = exec_calls[0]

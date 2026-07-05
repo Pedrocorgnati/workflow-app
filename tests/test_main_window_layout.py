@@ -69,27 +69,34 @@ def test_command_queue_has_autocast_buttons(app):
 
 
 def test_output_toolbar_left_splits_insertions_controls(app):
-    """output-toolbar-left separa abas primarias do bloco Insercoes/rotas/gear."""
-    cq = CommandQueueWidget()
-    header = cq.header_widget
+    """Refactor output-toolbar-left/center: as abas primarias (Workflow/LOOPs/
+    Auxiliar) ficam no header output-toolbar-left; o bloco insertions-controls
+    migrou para output-toolbar-center, reparenteado por MainWindow._setup_ui
+    (command_queue_widget.py: "insertions_bar NAO entra no tab_row" +
+    main_window.py: _center_layout.addWidget(insertions_bar)). Em standalone o
+    insertions_bar fica sem parent; so a MainWindow completa o ancora no center.
+    A aba Inserchoes (queue-tab-terminal-insertions) deixou de ser botao de aba
+    (conteudo sempre visivel no center), entao nao e mais procurada aqui.
+    """
+    from workflow_app.main_window import MainWindow
 
-    primary = _find_widget_by_testid(header, "output-toolbar-left-primary-tabs")
-    insertions = _find_widget_by_testid(header, "output-toolbar-left-insertions-controls")
+    win = MainWindow()
+
+    # Abas primarias permanecem no header output-toolbar-left.
+    primary = win._command_queue._tab_bar_layout.parentWidget()
     assert primary is not None
-    assert insertions is not None
-
-    insertions_tab = _find_widget_by_testid(header, "queue-tab-terminal-insertions")
-    assert insertions_tab is not None
-    assert insertions_tab.parentWidget() is insertions
-
-    for testid in (
-        "queue-tab-workflow",
-        "queue-tab-loops",
-        "queue-tab-auxiliar",
-    ):
-        tab = _find_widget_by_testid(header, testid)
-        assert tab is not None
+    assert primary.property("testid") == "output-toolbar-left-primary-tabs"
+    for tab in win._command_queue._sec_tabs[:3]:
         assert tab.parentWidget() is primary
+
+    # insertions-controls migrou para output-toolbar-center (fora do header).
+    insertions = win._command_queue.insertions_bar
+    center = insertions.parentWidget()
+    assert insertions is not None
+    assert center is not None
+    assert insertions.property("testid") == "output-toolbar-left-insertions-controls"
+    assert center.property("testid") == "output-toolbar-center"
+    assert insertions.parentWidget() is center
 
 
 def test_output_toolbar_left_subtabs_use_responsive_flow(app):
@@ -131,6 +138,61 @@ def test_output_toolbar_left_subtabs_use_responsive_flow(app):
     assert len(y_positions) <= 4
     assert min(widths) < 64
     assert max_right < 180
+
+
+def test_attachment_row_keeps_visible_controls_non_overlapping(app):
+    """Project/loop/brainstorm attachments stay split and non-overlapping."""
+    from workflow_app.config.app_state import app_state
+    from workflow_app.main_window import MainWindow
+
+    app_state.clear_all()
+    win = MainWindow()
+    project_name = "project-with-a-very-long-name-for-small-viewports"
+    loop_name = "loop-with-a-very-long-name-for-small-viewports"
+    win._metrics_bar._apply_project_loaded(project_name)
+    win._metrics_bar._apply_loop_loaded(loop_name)
+    win.resize(640, 480)
+    win.show()
+    app.processEvents()
+
+    assert win._metrics_bar._project_name_lbl.toolTip() == project_name
+    assert win._metrics_bar._loop_name_lbl.toolTip() == loop_name
+    assert win._metrics_bar._project_name_lbl.maximumWidth() <= 180
+    assert win._metrics_bar._loop_name_lbl.maximumWidth() <= 180
+
+    attachments_block = win._attachments_block
+    project_row = win._attachments_project_row
+    loop_row = win._attachments_loop_row
+    brainstorm_row = win._attachments_brainstorm_row
+    actions_row = win._clear_queue_btn.parentWidget()
+
+    assert attachments_block is not None
+    assert project_row is not None
+    assert loop_row is not None
+    assert brainstorm_row is not None
+    assert actions_row is not None
+    assert project_row.parentWidget() is attachments_block
+    assert loop_row.parentWidget() is attachments_block
+    assert brainstorm_row.parentWidget() is attachments_block
+    assert actions_row.parentWidget() is not attachments_block
+
+    row_tops = {project_row.geometry().top(), loop_row.geometry().top(), brainstorm_row.geometry().top()}
+    assert len(row_tops) == 3, "anexos devem ocupar linhas semanticas separadas"
+
+    for row in (project_row, loop_row, brainstorm_row):
+        visible_items = []
+        layout = row.layout()
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            widget = item.widget()
+            if widget is not None and widget.isVisible():
+                visible_items.append(widget)
+
+        previous_right = -1
+        for widget in visible_items:
+            geom = widget.geometry()
+            assert geom.left() > previous_right
+            previous_right = geom.right()
 
 
 def test_autocast_toggle_signal_proxied(app):

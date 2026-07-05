@@ -149,6 +149,8 @@ _EFFORT_MAP: dict[str, EffortLevel] = {
     "max": EffortLevel.MAX,
 }
 
+_WORKSPACE_DRIFT_ALLOW_PROJECT_OVERRIDE = "allow_project_override"
+
 # Match a PROGRESS.md item row, e.g.
 #   | 001 | [ ] | path/to/file.md | T-sonnet-medium | - |
 _ITEM_ROW = re.compile(
@@ -268,6 +270,72 @@ def resolve_loop_path(
     if p.is_absolute():
         return p
     return (loop_root / p).resolve()
+
+
+def _canonical_path(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _workspace_drift_policy(raw_config: dict[str, Any]) -> str:
+    daily_loop = raw_config.get("daily_loop")
+    metadata = raw_config.get("metadata")
+    candidates: list[Any] = [
+        raw_config.get("workspace_drift_policy"),
+        metadata.get("workspace_drift_policy") if isinstance(metadata, dict) else None,
+        daily_loop.get("workspace_drift_policy") if isinstance(daily_loop, dict) else None,
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return "block"
+
+
+def resolve_effective_workspace_root(
+    raw_config: dict[str, Any],
+    loop_root: Path | str,
+    *,
+    project_workspace_root: Path | str | None = None,
+) -> Path:
+    """Resolve the workspace used to rewrite loop command tokens.
+
+    Default policy is fail-closed: when the loop declares a workspace root that
+    differs from the active project workspace, do not silently switch bases.
+    Producers may opt in with `workspace_drift_policy: allow_project_override`.
+    Without an active project, preserve legacy behavior: loop workspace when
+    declared, otherwise loop_root.
+    """
+    loop_root_path = _canonical_path(Path(loop_root))
+    loop_workspace_raw = ""
+    basic_flow = raw_config.get("basic_flow")
+    if isinstance(basic_flow, dict):
+        loop_workspace_raw = str(basic_flow.get("workspace_root", "") or "").strip()
+    loop_workspace = (
+        _canonical_path(Path(loop_workspace_raw))
+        if loop_workspace_raw
+        else loop_root_path
+    )
+
+    if project_workspace_root is None or not str(project_workspace_root).strip():
+        return loop_workspace
+
+    project_workspace = _canonical_path(Path(project_workspace_root))
+    if loop_workspace == project_workspace:
+        return loop_workspace
+
+    policy = _workspace_drift_policy(raw_config)
+    if policy == _WORKSPACE_DRIFT_ALLOW_PROJECT_OVERRIDE:
+        return project_workspace
+
+    raise DailyLoopConfigError(
+        "workspace_root divergente entre loop e project; sobrescrita silenciosa "
+        "bloqueada.\n"
+        f"  loop.basic_flow.workspace_root: {loop_workspace}\n"
+        f"  project.workspace_root:         {project_workspace}\n"
+        "  politica default: bloquear.\n"
+        "  para permitir override explicito, declare "
+        "workspace_drift_policy: allow_project_override no _LOOP-CONFIG.json."
+    )
 
 
 def parse_progress_items(progress_md_text: str) -> list[ProgressItem]:
@@ -1062,6 +1130,8 @@ def _assert_no_orphan_kimi_pair(raw_config: dict[str, Any]) -> None:
 def build_daily_loop_specs(
     raw_config: dict[str, Any],
     loop_root: Path | str,
+    *,
+    project_workspace_root: Path | str | None = None,
 ) -> list[CommandSpec]:
     """Expand the daily_loop block + PROGRESS.md into a CommandSpec queue.
 
@@ -1101,9 +1171,10 @@ def build_daily_loop_specs(
     bucket_index = _resolve_bucket_index(daily_loop)
 
     loop_root_path = Path(loop_root)
-    workspace_root_path = Path(
-        str(raw_config.get("basic_flow", {}).get("workspace_root", "")).strip()
-        or loop_root_path
+    workspace_root_path = resolve_effective_workspace_root(
+        raw_config,
+        loop_root_path,
+        project_workspace_root=project_workspace_root,
     )
     progress_path = resolve_loop_path(
         daily_loop.get("progress_path"),
@@ -1185,11 +1256,11 @@ def build_daily_loop_specs(
     for idx, item in enumerate(pending):
         # Opt-in: drop a /clear between items (after the prior :review-done,
         # before this :do). Skipped before the first item — position 0 already
-        # holds a /clear. After a /clear we cannot rely on the harness keeping
-        # /model and /effort state, so reset the dedup trackers to force the
-        # next pair of headers to re-emit. Only the bucket headers are forced;
-        # the review-done /model opus + /effort standard headers will dedup
-        # naturally based on whether the new bucket already matches them.
+        # holds a /clear. NAO resetar current_model/current_effort: /clear reseta
+        # apenas o CONTEXTO da conversa, nunca /model nem /effort no CLI
+        # (workflow-app-command-lists.md secao 1). Resetar forcaria re-emissao
+        # redundante de directives identicas a cada item, violando a politica
+        # anti-redundancia (secao 3.1). O dedup natural por bucket continua valendo.
         if clear_between_items and idx > 0:
             specs.append(
                 CommandSpec(
@@ -1200,8 +1271,6 @@ def build_daily_loop_specs(
                     position=0,
                 )
             )
-            current_model = None
-            current_effort = None
 
         bucket = bucket_index.get(item.bucket_id)
         if bucket is None:
@@ -1495,6 +1564,8 @@ def parse_progress_items_loop(progress_md_text: str) -> list[ProgressItem]:
 def build_loop_specs(
     raw_config: dict[str, Any],
     loop_root: Path | str,
+    *,
+    project_workspace_root: Path | str | None = None,
 ) -> list[CommandSpec]:
     """Expand a `/loop`-flavoured `_LOOP-CONFIG.json` + PROGRESS.md into a queue.
 
@@ -1547,9 +1618,10 @@ def build_loop_specs(
     bucket_index = _resolve_bucket_index(daily_loop)
 
     loop_root_path = Path(loop_root)
-    workspace_root_path = Path(
-        str(raw_config.get("basic_flow", {}).get("workspace_root", "")).strip()
-        or loop_root_path
+    workspace_root_path = resolve_effective_workspace_root(
+        raw_config,
+        loop_root_path,
+        project_workspace_root=project_workspace_root,
     )
     progress_path = resolve_loop_path(
         daily_loop.get("progress_path"),
@@ -1622,8 +1694,11 @@ def build_loop_specs(
                     position=0,
                 )
             )
-            current_model = None
-            current_effort = None
+            # NAO resetar current_model/current_effort aqui. /clear reseta apenas
+            # o CONTEXTO da conversa, nunca /model nem /effort no CLI
+            # (workflow-app-command-lists.md secao 1, tabela de persistencia).
+            # Resetar forcaria re-emissao redundante de /model e /effort identicos
+            # a cada item, violando a politica anti-redundancia (secao 3.1).
 
         bucket = bucket_index.get(item.bucket_id)
         if bucket is None:

@@ -90,14 +90,21 @@ def test_deploy_has_expected_coverage():
 
 
 def test_daily_has_expected_commands():
-    # Includes a leading `/clear` header.
+    # Redesenho 5a8dce8 (2026-05-18): /clear + diretivas /model + /effort
+    # intercaladas entre as fases (effort-por-fase). 6 -> 12 entries.
     names = [c.name for c in TEMPLATE_DAILY]
-    assert len(TEMPLATE_DAILY) == 6
-    assert names[0] == "/clear"
-    assert names[1:] == [
+    assert len(TEMPLATE_DAILY) == 12
+    assert names == [
+        "/clear",
+        "/model sonnet",
+        "/effort standard",
         "/daily:scan",
+        "/model opus",
+        "/effort high",
         "/daily:plan",
+        "/model sonnet",
         "/daily:do",
+        "/effort standard",
         "/daily:validate",
         "/daily:review",
     ]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -243,6 +243,27 @@ class TestMetricsBarProjectPill:
             app_state.clear_config()
         assert emitted == [config_path]
 
+    def test_proj_refresh_does_not_reload_loop_slot(self, bar, tmp_path):
+        loop_path = str(tmp_path / "_LOOP-CONFIG.json")
+        emitted: list[str] = []
+        bar.config_reload_requested.connect(emitted.append)
+        app_state.clear_all()
+        app_state.set_loop_config(
+            PipelineConfig(
+                config_path=loop_path,
+                project_name="loop",
+                brief_root="",
+                docs_root="",
+                wbs_root="",
+                workspace_root="",
+            )
+        )
+        try:
+            bar._on_proj_refresh()
+        finally:
+            app_state.clear_all()
+        assert emitted == []
+
     def test_project_pill_not_hidden_after_project_loaded(self, bar):
         bar._apply_project_loaded("my-project")
         assert not bar._project_pill.isHidden()
@@ -250,6 +271,131 @@ class TestMetricsBarProjectPill:
     def test_proj_select_btn_hidden_after_project_loaded(self, bar):
         bar._apply_project_loaded("my-project")
         assert bar._proj_select_btn.isHidden()
+
+    def test_proj_select_emits_project_config_change_requested(self, bar, tmp_path):
+        config_path = tmp_path / "project.json"
+        config_path.write_text("{}")
+        emitted_project: list[str] = []
+        emitted_config: list[str] = []
+        emitted_loop: list[str] = []
+        bar.project_config_change_requested.connect(emitted_project.append)
+        bar.config_change_requested.connect(emitted_config.append)
+        bar.loop_config_change_requested.connect(emitted_loop.append)
+
+        with patch(
+            "workflow_app.metrics_bar.metrics_bar.QFileDialog.getOpenFileName",
+            return_value=(str(config_path), ""),
+        ):
+            bar._on_proj_select()
+
+        assert emitted_project == [str(config_path)]
+        assert emitted_loop == []
+        # Compat bridge ainda dispara para integração legada.
+        assert emitted_config == [str(config_path)]
+
+    def test_project_picker_with_loop_only_starts_in_project_fallback(self, bar, tmp_path):
+        loop_path = tmp_path / "blacksmith" / "loop" / "_LOOP-CONFIG.json"
+        projects_dir = tmp_path / ".claude" / "projects"
+        selected_project = projects_dir / "project.json"
+        loop_path.parent.mkdir(parents=True)
+        projects_dir.mkdir(parents=True)
+        loop_path.write_text("{}", encoding="utf-8")
+        selected_project.write_text("{}", encoding="utf-8")
+        app_state.clear_all()
+        app_state.set_loop_config(
+            PipelineConfig(
+                config_path=str(loop_path),
+                project_name="loop",
+                brief_root="",
+                docs_root="",
+                wbs_root="",
+                workspace_root="",
+            )
+        )
+        captured_start_dirs: list[str] = []
+
+        def fake_dialog(parent, title, start_dir, file_filter):
+            captured_start_dirs.append(start_dir)
+            return (str(selected_project), "")
+
+        with patch.object(bar, "_resolve_walk_up", return_value=str(projects_dir)):
+            with patch(
+                "workflow_app.metrics_bar.metrics_bar.QFileDialog.getOpenFileName",
+                side_effect=fake_dialog,
+            ):
+                try:
+                    bar._on_proj_select()
+                finally:
+                    app_state.clear_all()
+
+        assert captured_start_dirs == [str(projects_dir)]
+
+    def test_project_picker_with_project_and_loop_starts_in_project_dir(self, bar, tmp_path):
+        project_path = tmp_path / "project" / ".claude" / "project.json"
+        loop_path = tmp_path / "blacksmith" / "loop" / "_LOOP-CONFIG.json"
+        project_path.parent.mkdir(parents=True)
+        loop_path.parent.mkdir(parents=True)
+        project_path.write_text("{}", encoding="utf-8")
+        loop_path.write_text("{}", encoding="utf-8")
+        app_state.clear_all()
+        app_state.set_project_config(
+            PipelineConfig(
+                config_path=str(project_path),
+                project_name="project",
+                brief_root="brief",
+                docs_root="docs",
+                wbs_root="wbs",
+                workspace_root="workspace",
+            )
+        )
+        app_state.set_loop_config(
+            PipelineConfig(
+                config_path=str(loop_path),
+                project_name="loop",
+                brief_root="",
+                docs_root="",
+                wbs_root="",
+                workspace_root="",
+            )
+        )
+        captured_start_dirs: list[str] = []
+
+        def fake_dialog(parent, title, start_dir, file_filter):
+            captured_start_dirs.append(start_dir)
+            return (str(project_path), "")
+
+        with patch(
+            "workflow_app.metrics_bar.metrics_bar.QFileDialog.getOpenFileName",
+            side_effect=fake_dialog,
+        ):
+            try:
+                bar._on_proj_select()
+            finally:
+                app_state.clear_all()
+
+        assert captured_start_dirs == [str(project_path.parent)]
+
+    def test_loop_select_emits_loop_config_change_requested(self, bar, tmp_path):
+        loop_path = tmp_path / "_LOOP-CONFIG.json"
+        loop_path.write_text(
+            '{"iteration_template":"x","items":[],"finalization":{},"schema_version":"1.0.0","name":"loop"}'
+        )
+        emitted_loop: list[str] = []
+        emitted_config: list[str] = []
+        emitted_project: list[str] = []
+        bar.loop_config_change_requested.connect(emitted_loop.append)
+        bar.config_change_requested.connect(emitted_config.append)
+        bar.project_config_change_requested.connect(emitted_project.append)
+
+        with patch(
+            "workflow_app.metrics_bar.metrics_bar.QFileDialog.getOpenFileName",
+            return_value=(str(loop_path), ""),
+        ):
+            bar._on_loop_select()
+
+        assert emitted_loop == [str(loop_path)]
+        assert emitted_project == []
+        assert emitted_config == [str(loop_path)]
 
     def test_project_name_label_shows_name(self, bar):
         bar._apply_project_loaded("ai-forge")
@@ -272,6 +418,107 @@ class TestMetricsBarProjectPill:
         bar._apply_project_empty()
         bar._apply_project_loaded("second-project")
         assert not bar._proj_x.isHidden()
+
+    def test_project_loaded_keeps_loop_selector_available(self, bar):
+        bar._apply_project_loaded("my-project")
+        assert bar._proj_select_btn.isHidden()
+        assert not bar._loop_select_btn.isHidden()
+        assert not bar._proj_open_btn.isHidden()
+
+
+class TestMetricsBarLoopPill:
+    """Loop pill is a separate attachment surface from the project pill."""
+
+    def test_loop_pill_hidden_on_init(self, bar):
+        assert bar._loop_pill.isHidden()
+
+    def test_loop_loaded_shows_loop_pill_only(self, bar):
+        bar._apply_loop_loaded("my-loop")
+        assert not bar._loop_pill.isHidden()
+        assert bar._loop_select_btn.isHidden()
+        assert bar._loop_name_lbl.text() == "my-loop"
+        assert bar._project_pill.isHidden()
+
+    def test_loop_empty_restores_loop_selector(self, bar):
+        bar._apply_loop_loaded("my-loop")
+        bar._apply_loop_empty()
+        assert bar._loop_pill.isHidden()
+        assert not bar._loop_select_btn.isHidden()
+
+    def test_loop_refresh_emits_active_loop_path(self, bar, tmp_path):
+        config_path = str(tmp_path / "_LOOP-CONFIG.json")
+        emitted: list[str] = []
+        bar.loop_config_reload_requested.connect(emitted.append)
+        app_state.set_loop_config(
+            PipelineConfig(
+                config_path=config_path,
+                project_name="my-loop",
+                brief_root="",
+                docs_root="",
+                wbs_root="",
+                workspace_root="",
+            )
+        )
+        try:
+            bar._on_loop_refresh()
+        finally:
+            app_state.clear_loop()
+        assert emitted == [config_path]
+
+    def test_loop_unload_emits_granular_signal(self, bar):
+        emitted: list[bool] = []
+        bar.loop_config_unload_requested.connect(lambda: emitted.append(True))
+        bar._on_loop_unload()
+        assert emitted == [True]
+
+    def test_loop_loaded_toast_reads_loop_config_when_project_exists(
+        self, bar, tmp_path
+    ):
+        project_cfg = PipelineConfig(
+            config_path=str(tmp_path / ".claude" / "project.json"),
+            project_name="project",
+            brief_root="brief",
+            docs_root="docs",
+            wbs_root="wbs",
+            workspace_root="workspace",
+        )
+        loop_root = tmp_path / "blacksmith" / "loop-archives" / "loop-a"
+        loop_root.mkdir(parents=True)
+        (loop_root / "PROGRESS.md").write_text(
+            "\n".join([
+                "# Progress",
+                "Total: 2 items | Done: 1 | Pending: 1 | Failed: 0",
+                "",
+                "| ID  | Status | Target | Bucket | Updated |",
+                "|-----|--------|--------|--------|---------|",
+                "| 001 | [x]    | a.md   | T      | now     |",
+                "| 002 | [ ]    | b.md   | T      | -       |",
+            ]),
+            encoding="utf-8",
+        )
+        loop_cfg = PipelineConfig(
+            config_path=str(loop_root / "_LOOP-CONFIG.json"),
+            project_name="loop-a",
+            brief_root="",
+            docs_root="",
+            wbs_root="",
+            workspace_root="",
+        )
+        app_state.set_project_config(project_cfg)
+        app_state.set_loop_config(loop_cfg)
+        try:
+            bar._emit_loop_loaded_toast(
+                {"kind": "daily-loop", "daily_loop": {"slug": "loop-a"}},
+                "daily-loop",
+            )
+        finally:
+            app_state.clear_all()
+
+        bar._signal_bus.toast_requested.emit.assert_called_with(
+            "Daily loop carregado (loop-a): 1 pendente(s). "
+            "Clique `queue-btn-daily-loop` na barra de queue para enfileirar.",
+            "info",
+        )
 
 
 # ──────────────────────────────── nav buttons ─── #

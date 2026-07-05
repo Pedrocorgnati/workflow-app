@@ -395,3 +395,50 @@ class TestBuildLoopSpecsPrecedence:
         assert (
             "/daily-loop:review-done --slug test-slug --item 001" in names
         ), "daily-loop lane must continue to emit review-done unconditionally (not affected by loop fix)"
+
+    def test_loop_clear_between_items_no_redundant_model_effort(
+        self, loop_root: Path
+    ) -> None:
+        """Anti-redundancy (workflow-app-command-lists.md section 3.1):
+        reproduz o bug reportado em 06-25. Com clear_between_items=true e
+        canonical_cmds populada no MESMO bucket sonnet/medium para todos os
+        items, a fila NAO pode reemitir /model sonnet nem /effort medium a
+        cada item — /clear nao reseta /model/effort no CLI (secao 1), so o
+        contexto. Apenas o PRIMEIRO item carrega o header sonnet/medium."""
+        _write_progress(
+            loop_root,
+            [
+                ("001", " ", "a", "T-sonnet-medium"),
+                ("002", " ", "b", "T-sonnet-medium"),
+                ("003", " ", "c", "T-sonnet-medium"),
+            ],
+        )
+        cfg = _cfg(
+            loop_root,
+            [
+                {"id": "001", "commands": ["/loop:iteraction:execute-task --task A"]},
+                {"id": "002", "commands": ["/loop:iteraction:execute-task --task B"]},
+                {"id": "003", "commands": ["/loop:iteraction:execute-task --task C"]},
+            ],
+            kind="loop",
+        )
+        cfg["daily_loop"]["clear_between_items"] = True
+        specs = build_loop_specs(cfg, loop_root)
+        names = _names(specs)
+
+        # /model sonnet emitido UMA vez (header inicial do item 001), nunca
+        # reemitido para 002/003. /effort medium idem. O salto final para
+        # opus/high do /loop ... :review nao conta como redundancia.
+        assert names.count("/model sonnet") == 1, (
+            f"/model sonnet deve aparecer 1x (header inicial), nunca por item; "
+            f"names={names}"
+        )
+        assert names.count("/effort medium") == 1, (
+            f"/effort medium deve aparecer 1x (header inicial), nunca por item; "
+            f"names={names}"
+        )
+        # Sanity: o /clear inter-item continua presente (3 items -> >= 4 clears
+        # contando o inicial e o final pre-:review).
+        assert names.count("/clear") >= 4, (
+            f"clear_between_items deve manter os /clear inter-item; names={names}"
+        )

@@ -10,7 +10,7 @@ Helpers are commands that mutate CLI/session state or the bash environment
 but DO NOT write a notify file on completion:
   - slash-helpers: /model, /effort, /clear (Claude Code session directives)
   - bash: cd (directory change)
-  - CLI launches: clauded, kimid, clauded2, kimid2, codex, codex-high
+  - CLI launches: clauded, kimid, codex, codex-high
 
 Consequences of being a helper (enforced by the consumers, not here):
   - the early-exit watcher is NOT armed for them — they finish fast by design
@@ -27,7 +27,7 @@ from __future__ import annotations
 HELPER_COMMANDS: tuple[str, ...] = (
     "/model", "/effort", "/clear",            # slash-helpers
     "cd",                                      # bash directory change
-    "clauded", "kimid", "clauded2", "kimid2", "codex", "codex-high",  # CLI launches
+    "clauded", "kimid", "codex", "codex-high",  # CLI launches
 )
 
 

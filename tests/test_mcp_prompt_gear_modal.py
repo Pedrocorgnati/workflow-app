@@ -1,11 +1,11 @@
 """Testes do modal de configuracao gear (T4).
 
 Cobre 3 cenarios do T4 (loop 05-21-implantation-tasklist-aba-brainstorm):
-- test_gear_dialog_opens_with_seeds_loaded: dialog carrega 10 seeds com testid.
+- test_gear_dialog_opens_with_seeds_loaded: dialog carrega 20 seeds com testid.
 - test_gear_modal_persists_seed_edits_to_disk: save grava no .md (atomic write).
 - test_gear_modal_revert_discards_edits: reject() preserva conteudo do .md.
 
-Usa `tmp_path` para criar workspace temporario com 10 seeds canonicos.
+Usa `tmp_path` para criar workspace temporario com 20 seeds canonicos.
 """
 
 from __future__ import annotations
@@ -18,8 +18,10 @@ pytestmark = pytest.mark.timeout(5)
 
 pytest.importorskip("workflow_app.widgets.brainstorm_mcp_config_dialog")
 
+from workflow_app.main_window import MainWindow
 from workflow_app.widgets.brainstorm_mcp_config_dialog import (
     BrainstormMcpConfigDialog,
+    effective_label,
     load_seed,
     save_seed,
 )
@@ -47,7 +49,7 @@ target_terminal: {target_terminal}
 
 
 def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
-    """Cria 10 seeds canonicos + diretorio de agentes. Retorna (seeds_dir, agents_dir)."""
+    """Cria 20 seeds canonicos + diretorio de agentes. Retorna (seeds_dir, agents_dir)."""
     seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
     agents_dir = repo_root / "agents"
     seeds_dir.mkdir(parents=True)
@@ -55,14 +57,24 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
     specs = [
         ("01-criar-md", "criar-md", "Claude", "Criar arquivo", False, "terminal-interactive-output"),
         ("02-search-in", "search-in", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("03-controversial", "controversial", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("04-hardening", "hardening", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("05-loop-prepare", "loop-prepare", "Claude", "Loop prepare", True, "terminal-interactive-output"),
-        ("06-criar-task", "criar-task", "Claude", "Criar tasks", True, "terminal-interactive-output"),
-        ("07-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
-        ("08-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
-        ("09-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
-        ("10-search-out", "search-out", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("03-search-out", "search-out", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("04-search-forge", "search-forge", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("05-deep-detailer", "deep-detailer", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("06-controversial", "controversial", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("07-hardening", "hardening", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("08-loop-prepare", "loop-prepare", "Claude", "Loop prepare", True, "terminal-interactive-output"),
+        ("09-criar-task", "criar-task", "Claude", "Criar tasks", True, "terminal-interactive-output"),
+        ("10-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
+        ("11-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
+        ("12-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
+        ("13-visual-design", "visual-design", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("14-layout-architect", "layout-architect", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("15-analise-complexidade", "analise-complexidade", "Claude", "Analisar complexidade", True, "terminal-interactive-output"),
+        ("16-billing", "billing", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("17-debugger", "debugger", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("18-delegador", "delegador", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("19-pdca", "pdca", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("20-soft-engen", "soft-engen", "Claude", "Otimizar", True, "terminal-interactive-output"),
     ]
     for fname, slug, btype, action, tp, tt in specs:
         agent_path = f"agents/{slug}-rules.md"
@@ -83,7 +95,7 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
 
 
 def test_gear_dialog_opens_with_seeds_loaded(qtbot, tmp_path):
-    """Dialog inicializa com 10 seeds carregados na lista lateral."""
+    """Dialog inicializa com 20 seeds carregados na lista lateral."""
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     seeds_dir, _ = _materialize_seeds(repo_root)
@@ -93,10 +105,10 @@ def test_gear_dialog_opens_with_seeds_loaded(qtbot, tmp_path):
     )
     qtbot.addWidget(dlg)
     assert dlg.property("testid") == "brainstorm-mcp-config-dialog"
-    # Lista lateral tem 10 itens (1 por seed).
-    assert dlg._list_widget.count() == 10
-    # Os 10 paths foram registrados internamente.
-    assert len(dlg._seed_paths) == 10
+    # Lista lateral tem 20 itens (1 por seed).
+    assert dlg._list_widget.count() == 20
+    # Os 20 paths foram registrados internamente.
+    assert len(dlg._seed_paths) == 20
 
 
 def test_gear_modal_persists_seed_edits_to_disk(qtbot, tmp_path):
@@ -157,3 +169,57 @@ def test_gear_modal_revert_discards_edits(qtbot, tmp_path):
     meta_after, body_after = load_seed(seed_path)
     assert meta_after.get("label") == meta_before.get("label")
     assert body_after == body_before
+
+
+# Regressao: campo Label do gear reflete no label do botao da grade.
+
+
+def test_effective_label_strips_legacy_title_in_label():
+    """Label legado que guardou o `title` inteiro nunca vaza para o botao."""
+    legacy = {
+        "label": "Seed - Botao 13 - Analise de Complexidade",
+        "title": "Seed - Botao 13 - Analise de complexidade",
+        "slug": "analise-complexidade",
+    }
+    assert effective_label(legacy) == "Analise de Complexidade"
+    # Label explicito limpo vence o title.
+    assert effective_label({"label": "Complexidade", "title": "Seed - Botao 13 - X"}) == "Complexidade"
+    # Sem label: deriva do title (sem prefixo).
+    assert effective_label({"title": "Seed - Botao 2 - search-in", "slug": "search-in"}) == "search-in"
+    # Sem label nem title: fallback slug.
+    assert effective_label({"slug": "x"}) == "x"
+
+
+def test_gear_label_edit_reflects_on_grid_button_label(tmp_path):
+    """Editar o campo Label e salvar muda o label que o loader entrega ao botao.
+
+    Era o bug: o loader derivava o label so do `title` e ignorava o `label`
+    gravado pelo gear -> editar o campo nao mudava nada no botao.
+    """
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    seeds_dir, _ = _materialize_seeds(repo_root)
+    seed_path = seeds_dir / "15-analise-complexidade.md"
+
+    # Simula o save do gear: grava `label` novo no frontmatter.
+    save_seed(seed_path, {"label": "Complexidade"}, "prompt body for analise-complexidade")
+
+    class _Fake:
+        _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
+        _BRAINSTORM_SEED_COUNT = 20
+
+        def __init__(self, root: Path) -> None:
+            self._root = root
+
+        def _systemforge_root(self) -> Path:
+            return self._root
+
+        def _brainstorm_seeds_dir(self) -> Path:
+            return MainWindow._brainstorm_seeds_dir(self)  # type: ignore[arg-type]
+
+        def _load_brainstorm_seeds(self):
+            return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
+
+    seeds = _Fake(repo_root)._load_brainstorm_seeds()
+    ac = next(s for s in seeds if s["slug"] == "analise-complexidade")
+    assert ac["label"] == "Complexidade"

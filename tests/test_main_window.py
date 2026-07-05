@@ -18,8 +18,8 @@ def test_main_window_title(qapp):
     assert "SystemForge Desktop" in window.windowTitle()
 
 
-def test_clear_button_in_pill_row_empties_queue(qapp):
-    """O botao Clear vive no pill-row e esvazia o queue-command-list."""
+def test_clear_button_in_actions_row_empties_queue(qapp):
+    """O botao Clear vive na linha de acoes e esvazia o queue-command-list."""
     from PySide6.QtWidgets import QPushButton
 
     from workflow_app.main_window import MainWindow
@@ -32,14 +32,19 @@ def test_clear_button_in_pill_row_empties_queue(qapp):
     )
     assert btn.text() == "Clear"
 
-    # O botao deve viver dentro do pill-row (sequencia de botoes pedida).
+    # O botao deve viver fora do bloco de anexos, em uma linha de acoes.
     # Caminhamos a cadeia de parents — evitamos findChildren(QWidget), que
     # materializa wrappers de todos os widgets e corrompe o teardown do
     # conftest (_cleanup_qt_widgets) com segfault no shiboken6.delete.
     ancestor = btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "main-command-queue-actions-row":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None, "Botao Clear nao esta dentro do main-command-queue-actions-row"
+
+    ancestor = btn.parentWidget()
     while ancestor is not None and ancestor.property("testid") != "main-command-queue-pill-row":
         ancestor = ancestor.parentWidget()
-    assert ancestor is not None, "Botao Clear nao esta dentro do main-command-queue-pill-row"
+    assert ancestor is None, "Botao Clear nao deve continuar dentro do bloco de anexos"
 
     state = [
         {"name": "/foo", "model": "Sonnet", "interaction_type": "auto",
@@ -56,6 +61,249 @@ def test_clear_button_in_pill_row_empties_queue(qapp):
     # Idempotente: clicar com a fila vazia nao quebra.
     btn.click()
     assert window._command_queue.get_queue_snapshot() == []
+
+
+def test_attachment_pills_have_distinct_semantic_slots(qapp):
+    """Project, loop and brainstorm surfaces keep distinct testids."""
+    from workflow_app.config.app_state import app_state
+    from workflow_app.main_window import MainWindow
+
+    app_state.clear_all()
+    window = MainWindow()
+
+    attachments_block = window._attachments_block
+    project_row = window._attachments_project_row
+    loop_row = window._attachments_loop_row
+    brainstorm_row = window._attachments_brainstorm_row
+
+    project_pill = window._metrics_bar._project_pill
+    loop_pill = window._metrics_bar._loop_pill
+    picker_row = window._brainstorm_md_btn.parentWidget()
+
+    assert attachments_block.property("testid") == "attachments-block"
+    assert project_pill.parentWidget() is project_row
+    assert loop_pill.parentWidget() is loop_row
+    assert picker_row.property("testid") == "brainstorm-md-picker-row"
+    assert picker_row.parentWidget() is brainstorm_row
+    assert project_row.parentWidget() is attachments_block
+    assert loop_row.parentWidget() is attachments_block
+    assert brainstorm_row.parentWidget() is attachments_block
+    assert picker_row is not project_pill
+    assert picker_row is not loop_pill
+
+
+def test_header_path_buttons_use_typed_project_and_loop_slots(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.config.app_state import app_state
+    from workflow_app.config.config_parser import PipelineConfig
+    from workflow_app.main_window import MainWindow
+
+    project_json = tmp_path / "project" / ".claude" / "project.json"
+    loop_json = tmp_path / "loop" / "_LOOP-CONFIG.json"
+    project_json.parent.mkdir(parents=True)
+    loop_json.parent.mkdir(parents=True)
+    project_json.write_text("{}", encoding="utf-8")
+    loop_json.write_text("{}", encoding="utf-8")
+    project_cfg = PipelineConfig(
+        config_path=str(project_json),
+        project_name="project",
+        brief_root="brief",
+        docs_root="docs",
+        wbs_root="wbs",
+        workspace_root="workspace",
+    )
+    loop_cfg = PipelineConfig(
+        config_path=str(loop_json),
+        project_name="loop",
+        brief_root="",
+        docs_root="",
+        wbs_root="",
+        workspace_root="",
+        raw={"kind": "daily-loop", "daily_loop": {"slug": "loop"}},
+    )
+    app_state.clear_all()
+    app_state.set_project_config(project_cfg)
+    app_state.set_loop_config(loop_cfg)
+    window = MainWindow()
+    published: list[str] = []
+    monkeypatch.setattr(window, "_publish_to_terminal", published.append)
+
+    def btn(testid: str):
+        return next(
+            b for b in window.findChildren(QPushButton)
+            if b.property("testid") == testid
+        )
+
+    qapp.clipboard().clear()
+    btn("queue-btn-json-path").click()
+    assert qapp.clipboard().text() == ".claude/project.json"
+    assert published[-1] == ".claude/project.json"
+
+    btn("queue-btn-loop-path").click()
+    assert qapp.clipboard().text() == str(loop_json)
+    assert published[-1] == str(loop_json)
+    app_state.clear_all()
+
+
+def test_header_path_buttons_warn_when_typed_slot_missing(qapp, tmp_path, request):
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.config.app_state import app_state
+    from workflow_app.config.config_parser import PipelineConfig
+    from workflow_app.main_window import MainWindow
+    from workflow_app.signal_bus import signal_bus
+
+    loop_json = tmp_path / "loop" / "_LOOP-CONFIG.json"
+    loop_json.parent.mkdir(parents=True)
+    loop_json.write_text("{}", encoding="utf-8")
+    loop_cfg = PipelineConfig(
+        config_path=str(loop_json),
+        project_name="loop",
+        brief_root="",
+        docs_root="",
+        wbs_root="",
+        workspace_root="",
+        raw={"kind": "daily-loop", "daily_loop": {"slug": "loop"}},
+    )
+    app_state.clear_all()
+    app_state.set_loop_config(loop_cfg)
+    window = MainWindow()
+    toasts: list[tuple[str, str]] = []
+
+    def capture(message: str, level: str) -> None:
+        toasts.append((message, level))
+
+    signal_bus.toast_requested.connect(capture)
+    request.addfinalizer(lambda: signal_bus.toast_requested.disconnect(capture))
+
+    json_btn = next(
+        b for b in window.findChildren(QPushButton)
+        if b.property("testid") == "queue-btn-json-path"
+    )
+    qapp.clipboard().clear()
+    json_btn.click()
+    assert qapp.clipboard().text() == ""
+    assert any("Nenhum projeto carregado" in msg for msg, _ in toasts)
+
+    app_state.clear_all()
+    project_json = tmp_path / "project" / ".claude" / "project.json"
+    project_json.parent.mkdir(parents=True)
+    project_json.write_text("{}", encoding="utf-8")
+    app_state.set_project_config(
+        PipelineConfig(
+            config_path=str(project_json),
+            project_name="project",
+            brief_root="brief",
+            docs_root="docs",
+            wbs_root="wbs",
+            workspace_root="workspace",
+        )
+    )
+    loop_btn = next(
+        b for b in window.findChildren(QPushButton)
+        if b.property("testid") == "queue-btn-loop-path"
+    )
+    loop_btn.click()
+    assert any("Loop anexado ausente" in msg for msg, _ in toasts)
+    app_state.clear_all()
+
+
+def test_project_unload_preserves_loop_attachment(qapp):
+    from workflow_app.config.app_state import app_state
+    from workflow_app.config.config_parser import PipelineConfig
+    from workflow_app.main_window import MainWindow
+
+    app_state.clear_all()
+    window = MainWindow()
+    loop_cfg = PipelineConfig(
+        config_path="/tmp/loop/_LOOP-CONFIG.json",
+        project_name="loop-a",
+        brief_root="",
+        docs_root="",
+        wbs_root="",
+        workspace_root="",
+    )
+    project_cfg = PipelineConfig(
+        config_path="/tmp/project/.claude/project.json",
+        project_name="project-a",
+        brief_root="brief",
+        docs_root="docs",
+        wbs_root="wbs",
+        workspace_root="workspace",
+    )
+    app_state.set_project_config(project_cfg)
+    app_state.set_loop_config(loop_cfg)
+    window._metrics_bar._apply_project_loaded("project-a")
+    window._metrics_bar._apply_loop_loaded("loop-a")
+
+    window._unload_config()
+
+    assert app_state.project_config is None
+    assert app_state.loop_config is loop_cfg
+    assert window._metrics_bar._project_pill.isHidden()
+    assert not window._metrics_bar._loop_pill.isHidden()
+    assert window._metrics_bar._loop_select_btn.isHidden()
+
+
+def test_terminal_notes_copy_clear_are_scoped_per_slot(qapp):
+    from PySide6.QtWidgets import QLineEdit, QPushButton
+
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+
+    def slot_widgets(testid: str):
+        line_edit = None
+        for candidate in window.findChildren(QLineEdit):
+            ancestor = candidate.parentWidget()
+            while ancestor is not None and ancestor.property("testid") != testid:
+                ancestor = ancestor.parentWidget()
+            if ancestor is not None:
+                line_edit = candidate
+                footer = ancestor
+                break
+        assert line_edit is not None
+        copy_btn = next(
+            btn for btn in footer.findChildren(QPushButton)
+            if btn.toolTip() == "Copiar anotacao para a area de transferencia"
+        )
+        clear_btn = next(
+            btn for btn in footer.findChildren(QPushButton)
+            if btn.toolTip() == "Limpar anotacao"
+        )
+        return line_edit, copy_btn, clear_btn
+
+    interactive_input, interactive_copy, interactive_clear = slot_widgets(
+        "terminal-interactive-notes"
+    )
+    workspace_input, workspace_copy, workspace_clear = slot_widgets(
+        "terminal-workspace-notes"
+    )
+
+    interactive_input.setText("nota T1")
+    workspace_input.setText("nota T2")
+
+    qapp.clipboard().clear()
+    interactive_copy.click()
+    assert qapp.clipboard().text() == "nota T1"
+
+    workspace_copy.click()
+    assert qapp.clipboard().text() == "nota T2"
+
+    interactive_clear.click()
+    interactive_clear.click()
+    assert interactive_input.text() == ""
+    assert workspace_input.text() == "nota T2"
+
+    workspace_input.setText("nota T2 nova")
+    workspace_copy.click()
+    assert qapp.clipboard().text() == "nota T2 nova"
+
+    workspace_clear.click()
+    workspace_clear.click()
+    assert interactive_input.text() == ""
+    assert workspace_input.text() == ""
 
 
 def test_layout_has_splitter(qapp):

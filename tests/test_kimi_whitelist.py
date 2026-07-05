@@ -77,7 +77,9 @@ class TestWhitelist:
         # + 1 (/mkt-assets:scan, score 85, SC81 do apendice 2026-06-18) = 120
         # + 1 (/mkt-assets:plan, score 74, SC82 do apendice 2026-06-18) = 121
         # + 1 (/mkt-assets:noop-fallback, score 100, SC83 do apendice 2026-06-18) = 122
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 122
+        # + 1 (/usabilidade:detect, score 88, SC84 reconciliado do loop 06-23) = 123
+        # + 1 (/loop:friendly-resume, score 82, SC85) = 124
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 124
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):

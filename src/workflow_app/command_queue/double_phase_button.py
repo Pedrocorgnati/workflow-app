@@ -44,6 +44,7 @@ class DoublePhaseButton(QPushButton):
         mode_radio: list[str] | None = None,
         mode_radio_flags: dict[str, str] | None = None,
         mode_radio_summaries: dict[str, str] | None = None,
+        selected_md_path_getter: Callable[[], str | None] | None = None,
         pill: object | None = None,
         on_command_ready: Callable[[str], None] | None = None,
         parent: object | None = None,
@@ -59,6 +60,7 @@ class DoublePhaseButton(QPushButton):
         self._mode_radio = list(mode_radio or [])
         self._mode_radio_flags = dict(mode_radio_flags or {})
         self._mode_radio_summaries = dict(mode_radio_summaries or {})
+        self._selected_md_path_getter = selected_md_path_getter
         self._pill = pill
         self._on_command_ready = on_command_ready
         self.clicked.connect(self._on_clicked)
@@ -78,6 +80,7 @@ class DoublePhaseButton(QPushButton):
             mode_radio=self._mode_radio,
             mode_radio_flags=self._mode_radio_flags,
             mode_radio_summaries=self._mode_radio_summaries,
+            selected_md_path_getter=self._selected_md_path_getter,
             parent=self,
         )
         if self._on_command_ready is not None:

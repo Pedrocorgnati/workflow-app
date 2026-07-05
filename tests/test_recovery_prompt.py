@@ -92,13 +92,17 @@ def test_claude_uses_auq_interview_and_no_manual_blue_block():
     ("codex", "workspace_xterm"),
     ("kimi", "workspace"),
 ])
-def test_codex_kimi_emit_manual_blue_signal_and_plain_text(llm, channel):
+def test_codex_kimi_emit_manual_blue_signal_and_visible_marker(llm, channel):
     p = build_recovery_prompt(llm=llm, reason="VERIFY_FAILED", channel=channel)
     # Manual blue signal block present...
     assert "wf-notify.sh" in p
     assert "--status awaiting_user" in p
     # ...phrased for the right channel default...
     assert f"WF_CHANNEL_OVERRIDE:-{channel}" in p
+    # ...the question renders via a VISIBLE marker block (FIX-CL2-CASE020:
+    # evita azul orfao — dot azul sem pergunta na tela)...
+    assert ">>> PERGUNTA AO OPERADOR <<<" in p
+    assert "clique no dot AZUL" in p
     # ...and explicitly NOT routed through the Claude-only skill.
     assert "/skill:auq-interview" not in p
 

@@ -111,6 +111,21 @@ def qsettings_isolated(tmp_path, monkeypatch):
         QSettings.Scope.SystemScope,
         str(tmp_path / "sys"),
     )
+    # O app constroi QSettings("systemForge", "workflow-app") SEM passar format,
+    # entao usa NativeFormat (no Linux: ~/.config/systemForge/workflow-app.conf).
+    # setPath e por-formato: redirecionar so IniFormat deixava o NativeFormat
+    # ler o ~/.config REAL do dev — vazando overrides (ex.: personas/label_overrides)
+    # para dentro dos testes. Redirecionar tambem NativeFormat fecha o vazamento.
+    QSettings.setPath(
+        QSettings.Format.NativeFormat,
+        QSettings.Scope.UserScope,
+        str(tmp_path),
+    )
+    QSettings.setPath(
+        QSettings.Format.NativeFormat,
+        QSettings.Scope.SystemScope,
+        str(tmp_path / "sys"),
+    )
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     yield
 

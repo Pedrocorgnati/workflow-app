@@ -176,7 +176,7 @@ class SignalBus(QObject):
     terminal_worker_changed = Signal(str, object)      # channel, runner
 
     # --- Instance selection (MetricsBar → CommandQueueWidget) ---
-    # Emitted when user selects a CLI instance (e.g. "clauded", "clauded2")
+    # Emitted when user selects a CLI instance (e.g. "clauded", "kimid")
     instance_selected = Signal(str)          # binary_name
 
     # --- Main LLM routing (CommandQueueWidget → MetricsBar) ---

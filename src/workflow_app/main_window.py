@@ -25,6 +25,7 @@ Window: resize(1280, 720), setMinimumSize(1024, 600)
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,7 +55,13 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.command_queue.add_command_dialog import AddCommandDialog
-from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+from workflow_app.command_queue.command_queue_widget import (
+    PERSONA_FILTER_CATEGORIES,
+    PERSONA_FILTER_DEFAULT,
+    PROMPT_FILTER_CATEGORIES,
+    PROMPT_FILTER_DEFAULT,
+    CommandQueueWidget,
+)
 from workflow_app.config.app_state import app_state
 from workflow_app.config.config_bar import ConfigBar
 from workflow_app.config.config_parser import parse_config
@@ -71,7 +78,7 @@ from workflow_app.views.module_detail import ModuleDetailView
 from workflow_app.widgets.execution_detail_panel import ExecutionDetailPanel
 from workflow_app.widgets.execution_history_widget import ExecutionHistoryWidget
 from workflow_app.widgets.filter_panel import FilterPanel
-from workflow_app.widgets.mcp_prompt_actions import build_prompt
+from workflow_app.widgets.mcp_prompt_actions import append_public_context, build_prompt
 from workflow_app.widgets.mcp_prompt_button import (
     VALID_ACTIONS,
     VALID_BUTTON_TYPES,
@@ -994,7 +1001,6 @@ class MainWindow(QMainWindow):
         # ConfigBar (hidden — project selector moved into MetricsBar)
         self._config_bar = ConfigBar(parent=self)
         self._config_bar.hide()
-        self._metrics_bar.config_change_requested.connect(self._on_config_change_requested)
         self._metrics_bar.config_unload_requested.connect(self._unload_config)
         self._metrics_bar.config_reload_requested.connect(self._reload_config)
 
@@ -1016,9 +1022,10 @@ class MainWindow(QMainWindow):
         self._command_queue.setProperty("testid", "main-command-queue")
 
         # Botao Clear — esvazia o queue-command-list desta instancia.
-        # Vive no pill-row (nao no MetricsBar) porque depende diretamente de
-        # self._command_queue. Estilo vermelho para sinalizar acao destrutiva,
-        # diferenciando dos botoes ambar de selecao de JSON.
+        # Vive na linha de acoes da fila (nao no MetricsBar nem no bloco de
+        # anexos) porque depende diretamente de self._command_queue.
+        # Estilo vermelho para sinalizar acao destrutiva, diferenciando dos
+        # botoes ambar de selecao de JSON.
         self._clear_queue_btn = QPushButton("Clear")
         self._clear_queue_btn.setProperty("testid", "main-command-queue-clear-btn")
         self._clear_queue_btn.setToolTip("Esvaziar a fila (queue-command-list) desta janela")
@@ -1030,29 +1037,77 @@ class MainWindow(QMainWindow):
         )
         self._clear_queue_btn.clicked.connect(self._on_clear_queue_clicked)
 
-        # Pill row — project pill + selectors as first div inside command queue.
+        # Bloco semantico de anexos como first div inside command queue.
         # Widgets are reparented from MetricsBar (state machine stays in MetricsBar).
         _pill_row = QWidget()
-        _pill_row.setObjectName("CommandQueuePillRow")
+        _pill_row.setObjectName("CommandQueueAttachmentsShell")
         _pill_row.setProperty("testid", "main-command-queue-pill-row")
-        _pill_row_layout = QHBoxLayout(_pill_row)
+        _pill_row_layout = QVBoxLayout(_pill_row)
         # Task 1 (loop 05-13-workflow-app-layout-2): margin-top 10 no container que envolve metrics-project-pill.
         _pill_row_layout.setContentsMargins(8, 10, 8, 6)
-        _pill_row_layout.setSpacing(5)
+        _pill_row_layout.setSpacing(4)
+
+        self._attachments_block = QWidget()
+        self._attachments_block.setObjectName("AttachmentsBlock")
+        self._attachments_block.setProperty("testid", "attachments-block")
+        self._attachments_block.setStyleSheet("background: transparent; border: none;")
+        _attachments_layout = QVBoxLayout(self._attachments_block)
+        _attachments_layout.setContentsMargins(0, 0, 0, 0)
+        _attachments_layout.setSpacing(4)
+
+        self._attachments_project_row = QWidget()
+        self._attachments_project_row.setProperty("testid", "attachments-project-row")
+        self._attachments_project_row.setStyleSheet("background: transparent; border: none;")
+        _project_row_layout = QHBoxLayout(self._attachments_project_row)
+        _project_row_layout.setContentsMargins(0, 0, 0, 0)
+        _project_row_layout.setSpacing(5)
         for _w in (
             self._metrics_bar._project_pill,
             self._metrics_bar._feature_name_input,
             self._metrics_bar._proj_open_btn,
             self._metrics_bar._proj_select_btn,
-            self._metrics_bar._loop_select_btn,
-            self._clear_queue_btn,
         ):
-            _pill_row_layout.addWidget(_w)
+            _project_row_layout.addWidget(_w)
+        _project_row_layout.addStretch(1)
+
+        self._attachments_loop_row = QWidget()
+        self._attachments_loop_row.setProperty("testid", "attachments-loop-row")
+        self._attachments_loop_row.setStyleSheet("background: transparent; border: none;")
+        _loop_row_layout = QHBoxLayout(self._attachments_loop_row)
+        _loop_row_layout.setContentsMargins(0, 0, 0, 0)
+        _loop_row_layout.setSpacing(5)
+        for _w in (
+            self._metrics_bar._loop_pill,
+            self._metrics_bar._loop_select_btn,
+        ):
+            _loop_row_layout.addWidget(_w)
+        _loop_row_layout.addStretch(1)
+
+        self._attachments_brainstorm_row = QWidget()
+        self._attachments_brainstorm_row.setProperty("testid", "attachments-brainstorm-row")
+        self._attachments_brainstorm_row.setStyleSheet("background: transparent; border: none;")
+        _brainstorm_row_layout = QHBoxLayout(self._attachments_brainstorm_row)
+        _brainstorm_row_layout.setContentsMargins(0, 0, 0, 0)
+        _brainstorm_row_layout.setSpacing(5)
+
+        _attachments_layout.addWidget(self._attachments_project_row)
+        _attachments_layout.addWidget(self._attachments_loop_row)
+        _attachments_layout.addWidget(self._attachments_brainstorm_row)
+        _pill_row_layout.addWidget(self._attachments_block)
+
+        _actions_row = QWidget()
+        _actions_row.setObjectName("CommandQueueActionsRow")
+        _actions_row.setProperty("testid", "main-command-queue-actions-row")
+        _actions_row.setStyleSheet("background: transparent; border: none;")
+        _actions_row_layout = QHBoxLayout(_actions_row)
+        _actions_row_layout.setContentsMargins(8, 0, 8, 6)
+        _actions_row_layout.setSpacing(5)
+        _actions_row_layout.addWidget(self._clear_queue_btn)
         # Park hidden nav buttons here so MetricsBar is fully decoupled
         for _btn in (self._metrics_bar._btn_workflow, self._metrics_bar._btn_comandos):
-            _pill_row_layout.addWidget(_btn)
+            _actions_row_layout.addWidget(_btn)
             _btn.hide()
-        _pill_row_layout.addStretch(1)
+        _actions_row_layout.addStretch(1)
 
         # Window label — etiqueta livre para identificar visualmente esta
         # janela quando varias instancias do workflow-app rodam em paralelo.
@@ -1075,6 +1130,7 @@ class MainWindow(QMainWindow):
         # que pill_row fique como primeiro item do main-command-queue (acima
         # de dual-status-section que sera inserido em idx 1 por _build_output_toolbar).
         self._command_queue.layout().insertWidget(0, self._window_label)
+        self._command_queue.layout().insertWidget(0, _actions_row)
         self._command_queue.layout().insertWidget(0, _pill_row)
 
         # MetricsBar no longer has visible children — hide it.
@@ -1174,6 +1230,7 @@ class MainWindow(QMainWindow):
 
         # Coluna MCP: radio Claude/Kimi/Codex + acoes Main MCP/Parallel/Dual.
         _mcp_column = self._build_mcp_column(self._mcp_column_btns)
+        _mcp_column.setMinimumWidth(int(_mcp_column.sizeHint().width() * 1.25))
         _bottom_row_layout.addWidget(_mcp_column)                                  # mcp
 
         _toolbar_row_layout.addWidget(_bottom_row)
@@ -1574,6 +1631,10 @@ class MainWindow(QMainWindow):
              "description": "Converte estudo simples em tasklist revisada"},
             {"label": "turn-green",      "path": "ai-forge/custom-prompts/prompts-subtab/turn-green.md",
              "description": "Força o listener deste terminal a ficar verde (idle)"},
+            {"label": "Plan vs Loop",    "path": "ai-forge/custom-prompts/prompts-subtab/plan-vs-loop-coverage.md",
+             "description": "Compara planejado vs implantado no loop e delega gaps"},
+            {"label": "create-agent",    "path": "ai-forge/custom-prompts/prompts-subtab/create-agent.md",
+             "description": "Cria persona MCP com pesquisa web, deduplicacao, validacao e botao na sub-aba Agentes"},
         ]
 
         _pset = QSettings("systemForge", "workflow-app")
@@ -1620,6 +1681,59 @@ class MainWindow(QMainWindow):
                 "hover": _hv,
             })
 
+        # Reconciliacao de boot (2026-06-24): o QFileSystemWatcher so detecta
+        # .md novos enquanto o app esta aberto (directoryChanged). Um .md criado
+        # com o app fechado — ou shadow de `prompts_row/entries` persistido que
+        # nao inclui uma entry default nova — nunca renderizava botao no startup.
+        # Aqui varremos o diretorio e anexamos qualquer .md ausente das entries,
+        # espelhando _on_prompts_dir_changed mas em init. Persistimos de volta
+        # para que o conjunto reconciliado vire o novo baseline.
+        import os as _os_rc
+        # Resolver cwd-INDEPENDENTE (mesmo de personas/brainstorm via
+        # _systemforge_root). O app NAO faz chdir e roda com cwd =
+        # ai-forge/workflow-app (Makefile `uv run python -m workflow_app.main`),
+        # entao getcwd() NAO e a raiz do repo. Usar getcwd() fazia esta
+        # reconciliacao (e o watcher abaixo) observarem um path inexistente
+        # (ai-forge/workflow-app/ai-forge/custom-prompts/...) e os botoes de
+        # prompt NUNCA apareciam. _systemforge_root() = parents[4] deste modulo.
+        _prompts_dir_abs = str(
+            self._systemforge_root() / "ai-forge/custom-prompts/prompts-subtab"
+        )
+        if _os_rc.path.isdir(_prompts_dir_abs):
+            _known_paths = {e.get("path", "") for e in self._prompt_entries}
+            _appended = False
+            for _fname in sorted(_os_rc.listdir(_prompts_dir_abs)):
+                if not _fname.endswith(".md") or _fname == "README.md":
+                    continue
+                _rel = f"ai-forge/custom-prompts/prompts-subtab/{_fname}"
+                if _rel in _known_paths:
+                    continue
+                _fallback_lbl = _fname.replace("-", " ").replace(".md", "").title()
+                _lbl = self._prompt_label_for_discovered_file(
+                    Path(_prompts_dir_abs) / _fname, _fallback_lbl
+                )
+                _idx = len(self._prompt_entries)
+                _bg, _hv = _PROMPT_PALETTE[_idx % len(_PROMPT_PALETTE)]
+                self._prompt_entries.append({
+                    "label": _lbl,
+                    "path": _rel,
+                    "description": "",
+                    "testid": f"output-btn-prompt-{_slug_label(_lbl)}",
+                    "bg": _bg,
+                    "hover": _hv,
+                })
+                _appended = True
+            if _appended:
+                import json as _json_rc
+                _pset.setValue(
+                    "prompts_row/entries",
+                    _json_rc.dumps([
+                        {"label": e["label"], "path": e["path"],
+                         "description": e.get("description", "")}
+                        for e in self._prompt_entries
+                    ]),
+                )
+
         # Prompt base (persistido em QSettings; editavel no modal)
         _DEFAULT_BASE_PROMPT = (
             "Leia o conteudo completo do arquivo indicado abaixo e execute "
@@ -1651,15 +1765,21 @@ class MainWindow(QMainWindow):
         _gear_layout.setSpacing(0)
         _gear_layout.addWidget(_gear_lbl, 0, Qt.AlignmentFlag.AlignCenter)
         gear_btn.clicked.connect(self._open_prompts_config_dialog)
+        # 2026-06-22: o gear de prompts deixa de ser cornerWidget compartilhado
+        # (aparecia em TODAS as sub-abas e confundia) e passa a viver DENTRO da
+        # sub-aba PROMPTS — so renderiza com ela aberta. Ref guardado para os
+        # rebuilds da sub-aba (_open_prompts_config_dialog, _on_prompts_dir_changed).
+        self._prompts_config_gear = gear_btn
 
         # Watcher para auto-detectar novos .md criados em prompts-subtab
         import os as _os_w
 
         from PySide6.QtCore import QFileSystemWatcher as _FSWatcher
-        _watcher_rel = "ai-forge/custom-prompts/prompts-subtab"
-        _watcher_abs = (
-            _watcher_rel if _os_w.path.isabs(_watcher_rel)
-            else _os_w.path.join(_os_w.getcwd(), _watcher_rel)
+        # Resolver cwd-INDEPENDENTE (ver reconciliacao de boot acima): o app
+        # roda com cwd != raiz do repo, entao getcwd() observava um path
+        # inexistente e o watcher nunca disparava em .md novos.
+        _watcher_abs = str(
+            self._systemforge_root() / "ai-forge/custom-prompts/prompts-subtab"
         )
         self._prompts_file_watcher = _FSWatcher(
             [_watcher_abs] if _os_w.path.isdir(_watcher_abs) else [], self
@@ -1737,18 +1857,27 @@ class MainWindow(QMainWindow):
         workflow_app_widgets = self._populate_header_workflow_app()
         paths_extras = self._populate_header_paths_extras()
 
-        # paths & IDs: JSON, WS, Workflow App + 6 campos basic_flow
-        _paths_btns = [action_widgets[0], action_widgets[1], workflow_app_widgets[0]] + paths_extras
+        # paths & IDs: JSON, WS, Loop, Brainstorm, Workflow App + 6 campos basic_flow
+        _paths_btns = [
+            action_widgets[0],
+            action_widgets[1],
+            action_widgets[2],
+            action_widgets[3],
+            workflow_app_widgets[0],
+        ] + paths_extras
         # MCP column (output-toolbar-mcp): os 9 botoes legados continuam sendo
         # criados para preservar o contrato de action_widgets, mas a aba MCPs
         # renderiza radio Claude/Kimi/Codex + 3 acoes.
-        self._mcp_column_btns = action_widgets[2:11]
+        self._mcp_column_btns = action_widgets[4:13]
         # rules: dcp+meta-feeding+cmd+terminal+listeners+cascade-bug+indicators+prompt+add-rules
         _rules_btns = workflow_app_widgets[1:]
-        # prompts: asq-user (migrado da ex-subtab mcps) + entries .md.
-        # Guardado em self para que rebuild via modal/watcher possa re-prepender.
-        self._asq_user_btn = action_widgets[11]
-        _prompts_btns = [self._asq_user_btn] + self._populate_header_prompts_subtab()
+        # prompts: entries .md + gear de configuracao (ultimo widget do flow).
+        # 2026-06-22: asq-user migrou daqui para a sub-aba CMD (ver _cmd_btns).
+        self._asq_user_btn = action_widgets[13]
+        _prompts_btns = (
+            self._populate_header_prompts_subtab()
+            + [self._prompts_config_gear]
+        )
 
         # Linha de baixo da sub-aba paths & IDs: botao 'repo rules'.
         _paths_row2_btns = [self._build_repo_rules_button()]
@@ -1756,7 +1885,8 @@ class MainWindow(QMainWindow):
         # Padding das sub-abas ja definido em 4px 8px nas funcoes de criacao.
 
         # cmd: comandos avulsos (slash-commands pontuais fora de pipeline).
-        _cmd_btns = self._populate_header_cmd_subtab()
+        # asq-user (output-btn-asq-user) vive aqui desde 2026-06-22 (migrado de PROMPTS).
+        _cmd_btns = [self._asq_user_btn] + self._populate_header_cmd_subtab()
 
         # auto-improove: melhoria continua de assets SystemForge.
         _auto_improove_btns = self._populate_header_auto_improove_subtab()
@@ -1775,9 +1905,10 @@ class MainWindow(QMainWindow):
         self._command_queue.populate_personal_subtab(_personal_btns)
         self._command_queue.populate_personas_subtab(_personas_btns)
         self._command_queue.attach_tab_bar_extras(_terminal_route_box)
-        # Refactor 2026-05-24: gear migra do insertions_bar para o canto da
-        # tab bar das sub-abas (PATHS/PROMPTS/RULES), na mesma row das abas.
-        self._command_queue.attach_subtab_corner_widget(gear_btn)
+        # Refactor 2026-06-22: o gear de prompts NAO e mais cornerWidget (vivia
+        # no canto compartilhado de todas as sub-abas). Agora entra como ultimo
+        # widget do flow da sub-aba PROMPTS (ver _prompts_btns acima), so visivel
+        # com ela aberta.
 
         # queue-count-label vive em progress-section (refactor 2026-05-18).
         # attach_count_label nao e mais chamado — o label ja esta em ProgressSection.
@@ -1794,7 +1925,8 @@ class MainWindow(QMainWindow):
     # agents prompt dir, slot por cor) removidas em T2.
 
     _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
-    _BRAINSTORM_SEED_COUNT = 10
+    _BRAINSTORM_SEED_COUNT = 20
+    _BRAINSTORM_GRID_COLUMNS = 4
 
     @staticmethod
     def _systemforge_root() -> Path:
@@ -1943,14 +2075,24 @@ class MainWindow(QMainWindow):
                     f"{p.name}: G6 violado: agent_path {agent_path} fora do repo"
                 ) from exc
 
-            # Label canonico (fix T021): extrai do title removendo o prefixo
-            # "Seed - Botao N - " (regex que tolera espacos extras), conforme
+            # Label canonico. Precedencia: campo `label` explicito (editavel
+            # pelo gear `brainstorm-mcp-config-dialog`) quando preenchido;
+            # senao deriva do `title` removendo o prefixo "Seed - Botao N - "
+            # (fix T021, regex que tolera espacos extras), conforme
             # mcp-flow-implantation-base-archive.md §4 (labels: "Criar md",
-            # "seatch-in", "search-out", etc. - sem numero prefixo).
-            raw_title = str(data.get("title") or slug).strip()
-            canonical_label = re.sub(
-                r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
-            ).strip() or slug
+            # "search-in", "search-out", etc. - sem numero prefixo). O fallback
+            # tambem limpa labels legados que guardaram o title inteiro.
+            explicit_label = re.sub(
+                r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "",
+                str(data.get("label") or "").strip(),
+            ).strip()
+            if explicit_label:
+                canonical_label = explicit_label
+            else:
+                raw_title = str(data.get("title") or slug).strip()
+                canonical_label = re.sub(
+                    r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
+                ).strip() or slug
 
             loaded.append({
                 "slug": slug,
@@ -2150,25 +2292,28 @@ class MainWindow(QMainWindow):
         # Personas/agentes (output-mcp-persona-checkboxes*): grade de 4 por linha
         # x 3 linhas (12 agentes). Os checkboxes marcados tem seus prompts
         # anexados ao comando MCP via _compose_mcp_text na ORDEM da UI (row-major).
-        # Os 6 primeiros testids sao estaveis (contrato de teste). Os 6 ultimos sao
-        # os mais importantes de queue-subtab-insertions-personas (ai-forge/MCP/agents/):
-        # search-in/search-out, revisar-task, revisar-qa, code-debugger,
-        # executor de slash-commands e analista-delegador.
+        # A familia de pesquisa (search-in/search-out/search-forge) ocupa as 3
+        # primeiras posicoes da Linha 1. exec-slash foi removido desta grade de
+        # output para abrir espaco a search-forge sem estourar 3 linhas (continua
+        # disponivel em queue-subtab-insertions-personas, que auto-descobre).
         persona_specs = (
-            # Linha 1 — analise / brainstorm
-            ("seatch-in", "output-mcp-persona-search-in",
+            # Linha 1 — pesquisa + analise
+            ("search-in", "output-mcp-persona-search-in",
              "no papel de search-in, conforme regras em "
              "ai-forge/MCP/agents/search-in-rules.md"),
             ("search-out", "output-mcp-persona-search-out",
              "no papel de search-out, conforme regras em "
              "ai-forge/MCP/agents/search-out-rules.md"),
+            ("search-forge", "output-mcp-persona-search-forge",
+             "no papel de search-forge, conforme regras em "
+             "ai-forge/MCP/agents/search-forge-rules.md"),
             ("controversial", "output-mcp-persona-controversial",
              "no papel de controversial, conforme regras em "
              "ai-forge/MCP/agents/controversial-devils-advocate-rules.md"),
+            # Linha 2 — robustez + ciclo de task
             ("hardening", "output-mcp-persona-hardening",
              "no papel de engenheiro de hardening, conforme regras em "
              "ai-forge/MCP/agents/hardening-engineer-rules.md"),
-            # Linha 2 — ciclo de task
             ("criar-task", "output-mcp-persona-criar-task",
              "no papel de criador de tasks, conforme regras em "
              "ai-forge/MCP/agents/criar-task-rules.md"),
@@ -2178,19 +2323,16 @@ class MainWindow(QMainWindow):
             ("executor", "output-mcp-persona-executor",
              "no papel de executor de tasks, conforme regras em "
              "ai-forge/MCP/agents/executar-task-rules.md"),
+            # Linha 3 — execucao + especializados
             ("rev-exec", "output-mcp-persona-rev-exec",
              "no papel de revisor de execucao, conforme regras em "
              "ai-forge/MCP/agents/revisar-execucao-rules.md"),
-            # Linha 3 — especializados (mais importantes das personas)
             ("revisar-qa", "output-mcp-persona-revisar-qa",
              "no papel de revisor de QA, conforme regras em "
              "ai-forge/MCP/agents/revisar-qa-rules.md"),
             ("code-debugger", "output-mcp-persona-code-debugger",
              "no papel de code-debugger, conforme regras em "
              "ai-forge/MCP/agents/code-debugger.md"),
-            ("exec-slash", "output-mcp-persona-exec-slash",
-             "no papel de executor de slash-commands, conforme regras em "
-             "ai-forge/MCP/agents/executor-de-slash-commands-rules.md"),
             ("delegador", "output-mcp-persona-delegador",
              "no papel de analista-delegador, conforme regras em "
              "ai-forge/MCP/agents/analista-delegador-rules.md"),
@@ -2485,9 +2627,13 @@ class MainWindow(QMainWindow):
                 "Path do .md copiado para a area de transferencia.", "info"
             )
 
+        def _open_selected_md_reader() -> None:
+            self._open_brainstorm_md_reader_dialog()
+
         # T4 (loop 05-21-implantation-tasklist-aba-brainstorm): row container
-        # com `md_btn` (stretch=1) + copy path button + `gear_btn_brainstorm` (24x24, _GearButton
-        # extraido). Testid canonico `brainstorm-mcp-config-gear`. Clique abre
+        # com `md_btn` (stretch=1) + copy path button + eye reader button +
+        # `gear_btn_brainstorm` (24x24, _GearButton extraido). Testid canonico
+        # `brainstorm-mcp-config-gear`. Clique abre
         # BrainstormMcpConfigDialog (modulo separado, import sob demanda no
         # handler para nao impactar cold start).
         row_container = QWidget()
@@ -2513,6 +2659,22 @@ class MainWindow(QMainWindow):
         copy_md_path_btn.clicked.connect(_copy_selected_md_path)
         self._brainstorm_md_copy_path_btn = copy_md_path_btn
         row_layout.addWidget(copy_md_path_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        eye_md_reader_btn = QPushButton()
+        eye_md_reader_btn.setProperty("testid", "brainstorm-md-reader-open")
+        eye_md_reader_btn.setFixedSize(24, 24)
+        eye_md_reader_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        eye_md_reader_btn.setToolTip("Abrir leitor/editor do arquivo .md selecionado")
+        eye_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "eye.svg"
+        eye_icon = self._load_tinted_svg_icon(eye_icon_path, "#FAFAFA")
+        if eye_icon is not None:
+            eye_md_reader_btn.setIcon(eye_icon)
+            eye_md_reader_btn.setIconSize(QSize(13, 13))
+        else:
+            eye_md_reader_btn.setText("1:1")
+        eye_md_reader_btn.setStyleSheet(_GEAR_QSS)
+        eye_md_reader_btn.clicked.connect(_open_selected_md_reader)
+        self._brainstorm_md_reader_btn = eye_md_reader_btn
+        row_layout.addWidget(eye_md_reader_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         gear_btn_brainstorm = _GearButton(
             testid="brainstorm-mcp-config-gear",
             tooltip="Configurar seeds brainstorm-mcp (label, prompt, agent, action, target)",
@@ -2520,7 +2682,14 @@ class MainWindow(QMainWindow):
         gear_btn_brainstorm.clicked.connect(self._open_brainstorm_mcp_config_dialog)
         self._brainstorm_mcp_config_gear = gear_btn_brainstorm
         row_layout.addWidget(gear_btn_brainstorm, 0, Qt.AlignmentFlag.AlignVCenter)
-        page_layout.addWidget(row_container)
+        # D2: o picker .md pertence ao bloco visual de anexos project/loop/brainstorm.
+        # A pagina Brainstorm continua dona dos botoes e do estado; apenas o row
+        # do picker e reparenteado para o bloco semantico de anexos.
+        brainstorm_attachment_row = getattr(self, "_attachments_brainstorm_row", None)
+        if brainstorm_attachment_row is not None and brainstorm_attachment_row.layout() is not None:
+            brainstorm_attachment_row.layout().addWidget(row_container)
+        else:
+            page_layout.addWidget(row_container)
 
         # Cache do handle do page para rebuild via signal (T4 hardening §9).
         # Conexao defensiva (`UniqueConnection` impede duplicate em rebuild).
@@ -2694,8 +2863,13 @@ class MainWindow(QMainWindow):
             page_layout.addStretch(1)
             return page
 
+        cols = getattr(
+            self,
+            "_BRAINSTORM_GRID_COLUMNS",
+            MainWindow._BRAINSTORM_GRID_COLUMNS,
+        )
         for i, btn in enumerate(built):
-            grid.addWidget(btn, i // 3, i % 3)
+            grid.addWidget(btn, i // cols, i % cols)
         self._brainstorm_mcp_btns = built
         # Cache refs para rebuild via _rebuild_brainstorm_grid (T4 hardening §9).
         self._brainstorm_grid_widget = grid_widget
@@ -2707,6 +2881,31 @@ class MainWindow(QMainWindow):
         # fixos sincronizem o cache via signal logo apos a montagem da grade.
         signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
         return page
+
+    def _open_brainstorm_md_reader_dialog(self) -> None:
+        selected_path_raw = (self._brainstorm_md_path or "").strip()
+        if not selected_path_raw:
+            signal_bus.toast_requested.emit(
+                "Nenhum arquivo .md selecionado para abrir no leitor.", "warning"
+            )
+            return
+        selected_path = Path(selected_path_raw)
+        if not selected_path.is_file():
+            signal_bus.toast_requested.emit(
+                "Arquivo .md selecionado nao existe mais.", "warning"
+            )
+            return
+        if selected_path.suffix.lower() not in {".md", ".markdown"}:
+            signal_bus.toast_requested.emit(
+                "O leitor brainstorm aceita apenas arquivos Markdown.", "warning"
+            )
+            return
+        from workflow_app.widgets.brainstorm_md_reader_dialog import (
+            BrainstormMdReaderDialog,
+        )
+
+        dlg = BrainstormMdReaderDialog(selected_path, self)
+        dlg.exec()
 
     def _open_brainstorm_mcp_config_dialog(self) -> None:
         """Abre o modal de configuracao dos seeds brainstorm-mcp (T4).
@@ -2814,8 +3013,13 @@ class MainWindow(QMainWindow):
             )
             return
 
+        cols = getattr(
+            self,
+            "_BRAINSTORM_GRID_COLUMNS",
+            MainWindow._BRAINSTORM_GRID_COLUMNS,
+        )
         for i, btn in enumerate(built):
-            grid.addWidget(btn, i // 3, i % 3)
+            grid.addWidget(btn, i // cols, i % cols)
         self._brainstorm_mcp_btns = built
         # T7 (task-008): publica estado de T3 apos rebuild para resync de
         # cache em botoes Codex fixos recem-criados.
@@ -2852,7 +3056,6 @@ class MainWindow(QMainWindow):
                 signal_bus.dispatch_result.emit(button_id, False)
                 return
 
-            label = str(payload.get("label", ""))
             action = str(payload.get("action", ""))
             agent_name = str(payload.get("agent_name") or "")
             agent_path = str(payload.get("agent_path") or "")
@@ -2875,7 +3078,14 @@ class MainWindow(QMainWindow):
                 resolved_slug, str(button_type)
             )
 
-            md_ref = self._rel_to_root(md_path) if md_path else None
+            # "Criar arquivo" (botao 1 / Criar md) cria um MD NOVO a partir
+            # do T1. Ele nunca deve ler, anexar ou renderizar o .md selecionado
+            # no brainstorm-md-picker-row, mesmo que exista um path ativo.
+            md_ref = (
+                None
+                if action == "Criar arquivo"
+                else self._rel_to_root(md_path) if md_path else None
+            )
             seed_meta: dict[str, object] = {
                 "agent_name": agent_name,
                 "agent_path": agent_path,
@@ -2886,6 +3096,11 @@ class MainWindow(QMainWindow):
                 v = payload.get(k)
                 if v:
                     seed_meta[k] = v
+            seed_meta = append_public_context(
+                seed_meta,
+                project=app_state.project_config,
+                loop=app_state.loop_config,
+            )
 
             try:
                 repo_root = self._systemforge_root().resolve()
@@ -3656,6 +3871,147 @@ class MainWindow(QMainWindow):
         payload = f'data-testid="{testid}"\x08'
         self._publish_to_terminal(payload)
 
+    _PROMPT_CATEGORIES: dict[str, str] = {
+        "mcp-test": "Ops",
+        "online-review": "Review",
+        "next-module": "Build",
+        "workflow-rules": "Plan",
+        "progress": "Plan",
+        "pending-actions-sweep": "Ops",
+        "memory-decay-refresh": "Ops",
+        "zero-rules-module-audit": "Review",
+        "dcp-coherence-triage": "Review",
+        "codex-hardening": "Review",
+        "pdca-task-recovery": "Ops",
+        "study-tasklist-codex": "Study",
+        "turn-green": "Ops",
+        "plan-vs-loop-coverage": "Review",
+        "create-agent": "Build",
+        "analista-trajeto-delegador": "Plan",
+        "generated-command-list-comparison-whit-rules": "Review",
+    }
+
+    @staticmethod
+    def _infer_prompt_category(label: str, path: str, description: str = "") -> str:
+        """Inferencia conservadora para prompts fora do mapa explicito."""
+        haystack = " ".join((label, path, description)).lower()
+
+        def _has(*keys: str) -> bool:
+            return any(k in haystack for k in keys)
+
+        if _has("study", "estudo", "tasklist-codex"):
+            return "Study"
+        if _has(
+            "review", "audit", "triage", "coherence", "zero", "hardening",
+            "coverage", "compar", "revis", "qa",
+        ):
+            return "Review"
+        if _has("next-module", "build", "module", "task", "implant", "deleg"):
+            return "Build"
+        if _has("plan", "workflow", "rules", "progress", "pdca", "trajeto"):
+            return "Plan"
+        if _has("mcp", "memory", "pending", "sweep", "turn-green", "listener"):
+            return "Ops"
+        return PROMPT_FILTER_DEFAULT
+
+    def _prompt_category(self, label: str, path: str, description: str = "") -> str:
+        slug = (
+            Path(path).stem
+            if path
+            else re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+        )
+        category = self._PROMPT_CATEGORIES.get(slug) or self._infer_prompt_category(
+            label, path, description
+        )
+        if category not in PROMPT_FILTER_CATEGORIES:
+            category = PROMPT_FILTER_DEFAULT
+        return category
+
+    @staticmethod
+    def _prompt_label_for_discovered_file(path: Path, fallback: str) -> str:
+        """Label para prompts descobertos pelo watcher/reconciliacao.
+
+        Se o .md tiver frontmatter com `label`, `title` ou `name`, respeita esse
+        valor. Isso preserva labels intencionais como `create-agent` mesmo quando
+        QSettings antigo nao tem a entry default nova.
+        """
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return fallback
+        if not text.startswith("---"):
+            return fallback
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return fallback
+        try:
+            fm = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            return fallback
+        if not isinstance(fm, dict):
+            return fallback
+        for key in ("label", "title", "name"):
+            value = str(fm.get(key) or "").strip()
+            if value:
+                return value
+        return fallback
+
+    def _prompt_description(self, label: str, path: str, description: str = "") -> str:
+        """Resumo curto para tooltip do botao de prompt."""
+        desc = (description or "").strip()
+        if not desc and path:
+            prompt_path = Path(path)
+            if not prompt_path.is_absolute():
+                prompt_path = self._systemforge_root() / prompt_path
+            try:
+                text = prompt_path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            desc = self._summarize_prompt_markdown(text)
+        if not desc:
+            desc = f"Executa o prompt configurado para {label}."
+        return desc
+
+    @staticmethod
+    def _summarize_prompt_markdown(text: str) -> str:
+        """Extrai uma linha util de um arquivo .md para tooltip."""
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                try:
+                    fm = yaml.safe_load(parts[1])
+                except yaml.YAMLError:
+                    fm = None
+                if isinstance(fm, dict):
+                    for key in ("description", "summary", "title", "name"):
+                        value = str(fm.get(key) or "").strip()
+                        if value:
+                            return MainWindow._clean_prompt_summary(value)
+                text = parts[2]
+
+        lines = [line.strip() for line in text.splitlines()]
+        lines = [
+            line for line in lines
+            if line and not line.startswith("```") and not line.startswith("---")
+        ]
+        if not lines:
+            return ""
+
+        for line in lines:
+            normalized = line.rstrip(":").lower()
+            if normalized in {"objetivo", "tarefa", "contexto"}:
+                continue
+            return MainWindow._clean_prompt_summary(line)
+        return ""
+
+    @staticmethod
+    def _clean_prompt_summary(text: str) -> str:
+        text = re.sub(r"^[#>*\-\d.\s]+", "", text).strip()
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > 220:
+            text = text[:217].rstrip() + "..."
+        return text
+
     def _on_prompt_btn_clicked(self, idx: int) -> None:
         """Handler dos botoes da sub-aba prompts.
 
@@ -3673,10 +4029,14 @@ class MainWindow(QMainWindow):
             )
             return
         import os as _os
-        # Verificar existencia do arquivo (relativo ao project_dir ou absoluto)
-        _abs = path if _os.path.isabs(path) else _os.path.join(
-            str(getattr(getattr(self, "_project_dir", None), "__str__", lambda: "")()),
-            path,
+        # Verificar existencia do arquivo. Os paths das entries sao relativos a
+        # raiz do repo SystemForge (ex.: "ai-forge/custom-prompts/..."), NAO ao
+        # project_dir do projeto ativo. Resolver contra _systemforge_root()
+        # (mesma raiz usada pela reconciliacao de boot e pelo watcher acima);
+        # resolver contra _project_dir gerava "Arquivo de prompt nao encontrado"
+        # sempre que um projeto estava ativo (repo-root off-by-one).
+        _abs = path if _os.path.isabs(path) else str(
+            self._systemforge_root() / path
         )
         if not _os.path.exists(_abs):
             signal_bus.toast_requested.emit(
@@ -3686,16 +4046,80 @@ class MainWindow(QMainWindow):
         msg = f"{self._prompt_base} {path}"
         self._publish_to_terminal(msg)
 
+    def _resolve_repo_rules_dir(self) -> str | None:
+        """Resolve `{workspace_root}/rules` do project.json ativo.
+
+        Retorna None e emite toast (Zero Silencio) quando nenhum projeto esta
+        carregado ou `workspace_root` esta vazio — NUNCA devolve path vazio.
+        Mesmo contrato de guarda de `_on_repo_rules_path`/`_on_ws_rules_path`.
+        """
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "workspace_root indisponivel: nenhum projeto carregado."
+                " Selecione o project.json via queue-btn-json-path.",
+                "warning",
+            )
+            return None
+        ws = (app_state.config.workspace_root or "").strip()
+        if not ws:
+            signal_bus.toast_requested.emit(
+                "workspace_root nao configurado em project.json", "warning",
+            )
+            return None
+        return f"{ws.rstrip('/')}/rules"
+
+    def _on_reviewer_prompt(self) -> None:
+        """Handler do botao 'reviewer' (PROMPTS/Review): cola um prompt de
+        revisao do contexto desta conversa contra as regras do repo-alvo em
+        `{workspace_root}/rules` via persona `specific-reviewer`. Guard de
+        workspace_root ausente (no-op + toast) herdado de _resolve_repo_rules_dir.
+        """
+        rules_dir = self._resolve_repo_rules_dir()
+        if not rules_dir:
+            return
+        prompt = (
+            "Voce e o 'specific-reviewer' (regras canonicas em "
+            "ai-forge/MCP/agents/specific-reviewer.md; leia integralmente antes "
+            "de responder). Revise a implementacao e o texto discutidos nesta "
+            f"conversa contra as regras vivas do repositorio-alvo em {rules_dir}. "
+            "Para cada ponto, classifique conforme|violacao|conflito|nao-coberto "
+            "com evidencia concreta (path + linha ou trecho literal). Marque "
+            "hipotese/inferencia quando nao houver leitura direta. Nao altere o "
+            "escopo; apenas revise e recomende correcoes."
+        )
+        self._publish_insertion_llm_aware(prompt)
+
+    def _on_create_rule_prompt(self) -> None:
+        """Handler do botao 'create rule' (PROMPTS/Ops): cola um prompt pedindo
+        a criacao de um novo arquivo de regras em `{workspace_root}/rules` do
+        repo-alvo (nunca `ai-forge/rules/`). Guard de workspace_root ausente
+        (no-op + toast) herdado de _resolve_repo_rules_dir.
+        """
+        rules_dir = self._resolve_repo_rules_dir()
+        if not rules_dir:
+            return
+        prompt = (
+            f"Crie em {rules_dir} um novo arquivo de regras referente ao contexto "
+            "que pedi para estudar agora, de forma estruturada e claude-friendly "
+            "como os outros arquivos da pasta de regras do repositorio-alvo. O "
+            f"destino e {rules_dir} (do project.json ativo), NAO ai-forge/rules/."
+        )
+        self._publish_insertion_llm_aware(prompt)
+
     def _populate_header_prompts_subtab(self) -> list[QPushButton]:
         """Constroi os botoes da sub-aba 'prompts' a partir de self._prompt_entries."""
         def _prompt_btn(
-            label: str, testid: str, bg: str, hover: str, description: str
+            label: str, testid: str, bg: str, hover: str,
+            description: str, category: str,
         ) -> QPushButton:
             b = QPushButton(label)
             b.setProperty("testid", testid)
+            b.setProperty("prompt_category", category)
+            b.setProperty("prompt_description", description)
             b.setFixedHeight(32)
             b.setMinimumWidth(70)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(description)
             b.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
@@ -3703,18 +4127,25 @@ class MainWindow(QMainWindow):
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {hover}; }}"
             )
-            if description:
-                _PromptTooltipFilter(b, description, b)
+            _PromptTooltipFilter(b, description, b)
             return b
 
         btns = []
         for _i, entry in enumerate(self._prompt_entries):
+            label = entry["label"] or f"Prompt {_i+1}"
+            description = self._prompt_description(
+                label, entry.get("path", ""), entry.get("description", "")
+            )
+            category = self._prompt_category(
+                label, entry.get("path", ""), description
+            )
             b = _prompt_btn(
-                entry["label"] or f"Prompt {_i+1}",
+                label,
                 entry["testid"],
                 entry["bg"],
                 entry["hover"],
-                entry.get("description", ""),
+                description,
+                category,
             )
             b.clicked.connect(
                 lambda _c=False, idx=_i: self._on_prompt_btn_clicked(idx)
@@ -3735,14 +4166,18 @@ class MainWindow(QMainWindow):
         )
         _exec_tasks_btn = QPushButton("executar-tasks")
         _exec_tasks_btn.setProperty("testid", "queue-btn-executar-tasks")
+        _exec_tasks_desc = (
+            "Cola no terminal um prompt de loop: executa o tasklist task a "
+            "task, revisao adversarial via /mcp:codex, corrige o que for "
+            "congruente, marca no progress.md e segue ate acabar."
+        )
+        _exec_tasks_btn.setProperty("prompt_category", "Build")
+        _exec_tasks_btn.setProperty("prompt_description", _exec_tasks_desc)
         _exec_tasks_btn.setFixedHeight(32)
         _exec_tasks_btn.setMinimumWidth(90)
         _exec_tasks_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        _exec_tasks_btn.setToolTip(
-            "Cola no terminal um prompt de loop: executa o tasklist task a\n"
-            "task, revisao adversarial via /mcp:codex, corrige o que\n"
-            "for congruente, marca no progress.md e segue ate acabar."
-        )
+        _exec_tasks_btn.setToolTip(_exec_tasks_desc)
+        _PromptTooltipFilter(_exec_tasks_btn, _exec_tasks_desc, _exec_tasks_btn)
         _exec_tasks_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
             "  border: none; border-radius: 5px;"
@@ -3755,17 +4190,76 @@ class MainWindow(QMainWindow):
         )
         btns.append(_exec_tasks_btn)
 
+        # Botao fixo 'reviewer' (filtro Review): cola um prompt de revisao do
+        # contexto desta conversa contra as regras do repo-alvo
+        # ({workspace_root}/rules) via persona specific-reviewer. Guard de
+        # workspace_root em _on_reviewer_prompt (no-op + toast se ausente).
+        _reviewer_btn = QPushButton("reviewer")
+        _reviewer_btn.setProperty("testid", "queue-btn-reviewer")
+        _reviewer_desc = (
+            "Cola um prompt pedindo revisao do contexto desta conversa contra as "
+            "regras do repo-alvo ({workspace_root}/rules) via specific-reviewer.\n"
+            "Sem projeto/workspace_root carregado: toast de aviso, nada e colado."
+        )
+        _reviewer_btn.setProperty("prompt_category", "Review")
+        _reviewer_btn.setProperty("prompt_description", _reviewer_desc)
+        _reviewer_btn.setFixedHeight(32)
+        _reviewer_btn.setMinimumWidth(90)
+        _reviewer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _reviewer_btn.setToolTip(_reviewer_desc)
+        _PromptTooltipFilter(_reviewer_btn, _reviewer_desc, _reviewer_btn)
+        _reviewer_btn.setStyleSheet(
+            "QPushButton { background-color: #7C3AED; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "QPushButton:hover { background-color: #6D28D9; }"
+            "QPushButton:pressed { background-color: #5B21B6; }"
+        )
+        _reviewer_btn.clicked.connect(lambda _c=False: self._on_reviewer_prompt())
+        btns.append(_reviewer_btn)
+
+        # Botao fixo 'create rule' (filtro Ops): cola um prompt pedindo a criacao
+        # de um novo arquivo de regras em {workspace_root}/rules do repo-alvo
+        # (nunca ai-forge/rules/). Guard de workspace_root em
+        # _on_create_rule_prompt (no-op + toast se ausente).
+        _create_rule_btn = QPushButton("create rule")
+        _create_rule_btn.setProperty("testid", "queue-btn-create-rule")
+        _create_rule_desc = (
+            "Cola um prompt pedindo a criacao de um novo arquivo de regras em "
+            "{workspace_root}/rules do repo-alvo (nao ai-forge/rules/).\n"
+            "Sem projeto/workspace_root carregado: toast de aviso, nada e colado."
+        )
+        _create_rule_btn.setProperty("prompt_category", "Ops")
+        _create_rule_btn.setProperty("prompt_description", _create_rule_desc)
+        _create_rule_btn.setFixedHeight(32)
+        _create_rule_btn.setMinimumWidth(90)
+        _create_rule_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _create_rule_btn.setToolTip(_create_rule_desc)
+        _PromptTooltipFilter(_create_rule_btn, _create_rule_desc, _create_rule_btn)
+        _create_rule_btn.setStyleSheet(
+            "QPushButton { background-color: #0891B2; color: #FAFAFA;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "QPushButton:hover { background-color: #0E7490; }"
+            "QPushButton:pressed { background-color: #155E75; }"
+        )
+        _create_rule_btn.clicked.connect(lambda _c=False: self._on_create_rule_prompt())
+        btns.append(_create_rule_btn)
+
         # Botao especial para criar novos prompts seguindo as regras
         _add_btn = QPushButton("+ Add prompt")
         _add_btn.setProperty("testid", "queue-btn-add-prompt")
         _add_btn.setFixedHeight(32)
         _add_btn.setMinimumWidth(90)
         _add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        _add_btn.setToolTip(
+        _add_prompt_desc = (
             "Envia meta-prompt ao terminal guiando a criacao de um novo prompt\n"
             "seguindo ai-forge/rules/prompt-creation-rules.md.\n"
             "Ao criar o .md na pasta, o botao aparece automaticamente."
         )
+        _add_btn.setProperty("prompt_description", _add_prompt_desc)
+        _add_btn.setToolTip(_add_prompt_desc)
+        _PromptTooltipFilter(_add_btn, _add_prompt_desc, _add_btn)
         _add_btn.setStyleSheet(
             "QPushButton { background-color: #18181B; color: #A1A1AA;"
             "  border: 1px dashed #52525B; border-radius: 5px;"
@@ -3825,9 +4319,12 @@ class MainWindow(QMainWindow):
         ]
         _pset.setValue("prompts_row/entries", _json.dumps(_entries_simple))
 
-        # Reconstruir sub-aba prompts — asq-user sempre prepended (Bug-fix: sem isso
-        # desaparecia apos salvar o modal, pois _populate_header_prompts_subtab nao o inclui).
-        _new_btns = [self._asq_user_btn] + self._populate_header_prompts_subtab()
+        # Reconstruir sub-aba prompts. gear de prompts sempre como ultimo widget
+        # do flow (vive dentro da sub-aba). asq-user nao entra aqui (migrou p/ CMD).
+        _new_btns = (
+            self._populate_header_prompts_subtab()
+            + [self._prompts_config_gear]
+        )
         self._command_queue.populate_prompts_subtab(_new_btns)
         signal_bus.toast_requested.emit("Prompts atualizados.", "info")
 
@@ -3867,8 +4364,11 @@ class MainWindow(QMainWindow):
                     continue
                 _rel = f"ai-forge/custom-prompts/prompts-subtab/{_fname}"
                 if _rel not in _existing_paths:
-                    _label = (
+                    _fallback_label = (
                         _fname.replace("-", " ").replace(".md", "").title()
+                    )
+                    _label = self._prompt_label_for_discovered_file(
+                        Path(path) / _fname, _fallback_label
                     )
                     _new.append({"label": _label, "path": _rel, "description": ""})
 
@@ -3907,7 +4407,11 @@ class MainWindow(QMainWindow):
             ]),
         )
 
-        _new_btns = [self._asq_user_btn] + self._populate_header_prompts_subtab()
+        # asq-user nao entra aqui (migrou p/ CMD); gear sempre por ultimo no flow.
+        _new_btns = (
+            self._populate_header_prompts_subtab()
+            + [self._prompts_config_gear]
+        )
         self._command_queue.populate_prompts_subtab(_new_btns)
         signal_bus.toast_requested.emit(
             f"{len(_new)} novo(s) prompt(s) detectado(s) e adicionado(s).", "info"
@@ -4110,7 +4614,7 @@ class MainWindow(QMainWindow):
         do MetricsBar; unico consumer agora e CommandQueueHeader.populate_actions_tab().
         Retorna a lista de widgets em ordem; quem instala decide o layout.
 
-        Handlers: JSON/WS resolvem via `app_state.config` + clipboard +
+        Handlers: JSON/WS resolvem via slots tipados de `app_state` + clipboard +
         `_publish_to_terminal`; demais emitem o comando cru via
         `_publish_to_terminal` (roteamento T1/T2).
         """
@@ -4133,12 +4637,15 @@ class MainWindow(QMainWindow):
             return btn
 
         def _on_json_path() -> None:
-            import os
-            if not app_state.has_config or not app_state.config:
-                signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+            project_cfg = app_state.project_config
+            if not project_cfg:
+                signal_bus.toast_requested.emit(
+                    "Nenhum projeto carregado. Selecione um project.json no anexo project.",
+                    "warning",
+                )
                 return
-            abs_config = app_state.config.config_path
-            project_dir = str(app_state.config.project_dir)
+            abs_config = project_cfg.config_path
+            project_dir = str(project_cfg.project_dir)
             try:
                 rel = os.path.relpath(abs_config, project_dir)
             except ValueError:
@@ -4151,15 +4658,57 @@ class MainWindow(QMainWindow):
             )
 
         def _on_ws_path() -> None:
-            if not app_state.has_config or not app_state.config:
-                signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+            project_cfg = app_state.project_config
+            if not project_cfg:
+                signal_bus.toast_requested.emit(
+                    "workspace_root indisponivel: nenhum projeto carregado."
+                    " Selecione o project.json via queue-btn-json-path.",
+                    "warning",
+                )
                 return
-            ws = app_state.config.workspace_root
+            ws = project_cfg.workspace_root
             QApplication.clipboard().setText(ws)
             # Task 6 (loop 05-13-workflow-app-layout-2): roteamento T1/T2.
             self._publish_to_terminal(ws)
             signal_bus.toast_requested.emit(
                 "workspace_root copiado e digitado no terminal.", "info",
+            )
+
+        def _on_loop_path() -> None:
+            loop_cfg = app_state.loop_config
+            if not loop_cfg:
+                signal_bus.toast_requested.emit(
+                    "Loop anexado ausente: carregue um _LOOP-CONFIG.json para"
+                    " usar queue-btn-loop-path.",
+                    "warning",
+                )
+                return
+            loop_path = str(loop_cfg.config_path or "")
+            if not loop_path:
+                signal_bus.toast_requested.emit(
+                    "Loop anexado sem caminho. Recarregue o _LOOP-CONFIG.json",
+                    "warning",
+                )
+                return
+            QApplication.clipboard().setText(loop_path)
+            self._publish_to_terminal(loop_path)
+            signal_bus.toast_requested.emit(
+                "Loop path copiado e digitado no terminal.", "info",
+            )
+
+        def _on_brainstorm_path() -> None:
+            md_path = (self._brainstorm_md_path or "").strip()
+            if not md_path:
+                signal_bus.toast_requested.emit(
+                    "Brainstorm .md nao carregado: selecione um arquivo no"
+                    " brainstorm-md-picker antes de usar queue-btn-brainstorm-path.",
+                    "warning",
+                )
+                return
+            QApplication.clipboard().setText(md_path)
+            self._publish_to_terminal(md_path)
+            signal_bus.toast_requested.emit(
+                "Brainstorm path copiado e digitado no terminal.", "info",
             )
 
         def _paste_cmd(cmd: str):
@@ -4180,6 +4729,20 @@ class MainWindow(QMainWindow):
             "Copia o workspace_root do projeto\ne digita no terminal automaticamente",
         )
         ws_btn.clicked.connect(_on_ws_path)
+
+        loop_btn = _make_action_btn(
+            "Loop", "queue-btn-loop-path",
+            "#0EA5E9", "#0284C7", "#0369A1",
+            "Copia o path do _LOOP-CONFIG.json do anexo loop\ne digita no terminal automaticamente",
+        )
+        loop_btn.clicked.connect(_on_loop_path)
+
+        brainstorm_btn = _make_action_btn(
+            "Brainstorm", "queue-btn-brainstorm-path",
+            "#7C3AED", "#6D28D9", "#5B21B6",
+            "Copia o path do .md selecionado em brainstorm\ne digita no terminal automaticamente",
+        )
+        brainstorm_btn.clicked.connect(_on_brainstorm_path)
 
         # Botoes da coluna MCP (output-toolbar-mcp): labels resumidos + cores
         # padronizadas por linha. Linha 1 (Anthropic laranja): MCPs Claude-side.
@@ -4283,6 +4846,8 @@ class MainWindow(QMainWindow):
         return [
             json_btn,
             ws_btn,
+            loop_btn,
+            brainstorm_btn,
             mcp_codex_btn,
             mcp_kimi_btn,
             double_mcp_btn,
@@ -4340,6 +4905,14 @@ class MainWindow(QMainWindow):
             "Cola o path ai-forge/workflow-app no terminal\n(respeita terminal-route-toggles)",
         )
         workflow_app_btn.clicked.connect(_paste_path("ai-forge/workflow-app"))
+
+        ws_rules_btn = _make_btn(
+            "ws-rules", "queue-btn-ws-rules-path",
+            "#14B8A6", "#0D9488", "#0F766E",
+            "Cola o path {workspace_root}/rules do projeto ativo no terminal\n"
+            "(mesma origem do queue-btn-ws-path, com subpasta rules)",
+        )
+        ws_rules_btn.clicked.connect(self._on_ws_rules_path)
 
         dcp_rules_btn = _make_btn(
             "Dcp-list-rules", "queue-btn-dcp-command-list-rules-path",
@@ -4593,8 +5166,8 @@ class MainWindow(QMainWindow):
         add_rules_btn.clicked.connect(_paste_add_rules)
 
         return [
-            workflow_app_btn, dcp_rules_btn, meta_feeding_rules_btn, cmd_rules_btn,
-            terminal_rules_btn, listeners_rules_btn, cascade_bug_btn,
+            workflow_app_btn, ws_rules_btn, dcp_rules_btn, meta_feeding_rules_btn,
+            cmd_rules_btn, terminal_rules_btn, listeners_rules_btn, cascade_bug_btn,
             indicators_rules_btn, prompt_rules_btn,
             build_render_rules_btn, matrix_spec_rules_btn, llm_routing_rules_btn,
             main_llm_publish_rules_btn, kimi_skill_routing_rules_btn,
@@ -4670,15 +5243,157 @@ class MainWindow(QMainWindow):
         "revisar-qa-rules": "QA Reviewer",
         "revisar-task-rules": "Task Reviewer",
         "study-researcher-rules": "Researcher",
-        "search-in-rules": "seatch-in",
+        "search-in-rules": "search-in",
         "search-out-rules": "search-out",
+        "search-forge-rules": "search-forge",
+        "landing-page-conversion-rules": "LP Conversion",
         "code-debugger": "Debugger",
         "loop-preparer-rules": "Loop Preparer",
         "orquestrador-pdca-rules": "PDCA Orchestrator",
+        "visual-designer-rules": "Visual Design",
+        "layout-architect-rules": "Layout",
+        "deep-detailer": "Deep Detailer",
+        "billing-scpecialist": "Billing",
+        "auth-security-specialist": "Auth Security",
+        "deployment-reliability-specialist": "Deploy Reliability",
+        "soft-engineer": "soft Engen",
+        "engenheiro-solucionador": "Eng Solucionador",
     }
 
-    def _persona_button_label(self, slug: str, rel_path: str) -> str:
-        """Label curto e legivel para botoes da sub-aba PERSONAS."""
+    # Atribuicao canonica persona -> categoria de filtro da sub-aba 'Agentes'.
+    # Os valores DEVEM pertencer a PERSONA_FILTER_CATEGORIES (validado em teste).
+    # Personas auto-descobertas (botao update) que nao estiverem aqui caem na
+    # inferencia por palavra-chave (_infer_persona_category) e, em ultimo caso,
+    # em PERSONA_FILTER_DEFAULT.
+    _PERSONA_CATEGORIES: dict[str, str] = {
+        # Plan — planejamento, orquestracao, roteamento, preparo de loop
+        "analista-delegador-rules": "Plan",
+        "orquestrador-pdca-rules": "Plan",
+        "complexity-router-rules": "Plan",
+        "loop-preparer-rules": "Plan",
+        "criar-md-rules": "Plan",
+        # Research — pesquisa interna/externa, aprofundamento de contexto
+        "search-in-rules": "Research",
+        "search-out-rules": "Research",
+        "search-forge-rules": "Research",
+        "study-researcher-rules": "Research",
+        "deep-detailer": "Research",
+        # Design — design visual, layout responsivo, conversao, SEO
+        "visual-designer-rules": "Design",
+        "layout-architect-rules": "Design",
+        "landing-page-conversion-rules": "Design",
+        "seo-specialist": "Design",
+        # Build — criacao/execucao de tasks e slash-commands
+        "criar-task-rules": "Build",
+        "executar-task-rules": "Build",
+        "executor-de-slash-commands-rules": "Build",
+        # Review — revisao, QA, hardening, debug, critica adversarial
+        "revisar-task-rules": "Review",
+        "revisar-execucao-rules": "Review",
+        "revisar-qa-rules": "Review",
+        "controversial-devils-advocate-rules": "Review",
+        "hardening-engineer-rules": "Review",
+        "code-debugger": "Review",
+        "specific-reviewer": "Review",
+        # specialists — especialistas de dominio acionados sob demanda
+        "billing-scpecialist": "specialists",
+        "auth-security-specialist": "specialists",
+        "deployment-reliability-specialist": "specialists",
+        "soft-engineer": "specialists",
+        "engenheiro-solucionador": "specialists",
+    }
+
+    @staticmethod
+    def _infer_persona_category(slug: str) -> str:
+        """Inferencia por palavra-chave para personas fora de _PERSONA_CATEGORIES.
+
+        Mantida deterministica e conservadora: cobre os eixos das 5 categorias e
+        cai em PERSONA_FILTER_DEFAULT quando nada casa. Usada por _persona_category
+        para classificar personas novas adicionadas ao vivo (botao 'update').
+        """
+        s = slug.lower()
+
+        def _has(*keys: str) -> bool:
+            return any(k in s for k in keys)
+
+        if _has("search", "research", "pesquis", "study", "detail", "scrap", "crawl"):
+            return "Research"
+        if _has(
+            "design", "layout", "visual", "seo", "landing", "conversion",
+            "ux", "ui", "brand", "art",
+        ):
+            return "Design"
+        if _has(
+            "review", "revis", "qa", "harden", "debug", "controvers",
+            "advoca", "critic", "audit", "lint",
+        ):
+            return "Review"
+        if _has(
+            "specialist", "billing", "payment", "finance", "financeiro",
+            "auth", "security", "deploy", "reliability", "sre", "infra",
+            "engineer", "engenheiro", "solution", "solucion",
+        ):
+            return "specialists"
+        if _has(
+            "plan", "delegad", "orquestr", "pdca", "router", "complex",
+            "loop", "prep", "estrutur", "roadmap", "scope", "criar-md",
+        ):
+            return "Plan"
+        return PERSONA_FILTER_DEFAULT
+
+    def _persona_category(self, slug: str, rel_path: str) -> str:
+        """Categoria de filtro ('Plan'/'Research'/'Design'/'Build'/'Review') de
+        uma persona, para a barra de filtros da sub-aba 'Agentes'.
+
+        Precedencia: mapa explicito _PERSONA_CATEGORIES > inferencia por
+        palavra-chave > PERSONA_FILTER_DEFAULT. O resultado e sempre um membro
+        de PERSONA_FILTER_CATEGORIES.
+        """
+        category = self._PERSONA_CATEGORIES.get(slug) or self._infer_persona_category(
+            slug
+        )
+        if category not in PERSONA_FILTER_CATEGORIES:
+            category = PERSONA_FILTER_DEFAULT
+        return category
+
+    def _load_persona_label_overrides(self) -> dict[str, str]:
+        """Le os overrides de label de personas (slug -> label) do QSettings.
+
+        Configurados pelo gear da sub-aba 'Agentes' (_open_personas_config_dialog).
+        Valores vazios sao ignorados (equivalem a 'sem override').
+        """
+        import json as _json
+
+        raw = QSettings("systemForge", "workflow-app").value(
+            "personas/label_overrides", None
+        )
+        if isinstance(raw, str) and raw:
+            try:
+                data = _json.loads(raw)
+            except _json.JSONDecodeError:
+                return {}
+            if isinstance(data, dict):
+                return {
+                    str(k): str(v).strip()
+                    for k, v in data.items()
+                    if str(v).strip()
+                }
+        return {}
+
+    def _persona_button_label(
+        self, slug: str, rel_path: str, *, ignore_overrides: bool = False,
+    ) -> str:
+        """Label curto e legivel para botoes da sub-aba PERSONAS.
+
+        Precedencia: override do usuario (gear) > _PERSONA_LABELS > frontmatter
+        `name` (truncado) > slug humanizado. `ignore_overrides=True` retorna o
+        label canonico (sem override) — usado pelo modal para detectar edicoes.
+        """
+        if not ignore_overrides:
+            overrides = getattr(self, "_persona_label_overrides", None)
+            if overrides and slug in overrides:
+                return overrides[slug]
+
         if slug in self._PERSONA_LABELS:
             return self._PERSONA_LABELS[slug]
 
@@ -4722,12 +5437,17 @@ class MainWindow(QMainWindow):
             if slug in self._persona_rendered_slugs:
                 continue
             label = self._persona_button_label(slug, rel_path)
+            category = self._persona_category(slug, rel_path)
             btn = QPushButton(label)
             btn.setProperty("testid", f"queue-btn-persona-{slug}")
+            # Consumido pela barra de filtros da sub-aba 'Agentes'
+            # (CommandQueueWidget._apply_persona_filter).
+            btn.setProperty("persona_category", category)
             btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(
-                f"{label}\nCola o path da persona no terminal: {rel_path}"
+                f"{label}  ·  {category}\n"
+                f"Cola o path da persona no terminal: {rel_path}"
             )
             btn.setStyleSheet(
                 "QPushButton { background-color: #8B5CF6; color: #FAFAFA;"
@@ -4762,10 +5482,30 @@ class MainWindow(QMainWindow):
         """
         # Rastreia slugs ja renderizados para o botao 'update' detectar novos.
         self._persona_rendered_slugs: set[str] = set()
+        # Overrides de label (slug -> label) configurados via gear da sub-aba.
+        # Carregados aqui para que _persona_button_label os consulte ao montar.
+        self._persona_label_overrides = self._load_persona_label_overrides()
 
         btns: list[QPushButton] = self._build_persona_buttons(
             self._scan_persona_files()
         )
+
+        # Gear de configuracao (34x34) — abre modal que lista os agentes atuais
+        # (sincronizado com os botoes) e permite renomear o label de cada um.
+        # Vive DENTRO da sub-aba 'Agentes' (so renderiza com ela aberta).
+        config_gear = _GearButton(
+            testid="queue-btn-personas-config",
+            tooltip=(
+                "Configurar agentes\n"
+                "Lista os agentes atuais de ai-forge/MCP/agents/ (em sincronia\n"
+                "com os botoes) e permite renomear o label de cada um."
+            ),
+            size=34,
+            font_px=18,
+        )
+        config_gear.clicked.connect(self._open_personas_config_dialog)
+        self._personas_config_gear = config_gear
+        btns.append(config_gear)
 
         # Botao 'update' 1:1 (34x34) verde com seta de refresh branca dentro.
         # Re-varre ai-forge/MCP/agents/ e cria botao para cada persona nova.
@@ -4817,6 +5557,50 @@ class MainWindow(QMainWindow):
         )
         signal_bus.toast_requested.emit(
             f"{len(new_btns)} persona(s) adicionada(s) a aba PERSONAS.", "info",
+        )
+
+    def _open_personas_config_dialog(self) -> None:
+        """Abre o modal de configuracao dos agentes da sub-aba 'Agentes'.
+
+        Lista os agentes ATUAIS varridos de ai-forge/MCP/agents/ (sempre em
+        sincronia com os botoes, nunca uma lista hardcoded) e permite renomear
+        o label de cada um. Submit persiste os overrides (slug -> label) em
+        QSettings e reconstroi a sub-aba para refletir os novos labels.
+        """
+        import json as _json
+
+        from PySide6.QtWidgets import QDialog
+
+        personas = self._scan_persona_files()
+        entries = [
+            {
+                "slug": slug,
+                "rel_path": rel_path,
+                "label": self._persona_button_label(slug, rel_path),
+                "default_label": self._persona_button_label(
+                    slug, rel_path, ignore_overrides=True,
+                ),
+            }
+            for slug, rel_path in personas
+        ]
+
+        dlg = PersonasConfigDialog(entries, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # collect() devolve apenas os labels que diferem do canonico (edicoes).
+        overrides = dlg.collect()
+        QSettings("systemForge", "workflow-app").setValue(
+            "personas/label_overrides", _json.dumps(overrides),
+        )
+        self._persona_label_overrides = overrides
+
+        # Reconstroi a sub-aba 'Agentes' (limpa rendered_slugs + reaplica labels).
+        new_btns = self._populate_header_personas_subtab()
+        self._command_queue.populate_personas_subtab(new_btns)
+        signal_bus.toast_requested.emit(
+            f"Agentes atualizados ({len(overrides)} label(s) personalizado(s)).",
+            "info",
         )
 
     def _populate_header_cmd_subtab(self) -> list[QPushButton]:
@@ -5303,6 +6087,28 @@ class MainWindow(QMainWindow):
         )
         btn.clicked.connect(self._on_repo_rules_path)
         return btn
+
+    def _on_ws_rules_path(self) -> None:
+        project_cfg = app_state.project_config
+        if not project_cfg:
+            signal_bus.toast_requested.emit(
+                "workspace_root indisponivel: nenhum projeto carregado."
+                " Selecione o project.json via queue-btn-json-path.",
+                "warning",
+            )
+            return
+        ws = (project_cfg.workspace_root or "").strip()
+        if not ws:
+            signal_bus.toast_requested.emit(
+                "workspace_root nao configurado em project.json", "warning",
+            )
+            return
+        path = f"{ws.rstrip('/')}/rules"
+        QApplication.clipboard().setText(path)
+        self._publish_to_terminal(path)
+        signal_bus.toast_requested.emit(
+            f"Path copiado e digitado no terminal: {path}", "info",
+        )
 
     def _on_repo_rules_path(self) -> None:
         if not app_state.has_config or not app_state.config:
@@ -5792,6 +6598,21 @@ class MainWindow(QMainWindow):
         self._command_queue.reorder_requested.connect(self._on_queue_reorder_requested)
         self._command_queue.save_requested.connect(self._on_save_queue)
         self._metrics_bar.view_changed.connect(self._on_view_changed)
+        self._metrics_bar.project_config_change_requested.connect(
+            self._on_project_config_change_requested
+        )
+        self._metrics_bar.loop_config_change_requested.connect(
+            self._on_loop_config_change_requested
+        )
+        self._metrics_bar.config_change_requested.connect(
+            self._on_config_change_requested
+        )
+        self._metrics_bar.loop_config_unload_requested.connect(
+            self._unload_loop_config
+        )
+        self._metrics_bar.loop_config_reload_requested.connect(
+            self._reload_loop_config
+        )
         signal_bus.toast_requested.connect(self._show_toast)
         signal_bus.pipeline_ready.connect(self._on_pipeline_ready)
         signal_bus.history_panel_toggled.connect(self._switch_to_history_tab)
@@ -5941,10 +6762,37 @@ class MainWindow(QMainWindow):
         self._command_queue.add_command(spec)
         self._show_toast(f"Comando adicionado: {spec.name}", "success")
 
+    def _on_project_config_change_requested(self, path: str) -> None:
+        """Handle project selection from metrics bar."""
+        self._load_config(path, config_kind="project")
+        if app_state.project_config and app_state.project_config.config_path == path:
+            signal_bus.toast_requested.emit(
+                f"Projeto carregado: {app_state.project_name}", "success"
+            )
+
+    def _on_loop_config_change_requested(self, path: str) -> None:
+        """Handle loop selection from metrics bar."""
+        self._load_config(path, config_kind="loop")
+        if app_state.loop_config and app_state.loop_config.config_path == path:
+            signal_bus.toast_requested.emit(
+                f"Loop carregado: {app_state.loop_config.project_name}", "success"
+            )
+
     def _on_config_change_requested(self, path: str) -> None:
-        """Trata solicitação de troca de config vinda da ConfigBar."""
+        """Handle legacy config change requests from ConfigBar/MetricsBar."""
+        if (
+            (app_state.project_config and app_state.project_config.config_path == path)
+            or (app_state.loop_config and app_state.loop_config.config_path == path)
+        ):
+            return
         self._load_config(path)
-        if app_state.has_config and app_state.config and app_state.config.config_path == path:
+
+        if app_state.loop_config and app_state.loop_config.config_path == path:
+            signal_bus.toast_requested.emit(
+                f"Loop carregado: {app_state.loop_config.project_name}", "success"
+            )
+            return
+        if app_state.project_config and app_state.project_config.config_path == path:
             signal_bus.toast_requested.emit(
                 f"Projeto carregado: {app_state.project_name}", "success"
             )
@@ -6312,8 +7160,8 @@ class MainWindow(QMainWindow):
         )
         self._update_title(project_name=None)
 
-    def _load_config(self, path: str) -> None:
-        """Carrega um project.json e atualiza o estado da aplicação.
+    def _load_config(self, path: str, *, config_kind: str | None = None) -> None:
+        """Carrega uma configuração e atualiza o estado da aplicação.
 
         Emite signal_bus.config_loaded em caso de sucesso.
         Exibe toast de erro em caso de falha.
@@ -6335,15 +7183,15 @@ class MainWindow(QMainWindow):
             )
             return
 
-        app_state.set_config(config)
-        self._update_title(project_name=config.project_name)
-        self._settings.setValue(self._SETTINGS_LAST_CONFIG, path)
-        signal_bus.config_loaded.emit(path)
-        logger.info("Config carregado: projeto=%s", config.project_name)
-        self._check_template_versions()  # RESOLVED: G002
-
         raw = config.raw if isinstance(config.raw, dict) else {}
-        is_loop_config = (
+
+        # Compatibilidade por slot:
+        # - config_kind="project" => ProjectConfig slot
+        # - config_kind="loop"   => LoopConfig slot
+        # - vazio                => autodetecção por shape de payload
+        # Sem quebrar consumidores antigos de compatibilidade, também atualiza
+        # set_config alias no fim deste bloco.
+        is_loop_json_config = (
             (raw.get("kind") == "daily-loop" and "daily_loop" in raw)
             or (
                 "iteration_template" in raw
@@ -6351,7 +7199,34 @@ class MainWindow(QMainWindow):
                 and "finalization" in raw
             )
         )
-        if is_loop_config:
+        is_loop_attachment = False
+        if config_kind == "loop":
+            is_loop_attachment = True
+        elif config_kind is None and is_loop_json_config:
+            is_loop_attachment = True
+
+        if is_loop_attachment:
+            app_state.set_loop_config(config)
+            logger.debug("Config carregado como loop: %s", path)
+        elif config_kind == "project":
+            app_state.set_project_config(config)
+            logger.debug("Config carregado como projeto: %s", path)
+        else:
+            app_state.set_project_config(config)
+            logger.debug("Config carregado por autodetecao como projeto: %s", path)
+        # compat: manter alias legado para fluxos que ainda fazem write-only em
+        # app_state.config sem escolher explicitamente project/loop. Para loop,
+        # NAO escrever no alias: a facade derivada ja retorna loop quando nao ha
+        # project, e escrever aqui sobrescreveria o slot de project.
+        if not is_loop_attachment:
+            app_state.set_config(config)
+            self._update_title(project_name=config.project_name)
+            self._settings.setValue(self._SETTINGS_LAST_CONFIG, path)
+        signal_bus.config_loaded.emit(path)
+        logger.info("Config carregado: projeto=%s", config.project_name)
+        self._check_template_versions()  # RESOLVED: G002
+
+        if is_loop_attachment:
             logger.info(
                 "Config '%s' identificada como loop config — skip "
                 "_restore_queue_from_storage + _load_kanban_from_config.",
@@ -6623,8 +7498,18 @@ class MainWindow(QMainWindow):
         )
 
     def _unload_config(self) -> None:
-        """Desvincula o projeto atual."""
-        app_state.clear_config()
+        """Desvincula o projeto atual.
+
+        Emite signal_bus.config_unloaded (escopo project-only) para que os
+        consumidores nao-metrics-bar reajam ao unload de projeto: config_bar
+        (_on_config_unloaded) e a governanca da command queue
+        (_on_config_unloaded_for_governance). O slot de loop e preservado
+        (clear_project granular); por isso metrics_bar nao conecta
+        config_unloaded a _apply_loop_empty (loop tem path proprio em
+        _unload_loop_config).
+        """
+        app_state.clear_project()
+        self._metrics_bar._apply_project_empty()
         self._settings.remove(self._SETTINGS_LAST_CONFIG)
         self._update_title(project_name=None)
         self._kanban_view.clear()
@@ -6639,16 +7524,37 @@ class MainWindow(QMainWindow):
                 "Nenhum projeto carregado para atualizar.", "warning"
             )
             return
-        app_state.clear_config()
+        app_state.clear_project()
+        self._metrics_bar._apply_project_empty()
         self._settings.remove(self._SETTINGS_LAST_CONFIG)
         self._update_title(project_name=None)
         self._kanban_view.clear()
         self._module_detail_view.clear()
-        signal_bus.config_unloaded.emit()
-        self._load_config(path)
+        self._load_config(path, config_kind="project")
         if app_state.has_config and app_state.config and app_state.config.config_path == path:
             signal_bus.toast_requested.emit(
                 f"Projeto atualizado: {app_state.project_name}", "success"
+            )
+
+    def _unload_loop_config(self) -> None:
+        """Desvincula apenas o loop atual, preservando o project."""
+        app_state.clear_loop()
+        self._metrics_bar._apply_loop_empty()
+        signal_bus.toast_requested.emit("Loop desvinculado", "info")
+
+    def _reload_loop_config(self, path: str) -> None:
+        """Recarrega apenas o loop atual sem tocar no project."""
+        if not path:
+            signal_bus.toast_requested.emit(
+                "Nenhum loop carregado para atualizar.", "warning"
+            )
+            return
+        app_state.clear_loop()
+        self._metrics_bar._apply_loop_empty()
+        self._load_config(path, config_kind="loop")
+        if app_state.loop_config and app_state.loop_config.config_path == path:
+            signal_bus.toast_requested.emit(
+                f"Loop atualizado: {app_state.loop_config.project_name}", "success"
             )
 
     # ─────────────────────────────────────────────── Kanban (T-036) ──── #
@@ -6963,9 +7869,11 @@ class PromptsConfigDialog(QDialog):
     def _prompt_md_start_dir() -> str:
         cur = Path.cwd().resolve()
         while cur != cur.parent:
-            brainstorm = cur / "brainstorm"
-            if brainstorm.is_dir():
-                return str(brainstorm)
+            # `brainstorm` foi realocado para `blacksmith/brainstorm` na
+            # reorganizacao do repo; mantemos o top-level legado por compat.
+            for cand in (cur / "brainstorm", cur / "blacksmith" / "brainstorm"):
+                if cand.is_dir():
+                    return str(cand)
             if (cur / "ai-forge" / "workflow-app").is_dir():
                 break
             cur = cur.parent
@@ -6993,6 +7901,124 @@ class PromptsConfigDialog(QDialog):
             for le, lp, ld in self._rows
         ]
         return base, entries
+
+
+class PersonasConfigDialog(QDialog):
+    """Modal de configuracao dos agentes da sub-aba 'Agentes'.
+
+    Recebe a lista de agentes ATUAIS (varridos de ai-forge/MCP/agents/, sempre
+    em sincronia com os botoes — nunca uma lista hardcoded) e renderiza um por
+    linha: label editavel + slug/path (somente leitura). collect() devolve
+    {slug: label} apenas para os labels editados (diferentes do canonico); um
+    label deixado igual ao padrao reseta o override (nao entra no dict), para
+    nao mascarar futuras mudancas em _PERSONA_LABELS ou no frontmatter.
+    """
+
+    def __init__(self, entries: list[dict], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configurar agentes")
+        self.setMinimumSize(720, 520)
+        self.setProperty("testid", "personas-config-dialog")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        _intro = QLabel(
+            f"{len(entries)} agente(s) em ai-forge/MCP/agents/ "
+            "(sincronizado com os botoes da sub-aba). Edite o label de cada um; "
+            "deixe igual ao padrao para resetar."
+        )
+        _intro.setWordWrap(True)
+        _intro.setStyleSheet("font-size: 11px; color: #A1A1AA;")
+        outer.addWidget(_intro)
+
+        _header = QWidget()
+        _hdr = QHBoxLayout(_header)
+        _hdr.setContentsMargins(0, 0, 0, 0)
+        _hdr.setSpacing(4)
+        for _txt, _stretch in [("Label", 28), ("Slug / Path", 72)]:
+            _l = QLabel(_txt)
+            _l.setStyleSheet("font-size: 10px; color: #71717A; font-weight: 600;")
+            _hdr.addWidget(_l, _stretch)
+        outer.addWidget(_header)
+
+        _scroll = QScrollArea()
+        _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _container = QWidget()
+        _list = QVBoxLayout(_container)
+        _list.setContentsMargins(0, 0, 0, 0)
+        _list.setSpacing(4)
+
+        # (slug, default_label, QLineEdit) — default_label permite detectar edicao.
+        self._rows: list[tuple[str, str, QLineEdit]] = []
+        for entry in entries:
+            slug = str(entry.get("slug", ""))
+            rel_path = str(entry.get("rel_path", ""))
+            label = str(entry.get("label", ""))
+            default_label = str(entry.get("default_label", label))
+
+            row = QWidget()
+            row.setStyleSheet(
+                "QWidget { background-color: #18181B; border: 1px solid #27272A;"
+                "  border-radius: 4px; }"
+            )
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(6, 4, 6, 4)
+            rl.setSpacing(6)
+
+            le_label = QLineEdit(label)
+            le_label.setProperty("testid", f"personas-config-label-{slug}")
+            le_label.setPlaceholderText(default_label or slug)
+            le_label.setStyleSheet(
+                "QLineEdit { background-color: #27272A; color: #FAFAFA;"
+                "  border: 1px solid #3F3F46; border-radius: 4px; padding: 3px 6px; }"
+            )
+
+            _meta = QLabel(f"{slug}\n{rel_path}")
+            _meta.setProperty("testid", f"personas-config-meta-{slug}")
+            _meta.setStyleSheet(
+                "color: #71717A; font-size: 10px; background: transparent;"
+                " border: none;"
+            )
+            _meta.setWordWrap(True)
+
+            rl.addWidget(le_label, 28)
+            rl.addWidget(_meta, 72)
+            _list.addWidget(row)
+            self._rows.append((slug, default_label, le_label))
+
+        _list.addStretch(1)
+        _scroll.setWidget(_container)
+        outer.addWidget(_scroll, 1)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        save_btn = bb.button(QDialogButtonBox.StandardButton.Save)
+        if save_btn is not None:
+            save_btn.setText("Salvar")
+            save_btn.setProperty("testid", "personas-config-submit")
+            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn = bb.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn is not None:
+            cancel_btn.setText("Cancelar")
+            cancel_btn.setProperty("testid", "personas-config-cancel")
+            cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        outer.addWidget(bb)
+
+    def collect(self) -> dict[str, str]:
+        """{slug: label} apenas para labels editados (diferentes do canonico)."""
+        out: dict[str, str] = {}
+        for slug, default_label, le in self._rows:
+            val = le.text().strip()
+            if val and val != default_label:
+                out[slug] = val
+        return out
 
 
 # ──────────────────────────────────────────────────────── Entry point ─── #

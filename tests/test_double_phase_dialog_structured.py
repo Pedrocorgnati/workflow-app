@@ -66,6 +66,28 @@ def test_structured_main_input_has_md_browse_button(qapp):
     dlg.deleteLater()
 
 
+def test_structured_main_input_brainstorm_button_pastes_selected_md(qapp):
+    """Botao cerebro cola o .md selecionado no brainstorm picker no input principal."""
+    selected = "blacksmith/brainstorm-mcp/ideia.md"
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/loop",
+        flags_with_value=[FlagSpec(name="task", label="Task", placeholder="tasks.md")],
+        selected_md_path_getter=lambda: selected,
+    )
+    buttons = [
+        btn for btn in dlg.findChildren(QPushButton)
+        if btn.property("testid") == "double-phase-main-md-brainstorm"
+    ]
+    assert len(buttons) == 1
+    assert buttons[0].text() == "🧠"
+    assert buttons[0].width() == buttons[0].height()
+
+    pte = dlg.findChild(QPlainTextEdit)
+    buttons[0].click()
+    assert pte.toPlainText() == selected
+    dlg.deleteLater()
+
+
 def test_structured_path_flags_use_path_md_widget(qapp):
     """Flags estruturadas com placeholder .md recebem picker de markdown."""
     dlg = DoublePhaseArgumentDialog(
@@ -76,6 +98,31 @@ def test_structured_path_flags_use_path_md_widget(qapp):
         ],
     )
     assert len(dlg.findChildren(PathMdFieldWidget)) == 1
+    dlg.deleteLater()
+
+
+def test_structured_path_flag_brainstorm_button_pastes_selected_md(qapp):
+    """Campo path.md condicional tambem recebe cerebro e cola o .md selecionado."""
+    selected = "blacksmith/brainstorm-mcp/plano.md"
+    dlg = DoublePhaseArgumentDialog(
+        pipeline_name="/loop",
+        flags_with_value=[
+            FlagSpec(name="task", label="Task", placeholder="caminho/para/tasklist.md"),
+        ],
+        selected_md_path_getter=lambda: selected,
+    )
+    path_widget = dlg.findChild(PathMdFieldWidget)
+    assert path_widget is not None
+    buttons = [
+        btn for btn in path_widget.findChildren(QPushButton)
+        if btn.property("testid") == "double-phase-path-md-brainstorm"
+    ]
+    assert len(buttons) == 1
+    assert buttons[0].text() == "🧠"
+    assert buttons[0].width() == buttons[0].height()
+
+    buttons[0].click()
+    assert path_widget.text() == selected
     dlg.deleteLater()
 
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextOption
@@ -55,6 +56,30 @@ FREETEXT_MAX_HEIGHT = 240
 # Slug canonico para `--name`: kebab-case minusculo, 1-50 chars, comeca com [a-z0-9].
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 
+SelectedMdPathGetter = Callable[[], str | None]
+
+
+def _selected_brainstorm_md_path(
+    getter: SelectedMdPathGetter | None,
+) -> str:
+    if getter is None:
+        return ""
+    try:
+        return (getter() or "").strip()
+    except Exception:
+        return ""
+
+
+def _emit_missing_brainstorm_md_toast() -> None:
+    try:
+        from workflow_app.signal_bus import signal_bus
+
+        signal_bus.toast_requested.emit(
+            "Nenhum .md selecionado em brainstorm-md-picker-row.", "warning"
+        )
+    except Exception:
+        pass
+
 
 def _find_repo_root() -> Path:
     """Resolve a raiz do SystemForge para ancorar atalhos locais."""
@@ -73,9 +98,12 @@ def _find_repo_root() -> Path:
 def _markdown_picker_start_dir(default_md_dir: str = "") -> str:
     """Brainstorm e apenas atalho inicial; o dialog permite navegar livremente."""
     repo_root = _find_repo_root()
-    brainstorm = repo_root / "brainstorm"
-    if brainstorm.is_dir():
-        return str(brainstorm)
+    # `brainstorm` foi realocado para `blacksmith/brainstorm` na reorganizacao
+    # do repo; mantemos o top-level legado por compat (mesmo padrao de
+    # PromptsConfigDialog._prompt_md_start_dir em main_window.py).
+    for brainstorm in (repo_root / "brainstorm", repo_root / "blacksmith" / "brainstorm"):
+        if brainstorm.is_dir():
+            return str(brainstorm)
 
     from workflow_app.config.app_state import app_state
 
@@ -112,10 +140,12 @@ class PathMdFieldWidget(QWidget):
     def __init__(
         self,
         default_md_dir: str,
+        selected_md_path_getter: SelectedMdPathGetter | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._default_md_dir = default_md_dir
+        self._selected_md_path_getter = selected_md_path_getter
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -146,10 +176,36 @@ class PathMdFieldWidget(QWidget):
         self._btn.clicked.connect(self._browse)
         layout.addWidget(self._btn)
 
+        if self._selected_md_path_getter is not None:
+            self._brainstorm_btn = QPushButton("🧠")
+            self._brainstorm_btn.setProperty(
+                "testid", "double-phase-path-md-brainstorm"
+            )
+            self._brainstorm_btn.setToolTip(
+                "Usar .md selecionado em brainstorm-md-picker-row"
+            )
+            self._brainstorm_btn.setFixedSize(28, 28)
+            self._brainstorm_btn.setStyleSheet(
+                "QPushButton { background-color: #3F3F46; color: #FBBF24;"
+                "  border: 1px solid #52525B; border-radius: 4px;"
+                "  font-size: 13px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #52525B; color: #FDE68A; }"
+            )
+            self._brainstorm_btn.clicked.connect(self._paste_brainstorm_md)
+            layout.addWidget(self._brainstorm_btn)
+
     def _browse(self) -> None:
         path = _browse_markdown_file(self, self._default_md_dir)
         if path:
             self._line.setText(path)
+
+    def _paste_brainstorm_md(self) -> None:
+        path = _selected_brainstorm_md_path(self._selected_md_path_getter)
+        if not path:
+            _emit_missing_brainstorm_md_toast()
+            return
+        self._line.setText(path)
+        self._line.setFocus()
 
     def text(self) -> str:
         return self._line.text().strip()
@@ -458,6 +514,7 @@ class DoublePhaseArgumentDialog(QDialog):
         mode_radio: list[str] | None = None,
         mode_radio_flags: dict[str, str] | None = None,
         mode_radio_summaries: dict[str, str] | None = None,
+        selected_md_path_getter: SelectedMdPathGetter | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -476,6 +533,7 @@ class DoublePhaseArgumentDialog(QDialog):
         self._mode_radio_flags = dict(mode_radio_flags or {})
         self._mode_radio_summaries = dict(mode_radio_summaries or {})
         self._mode_radio_widget: RadioGroupWithSummary | None = None
+        self._selected_md_path_getter = selected_md_path_getter
         self._structured_mode = bool(self._flags_boolean or self._flags_with_value or self._fixed_flag)
         self._tokens: list[_Token] = []
         self._widgets: list[QWidget] = []
@@ -599,6 +657,28 @@ class DoublePhaseArgumentDialog(QDialog):
             self._main_md_btn,
             alignment=Qt.AlignmentFlag.AlignTop,
         )
+        if self._selected_md_path_getter is not None:
+            self._main_brainstorm_md_btn = QPushButton("🧠")
+            self._main_brainstorm_md_btn.setProperty(
+                "testid", "double-phase-main-md-brainstorm"
+            )
+            self._main_brainstorm_md_btn.setToolTip(
+                "Usar .md selecionado em brainstorm-md-picker-row"
+            )
+            self._main_brainstorm_md_btn.setFixedSize(32, 32)
+            self._main_brainstorm_md_btn.setStyleSheet(
+                "QPushButton { background-color: #3F3F46; color: #FBBF24;"
+                "  border: 1px solid #52525B; border-radius: 4px;"
+                "  font-size: 15px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #52525B; color: #FDE68A; }"
+            )
+            self._main_brainstorm_md_btn.clicked.connect(
+                self._paste_main_brainstorm_markdown
+            )
+            main_input_layout.addWidget(
+                self._main_brainstorm_md_btn,
+                alignment=Qt.AlignmentFlag.AlignTop,
+            )
         form_layout.addWidget(main_input_row)
 
         # Radio de modo (opcional), imediatamente abaixo do input principal.
@@ -653,7 +733,10 @@ class DoublePhaseArgumentDialog(QDialog):
                 container_layout.addWidget(flag_label)
 
                 if _flag_spec_is_path_md(flag_spec):
-                    edit = PathMdFieldWidget(self._default_md_dir)
+                    edit = PathMdFieldWidget(
+                        self._default_md_dir,
+                        selected_md_path_getter=self._selected_md_path_getter,
+                    )
                     edit.line_edit.setPlaceholderText(
                         flag_spec.placeholder or f"valor para --{flag_spec.name}"
                     )
@@ -702,6 +785,14 @@ class DoublePhaseArgumentDialog(QDialog):
         path = _browse_markdown_file(self, self._default_md_dir)
         if path:
             self._main_input.setPlainText(path)
+
+    def _paste_main_brainstorm_markdown(self) -> None:
+        path = _selected_brainstorm_md_path(self._selected_md_path_getter)
+        if not path:
+            _emit_missing_brainstorm_md_toast()
+            return
+        self._main_input.setPlainText(path)
+        self._main_input.setFocus()
 
     @staticmethod
     def _input_widget_text(widget: QWidget) -> str:
@@ -805,7 +896,10 @@ class DoublePhaseArgumentDialog(QDialog):
             layout.addWidget(label)
 
             if ".md" in token.label.lower():
-                edit = PathMdFieldWidget(self._default_md_dir)
+                edit = PathMdFieldWidget(
+                    self._default_md_dir,
+                    selected_md_path_getter=self._selected_md_path_getter,
+                )
                 edit.line_edit.setPlaceholderText(token.label)
             else:
                 edit = QLineEdit()
@@ -875,7 +969,10 @@ class DoublePhaseArgumentDialog(QDialog):
             )
             layout.addWidget(chk)
 
-            pw = PathMdFieldWidget(self._default_md_dir)
+            pw = PathMdFieldWidget(
+                self._default_md_dir,
+                selected_md_path_getter=self._selected_md_path_getter,
+            )
             pw.setVisible(False)
             layout.addWidget(pw)
 
@@ -931,7 +1028,10 @@ class DoublePhaseArgumentDialog(QDialog):
             label.setStyleSheet("color: #D4D4D8; font-size: 11px; font-weight: 600;")
             layout.addWidget(label)
 
-            pw = PathMdFieldWidget(self._default_md_dir)
+            pw = PathMdFieldWidget(
+                self._default_md_dir,
+                selected_md_path_getter=self._selected_md_path_getter,
+            )
             layout.addWidget(pw)
             self._widgets.append(pw)
 

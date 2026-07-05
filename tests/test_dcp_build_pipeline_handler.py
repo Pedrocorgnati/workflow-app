@@ -754,6 +754,7 @@ def test_validate_delivery_json_script_rejects_invalid(tmp_path: Path) -> None:
     (smoke test cenario invalido)."""
 
     import subprocess
+    import sys
 
     script = _validate_delivery_script_path()
     assert script.exists(), f"script ausente: {script}"
@@ -762,7 +763,7 @@ def test_validate_delivery_json_script_rejects_invalid(tmp_path: Path) -> None:
     invalid.write_text(json.dumps({"invalid": "schema", "missing": "fields"}))
 
     result = subprocess.run(
-        ["python3", str(script), str(invalid)],
+        [sys.executable, str(script), str(invalid)],
         capture_output=True,
         text=True,
         timeout=30,
@@ -785,6 +786,7 @@ def test_validate_delivery_json_script_accepts_valid(tmp_path: Path) -> None:
     valido)."""
 
     import subprocess
+    import sys
 
     script = _validate_delivery_script_path()
     assert script.exists(), f"script ausente: {script}"
@@ -807,7 +809,7 @@ def test_validate_delivery_json_script_accepts_valid(tmp_path: Path) -> None:
     valid.write_text(parsed.model_dump_json())
 
     result = subprocess.run(
-        ["python3", str(script), str(valid)],
+        [sys.executable, str(script), str(valid)],
         capture_output=True,
         text=True,
         timeout=30,

@@ -85,11 +85,13 @@ def parse_config(path: str) -> PipelineConfig:
     project_name = raw.get("name", resolved.stem)
 
     # ── Detecta versão e extrai paths ──────────────────────────────────────
-    is_loop_json = (
+    is_legacy_loop_json = (
         "iteration_template" in raw
         and "items" in raw
         and "finalization" in raw
     )
+    is_daily_loop_json = raw.get("kind") == "daily-loop" and "daily_loop" in raw
+    is_loop_json = is_legacy_loop_json or is_daily_loop_json
 
     if "basic_flow" in raw:
         # V3

@@ -141,7 +141,15 @@ def _ask_clause(llm: str, channel: str) -> str:
         "```bash\n"
         f"{_blue_signal_block(channel)}\n"
         "```\n"
-        "Depois faca a pergunta em texto simples e aguarde a resposta."
+        "Depois faca a pergunta ao operador de forma VISIVEL e inequivoca. "
+        "O azul fica ORFAO (dot azul sem pergunta na tela) se a pergunta nao "
+        "renderizar; portanto imprima OBRIGATORIAMENTE um bloco-marcador "
+        "destacado, exatamente neste formato, e so entao aguarde a resposta:\n"
+        "```\n"
+        ">>> PERGUNTA AO OPERADOR <<<\n"
+        "{sua pergunta, em uma linha}\n"
+        "Responda no terminal e clique no dot AZUL para liberar o autocast.\n"
+        "```"
     )
 
 

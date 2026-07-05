@@ -106,6 +106,25 @@ class TestParseConfigV1:
         assert cfg.brief_root == "output/app-v1/brief"
 
 
+class TestParseLoopConfig:
+    def test_parse_daily_loop_config(self, tmp_path):
+        loop_root = tmp_path / "blacksmith" / "loop-archives" / "my-loop"
+        loop_root.mkdir(parents=True)
+        cfg_path = loop_root / "_LOOP-CONFIG.json"
+        cfg_path.write_text(json.dumps({
+            "name": "my-loop",
+            "kind": "daily-loop",
+            "daily_loop": {"slug": "my-loop", "buckets": []},
+        }), encoding="utf-8")
+
+        cfg = parse_config(str(cfg_path))
+
+        assert cfg.project_name == "my-loop"
+        assert cfg.docs_root == ""
+        assert cfg.queue_root == "my-loop/_QUEUE-STATE.json"
+        assert cfg.raw["kind"] == "daily-loop"
+
+
 class TestParseConfigErrors:
     def test_parse_config_invalid_json(self, tmp_path):
         bad = tmp_path / "bad.json"

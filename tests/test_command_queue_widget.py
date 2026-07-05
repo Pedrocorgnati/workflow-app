@@ -584,6 +584,10 @@ class TestForceKimi:
             if w.property("testid") == "queue-div-llm-routing"
         ]
         assert len(found) == 1, "queue-div-llm-routing container nao encontrado"
+        llm_box = found[0]
+        assert llm_box.minimumHeight() == 112
+        assert llm_box.maximumHeight() == 112
+        assert llm_box.parentWidget().minimumHeight() >= 158
         assert widget._main_claude_radio.isChecked() is True
         assert widget._main_codex_radio.text() == "codex"
         assert widget._use_codex_chk.property("testid") == "queue-chk-use-codex"
@@ -1518,6 +1522,230 @@ class TestUnifiedEntrypointThreeButtons:
         expected_effort = cs_cfg.get("effort", EffortLevel.HIGH).value
         assert names[1] == f"/model {expected_model}"
         assert names[2] == f"/effort {expected_effort}"
+
+
+class TestLoopActionHandlersUseLoopSlot:
+    """Os handlers de loop da coluna LOOPs usam explicitamente o anexo loop."""
+
+    def _make_loop_config(self, tmp_path, *, slug="06-26-workflow-app-pills-triplas"):
+        from types import SimpleNamespace
+        loop_path = tmp_path / "loop.json"
+        loop_path.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            config_path=str(loop_path),
+            raw={
+                "name": slug,
+                "kind": "daily-loop",
+                "daily_loop": {"slug": slug, "buckets": []},
+            },
+            project_name="workflow-app-loop",
+        )
+
+    def _make_project_config(self, tmp_path):
+        from types import SimpleNamespace
+
+        project_path = tmp_path / "project.json"
+        project_path.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            config_path=str(project_path),
+            raw={"name": "project", "kind": "project"},
+            project_name="proj",
+            workspace_root=None,
+            project_dir=tmp_path,
+        )
+
+    def _find_button_by_testid(self, widget: CommandQueueWidget, testid: str):
+        from PySide6.QtWidgets import QPushButton
+
+        header = getattr(widget, "header_widget", None)
+        search_root = header if header is not None else widget
+        for btn in search_root.findChildren(QPushButton):
+            if btn.property("testid") == testid:
+                return btn
+        return None
+
+    def _install_build_stub(self, monkeypatch, *, loop_specs=None):
+        if loop_specs is None:
+            loop_specs = [
+                CommandSpec("/dummy", ModelName.SONNET, position=1),
+            ]
+        captured = {"build_loop_specs": None, "loop_root": None}
+
+        def _build(raw, loop_root, project_workspace_root=None):
+            captured["build_loop_specs"] = raw
+            captured["loop_root"] = str(loop_root)
+            return loop_specs
+
+        def _build_daily(raw, loop_root, project_workspace_root=None):
+            captured["build_loop_specs"] = raw
+            captured["loop_root"] = str(loop_root)
+            return loop_specs
+
+        def _build_rocksmash(raw, loop_root, project_workspace_root=None):
+            captured["build_loop_specs"] = raw
+            captured["loop_root"] = str(loop_root)
+            return loop_specs
+
+        monkeypatch.setattr(
+            "workflow_app.daily_loop.build_loop_specs",
+            _build,
+        )
+        monkeypatch.setattr(
+            "workflow_app.daily_loop.build_daily_loop_specs",
+            _build_daily,
+        )
+        monkeypatch.setattr(
+            "workflow_app.command_queue.loop_rocksmash_expander.build_loop_rocksmash_specs",
+            _build_rocksmash,
+        )
+        # evitar modal de review-blocked e manter fluxo deterministico
+        monkeypatch.setattr(
+            "workflow_app.daily_loop.read_review_blocked_sentinel",
+            lambda _path: None,
+        )
+
+        return captured
+
+    def test_loop_handlers_missing_loop_toasts_do_not_reference_project_pill(self, widget):
+        from workflow_app.config.app_state import app_state
+
+        app_state.clear_all()
+        toasts: list[tuple[str, str]] = []
+
+        def capture(message: str, level: str) -> None:
+            toasts.append((message, level))
+
+        signal_bus.toast_requested.connect(capture)
+        try:
+            widget._on_daily_loop_clicked()
+            widget._on_loop_clicked()
+            widget._on_rocksmash_clicked()
+        finally:
+            signal_bus.toast_requested.disconnect(capture)
+            app_state.clear_all()
+
+        messages = [message for message, _ in toasts]
+        assert len(messages) >= 3
+        assert all("metrics-project-pill" not in message for message in messages)
+        assert any("metrics-loop-pill" in message for message in messages)
+        assert any(
+            "anexo loop" in message or "Loop anexado" in message
+            for message in messages
+        )
+
+    def test_loop_handler_with_project_only_reads_loop_pill_not_project(
+        self, widget, tmp_path
+    ):
+        from workflow_app.config.app_state import app_state
+
+        app_state.clear_config()
+        app_state.set_project_config(self._make_project_config(tmp_path))
+
+        toasts: list[tuple[str, str]] = []
+        pipelines: list[list[CommandSpec]] = []
+
+        def capture_toast(message: str, level: str) -> None:
+            toasts.append((message, level))
+
+        def capture_pipeline(specs: list[CommandSpec]) -> None:
+            pipelines.append(list(specs))
+
+        signal_bus.toast_requested.connect(capture_toast)
+        signal_bus.pipeline_ready.connect(capture_pipeline)
+        try:
+            widget._on_loop_clicked()
+        finally:
+            signal_bus.toast_requested.disconnect(capture_toast)
+            signal_bus.pipeline_ready.disconnect(capture_pipeline)
+            app_state.clear_config()
+
+        assert pipelines == []
+        assert toasts
+        messages = [message for message, _ in toasts]
+        assert all("metrics-project-pill" not in message for message in messages)
+        assert any("metrics-loop-pill" in message for message in messages)
+
+    def test_loop_button_project_only_opens_dialog_instead_of_attachment_flow(
+        self, widget, qtbot, monkeypatch, tmp_path
+    ):
+        from PySide6.QtCore import Qt
+        from workflow_app.command_queue.double_phase_dialog import (
+            DoublePhaseArgumentDialog,
+        )
+        from workflow_app.config.app_state import app_state
+
+        app_state.clear_config()
+        app_state.set_project_config(self._make_project_config(tmp_path))
+
+        opened: list[DoublePhaseArgumentDialog] = []
+        toasts: list[tuple[str, str]] = []
+
+        def fake_exec(self):
+            opened.append(self)
+            return 1
+
+        def capture_toast(message: str, level: str) -> None:
+            toasts.append((message, level))
+
+        monkeypatch.setattr(DoublePhaseArgumentDialog, "exec", fake_exec)
+        signal_bus.toast_requested.connect(capture_toast)
+        try:
+            btn = self._find_button_by_testid(widget, "queue-btn-loop")
+            assert btn is not None
+            qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+        finally:
+            signal_bus.toast_requested.disconnect(capture_toast)
+            app_state.clear_config()
+
+        assert len(opened) == 1
+        assert all("Nenhum loop anexado" not in message for message, _ in toasts)
+
+    def test_loop_handlers_prioritize_loop_slot(self, widget, monkeypatch, tmp_path):
+        from workflow_app.config.app_state import app_state
+
+        project_cfg = self._make_project_config(tmp_path)
+        loop_cfg = self._make_loop_config(tmp_path)
+
+        app_state.clear_config()
+        app_state.set_project_config(project_cfg)
+        app_state.set_loop_config(loop_cfg)
+
+        captured = self._install_build_stub(monkeypatch)
+        pipelines: list[list[CommandSpec]] = []
+        on_pipeline = lambda specs: pipelines.append(list(specs))
+        signal_bus.pipeline_ready.connect(on_pipeline)
+        try:
+            widget._on_loop_clicked()
+            widget._on_daily_loop_clicked()
+            widget._on_rocksmash_clicked()
+        finally:
+            signal_bus.pipeline_ready.disconnect(on_pipeline)
+            app_state.clear_config()
+
+        assert pipelines, "esperado pipeline_ready para os tres handlers"
+        assert captured["loop_root"] == str((tmp_path / "loop.json").resolve().parent)
+        assert captured["build_loop_specs"]["kind"] == "daily-loop"
+
+    def test_loop_handlers_fallback_to_legacy_config_alias(self, widget, monkeypatch, tmp_path):
+        from workflow_app.config.app_state import app_state
+
+        legacy_cfg = self._make_loop_config(tmp_path)
+        # compat: sem set_loop_config explicito, mas config legado aponta loop.
+        app_state.clear_config()
+        app_state.set_config(legacy_cfg)  # type: ignore[arg-type]
+
+        captured = self._install_build_stub(monkeypatch)
+        pipelines: list[list[CommandSpec]] = []
+        on_pipeline = lambda specs: pipelines.append(list(specs))
+        signal_bus.pipeline_ready.connect(on_pipeline)
+        try:
+            widget._on_loop_clicked()
+        finally:
+            signal_bus.pipeline_ready.disconnect(on_pipeline)
+            app_state.clear_config()
+
+        assert pipelines, "esperado fallback via app_state.config em modo compatibilidade"
+        assert captured["build_loop_specs"]["daily_loop"]["slug"] == "06-26-workflow-app-pills-triplas"
 
 
 # ---------------------------------------------------------------------------
@@ -3494,7 +3722,10 @@ class TestRestoreSnapshotValidation:
     def test_relative_ref_without_project_dir_fails_open(self, widget, monkeypatch):
         from workflow_app.config.app_state import app_state
 
-        monkeypatch.setattr(app_state, "_config", None)
+        # AppState migrou a facade legada `_config` para slots tipados
+        # (_project_config/_loop_config). "Sem contexto de resolucao" = ambos None.
+        monkeypatch.setattr(app_state, "_project_config", None)
+        monkeypatch.setattr(app_state, "_loop_config", None)
         rel = "/execute-task --module 7 --task wbs/modules/m7/TASK-9.md"
         widget.restore_queue_snapshot([self._entry(rel)])
         names = [it.get_spec().name for it in widget._items]

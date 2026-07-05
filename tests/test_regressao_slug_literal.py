@@ -22,7 +22,10 @@ from workflow_app.domain import FlagSpec
 
 
 def test_legacy_checkbox_with_placeholder_never_emits_literal(qapp):
-    """[--name <slug>] marcado como checkbox nao deve emitir '<slug>' literal."""
+    """[--name <slug>] (checkbox_with_value, task-022): vazio bloqueia o submit;
+    preenchido emite o valor real, nunca o literal '<slug>'."""
+    from PySide6.QtWidgets import QLineEdit
+
     dlg = DoublePhaseArgumentDialog(
         pipeline_name="/study",
         argument_hint="[--name <slug>]",
@@ -32,12 +35,19 @@ def test_legacy_checkbox_with_placeholder_never_emits_literal(qapp):
     chk = dlg.findChild(QCheckBox)
     chk.setChecked(True)
 
+    # Valor vazio: validacao de slug (task-022) bloqueia o submit.
+    spy_empty = QSignalSpy(dlg.submitted)
+    dlg._on_confirm()
+    assert spy_empty.count() == 0
+
+    # Valor valido: emite o slug real, jamais o placeholder literal.
+    dlg.findChild(QLineEdit).setText("meu-slug")
     spy = QSignalSpy(dlg.submitted)
     dlg._on_confirm()
     assert spy.count() == 1
     cmd = spy.at(0)[0]
     assert "<slug>" not in cmd
-    assert cmd == "/study --name"
+    assert cmd == "/study --name meu-slug"
     dlg.deleteLater()
 
 
@@ -92,8 +102,12 @@ def test_structured_flag_with_value_never_emits_placeholder(qapp):
     dlg.deleteLater()
 
 
-def test_structured_omits_flag_when_input_empty(qapp):
-    """Flag marcada com input vazio deve ser omitida (nao emitir --flag vazio)."""
+def test_structured_blocks_when_input_empty(qapp):
+    """Flag validada (--name) marcada com input vazio bloqueia o submit (task-022).
+
+    Contrato anterior omitia a flag; a lane de validacao task-022 passou a
+    exigir slug valido, entao o submit nao emite ate o campo ser preenchido.
+    """
     dlg = DoublePhaseArgumentDialog(
         pipeline_name="/loop",
         flags_with_value=[FlagSpec(name="name", label="Nome", placeholder="slug")],
@@ -105,9 +119,7 @@ def test_structured_omits_flag_when_input_empty(qapp):
 
     spy = QSignalSpy(dlg.submitted)
     dlg._on_confirm()
-    assert spy.count() == 1
-    cmd = spy.at(0)[0]
-    assert "--name" not in cmd
+    assert spy.count() == 0
     dlg.deleteLater()
 
 
@@ -116,9 +128,10 @@ def test_structured_omits_flag_when_input_empty(qapp):
 # ---------------------------------------------------------------------------
 
 
-def test_parser_checkbox_with_placeholder_classified_as_checkbox():
-    """Parser legacy ainda classifica [--name <slug>] como checkbox (esperado)."""
+def test_parser_checkbox_with_placeholder_classified_as_checkbox_with_value():
+    """Parser classifica [--name <slug>] como checkbox_with_value (task-022)."""
     tokens = _parse_argument_hint("[--name <slug>]")
     assert len(tokens) == 1
-    assert tokens[0].kind == "checkbox"
-    assert tokens[0].key == "--name <slug>"
+    assert tokens[0].kind == "checkbox_with_value"
+    assert tokens[0].key == "--name"
+    assert tokens[0].options == ["slug"]

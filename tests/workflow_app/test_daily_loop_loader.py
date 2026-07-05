@@ -16,6 +16,7 @@ Contract enforced here:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -25,9 +26,11 @@ from workflow_app.daily_loop import (
     ReviewBlockedSentinel,
     assert_loop_root_relative_path,
     build_daily_loop_specs,
+    build_loop_specs,
     diagnose_workspace_doubled_path,
     parse_progress_items,
     read_review_blocked_sentinel,
+    resolve_effective_workspace_root,
     resolve_loop_path,
 )
 
@@ -328,6 +331,7 @@ class TestBuildDailyLoopSpecs:
         with pytest.raises(DailyLoopConfigError, match="slug ausente"):
             build_daily_loop_specs(cfg, loop_root)
 
+
     def test_pending_only_emitted_done_and_failed_skipped(self, loop_root: Path) -> None:
         cfg = _base_config(loop_root)
         cfg["daily_loop"]["total_items"] = 3
@@ -607,9 +611,10 @@ class TestClearBetweenItems:
     next item's :do (NEVER between :do and its :review-done — the audit
     depends on the :do context being fresh in conversation memory). The
     initial /clear at position 0 and the final /clear before :review remain
-    unchanged. After every injected /clear the next item must re-emit /model
-    and /effort, even if the bucket is identical to the previous item, since
-    we cannot rely on the harness preserving those flags across /clear.
+    unchanged. /clear resets only conversation context, never /model nor
+    /effort in the CLI (workflow-app-command-lists.md section 1), so the
+    injected /clear must NOT force re-emission of identical /model and /effort
+    headers — that would violate the anti-redundancy policy (section 3.1).
     """
 
     def test_default_false_preserves_legacy_no_inter_item_clear(
@@ -696,12 +701,18 @@ class TestClearBetweenItems:
             "/clear must NOT split the :do / :review-done pair"
         )
 
-    def test_flag_true_forces_model_and_effort_re_emit_after_clear(
+    def test_flag_true_suppresses_unchanged_directives_after_clear(
         self, loop_root: Path
     ) -> None:
-        """After an injected /clear, the next item must re-emit /model and
-        /effort even if its bucket matches the previous item — the harness
-        is not assumed to preserve those flags across /clear."""
+        """After an injected /clear, the next item must NOT re-emit a directive
+        whose value is unchanged — /clear does not reset /model or /effort in
+        the CLI (workflow-app-command-lists.md section 1), so re-emitting an
+        identical directive violates anti-redundancy (3.1).
+
+        In daily-loop each item's :review-done runs in opus/STANDARD, so the
+        model legitimately flips opus->sonnet at the next item (must re-emit
+        /model sonnet) while the effort stays STANDARD/medium (must suppress
+        /effort medium)."""
         cfg = _base_config(loop_root)
         cfg["daily_loop"]["clear_between_items"] = True
         cfg["daily_loop"]["total_items"] = 2
@@ -720,18 +731,18 @@ class TestClearBetweenItems:
             i for i, s in enumerate(specs)
             if s.name == "/daily-loop:do --slug test-slug --item 002"
         )
-        # Walk back from :do 002 to the most recent /clear; between them the
-        # queue must contain BOTH /model sonnet AND /effort medium.
         idx_clear_before_002 = max(
             i for i, s in enumerate(specs[:idx_do_002]) if s.name == "/clear"
         )
         window = specs[idx_clear_before_002 + 1: idx_do_002]
         names = [s.name for s in window]
+        # Model genuinely changed (opus review-done -> sonnet) -> must re-emit.
         assert "/model sonnet" in names, (
-            f"/model sonnet must re-emit after /clear; window={names}"
+            f"/model sonnet must re-emit after opus review-done; window={names}"
         )
-        assert "/effort medium" in names, (
-            f"/effort medium must re-emit after /clear; window={names}"
+        # Effort unchanged (STANDARD/medium throughout) -> must NOT re-emit.
+        assert "/effort medium" not in names, (
+            f"/effort medium must NOT re-emit after /clear (unchanged); window={names}"
         )
 
 
@@ -849,6 +860,68 @@ class TestParseProgressItems:
         text = "| 001 | [ ] | path/with spaces/file.py — note | T-x | - |\n"
         items = parse_progress_items(text)
         assert items[0].target == "path/with spaces/file.py — note"
+
+
+class TestWorkspaceDriftPolicy:
+    def test_loop_without_project_uses_loop_workspace(self, loop_root: Path) -> None:
+        loop_workspace = loop_root.parent / "loop-workspace"
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = str(loop_workspace)
+
+        assert resolve_effective_workspace_root(cfg, loop_root) == loop_workspace.resolve()
+
+    def test_equal_project_workspace_is_accepted_without_noise(self, loop_root: Path) -> None:
+        workspace = loop_root.parent / "shared-workspace"
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = str(workspace)
+
+        assert (
+            resolve_effective_workspace_root(
+                cfg,
+                loop_root,
+                project_workspace_root=workspace,
+            )
+            == workspace.resolve()
+        )
+
+    def test_divergent_project_workspace_blocks_silent_overwrite(
+        self, loop_root: Path, tmp_path: Path
+    ) -> None:
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = str(tmp_path / "loop-workspace")
+        _write_progress(loop_root, items=[("001", " ", "target/file.py", "T-sonnet-medium")])
+
+        with pytest.raises(DailyLoopConfigError, match="workspace_root divergente"):
+            build_daily_loop_specs(
+                cfg,
+                loop_root,
+                project_workspace_root=tmp_path / "project-workspace",
+            )
+
+    def test_explicit_project_override_uses_project_workspace_for_rewrite(
+        self, loop_root: Path, tmp_path: Path
+    ) -> None:
+        project_workspace = tmp_path / "project-workspace"
+        project_workspace.mkdir()
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = str(tmp_path / "loop-workspace")
+        cfg["workspace_drift_policy"] = "allow_project_override"
+        cfg["daily_loop"]["buckets"][0]["items"] = [
+            {"id": "001", "commands": ["/loop:test tasks/items/task-001.md"]}
+        ]
+        task_path = loop_root / "tasks" / "items" / "task-001.md"
+        task_path.parent.mkdir(parents=True)
+        task_path.write_text("# Task\n\n## Acao\n", encoding="utf-8")
+        _write_progress(loop_root, items=[("001", " ", "tasks/items/task-001.md", "T-sonnet-medium")])
+
+        specs = build_loop_specs(
+            cfg,
+            loop_root,
+            project_workspace_root=project_workspace,
+        )
+
+        expected = f"{os.path.relpath(loop_root, project_workspace)}/tasks/items/task-001.md"
+        assert any(spec.name == f"/loop:test {expected}" for spec in specs)
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -203,13 +203,22 @@ def test_resolve_provider_snapshot_atomic(
 def test_block_codex_unavailable_emits_canonical_toast(
     qtbot, mcp_prompt_button_factory, codex_alive_factory, toast_spy,
 ):
-    """Clique em radio-Codex sem T3 emite toast canonico (sem fallback)."""
+    """_block_codex_unavailable emite o toast canonico (sem fallback).
+
+    Contrato 2026-05-23: radio-input Codex NAO bloqueia no clique (fallback
+    central T3->T2 no MainWindow), entao o clique nao produz o toast canonico.
+    O emissor de bloqueio canonico permanece e e exercitado diretamente.
+    """
     codex_alive_factory(False)
     _, btn = mcp_prompt_button_factory(
         button_type="type-selector-radio-input", action="send",
         radio_state_getter=lambda: "Codex",
     )
+    # Clique em radio-input faz fallback: nenhum toast canonico.
     qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert all(msg != _CODEX_TOAST_CANONICAL for msg, _ in toast_spy.events)
+    # O emissor canonico, chamado diretamente, emite o toast canonico.
+    btn._block_codex_unavailable(reason="t3_missing")
     canonical_count = sum(
         1 for msg, level in toast_spy.events
         if msg == _CODEX_TOAST_CANONICAL and level == "warning"
@@ -217,11 +226,14 @@ def test_block_codex_unavailable_emits_canonical_toast(
     assert canonical_count >= 1
 
 
-# #9 - _on_clicked ordem canonica (gate T7 antes de emit).
-def test_on_clicked_blocks_codex_before_emitting(
+# #9 - radio-input Codex faz fallback (nao bloqueia no clique).
+def test_radio_input_codex_falls_back_instead_of_blocking(
     qtbot, mcp_prompt_button_factory, codex_alive_factory,
 ):
-    """Codex bloqueado NAO emite prompt_requested (gate antecede emit)."""
+    """Contrato 2026-05-23: radio-input Codex sem T3 NAO bloqueia — emite
+    prompt_requested (o fallback central T3->T2 acontece no MainWindow). O
+    gate de bloqueio canonico fica restrito ao button_type fixo "Codex".
+    """
     codex_alive_factory(False)
     _, btn = mcp_prompt_button_factory(
         button_type="type-selector-radio-input", action="Executar",
@@ -230,7 +242,7 @@ def test_on_clicked_blocks_codex_before_emitting(
     received: list[dict] = []
     btn.prompt_requested.connect(lambda p: received.append(p))
     qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
-    assert received == []
+    assert len(received) == 1
 
 
 # #10 - eventFilter dispara feedback em clique em Codex disabled.
@@ -262,10 +274,12 @@ def test_codex_blocked_logs_structured(
         button_type="type-selector-radio-input", action="send",
         radio_state_getter=lambda: "Codex", testid_slug="hard-11",
     )
+    # radio-input nao bloqueia no clique (contrato 2026-05-23); o log
+    # estruturado e emitido pelo bloqueio canonico, exercitado diretamente.
     with caplog.at_level(
         logging.WARNING, logger="workflow_app.widgets.mcp_prompt_button",
     ):
-        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+        btn._block_codex_unavailable(reason="t3_missing")
     blocked = [r for r in caplog.records if r.getMessage() == "codex_blocked"]
     assert blocked
     rec = blocked[0]
@@ -286,10 +300,11 @@ def test_codex_blocked_log_has_no_pii(
         button_type="type-selector-radio-input", action="send",
         radio_state_getter=lambda: "Codex", testid_slug="hard-12",
     )
+    # Bloqueio canonico exercitado diretamente (radio-input faz fallback).
     with caplog.at_level(
         logging.WARNING, logger="workflow_app.widgets.mcp_prompt_button",
     ):
-        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+        btn._block_codex_unavailable(reason="t3_missing")
     blocked = [r for r in caplog.records if r.getMessage() == "codex_blocked"]
     assert blocked
     rec = blocked[0]

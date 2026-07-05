@@ -35,6 +35,26 @@ def _find_copy_path_btn(window):
     raise AssertionError("brainstorm-md-copy-path nao encontrado")
 
 
+def _find_reader_btn(window):
+    """Acha o QPushButton que abre o leitor/editor do .md selecionado."""
+    from PySide6.QtWidgets import QPushButton
+
+    for btn in window.findChildren(QPushButton):
+        if btn.property("testid") == "brainstorm-md-reader-open":
+            return btn
+    raise AssertionError("brainstorm-md-reader-open nao encontrado")
+
+
+def _find_gear_btn(window):
+    """Acha o QPushButton de configuracao dos seeds brainstorm."""
+    from PySide6.QtWidgets import QPushButton
+
+    for btn in window.findChildren(QPushButton):
+        if btn.property("testid") == "brainstorm-mcp-config-gear":
+            return btn
+    raise AssertionError("brainstorm-mcp-config-gear nao encontrado")
+
+
 def _collect_toasts(request):
     """Conecta um slot a signal_bus.toast_requested e devolve a lista capturada.
 
@@ -144,6 +164,89 @@ def test_copy_path_button_copies_selected_md_path(qapp, monkeypatch, tmp_path, r
     assert info_toasts == ["Path do .md copiado para a area de transferencia."]
 
 
+def test_reader_button_sits_between_copy_and_config_buttons(qapp):
+    """Botao olho fica entre copiar path e configuracao no row do picker."""
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+    picker_row = window._brainstorm_md_btn.parentWidget()
+    layout = picker_row.layout()
+
+    copy_btn = _find_copy_path_btn(window)
+    reader_btn = _find_reader_btn(window)
+    gear_btn = _find_gear_btn(window)
+
+    assert reader_btn.width() == 24
+    assert reader_btn.height() == 24
+    assert layout.indexOf(copy_btn) < layout.indexOf(reader_btn) < layout.indexOf(gear_btn)
+
+
+def test_reader_button_without_selection_emits_warning(qapp, request):
+    """Clique no olho sem .md selecionado nao abre dialog e mostra feedback."""
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+    toasts = _collect_toasts(request)
+
+    _find_reader_btn(window).click()
+
+    warning_toasts = [
+        m for m, lvl in toasts
+        if lvl == "warning" and "Nenhum arquivo .md selecionado" in m
+    ]
+    assert warning_toasts == ["Nenhum arquivo .md selecionado para abrir no leitor."]
+
+
+def test_reader_button_opens_dialog_for_selected_md(qapp, monkeypatch, tmp_path):
+    """Clique no olho abre BrainstormMdReaderDialog com o path selecionado."""
+    from workflow_app.main_window import MainWindow
+
+    selected_md = tmp_path / "repo" / "blacksmith" / "brainstorm-mcp" / "ideia.md"
+    selected_md.parent.mkdir(parents=True)
+    selected_md.write_text("# Ideia\n", encoding="utf-8")
+
+    opened: list[str] = []
+
+    class FakeDialog:
+        def __init__(self, md_path, parent=None):
+            opened.append(str(md_path))
+            self.parent = parent
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(
+        "workflow_app.widgets.brainstorm_md_reader_dialog.BrainstormMdReaderDialog",
+        FakeDialog,
+    )
+
+    window = MainWindow()
+    window._brainstorm_md_path = str(selected_md)
+    _find_reader_btn(window).click()
+
+    assert opened == [str(selected_md)]
+
+
+def test_brainstorm_md_reader_dialog_edits_selected_file(qapp, qtbot, tmp_path):
+    """Dialog usa MarkdownReader do task-manager-desktop e salva o .md em disco."""
+    from workflow_app.widgets.brainstorm_md_reader_dialog import BrainstormMdReaderDialog
+
+    md_path = tmp_path / "ideia.md"
+    md_path.write_text("# Original\n", encoding="utf-8")
+
+    dlg = BrainstormMdReaderDialog(md_path)
+    qtbot.addWidget(dlg)
+
+    assert dlg.property("testid") == "brainstorm-md-reader-dialog"
+    assert dlg._reader.property("testid") == "brainstorm-md-reader"
+    assert "# Original" in dlg._reader._editor.toPlainText()
+
+    dlg._reader._editor.setPlainText("# Editado\n")
+    dlg._save_btn.click()
+
+    assert md_path.read_text(encoding="utf-8") == "# Editado\n"
+
+
 def test_picker_mkdir_permission_error_falls_back_to_blacksmith(
     qapp, monkeypatch, tmp_path, request
 ):
@@ -246,3 +349,45 @@ def test_picker_outside_repo_rejected(qapp, monkeypatch, tmp_path, request):
         if lvl == "warning" and "fora do repositorio" in m
     ]
     assert len(warning_toasts_after) == 1
+
+
+def test_picker_cancel_preserves_existing_selection(qapp, monkeypatch, tmp_path):
+    """Cancelamento do QFileDialog nao altera path, texto nem tooltip atuais."""
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+    repo_root = tmp_path / "repo"
+    selected_md = repo_root / "blacksmith" / "brainstorm-mcp" / "selecionado.md"
+    selected_md.parent.mkdir(parents=True)
+    selected_md.write_text("# selecionado\n", encoding="utf-8")
+    monkeypatch.setattr(
+        MainWindow, "_systemforge_root", staticmethod(lambda: repo_root)
+    )
+
+    def first_selection(parent, title, start_dir, file_filter):
+        return (str(selected_md), "")
+
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        first_selection,
+    )
+
+    md_btn = _find_md_btn(window)
+    md_btn.click()
+
+    assert window._brainstorm_md_path == str(selected_md)
+    assert md_btn.text() == "selecionado.md"
+    assert md_btn.toolTip() == str(selected_md)
+
+    def cancelled(parent, title, start_dir, file_filter):
+        return ("", "")
+
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        cancelled,
+    )
+    md_btn.click()
+
+    assert window._brainstorm_md_path == str(selected_md)
+    assert md_btn.text() == "selecionado.md"
+    assert md_btn.toolTip() == str(selected_md)

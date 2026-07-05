@@ -161,6 +161,45 @@ class TestMainWindowStartup:
         assert app_state.has_config
         assert app_state.project_name == "my-project"
 
+    def test_load_config_loop_skips_project_queue_and_kanban(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        """Loop config nao restaura queue/kanban de projeto (aceite item 003).
+
+        Regression guard do branch is_loop_attachment em _load_config
+        (main_window.py): carregar um loop config deve pular
+        _restore_queue_from_storage e _load_kanban_from_config e gravar
+        apenas o slot tipado de loop, sem tocar o slot de project.
+        """
+        loop_path = tmp_path / "_LOOP-CONFIG.json"
+        loop_path.write_text(json.dumps({
+            "name": "loop-x",
+            "kind": "daily-loop",
+            "daily_loop": {"slug": "loop-x", "buckets": []},
+        }), encoding="utf-8")
+
+        from workflow_app.main_window import MainWindow
+        window = MainWindow()
+        app_state.clear_config()
+
+        calls = {"queue": 0, "kanban": 0}
+        monkeypatch.setattr(
+            window, "_restore_queue_from_storage",
+            lambda *a, **k: calls.__setitem__("queue", calls["queue"] + 1),
+        )
+        monkeypatch.setattr(
+            window, "_load_kanban_from_config",
+            lambda *a, **k: calls.__setitem__("kanban", calls["kanban"] + 1),
+        )
+
+        window._load_config(str(loop_path), config_kind="loop")
+
+        assert calls == {"queue": 0, "kanban": 0}, (
+            "loop config nao pode restaurar queue/kanban de projeto"
+        )
+        assert app_state.loop_config is not None
+        assert not app_state.has_project
+
     def test_load_config_invalid_shows_toast(self, qapp):
         """_load_config com path inválido exibe toast de erro e não altera estado."""
         from workflow_app.main_window import MainWindow

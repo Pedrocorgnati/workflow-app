@@ -56,10 +56,10 @@ from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
 # ─── Instance buttons drag&drop (output-toolbar-center-top) ───────────────── #
 #
-# Os botoes do `instance-group` (clauded/kimid/clauded2/kimid2/codex) sao reordenaveis
+# Os botoes do `instance-group` (clauded/kimid/codex) sao reordenaveis
 # via drag&drop. A ordem persiste em QSettings("SystemForge", "WorkflowApp")
 # sob `_INSTANCE_ORDER_SETTINGS_KEY` e e restaurada na proxima abertura do app.
-_CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "clauded2", "kimid2", "codex"]
+_CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "codex"]
 _INSTANCE_ORDER_SETTINGS_KEY = "MetricsBar/instanceOrder"
 _INSTANCE_DRAG_MIME = "application/x-workflow-instance-button"
 _INSTANCE_DRAG_THRESHOLD = 6
@@ -393,6 +393,11 @@ class MetricsBar(QWidget):
     """38px project selector, instance selection, and navigation toolbar."""
 
     view_changed = Signal(int)              # 0=Workflow, 1=Comandos, 2=Kanban
+    project_config_change_requested = Signal(str)   # path of projeto .json
+    loop_config_change_requested = Signal(str)      # path of loop config .json
+    loop_config_unload_requested = Signal()         # user clicked x on loop pill
+    loop_config_reload_requested = Signal(str)      # user clicked refresh on loop pill
+    # Compat legado: mantém o contrato anterior sem quebrar integções legadas.
     config_change_requested = Signal(str)   # path of selected .json
     config_unload_requested = Signal()      # user clicked ✕ on project pill
     config_reload_requested = Signal(str)   # user clicked refresh on project pill
@@ -439,12 +444,16 @@ class MetricsBar(QWidget):
         # Remote mode removido 2026-05-12 — botao e estado persistido foram
         # eliminados; o RemoteServer (se ainda instanciado) permanece dormente.
 
-        # Reflect current project state (if a project was loaded before MetricsBar init)
+        # Reflect current attachment state (if loaded before MetricsBar init).
         from workflow_app.config.app_state import app_state
-        if app_state.has_config:
-            self._apply_project_loaded(app_state.project_name)
+        if app_state.has_project and app_state.project_config:
+            self._apply_project_loaded(app_state.project_config.project_name)
         else:
             self._apply_project_empty()
+        if app_state.has_loop and app_state.loop_config:
+            self._apply_loop_loaded(app_state.loop_config.project_name)
+        else:
+            self._apply_loop_empty()
 
     # ─────────────────────────────────────────────────────────── UI ──── #
 
@@ -480,6 +489,7 @@ class MetricsBar(QWidget):
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
         )
         self._project_name_lbl.setContentsMargins(0, 0, 0, 0)
+        self._project_name_lbl.setMaximumWidth(180)
         self._project_name_lbl.setStyleSheet(
             "color: #22C55E; font-size: 11px; font-weight: 600;"
             " border: none; background: transparent; padding: 0; margin: 0;"
@@ -513,6 +523,60 @@ class MetricsBar(QWidget):
         )
         self._proj_x.clicked.connect(self._on_proj_unload)
         _pl.addWidget(self._proj_x)
+
+        # ── Loop pill / select button ────────────────────────────────── #
+        self._loop_pill = QWidget()
+        self._loop_pill.setObjectName("LoopPill")
+        self._loop_pill.setProperty("testid", "metrics-loop-pill")
+        self._loop_pill.setFixedHeight(28)
+        self._loop_pill.setStyleSheet(
+            "QWidget#LoopPill { background: transparent; border: 1px solid #0EA5E9; border-radius: 5px; }"
+            " QWidget#LoopPill QLabel { border: none; }"
+            " QWidget#LoopPill QPushButton { border: none; }"
+        )
+        _ll = QHBoxLayout(self._loop_pill)
+        _ll.setContentsMargins(10, 0, 6, 0)
+        _ll.setSpacing(6)
+        _ll.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._loop_name_lbl = QLabel("")
+        self._loop_name_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+        self._loop_name_lbl.setContentsMargins(0, 0, 0, 0)
+        self._loop_name_lbl.setMaximumWidth(180)
+        self._loop_name_lbl.setStyleSheet(
+            "color: #38BDF8; font-size: 11px; font-weight: 600;"
+            " border: none; background: transparent; padding: 0; margin: 0;"
+        )
+        _ll.addWidget(self._loop_name_lbl)
+        self._loop_refresh = QPushButton("↻")
+        self._loop_refresh.setObjectName("LoopRefreshBtn")
+        self._loop_refresh.setProperty("testid", "metrics-btn-loop-refresh")
+        self._loop_refresh.setFixedSize(20, 20)
+        self._loop_refresh.setToolTip("Recarregar loop")
+        self._loop_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._loop_refresh.setStyleSheet(
+            "QPushButton#LoopRefreshBtn { background: transparent; border: none;"
+            "  color: #38BDF8; font-size: 15px; font-weight: 700;"
+            "  min-width: 20px; min-height: 20px; padding: 0; margin: 0; }"
+            "QPushButton#LoopRefreshBtn:hover { color: #7DD3FC; background: rgba(14, 165, 233, 0.14); border-radius: 3px; }"
+        )
+        self._loop_refresh.clicked.connect(self._on_loop_refresh)
+        _ll.addWidget(self._loop_refresh)
+        self._loop_x = QPushButton("✕")
+        self._loop_x.setObjectName("LoopCloseBtn")
+        self._loop_x.setProperty("testid", "metrics-btn-loop-unload")
+        self._loop_x.setFixedSize(20, 20)
+        self._loop_x.setToolTip("Desvincular loop")
+        self._loop_x.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._loop_x.setStyleSheet(
+            "QPushButton#LoopCloseBtn { background: transparent; border: none;"
+            "  color: #EF4444; font-size: 14px; font-weight: 700;"
+            "  min-width: 20px; min-height: 20px; padding: 0; margin: 0; }"
+            "QPushButton#LoopCloseBtn:hover { color: #F87171; background: rgba(239, 68, 68, 0.14); border-radius: 3px; }"
+        )
+        self._loop_x.clicked.connect(self._on_loop_unload)
+        _ll.addWidget(self._loop_x)
 
         # ── Feature name input (beside the pill) ─────────────────────── #
         self._feature_name_input = QLineEdit()
@@ -560,6 +624,7 @@ class MetricsBar(QWidget):
         #   4d: removido `codex` (historico).
         # 2026-05-19+: `codex` reintroduzido e roteado para T3.
         # 2026-06-01+: botao `codex` inicia a variante `codex-high`.
+        # 2026-06-22+: botoes `clauded2` e `kimid2` removidos (a pedido).
         # 2026-05-14: botoes sao reordenaveis via drag&drop (output-toolbar-center-top).
         # Ordem persiste em QSettings/_INSTANCE_ORDER_SETTINGS_KEY e e restaurada aqui.
         self._instance_order_settings = QSettings("SystemForge", "WorkflowApp")
@@ -593,6 +658,7 @@ class MetricsBar(QWidget):
         # _instance_group NOT added here — reparented to output-toolbar-center by MainWindow.
 
         layout.addWidget(self._project_pill)
+        layout.addWidget(self._loop_pill)
         layout.addWidget(self._feature_name_input)
         layout.addWidget(self._proj_select_btn)
         layout.addWidget(self._loop_select_btn)
@@ -1460,6 +1526,10 @@ class MetricsBar(QWidget):
         bus.git_info_updated.connect(self._on_git_info_updated)
 
         bus.config_loaded.connect(self._on_config_loaded_signal)
+        # config_unloaded e project-scoped (emitido por _unload_config). O loop
+        # tem unload proprio (_unload_loop_config -> _apply_loop_empty), entao
+        # NAO limpar o loop pill aqui: preserva o anexo de loop quando o projeto
+        # e desvinculado (granular unload, itens 003/005/006 do loop).
         bus.config_unloaded.connect(self._apply_project_empty)
 
     # ─────────────────────────────────────────────────────── Slots ───── #
@@ -1589,7 +1659,13 @@ class MetricsBar(QWidget):
         super().focusInEvent(event)
         self._refresh_instance_badge()
 
-    def _open_config_picker(self, title: str, fallback_segments: tuple[str, ...]) -> None:
+    def _open_config_picker(
+        self,
+        title: str,
+        fallback_segments: tuple[str, ...],
+        *,
+        target: str = "project",
+    ) -> None:
         """Shared picker for Projeto/Loop buttons.
 
         Opens a getOpenFileName dialog starting at the dir of the currently
@@ -1597,12 +1673,15 @@ class MetricsBar(QWidget):
         `fallback_segments` directory; otherwise uses cwd. Performs loop-
         schema validation by JSON content (not filename suffix) so that
         `_LOOP-CONFIG.json` and other non `-loop.json` names still get
-        checked. Emits `config_change_requested(path)` on success.
+        checked. Emits one or mais sinais dedicados ao tipo.
         """
         from workflow_app.config.app_state import app_state
         start_dir = str(Path.cwd())
-        if app_state.has_config and app_state.config:
-            start_dir = str(Path(app_state.config.config_path).parent)
+        active_config = (
+            app_state.loop_config if target == "loop" else app_state.project_config
+        )
+        if active_config is not None:
+            start_dir = str(Path(active_config.config_path).parent)
         else:
             resolved = self._resolve_walk_up(*fallback_segments)
             if resolved:
@@ -1614,68 +1693,85 @@ class MetricsBar(QWidget):
         if not path:
             return
         p = Path(path)
-        # Validacao por conteudo (nao por sufixo do filename): qualquer JSON
-        # que pareca loop config (`-loop.json`, `_LOOP-CONFIG.json`, ou
-        # totalmente arbitrario) e validado quando carrega campos canonicos
-        # de loop OU declara `kind: daily-loop` + bloco `daily_loop`.
-        try:
-            raw_probe = json.loads(p.read_text(encoding="utf-8"))
-        except Exception as exc:
-            self._signal_bus.toast_requested.emit(
-                f"Erro ao ler {p.name}: {exc}", "error"
-            )
-            return
-        if isinstance(raw_probe, dict):
-            has_loop_fields = (
-                "iteration_template" in raw_probe
-                and "items" in raw_probe
-                and "finalization" in raw_probe
-            )
-            is_daily_loop_kind = (
-                raw_probe.get("kind") == "daily-loop"
-                and "daily_loop" in raw_probe
-            )
-            if has_loop_fields or is_daily_loop_kind:
-                required = ["schema_version", "name"]
-                if has_loop_fields:
-                    required.extend(["iteration_template", "items", "finalization"])
-                if is_daily_loop_kind:
-                    required.append("daily_loop")
-                # `mode` exigido em cmd/both (legacy `-cmd-loop.json` /
-                # `-both-loop.json` por nome) e sempre que o proprio JSON
-                # declarar `mode` (validamos o valor abaixo).
-                if (
-                    p.name.endswith("-cmd-loop.json")
-                    or p.name.endswith("-both-loop.json")
-                ):
-                    required.append("mode")
-                missing = [f for f in required if f not in raw_probe]
-                if missing:
+        if target == "loop":
+            # Validacao por conteudo (nao por sufixo do filename): qualquer JSON
+            # que pareca loop config (`-loop.json`, `_LOOP-CONFIG.json`, ou
+            # totalmente arbitrario) e validado quando carrega campos canonicos
+            # de loop OU declara `kind: daily-loop` + bloco `daily_loop`.
+            try:
+                raw_probe = json.loads(p.read_text(encoding="utf-8"))
+            except Exception as exc:
+                self._signal_bus.toast_requested.emit(
+                    f"Erro ao ler {p.name}: {exc}", "error"
+                )
+                return
+            if isinstance(raw_probe, dict):
+                has_loop_fields = (
+                    "iteration_template" in raw_probe
+                    and "items" in raw_probe
+                    and "finalization" in raw_probe
+                )
+                is_daily_loop_kind = (
+                    raw_probe.get("kind") == "daily-loop"
+                    and "daily_loop" in raw_probe
+                )
+                if has_loop_fields or is_daily_loop_kind:
+                    required = ["schema_version", "name"]
+                    if has_loop_fields:
+                        required.extend(["iteration_template", "items", "finalization"])
+                    if is_daily_loop_kind:
+                        required.append("daily_loop")
+                    # `mode` exigido em cmd/both (legacy `-cmd-loop.json` /
+                    # `-both-loop.json` por nome) e sempre que o proprio JSON
+                    # declarar `mode` (validamos o valor abaixo).
+                    if (
+                        p.name.endswith("-cmd-loop.json")
+                        or p.name.endswith("-both-loop.json")
+                    ):
+                        required.append("mode")
+                    missing = [f for f in required if f not in raw_probe]
+                    if missing:
+                        self._signal_bus.toast_requested.emit(
+                            f"Schema invalido em {p.name}: campos ausentes "
+                            f"{', '.join(missing)}. Verifique se o JSON segue o "
+                            "LOOP_CANONICAL_TEMPLATE.",
+                            "error",
+                        )
+                        return
+                    if "mode" in raw_probe and raw_probe["mode"] not in (
+                        "task",
+                        "cmd",
+                        "both",
+                    ):
+                        self._signal_bus.toast_requested.emit(
+                            f"Schema invalido em {p.name}: modo "
+                            f"'{raw_probe.get('mode')}' nao reconhecido. "
+                            "Valores validos: task, cmd, both.",
+                            "error",
+                        )
+                        return
+                else:
                     self._signal_bus.toast_requested.emit(
-                        f"Schema invalido em {p.name}: campos ausentes "
-                        f"{', '.join(missing)}. Verifique se o JSON segue o "
-                        "LOOP_CANONICAL_TEMPLATE.",
-                        "error",
+                        f"{p.name} não é um loop config válido.", "error"
                     )
                     return
-                if "mode" in raw_probe and raw_probe["mode"] not in ("task", "cmd", "both"):
-                    self._signal_bus.toast_requested.emit(
-                        f"Schema invalido em {p.name}: modo "
-                        f"'{raw_probe.get('mode')}' nao reconhecido. "
-                        "Valores validos: task, cmd, both.",
-                        "error",
-                    )
-                    return
+            self.loop_config_change_requested.emit(path)
+        else:
+            self.project_config_change_requested.emit(path)
+
+        # Compat legado: mantem sinal unificado.
         self.config_change_requested.emit(path)
 
     def _on_proj_select(self) -> None:
         self._open_config_picker(
             "Selecionar project.json", (".claude", "projects"),
+            target="project",
         )
 
     def _on_loop_select(self) -> None:
         self._open_config_picker(
             "Selecionar _LOOP-CONFIG.json", ("blacksmith",),
+            target="loop",
         )
 
     def _on_proj_unload(self) -> None:
@@ -1685,12 +1781,27 @@ class MetricsBar(QWidget):
         """Recarrega o JSON ativo sem abrir o seletor."""
         from workflow_app.config.app_state import app_state
 
-        if not app_state.has_config or not app_state.config:
+        project_cfg = app_state.project_config
+        if project_cfg is None:
             self._signal_bus.toast_requested.emit(
                 "Nenhum projeto carregado para atualizar.", "warning"
             )
             return
-        self.config_reload_requested.emit(app_state.config.config_path)
+        self.config_reload_requested.emit(project_cfg.config_path)
+
+    def _on_loop_unload(self) -> None:
+        self.loop_config_unload_requested.emit()
+
+    def _on_loop_refresh(self) -> None:
+        """Recarrega o loop ativo sem abrir o seletor."""
+        from workflow_app.config.app_state import app_state
+
+        if not app_state.has_loop or not app_state.loop_config:
+            self._signal_bus.toast_requested.emit(
+                "Nenhum loop carregado para atualizar.", "warning"
+            )
+            return
+        self.loop_config_reload_requested.emit(app_state.loop_config.config_path)
 
     def _on_proj_open(self) -> None:
         """Seleciona pasta de projeto, carrega-o e abre no file manager.
@@ -1738,7 +1849,7 @@ class MetricsBar(QWidget):
             return
 
         # Carrega projeto (MainWindow tratara o resto: queue-command-list, etc)
-        self.config_change_requested.emit(config_path)
+        self.project_config_change_requested.emit(config_path)
 
         # Abre pasta no file manager do SO
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_path)))
@@ -1748,8 +1859,23 @@ class MetricsBar(QWidget):
 
     def _on_config_loaded_signal(self, _path: str) -> None:
         from workflow_app.config.app_state import app_state
-        if app_state.has_config:
-            raw = app_state.config.raw if app_state.config else {}
+        loaded_project = (
+            app_state.project_config
+            if app_state.project_config and app_state.project_config.config_path == _path
+            else None
+        )
+        loaded_loop = (
+            app_state.loop_config
+            if app_state.loop_config and app_state.loop_config.config_path == _path
+            else None
+        )
+        if loaded_project:
+            raw = loaded_project.raw if loaded_project else {}
+            commercial = raw.get("commercial_name", "") or loaded_project.project_name
+            feature = raw.get("feature_name", "")
+            self._apply_project_loaded(commercial, feature)
+        if loaded_loop:
+            raw = loaded_loop.raw if loaded_loop else {}
             # Discriminar tipo de JSON pelo schema. `kind` e `loop_mode` sao
             # eixos ortogonais — extraimos `mode` sempre que o JSON tiver
             # campos canonicos de loop OU declarar `mode` no root, mesmo
@@ -1780,9 +1906,8 @@ class MetricsBar(QWidget):
                     elif has_loop_fields:
                         loop_mode = "task"  # default historico
             app_state.set_loop_mode(loop_mode)
-            commercial = raw.get("commercial_name", "") or app_state.project_name
-            feature = raw.get("feature_name", "")
-            self._apply_project_loaded(commercial, feature)
+            commercial = raw.get("commercial_name", "") or loaded_loop.project_name
+            self._apply_loop_loaded(commercial)
             # Toast acionavel quando o JSON e um loop config — aponta o
             # botao certo da queue-strip e mostra contagem de pendencias
             # lida de PROGRESS.md (fallback: total declarado).
@@ -1793,8 +1918,8 @@ class MetricsBar(QWidget):
         """Toast pos-load para loop config: contagem de pendentes + CTA do botao certo."""
         from workflow_app.config.app_state import app_state
         loop_root: Path | None = None
-        if app_state.has_config and app_state.config:
-            loop_root = Path(app_state.config.config_path).parent
+        if app_state.loop_config:
+            loop_root = Path(app_state.loop_config.config_path).parent
         # Contagem de pendentes: tenta PROGRESS.md (verdade) -> fallback
         # `daily_loop.total_items` -> fallback `len(items)`.
         pending: int | None = None
@@ -1853,14 +1978,18 @@ class MetricsBar(QWidget):
         self._signal_bus.toast_requested.emit(msg, toast_type)
 
     def _apply_project_loaded(self, name: str, feature_name: str = "") -> None:
-        self._project_name_lbl.setText(name)
+        self._project_name_lbl.setToolTip(name)
+        self._project_name_lbl.setText(
+            self._project_name_lbl.fontMetrics().elidedText(
+                name, Qt.TextElideMode.ElideMiddle, 180,
+            )
+        )
         self._project_pill.show()
         self._project_name_lbl.show()
         self._proj_refresh.show()
         self._proj_x.show()
         self._proj_select_btn.hide()
-        self._loop_select_btn.hide()
-        self._proj_open_btn.hide()
+        self._proj_open_btn.show()
         if feature_name:
             self._feature_name_input.setText(feature_name)
             self._feature_name_input.show()
@@ -1869,12 +1998,35 @@ class MetricsBar(QWidget):
             self._feature_name_input.hide()
 
     def _apply_project_empty(self) -> None:
+        from workflow_app.config.app_state import app_state
+
         self._project_pill.hide()
         self._feature_name_input.setText("")
         self._feature_name_input.hide()
         self._proj_select_btn.show()
-        self._loop_select_btn.show()
+        if app_state.has_loop:
+            self._loop_select_btn.hide()
+        else:
+            self._loop_select_btn.show()
         self._proj_open_btn.show()
+
+    def _apply_loop_loaded(self, name: str) -> None:
+        self._loop_name_lbl.setToolTip(name)
+        self._loop_name_lbl.setText(
+            self._loop_name_lbl.fontMetrics().elidedText(
+                name, Qt.TextElideMode.ElideMiddle, 180,
+            )
+        )
+        self._loop_pill.show()
+        self._loop_name_lbl.show()
+        self._loop_refresh.show()
+        self._loop_x.show()
+        self._loop_select_btn.hide()
+
+    def _apply_loop_empty(self) -> None:
+        self._loop_pill.hide()
+        self._loop_name_lbl.setText("")
+        self._loop_select_btn.show()
 
     def _on_tool_use_started(self, tool_name: str) -> None:
         self._tool_use_count += 1

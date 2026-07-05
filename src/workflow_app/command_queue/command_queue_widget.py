@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -93,6 +94,35 @@ _DROP_INDICATOR_COLOR = QColor("#F59E0B")  # Amber-400
 _DROP_INDICATOR_WIDTH = 2
 
 _WORKFLOW_APP_DIR = Path(__file__).resolve().parents[3]  # .../ai-forge/workflow-app
+
+# ── Filtro por categoria da sub-aba 'Agentes' (insertions personas) ─────────── #
+# A sub-aba 'Agentes' expoe uma barra de filtros (QTabBar) acima do flow unico
+# de botoes de persona. A 1a aba e SEMPRE "All" (renderiza todos); as demais
+# filtram os botoes pela property `persona_category`. A atribuicao slug ->
+# categoria vive em MainWindow (_persona_category), que importa estas constantes
+# para validar/normalizar. Manter esta lista como fonte unica da ORDEM das abas.
+PERSONA_FILTER_ALL_LABEL = "All"
+PERSONA_FILTER_CATEGORIES: tuple[str, ...] = (
+    "Plan",
+    "Research",
+    "Design",
+    "Build",
+    "Review",
+    "specialists",
+)
+# Categoria default para personas auto-descobertas que nao casam nenhuma regra.
+PERSONA_FILTER_DEFAULT = "Build"
+
+# ── Filtro por tipo da sub-aba 'PROMPTS' ──────────────────────────────────── #
+PROMPT_FILTER_ALL_LABEL = "All"
+PROMPT_FILTER_CATEGORIES: tuple[str, ...] = (
+    "Plan",
+    "Review",
+    "Build",
+    "Ops",
+    "Study",
+)
+PROMPT_FILTER_DEFAULT = "Ops"
 
 
 class ResponsiveButtonFlowLayout(QLayout):
@@ -498,6 +528,19 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
         "model": ModelName.OPUS,
         "effort": EffortLevel.HIGH,
     },
+    # Familia Usabilidade do cliente final (queue-btn-usabilidade-visual +
+    # queue-btn-usabilidade-ia): refactor do loop 06-23 apos o revert 06-22
+    # (reuso de comandos scope=module em pipeline project-level = orfaos). Os
+    # DOIS botoes compartilham este unico par opus/high. Cada handler expande
+    # UMA cadeia estatica e completa, sem branch A/B em runtime: a trilha visual
+    # e 100% project (zero module-bound); a trilha IA so toca comandos
+    # module-bound depois do bootstrap micro:* que cria o modulo e grava o
+    # module_id num lock (resolvido em runtime pelos proprios comandos, nunca
+    # como placeholder {N} literal na expansao do clique).
+    "usabilidade": {
+        "model": ModelName.OPUS,
+        "effort": EffortLevel.HIGH,
+    },
     # NOTA: o pipeline /book-legacy NAO entra no GROUP_MAP porque cada
     # subcomando tem model/effort proprio (3 tiers do Bloco I-34). GROUP_MAP
     # so expressa um par model/effort unico por grupo. O builder
@@ -775,16 +818,51 @@ class CommandQueueWidget(QWidget):
 
     # ─────────────────────────────────────────────── Attachment proxy ─── #
 
+    @staticmethod
+    def _is_loop_attachment_config(config: object | None) -> bool:
+        """Retorna True somente quando o config tem shape de _LOOP-CONFIG.json."""
+        if config is None:
+            return False
+        raw = getattr(config, "raw", None)
+        return (
+            isinstance(raw, dict)
+            and raw.get("kind") == "daily-loop"
+            and "daily_loop" in raw
+        )
+
+    @classmethod
+    def _resolve_loop_attachment_config(cls):
+        """Resolve o anexo loop sem consultar project.json por engano.
+
+        Fonte primaria: ``app_state.loop_config`` (metrics-loop-pill).
+        Compatibilidade: aceita ``app_state.config`` apenas quando o proprio
+        payload legado tem shape de _LOOP-CONFIG.json.
+        """
+        from workflow_app.config.app_state import app_state
+
+        if app_state.loop_config is not None:
+            return app_state.loop_config
+        legacy_config = app_state.config
+        if cls._is_loop_attachment_config(legacy_config):
+            return legacy_config
+        return None
+
     class _AttachmentProxy:
         """Proxy que implementa a interface pill para DoublePhaseButton."""
 
-        def __init__(self, widget, loader):
+        def __init__(self, widget, loader, attachment_kind: str = "project"):
             self._widget = widget
             self._loader = loader
+            self._attachment_kind = attachment_kind
 
         def has_attachment(self):
             from workflow_app.config.app_state import app_state
-            return app_state.has_config and app_state.config is not None
+            if self._attachment_kind == "loop":
+                return (
+                    app_state.loop_config is not None
+                    or self._widget._is_loop_attachment_config(app_state.config)
+                )
+            return app_state.has_project and app_state.project_config is not None
 
         def generate_from_attachment(self):
             self._loader()
@@ -1138,6 +1216,11 @@ class CommandQueueWidget(QWidget):
             self._template_label.setVisible(True)
             self._maybe_auto_save(base_cmd)
 
+    def _selected_brainstorm_md_path(self) -> str:
+        """Retorna o .md selecionado no picker da aba brainstorm, se existir."""
+        win = self.window()
+        return str(getattr(win, "_brainstorm_md_path", "") or "").strip()
+
     def _on_loop_command_ready(self, command_line: str) -> None:
         """Expand `/loop --{mode} <path.md> [--name <slug>]` into its
         canonical sub-command sequence per `.claude/commands/loop.md` FASE 2.
@@ -1340,6 +1423,7 @@ class CommandQueueWidget(QWidget):
                     f"/loop:review --name {slug}",
                     f"/loop:integrated-architecture --loop-slug {slug}",
                     f"/loop:workflow-app --name {slug}",
+                    f"/loop:friendly-resume --name {slug}",
                 ]
             elif mode == "--cmd":
                 sub_names = [
@@ -1349,6 +1433,7 @@ class CommandQueueWidget(QWidget):
                     f"/loop:review {mode_flag} --name {slug}",
                     f"/loop:integrated-architecture --loop-slug {slug}",
                     f"/loop:workflow-app {mode_flag} --name {slug}",
+                    f"/loop:friendly-resume --name {slug}",
                 ]
             else:  # --both
                 sub_names = [
@@ -1360,6 +1445,7 @@ class CommandQueueWidget(QWidget):
                     f"/loop:mark-type --name {slug}",
                     f"/loop:check-tasks-and-cmd --name {slug}",
                     f"/loop:workflow-app {mode_flag} --name {slug}",
+                    f"/loop:friendly-resume --name {slug}",
                 ]
 
             specs: list[CommandSpec] = []
@@ -2059,7 +2145,7 @@ class CommandQueueWidget(QWidget):
         daily_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
         daily_loop_pill = self._AttachmentProxy(
-            self, self._on_daily_loop_clicked
+            self, self._on_daily_loop_clicked, attachment_kind="loop"
         )
         daily_loop_spec = COMMAND_FLAG_SPECS.get("/daily-loop")
         daily_loop_btn = DoublePhaseButton(
@@ -2077,7 +2163,7 @@ class CommandQueueWidget(QWidget):
         daily_loop_btn.setProperty("testid", "queue-btn-daily-loop")
         daily_loop_btn.setToolTip(
             "Execute Daily Loop — expande a fila finita gerada por Create. "
-            "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
+            "Le _LOOP-CONFIG.json + PROGRESS.md do anexo loop e cria "
             "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
             "/daily-loop:review-done (Opus/standard, /mcp:dual Level 3 "
             "CROSS_ADVERSARIAL — analogo per-item de /review-executed-task, "
@@ -2088,7 +2174,7 @@ class CommandQueueWidget(QWidget):
         daily_loop_btn.setStyleSheet(_SECTION_BTN_STYLE)
 
         loop_pill = self._AttachmentProxy(
-            self, self._on_loop_clicked
+            self, self._on_loop_clicked, attachment_kind="loop"
         )
         loop_spec = COMMAND_FLAG_SPECS.get("/loop")
         loop_btn = DoublePhaseButton(
@@ -2104,6 +2190,7 @@ class CommandQueueWidget(QWidget):
             },
             flags_boolean=loop_spec.flags_boolean if loop_spec else None,
             flags_with_value=loop_spec.flags_with_value if loop_spec else None,
+            selected_md_path_getter=self._selected_brainstorm_md_path,
             pill=loop_pill,
             on_command_ready=self._on_unified_command_ready,
             parent=self,
@@ -2111,7 +2198,7 @@ class CommandQueueWidget(QWidget):
         loop_btn.setProperty("testid", "queue-btn-loop")
         loop_btn.setToolTip(
             "Loop — expande fila finita gerada por /loop (--task|--cmd|--cmd-single|--both). "
-            "Le _LOOP-CONFIG.json + PROGRESS.md do projeto carregado e cria "
+            "Le _LOOP-CONFIG.json + PROGRESS.md do anexo loop e cria "
             "para CADA item pendente: /daily-loop:do (bucket model/effort) + "
             "/daily-loop:review-done (Opus/standard, /mcp:dual Level 3 "
             "CROSS_ADVERSARIAL). Final: /daily-loop:review global em Opus/HIGH. "
@@ -2124,7 +2211,7 @@ class CommandQueueWidget(QWidget):
         # design blacksmith/09-06-llm-dumb-use/KIMI-LOOP-DESIGN.md); a lane se
         # distingue pelos commands /kimi-loop:iteraction:* dentro do JSON.
         kimi_loop_pill = self._AttachmentProxy(
-            self, self._on_loop_clicked
+            self, self._on_loop_clicked, attachment_kind="loop"
         )
         kimi_loop_spec = COMMAND_FLAG_SPECS.get("/kimi-loop")
         kimi_loop_btn = DoublePhaseButton(
@@ -2319,7 +2406,7 @@ class CommandQueueWidget(QWidget):
             mkt_assets_btn,
             study_btn,
             ("rocksmash",
-             "rocksmash — le metrics-project-pill (_LOOP-CONFIG.json kind=daily-loop), "
+             "rocksmash — le anexo loop (_LOOP-CONFIG.json kind=daily-loop), "
              "expande para fila /loop-rocksmash:prepare + N pares :do/:review-done + "
              "/loop-rocksmash:rename. Items kind=preparo/finalizacao sao ignorados; "
              "directives /clear, /model, /effort auto-injetadas por bucket boundary.",
@@ -2432,6 +2519,42 @@ class CommandQueueWidget(QWidget):
              "aba admin Integracoes do backend central (systemforge-dashboard).",
              self._on_multibackend_clicked,
              "queue-btn-multibackend"),
+            ("usabilidade visual",
+             "Usabilidade (visual/responsivo) — trilha 100% project, zero "
+             "module-bound (licao do revert 06-22). Le o project.json do "
+             "metrics-project-pill como $1. Cadeia A estatica (12 comandos "
+             "opus/high, sem branch em runtime): IDENTIFICAR via "
+             "/usabilidade:detect + /frontend:scan + /frontend:audit + "
+             "/frontend:mobile-check + /frontend:assets-check + /frontend:report "
+             "-> IMPLANTAR via /tools:layout-full-refactor + /tools:mobile-analysis "
+             "+ /tools:mobile-update -> REVISAR (delta gate) re-rodando "
+             "/usabilidade:detect + /frontend:report -> MANUAL via "
+             "/instruction-manual (recebe o workspace_root derivado do config, "
+             "nao o placeholder literal). Nenhum --module, nenhum "
+             "build-module-pipeline, nenhum review-executed-module, nenhuma "
+             "entrevista. Sem project.json carregado -> toast verbose pt-BR, "
+             "nada enfileira.",
+             self._on_usabilidade_visual_clicked,
+             "queue-btn-usabilidade-visual"),
+            ("usabilidade IA",
+             "Usabilidade (IA/findability) — trilha que cria um modulo real via "
+             "micro-architecture ANTES de qualquer comando module-bound; o "
+             "numero do modulo nunca aparece como placeholder {N}. Le o "
+             "project.json do metrics-project-pill como $1. Cadeia B estatica "
+             "(13 comandos opus/high, sem branch em runtime): IDENTIFICAR via "
+             "/usabilidade:detect + /frontend:scan + /frontend:audit + "
+             "/frontend:report -> BOOTSTRAP DCP-lite /micro:brief -> "
+             "/micro:architecture -> /micro:specific-flow-prep -> "
+             "/micro:modularize (CRIA o modulo e grava o module_id no lock/"
+             "delivery.json) -> /micro:review -> BUILD via /build-module-pipeline "
+             "(resolve o modulo ativo lendo o lock, fail-closed se ausente) -> "
+             "REVISAR via /review-executed-module (mesmo lock) + /front-end-review "
+             "-> MANUAL via /instruction-manual (workspace_root derivado do "
+             "config). Os comandos module-bound rodam sempre depois do bootstrap "
+             "que cria o modulo; nenhum {N} literal na fila. Sem project.json "
+             "carregado -> toast verbose pt-BR, nada enfileira.",
+             self._on_usabilidade_ia_clicked,
+             "queue-btn-usabilidade-ia"),
             _maintenance_btn,
         ])
         header_layout.addWidget(auxiliar_content)
@@ -2482,12 +2605,102 @@ class CommandQueueWidget(QWidget):
             _paths_tab, spacing=4, max_lines=4
         )
         self._subtab_paths_layout.setContentsMargins(0, 2, 0, 2)
-        _prompts_tab, self._subtab_prompts_layout = _make_subtab("queue-subtab-insertions-prompts")
+        _prompts_tab = QWidget()
+        _prompts_tab.setProperty("testid", "queue-subtab-insertions-prompts")
+        _prompts_outer = QVBoxLayout(_prompts_tab)
+        _prompts_outer.setContentsMargins(0, 0, 0, 0)
+        _prompts_outer.setSpacing(3)
+
+        self._prompts_filter_bar = QTabBar()
+        self._prompts_filter_bar.setProperty("testid", "queue-prompts-filter-bar")
+        self._prompts_filter_bar.setExpanding(False)
+        self._prompts_filter_bar.setDrawBase(False)
+        self._prompts_filter_bar.setUsesScrollButtons(True)
+        self._prompts_filter_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._prompts_filter_bar.setStyleSheet(
+            "QTabBar { background: transparent; }"
+            "QTabBar::tab { background: #27272A; color: #A1A1AA;"
+            "  border: none; border-radius: 3px;"
+            "  padding: 3px 9px; font-size: 9px; font-weight: 700;"
+            "  letter-spacing: 0.4px; margin-right: 3px; }"
+            "QTabBar::tab:selected { background: #0D9488; color: #FAFAFA; }"
+            "QTabBar::tab:hover:!selected { background: #3F3F46; color: #D4D4D8; }"
+        )
+        self._prompts_filter_bar.addTab(PROMPT_FILTER_ALL_LABEL)
+        for _cat in PROMPT_FILTER_CATEGORIES:
+            self._prompts_filter_bar.addTab(_cat)
+        _prompts_outer.addWidget(self._prompts_filter_bar)
+
+        _prompts_flow_host = QWidget()
+        self._subtab_prompts_layout = ResponsiveButtonFlowLayout(
+            _prompts_flow_host, spacing=4, max_lines=4
+        )
+        self._subtab_prompts_layout.setContentsMargins(0, 2, 0, 2)
+        _prompts_outer.addWidget(_prompts_flow_host, stretch=1)
+
+        _prf = QSettings("systemForge", "workflow-app")
+        _active_prompt_filter = int(_prf.value("prompts/active_filter", 0))
+        if not (0 <= _active_prompt_filter <= len(PROMPT_FILTER_CATEGORIES)):
+            _active_prompt_filter = 0
+        self._prompts_filter_bar.setCurrentIndex(_active_prompt_filter)
+        self._prompts_filter_bar.currentChanged.connect(
+            self._on_prompts_filter_changed
+        )
         _rules_tab, self._subtab_rules_layout = _make_subtab("queue-subtab-insertions-rules")
         _cmd_tab, self._subtab_cmd_layout = _make_subtab("queue-subtab-insertions-cmd")
         _auto_improove_tab, self._subtab_auto_improove_layout = _make_subtab("queue-subtab-insertions-auto-improove")
         _personal_tab, self._subtab_personal_layout = _make_subtab("queue-subtab-insertions-personal")
-        _personas_tab, self._subtab_personas_layout = _make_subtab("queue-subtab-insertions-personas")
+
+        # Sub-aba 'Agentes' (personas): estrutura especial. Em vez de um flow
+        # nu, ela tem uma barra de filtros por categoria (QTabBar) acima de um
+        # flow unico de botoes. A 1a aba ("All") mostra todos; as demais filtram
+        # por `persona_category`. O flow continua sendo _subtab_personas_layout
+        # (contrato preservado: config gear + update permanecem os ultimos
+        # widgets e nunca sao filtrados). Ver _on_personas_filter_changed.
+        _personas_tab = QWidget()
+        _personas_tab.setProperty("testid", "queue-subtab-insertions-personas")
+        _personas_outer = QVBoxLayout(_personas_tab)
+        _personas_outer.setContentsMargins(0, 0, 0, 0)
+        _personas_outer.setSpacing(3)
+
+        self._personas_filter_bar = QTabBar()
+        self._personas_filter_bar.setProperty("testid", "queue-personas-filter-bar")
+        self._personas_filter_bar.setExpanding(False)
+        self._personas_filter_bar.setDrawBase(False)
+        self._personas_filter_bar.setUsesScrollButtons(True)
+        self._personas_filter_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._personas_filter_bar.setStyleSheet(
+            "QTabBar { background: transparent; }"
+            "QTabBar::tab { background: #27272A; color: #A1A1AA;"
+            "  border: none; border-radius: 3px;"
+            "  padding: 3px 9px; font-size: 9px; font-weight: 700;"
+            "  letter-spacing: 0.4px; margin-right: 3px; }"
+            "QTabBar::tab:selected { background: #8B5CF6; color: #FAFAFA; }"
+            "QTabBar::tab:hover:!selected { background: #3F3F46; color: #D4D4D8; }"
+        )
+        self._personas_filter_bar.addTab(PERSONA_FILTER_ALL_LABEL)
+        for _cat in PERSONA_FILTER_CATEGORIES:
+            self._personas_filter_bar.addTab(_cat)
+        _personas_outer.addWidget(self._personas_filter_bar)
+
+        _personas_flow_host = QWidget()
+        self._subtab_personas_layout = ResponsiveButtonFlowLayout(
+            _personas_flow_host, spacing=4, max_lines=4
+        )
+        self._subtab_personas_layout.setContentsMargins(0, 2, 0, 2)
+        _personas_outer.addWidget(_personas_flow_host, stretch=1)
+
+        # Restaura o filtro ativo da sessao anterior; persiste ao trocar. O
+        # filtro real so tem efeito apos o MainWindow popular os botoes — por
+        # isso populate_personas_subtab/add_persona_buttons re-aplicam o filtro.
+        _pf = QSettings("systemForge", "workflow-app")
+        _active_filter = int(_pf.value("personas/active_filter", 0))
+        if not (0 <= _active_filter <= len(PERSONA_FILTER_CATEGORIES)):
+            _active_filter = 0
+        self._personas_filter_bar.setCurrentIndex(_active_filter)
+        self._personas_filter_bar.currentChanged.connect(
+            self._on_personas_filter_changed
+        )
 
         self._insertions_subtabs.addTab(_paths_tab, "PATHS")
         self._insertions_subtabs.addTab(_prompts_tab, "PROMPTS")
@@ -2532,11 +2745,21 @@ class CommandQueueWidget(QWidget):
         self.header_widget = header
 
         # Play bar — big play button
+        _PLAY_ROW_TOP_HEIGHT = 32
+        _LLM_ROUTING_HEIGHT = 112
+        _PLAY_BAR_VERTICAL_MARGINS = 10
+        _PLAY_BAR_SPACING = 4
+        _PLAY_BAR_HEIGHT = (
+            _PLAY_ROW_TOP_HEIGHT
+            + _LLM_ROUTING_HEIGHT
+            + _PLAY_BAR_VERTICAL_MARGINS
+            + _PLAY_BAR_SPACING
+        )
         play_bar = QWidget()
         play_bar.setStyleSheet(
             "background-color: #1C1C1F; border-bottom: 1px solid #3F3F46;"
         )
-        play_bar.setFixedHeight(110)
+        play_bar.setFixedHeight(_PLAY_BAR_HEIGHT)
         pl = QVBoxLayout(play_bar)
         pl.setContentsMargins(8, 5, 8, 5)
         pl.setSpacing(4)
@@ -2556,7 +2779,7 @@ class CommandQueueWidget(QWidget):
         # _btn_next ("Continuar: X") que aparece SO em pause de interactive.
         self._play_btn = QPushButton("▶  Rodar próximo")
         self._play_btn.setProperty("testid", "queue-btn-play-next")
-        self._play_btn.setFixedHeight(32)
+        self._play_btn.setFixedHeight(_PLAY_ROW_TOP_HEIGHT)
         self._play_btn.setMinimumWidth(84)
         self._play_btn.setToolTip(
             "Executa o proximo item pendente da fila e para.\n"
@@ -2722,7 +2945,7 @@ class CommandQueueWidget(QWidget):
         # optional worker preference toggles used by [Rodar proximo].
         _llm_box = QWidget()
         _llm_box.setProperty("testid", "queue-div-llm-routing")
-        _llm_box.setFixedHeight(78)
+        _llm_box.setFixedHeight(_LLM_ROUTING_HEIGHT)
         _llm_box.setStyleSheet(
             "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
             "  border-radius: 5px; }"
@@ -2756,9 +2979,10 @@ class CommandQueueWidget(QWidget):
         _main_section = QWidget()
         _main_section.setProperty("testid", "queue-div-main-llm")
         _main_section.setStyleSheet("background: transparent; border: none;")
-        _main_layout = QHBoxLayout(_main_section)
+        # Layout em coluna: label em cima, inputs (radios) embaixo.
+        _main_layout = QVBoxLayout(_main_section)
         _main_layout.setContentsMargins(0, 0, 0, 0)
-        _main_layout.setSpacing(7)
+        _main_layout.setSpacing(2)
         _main_label = QLabel("Main LLM:")
         _main_label.setStyleSheet(_section_label_qss)
         _main_options = QWidget()
@@ -2786,15 +3010,16 @@ class CommandQueueWidget(QWidget):
             self._main_llm_group.addButton(_btn)
             _main_options_layout.addWidget(_btn)
         _main_layout.addWidget(_main_label)
-        _main_layout.addWidget(_main_options, stretch=1)
+        _main_layout.addWidget(_main_options)
         _llm_layout.addWidget(_main_section, stretch=1)
 
         _worker_section = QWidget()
         _worker_section.setProperty("testid", "queue-div-parallel-worker")
         _worker_section.setStyleSheet("background: transparent; border: none;")
-        _worker_layout = QHBoxLayout(_worker_section)
+        # Layout em coluna: label em cima, inputs (checkboxes) embaixo.
+        _worker_layout = QVBoxLayout(_worker_section)
         _worker_layout.setContentsMargins(0, 0, 0, 0)
-        _worker_layout.setSpacing(7)
+        _worker_layout.setSpacing(2)
         _worker_label = QLabel("Parallel Worker:")
         _worker_label.setStyleSheet(_section_label_qss)
         _worker_options = QWidget()
@@ -2817,7 +3042,7 @@ class CommandQueueWidget(QWidget):
             _btn.setStyleSheet(_control_qss)
             _worker_options_layout.addWidget(_btn)
         _worker_layout.addWidget(_worker_label)
-        _worker_layout.addWidget(_worker_options, stretch=1)
+        _worker_layout.addWidget(_worker_options)
         _llm_layout.addWidget(_worker_section, stretch=1)
         play_row_third.addWidget(_llm_box, stretch=1)
 
@@ -3257,6 +3482,7 @@ class CommandQueueWidget(QWidget):
     def populate_prompts_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'prompts': botoes de prompt construídos a partir de arquivos .md."""
         self._populate_subtab(self._subtab_prompts_layout, widgets)
+        self._apply_prompt_filter()
 
     def populate_rules_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'rules': dcp-list, cmd-list, terminal, listeners, indicators, add-rules."""
@@ -3274,9 +3500,101 @@ class CommandQueueWidget(QWidget):
         """Sub-aba 'PERSONAL': comandos pessoais (curriculum, imbound, mkt)."""
         self._populate_subtab(self._subtab_personal_layout, widgets)
 
+    # ── Filtro por tipo da sub-aba 'PROMPTS' ───────────────────────────────── #
+
+    def _prompt_filter_category(self) -> str:
+        """Tipo selecionado na barra de filtros de prompts (ou 'All')."""
+        bar = getattr(self, "_prompts_filter_bar", None)
+        if bar is None:
+            return PROMPT_FILTER_ALL_LABEL
+        idx = bar.currentIndex()
+        if 1 <= idx <= len(PROMPT_FILTER_CATEGORIES):
+            return PROMPT_FILTER_CATEGORIES[idx - 1]
+        return PROMPT_FILTER_ALL_LABEL
+
+    def _apply_prompt_filter(self) -> None:
+        """Mostra prompts do tipo selecionado e preserva utilitarios visiveis."""
+        layout = getattr(self, "_subtab_prompts_layout", None)
+        if layout is None:
+            return
+        category = self._prompt_filter_category()
+        show_all = category == PROMPT_FILTER_ALL_LABEL
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            widget = item.widget() if item is not None else None
+            if widget is None:
+                continue
+            cat = widget.property("prompt_category")
+            if not isinstance(cat, str) or not cat:
+                widget.setVisible(True)
+                continue
+            widget.setVisible(show_all or cat == category)
+        layout.invalidate()
+
+    def _on_prompts_filter_changed(self, index: int) -> None:
+        """Persiste o filtro ativo da sub-aba PROMPTS e re-filtra o flow."""
+        QSettings("systemForge", "workflow-app").setValue(
+            "prompts/active_filter", int(index)
+        )
+        self._apply_prompt_filter()
+
     def populate_personas_subtab(self, widgets: list[QWidget]) -> None:
-        """Sub-aba 'PERSONAS': botoes que colam o path de arquivos .md de personas."""
+        """Sub-aba 'Agentes': botoes que colam o path de arquivos .md de personas.
+
+        Re-aplica o filtro de categoria ativo apos popular (os botoes recem
+        criados respeitam a aba de filtro selecionada).
+        """
         self._populate_subtab(self._subtab_personas_layout, widgets)
+        self._apply_persona_filter()
+
+    # ── Filtro por categoria da sub-aba 'Agentes' ────────────────────────────── #
+
+    def _persona_filter_category(self) -> str:
+        """Categoria selecionada na barra de filtros (ou 'All' no indice 0)."""
+        bar = getattr(self, "_personas_filter_bar", None)
+        if bar is None:
+            return PERSONA_FILTER_ALL_LABEL
+        idx = bar.currentIndex()
+        if 1 <= idx <= len(PERSONA_FILTER_CATEGORIES):
+            return PERSONA_FILTER_CATEGORIES[idx - 1]
+        return PERSONA_FILTER_ALL_LABEL
+
+    def _apply_persona_filter(self) -> None:
+        """Mostra apenas os botoes de persona da categoria selecionada.
+
+        'All' (indice 0) mostra todos. Os botoes utilitarios (config gear e
+        update — testids `queue-btn-personas-*`, sem o sufixo de slug) NUNCA sao
+        filtrados: permanecem sempre visiveis. O flow responsivo ja ignora
+        widgets ocultos (_visible_items), entao a relayout acontece sozinha.
+        """
+        layout = getattr(self, "_subtab_personas_layout", None)
+        if layout is None:
+            return
+        category = self._persona_filter_category()
+        show_all = category == PERSONA_FILTER_ALL_LABEL
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            widget = item.widget() if item is not None else None
+            if widget is None:
+                continue
+            tid = widget.property("testid")
+            # So botoes de persona (queue-btn-persona-<slug>) sao filtraveis. Os
+            # utilitarios sao `queue-btn-personas-config/update` (char 18 == 's',
+            # nao casa o prefixo com hifen) e ficam sempre visiveis.
+            is_persona = isinstance(tid, str) and tid.startswith("queue-btn-persona-")
+            if not is_persona:
+                widget.setVisible(True)
+                continue
+            cat = widget.property("persona_category")
+            widget.setVisible(show_all or cat == category)
+        layout.invalidate()
+
+    def _on_personas_filter_changed(self, index: int) -> None:
+        """Slot da barra de filtros: persiste a aba ativa e re-filtra o flow."""
+        QSettings("systemForge", "workflow-app").setValue(
+            "personas/active_filter", int(index)
+        )
+        self._apply_persona_filter()
 
     def add_persona_buttons(
         self, new_btns: list[QWidget], keep_last: QWidget | None = None,
@@ -3303,6 +3621,8 @@ class CommandQueueWidget(QWidget):
         if keep_last is not None:
             layout.addWidget(keep_last)
         layout.invalidate()
+        # Personas recem-adicionadas pelo botao 'update' respeitam o filtro ativo.
+        self._apply_persona_filter()
 
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
         """Anexa widgets ao bloco de inserções, apos a aba Inserções.
@@ -5768,7 +6088,7 @@ class CommandQueueWidget(QWidget):
     def _on_daily_loop_clicked(self) -> None:
         """Expand a daily-loop _LOOP-CONFIG.json + PROGRESS.md into the queue.
 
-        Requires the metrics-project-pill to point at blacksmith/loop-archives/{slug}/_LOOP-CONFIG.json
+        Requires the loop attachment to point at blacksmith/loop-archives/{slug}/_LOOP-CONFIG.json
         (generated by /daily-loop:enumerate). One queue entry per pending item,
         with /clear at position 0 and /model/X /effort/Y emitted only when
         the bucket changes between consecutive items.
@@ -5790,19 +6110,21 @@ class CommandQueueWidget(QWidget):
             read_review_blocked_sentinel,
         )
 
-        if not app_state.has_config or not app_state.config:
+        config = self._resolve_loop_attachment_config()
+        if config is None:
             signal_bus.toast_requested.emit(
-                "Carregue um _LOOP-CONFIG.json em metrics-project-pill antes de usar Daily loop.",
+                "Nenhum loop anexado para daily-loop. Carregue um _LOOP-CONFIG.json "
+                "no anexo loop (metrics-loop-pill) ou use o fallback de "
+                "compatibilidade legado.",
                 "warning",
             )
             return
 
-        config = app_state.config
         raw = config.raw if isinstance(config.raw, dict) else {}
 
         if raw.get("kind") != "daily-loop" or "daily_loop" not in raw:
             signal_bus.toast_requested.emit(
-                "Projeto carregado nao e um _LOOP-CONFIG.json. "
+                "Anexo loop carregado nao e um _LOOP-CONFIG.json. "
                 "Rode /daily-loop no terminal e carregue o JSON gerado.",
                 "warning",
             )
@@ -5859,8 +6181,30 @@ class CommandQueueWidget(QWidget):
                 sentinel.blocker_count,
             )
 
+        project_workspace_root: Path | None = None
+        project_cfg = app_state.project_config
+        if (
+            project_cfg is not None
+            and not (
+                isinstance(project_cfg.raw, dict)
+                and project_cfg.raw.get("kind") == "daily-loop"
+            )
+        ):
+            workspace_raw = str(project_cfg.workspace_root or "").strip()
+            if workspace_raw:
+                workspace_path = Path(workspace_raw)
+                project_workspace_root = (
+                    workspace_path
+                    if workspace_path.is_absolute()
+                    else project_cfg.project_dir / workspace_path
+                )
+
         try:
-            specs = build_daily_loop_specs(raw, loop_root)
+            specs = build_daily_loop_specs(
+                raw,
+                loop_root,
+                project_workspace_root=project_workspace_root,
+            )
         except DailyLoopConfigError as exc:
             signal_bus.toast_requested.emit(f"Daily loop invalido: {exc}", "error")
             return
@@ -5906,7 +6250,7 @@ class CommandQueueWidget(QWidget):
         non-backtick-aware parser for byte-for-byte backwards
         compatibility with old archives.
 
-        Requires the metrics-project-pill to point at the
+        Requires the loop attachment to point at the
         `_LOOP-CONFIG.json` of a `/loop`-flavoured pipeline (same V3 +
         kind: daily-loop schema as the legacy daily-loop).
         """
@@ -5919,19 +6263,21 @@ class CommandQueueWidget(QWidget):
             read_review_blocked_sentinel,
         )
 
-        if not app_state.has_config or not app_state.config:
+        config = self._resolve_loop_attachment_config()
+        if config is None:
             signal_bus.toast_requested.emit(
-                "Carregue um _LOOP-CONFIG.json em metrics-project-pill antes de usar Loop.",
+                "Nenhum loop anexado para o botão Loop. Carregue um _LOOP-CONFIG.json "
+                "no anexo loop (metrics-loop-pill) ou use o fallback de "
+                "compatibilidade legado.",
                 "warning",
             )
             return
 
-        config = app_state.config
         raw = config.raw if isinstance(config.raw, dict) else {}
 
         if raw.get("kind") != "daily-loop" or "daily_loop" not in raw:
             signal_bus.toast_requested.emit(
-                "Projeto carregado nao e um _LOOP-CONFIG.json. "
+                "Anexo loop carregado nao e um _LOOP-CONFIG.json. "
                 "Rode /loop no terminal e carregue o JSON gerado.",
                 "warning",
             )
@@ -5988,8 +6334,30 @@ class CommandQueueWidget(QWidget):
                 sentinel.blocker_count,
             )
 
+        project_workspace_root: Path | None = None
+        project_cfg = app_state.project_config
+        if (
+            project_cfg is not None
+            and not (
+                isinstance(project_cfg.raw, dict)
+                and project_cfg.raw.get("kind") == "daily-loop"
+            )
+        ):
+            workspace_raw = str(project_cfg.workspace_root or "").strip()
+            if workspace_raw:
+                workspace_path = Path(workspace_raw)
+                project_workspace_root = (
+                    workspace_path
+                    if workspace_path.is_absolute()
+                    else project_cfg.project_dir / workspace_path
+                )
+
         try:
-            specs = build_loop_specs(raw, loop_root)
+            specs = build_loop_specs(
+                raw,
+                loop_root,
+                project_workspace_root=project_workspace_root,
+            )
         except DailyLoopConfigError as exc:
             signal_bus.toast_requested.emit(f"Loop invalido: {exc}", "error")
             return
@@ -6024,7 +6392,7 @@ class CommandQueueWidget(QWidget):
     def _on_rocksmash_clicked(self) -> None:
         """Expand the active _LOOP-CONFIG.json into the /loop-rocksmash:* queue.
 
-        Requires the metrics-project-pill to point at a daily-loop
+        Requires the loop attachment to point at a daily-loop
         _LOOP-CONFIG.json. Emits:
             1x /loop-rocksmash:prepare
             N pares /loop-rocksmash:do + /loop-rocksmash:review-done
@@ -6038,18 +6406,17 @@ class CommandQueueWidget(QWidget):
         from workflow_app.command_queue.loop_rocksmash_expander import (
             build_loop_rocksmash_specs,
         )
-        from workflow_app.config.app_state import app_state
         from workflow_app.daily_loop import DailyLoopConfigError
 
-        if not app_state.has_config or not app_state.config:
+        config = self._resolve_loop_attachment_config()
+        if config is None:
             signal_bus.toast_requested.emit(
-                "Selecione um _LOOP-CONFIG.json na metrics-project-pill "
-                "antes de usar rocksmash.",
+                "Nenhum loop anexado para Rocksmash. Carregue o _LOOP-CONFIG.json "
+                "no anexo loop (metrics-loop-pill).",
                 "warning",
             )
             return
 
-        config = app_state.config
         raw = config.raw if isinstance(config.raw, dict) else {}
 
         if raw.get("kind") != "daily-loop" or "daily_loop" not in raw:
@@ -6387,6 +6754,203 @@ class CommandQueueWidget(QWidget):
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"multibackend {slug}")
         signal_bus.pipeline_ready.emit(specs)
+
+    def _usabilidade_gate_and_path(self) -> tuple[str, str] | None:
+        """Gate compartilhado pelos dois handlers de Usabilidade.
+
+        Retorna `(config_path, workspace_root)` quando ha project.json valido
+        carregado na metrics-project-pill; emite o toast verbose pt-BR e retorna
+        None quando o gate falha (sem project.json OU sem config_path). O
+        `workspace_root` e DERIVADO do config (campo `workspace_root` resolvido
+        pelo parser, com fallback para o diretorio do config); nunca o
+        placeholder literal `{workspace_root}`.
+        """
+        from workflow_app.config.app_state import app_state
+
+        # Gate 1: has_config — verbose pt-BR (feedback_workflow_app_gate_verbose)
+        if not app_state.has_config or app_state.config is None:
+            signal_bus.toast_requested.emit(
+                "usabilidade requer project.json carregado na pill superior. "
+                "Use o botao [json] (queue-btn-json) para criar ou carregar um "
+                "project.json antes de rodar esta trilha.",
+                "warning",
+            )
+            return None
+
+        config = app_state.config
+        path = str(config.config_path)
+        if not path:
+            signal_bus.toast_requested.emit(
+                "project.json carregado nao expoe config_path. Recarregue o "
+                "projeto via botao [json] (queue-btn-json) e tente novamente.",
+                "error",
+            )
+            return None
+
+        # workspace_root derivado do config (Zero Assumido: nunca placeholder).
+        workspace_root = config.workspace_root or str(Path(path).parent)
+        return path, workspace_root
+
+    def _emit_usabilidade_pipeline(
+        self, trilha: str, real_specs: list[CommandSpec], slug: str
+    ) -> None:
+        """Injeta /clear/model/effort com anti-redundancia e emite a fila.
+
+        Mesmo helper canonico (_inject_clears) usado por queue-btn-multibackend,
+        queue-btn-legacy-to-dcp e queue-btn-dcp-build.
+        """
+        from workflow_app.templates.quick_templates import _inject_clears
+
+        specs = _inject_clears(real_specs)
+        logger.info(
+            "[usabilidade:%s] enqueued %d specs for project=%s",
+            trilha, len(specs), slug,
+        )
+        self._template_label.setText(
+            f"  \U0001f9ed  usabilidade {trilha}: {slug} ({len(specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"usabilidade {trilha} {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+
+    def _on_usabilidade_visual_clicked(self) -> None:
+        """Enfileira a trilha VISUAL de Usabilidade (Cadeia A, 100% project).
+
+        Le `metrics-project-pill` (project.json) e passa `config.config_path`
+        como `$1` a cada subcomando. Cadeia estatica e completa (sem branch A/B
+        em runtime, sem entrevista), alinhada a licao do revert 06-22: NENHUM
+        comando scope=module. Ordem canonica (WORKFLOW.md), 12 specs opus/high
+        (GROUP_MAP["usabilidade"]):
+
+          IDENTIFICAR
+            1. /usabilidade:detect <path>     (project/check)
+            2. /frontend:scan <path>
+            3. /frontend:audit <path>
+            4. /frontend:mobile-check <path>
+            5. /frontend:assets-check <path>
+            6. /frontend:report <path>
+          IMPLANTAR
+            7. /tools:layout-full-refactor <path>
+            8. /tools:mobile-analysis <path>
+            9. /tools:mobile-update <path>
+          REVISAR (delta gate)
+            10. /usabilidade:detect <path>    (re-run)
+            11. /frontend:report <path>       (re-run)
+          MANUAL
+            12. /instruction-manual <workspace_root>
+
+        `/instruction-manual` recebe o `workspace_root` DERIVADO do config
+        (nao o placeholder literal). _inject_clears poe /clear entre os passos
+        (cada subcomando comunica via artefato em disco, nao via conversa).
+        """
+        gate = self._usabilidade_gate_and_path()
+        if gate is None:
+            return
+        path, workspace_root = gate
+
+        cfg = GROUP_MAP["usabilidade"]
+        model = cfg["model"]
+        effort = cfg["effort"]
+
+        def _cmd(name: str, start: int) -> CommandSpec:
+            return CommandSpec(
+                name=name, model=model, effort=effort,
+                interaction_type=InteractionType.AUTO, position=start,
+            )
+
+        real_specs: list[CommandSpec] = [
+            # IDENTIFICAR
+            _cmd(f"/usabilidade:detect {path}", 1),
+            _cmd(f"/frontend:scan {path}", 2),
+            _cmd(f"/frontend:audit {path}", 3),
+            _cmd(f"/frontend:mobile-check {path}", 4),
+            _cmd(f"/frontend:assets-check {path}", 5),
+            _cmd(f"/frontend:report {path}", 6),
+            # IMPLANTAR
+            _cmd(f"/tools:layout-full-refactor {path}", 7),
+            _cmd(f"/tools:mobile-analysis {path}", 8),
+            _cmd(f"/tools:mobile-update {path}", 9),
+            # REVISAR (delta gate)
+            _cmd(f"/usabilidade:detect {path}", 10),
+            _cmd(f"/frontend:report {path}", 11),
+            # MANUAL (workspace_root derivado do config, nunca placeholder)
+            _cmd(f"/instruction-manual {workspace_root}", 12),
+        ]
+        self._emit_usabilidade_pipeline("visual", real_specs, Path(path).stem)
+
+    def _on_usabilidade_ia_clicked(self) -> None:
+        """Enfileira a trilha IA/findability de Usabilidade (Cadeia B).
+
+        Le `metrics-project-pill` (project.json) e passa `config.config_path`
+        como `$1` a cada subcomando. Cadeia estatica e completa (sem branch A/B
+        em runtime, sem entrevista). Cria um MODULO REAL via micro-architecture
+        ANTES de qualquer comando module-bound; o module_id nunca aparece como
+        placeholder {N} na expansao do clique — os comandos module-bound
+        resolvem o modulo ativo lendo o lock/delivery.json que `/micro:modularize`
+        grava antes nesta mesma fila. Ordem canonica, 13 specs opus/high
+        (GROUP_MAP["usabilidade"]):
+
+          IDENTIFICAR
+            1. /usabilidade:detect <path>     (project/check)
+            2. /frontend:scan <path>
+            3. /frontend:audit <path>
+            4. /frontend:report <path>
+          BOOTSTRAP do modulo (DCP-lite)
+            5. /micro:brief <path>
+            6. /micro:architecture <path>
+            7. /micro:specific-flow-prep <path>
+            8. /micro:modularize <path>        (CRIA o modulo + grava module_id)
+            9. /micro:review <path>
+          BUILD (module-bound, resolve modulo via lock)
+            10. /build-module-pipeline <path>
+          REVISAR (module-bound, mesmo lock)
+            11. /review-executed-module <path>
+            12. /front-end-review <path>
+          MANUAL
+            13. /instruction-manual <workspace_root>
+
+        Contrato anti-{N}: o module_id sai unicamente do lock gravado por
+        `/micro:modularize` (posicao 8), que roda antes de
+        `/build-module-pipeline` (10) e `/review-executed-module` (11). A
+        garantia e a ordem estatica da fila; o fail-closed (abortar se o lock
+        estiver ausente) e responsabilidade dos proprios comandos module-bound.
+        """
+        gate = self._usabilidade_gate_and_path()
+        if gate is None:
+            return
+        path, workspace_root = gate
+
+        cfg = GROUP_MAP["usabilidade"]
+        model = cfg["model"]
+        effort = cfg["effort"]
+
+        def _cmd(name: str, start: int) -> CommandSpec:
+            return CommandSpec(
+                name=name, model=model, effort=effort,
+                interaction_type=InteractionType.AUTO, position=start,
+            )
+
+        real_specs: list[CommandSpec] = [
+            # IDENTIFICAR
+            _cmd(f"/usabilidade:detect {path}", 1),
+            _cmd(f"/frontend:scan {path}", 2),
+            _cmd(f"/frontend:audit {path}", 3),
+            _cmd(f"/frontend:report {path}", 4),
+            # BOOTSTRAP do modulo (DCP-lite) — cria o modulo + grava module_id
+            _cmd(f"/micro:brief {path}", 5),
+            _cmd(f"/micro:architecture {path}", 6),
+            _cmd(f"/micro:specific-flow-prep {path}", 7),
+            _cmd(f"/micro:modularize {path}", 8),
+            _cmd(f"/micro:review {path}", 9),
+            # BUILD (module-bound; resolve modulo ativo via lock, nunca {N})
+            _cmd(f"/build-module-pipeline {path}", 10),
+            # REVISAR (module-bound; mesmo lock)
+            _cmd(f"/review-executed-module {path}", 11),
+            _cmd(f"/front-end-review {path}", 12),
+            # MANUAL (workspace_root derivado do config, nunca placeholder)
+            _cmd(f"/instruction-manual {workspace_root}", 13),
+        ]
+        self._emit_usabilidade_pipeline("ia", real_specs, Path(path).stem)
 
     def _on_boilerplate_clicked(self) -> None:
         """Carrega o pipeline boilerplate (9 passos).

@@ -1,7 +1,7 @@
-"""Testes da aba brainstorm: carga dos 10 seeds + picker md + dispatch_result.
+"""Testes da aba brainstorm: carga dos 20 seeds + picker md + dispatch_result.
 
 Cobre 4 cenarios canonicos do T2/T1 (loop 05-21-implantation-tasklist-aba-brainstorm):
-- test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons: 9 botoes na grade.
+- test_brainstorm_tab_loads_20_seeds_as_mcp_prompt_buttons: 20 botoes na grade.
 - test_picker_md_opens_brainstorm_mcp_dir: picker abre em blacksmith/brainstorm-mcp/.
 - test_picker_fallback_to_blacksmith_when_brainstorm_mcp_absent: fallback §7.5.
 - test_dispatch_result_signal_marks_button_checkbox: signal_bus.dispatch_result
@@ -45,7 +45,7 @@ _SEED_BODY = dedent(
 )
 
 
-def _materialize_9_seeds(repo_root: Path) -> Path:
+def _materialize_20_seeds(repo_root: Path) -> Path:
     seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
     agents_dir = repo_root / "agents"
     seeds_dir.mkdir(parents=True)
@@ -54,13 +54,23 @@ def _materialize_9_seeds(repo_root: Path) -> Path:
         ("01", "criar-md"),
         ("02", "search-in"),
         ("03", "controversial"),
-        ("04", "hardening"),
-        ("05", "loop-prepare"),
-        ("06", "criar-task"),
-        ("07", "revisar-task"),
-        ("08", "executar-task"),
-        ("09", "revisar-execucao"),
-        ("10", "search-out"),
+        ("04", "search-forge"),
+        ("05", "deep-detailer"),
+        ("06", "hardening"),
+        ("07", "loop-prepare"),
+        ("08", "criar-task"),
+        ("09", "revisar-task"),
+        ("10", "executar-task"),
+        ("11", "revisar-execucao"),
+        ("12", "search-out"),
+        ("13", "visual-design"),
+        ("14", "layout-architect"),
+        ("15", "analise-complexidade"),
+        ("16", "billing"),
+        ("17", "debugger"),
+        ("18", "delegador"),
+        ("19", "pdca"),
+        ("20", "soft-engen"),
     ]
     for prefix, slug in slugs:
         (agents_dir / f"{slug}-rules.md").write_text(
@@ -90,8 +100,8 @@ class _FakeMainWindow:
         return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
 
 
-def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
-    """`_load_brainstorm_seeds` retorna 9 dicts ordenados por filename.
+def test_brainstorm_tab_loads_20_seeds_as_mcp_prompt_buttons(tmp_path):
+    """`_load_brainstorm_seeds` retorna 20 dicts ordenados por filename.
 
     Cobertura: contrato do loader que alimenta `_build_brainstorm_page`
     com `MCPPromptButton(label=slug, button_type=..., prompt=seed_path,
@@ -99,15 +109,17 @@ def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
     """
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    _materialize_9_seeds(repo_root)
+    _materialize_20_seeds(repo_root)
     fake = _FakeMainWindow(repo_root)
     seeds = fake._load_brainstorm_seeds()
-    assert len(seeds) == 10
+    assert len(seeds) == 20
     slugs = [s["slug"] for s in seeds]
     assert slugs == [
         "criar-md",
         "search-in",
         "controversial",
+        "search-forge",
+        "deep-detailer",
         "hardening",
         "loop-prepare",
         "criar-task",
@@ -115,6 +127,14 @@ def test_brainstorm_tab_loads_9_seeds_as_mcp_prompt_buttons(tmp_path):
         "executar-task",
         "revisar-execucao",
         "search-out",
+        "visual-design",
+        "layout-architect",
+        "analise-complexidade",
+        "billing",
+        "debugger",
+        "delegador",
+        "pdca",
+        "soft-engen",
     ]
     for s in seeds:
         # Campos canonicos do widget.
@@ -135,11 +155,11 @@ def test_seed_loader_ignores_date_prefixed_output_siblings(tmp_path):
     MM- casa o glob 0[1-9]-*.md e fazia len(paths) > 9 -> grade inteira sumia.
 
     O loader deve filtrar esses irmaos (slug nao-alfabetico apos 0N-) e ainda
-    retornar exatamente os 10 seeds canonicos. Regressao das duas sumiços de hoje.
+    retornar exatamente os 20 seeds canonicos. Regressao das duas sumiços de hoje.
     """
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    seeds_dir = _materialize_9_seeds(repo_root)
+    seeds_dir = _materialize_20_seeds(repo_root)
     # Simula as duas saidas reais que quebraram a grade em 2026-05-24.
     (seeds_dir / "05-24-foot-stock-ciclo-assinatura-planos.md").write_text(
         "# output do brainstorm\n", encoding="utf-8"
@@ -149,11 +169,13 @@ def test_seed_loader_ignores_date_prefixed_output_siblings(tmp_path):
     )
     fake = _FakeMainWindow(repo_root)
     seeds = fake._load_brainstorm_seeds()
-    assert len(seeds) == 10
+    assert len(seeds) == 20
     assert [s["slug"] for s in seeds] == [
-        "criar-md", "search-in", "controversial", "hardening", "loop-prepare",
-        "criar-task", "revisar-task", "executar-task", "revisar-execucao",
-        "search-out",
+        "criar-md", "search-in", "controversial", "search-forge", "deep-detailer",
+        "hardening", "loop-prepare", "criar-task", "revisar-task", "executar-task",
+        "revisar-execucao", "search-out", "visual-design", "layout-architect",
+        "analise-complexidade", "billing", "debugger", "delegador", "pdca",
+        "soft-engen",
     ]
 
 
@@ -161,10 +183,10 @@ def test_seed_loader_still_fails_when_a_real_seed_is_missing(tmp_path):
     """O filtro nao pode mascarar a ausencia de um seed canonico real."""
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    seeds_dir = _materialize_9_seeds(repo_root)
-    (seeds_dir / "09-revisar-execucao.md").unlink()
+    seeds_dir = _materialize_20_seeds(repo_root)
+    (seeds_dir / "11-revisar-execucao.md").unlink()
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 10"):
+    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 20"):
         fake._load_brainstorm_seeds()
 
 
@@ -176,7 +198,7 @@ def test_picker_md_opens_brainstorm_mcp_dir(tmp_path):
     """
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    _materialize_9_seeds(repo_root)
+    _materialize_20_seeds(repo_root)
     fake = _FakeMainWindow(repo_root)
     seeds_dir = fake._brainstorm_seeds_dir()
     assert seeds_dir.name == "brainstorm-mcp"

@@ -63,6 +63,7 @@ ActionType = Literal[
     "Otimizar",
     "Criar tasks",
     "Revisar tasks",
+    "Revisar",
     "Executar",
     "Revisar execucao",
     "Loop prepare",
@@ -81,9 +82,11 @@ VALID_ACTIONS_PTBR: set[str] = {
     "Otimizar",
     "Criar tasks",
     "Revisar tasks",
+    "Revisar",
     "Executar",
     "Revisar execucao",
     "Loop prepare",
+    "Analisar complexidade",
 }
 VALID_ACTIONS: set[str] = VALID_ACTIONS_LEGACY | VALID_ACTIONS_PTBR
 

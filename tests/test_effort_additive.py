@@ -22,7 +22,6 @@ from workflow_app.templates._mapping import (
 from workflow_app.templates.quick_templates import (
     TEMPLATE_BRIEF_NEW,
     TEMPLATE_BUSINESS,
-    TEMPLATE_DAILY,
     TEMPLATE_MODULES,
     _HIGH_EFFORT_COMMANDS,
     _resolve_effort,
@@ -117,9 +116,14 @@ def test_resolve_effort_override_wins():
 
 
 def test_quick_templates_auto_tag_heavy_commands_as_high():
-    """Heavy commands inside module-level templates must carry effort=HIGH."""
+    """Heavy commands inside module-level templates must carry effort=HIGH.
+
+    DAILY fica de fora deste teste name-set-based: desde o redesenho 5a8dce8
+    (2026-05-18) ele usa effort-por-fase (/daily:plan e /daily:do sao HIGH por
+    transicao de fase, nao por estarem em _HIGH_EFFORT_COMMANDS). A sequencia
+    e os efforts do DAILY sao cobertos por test_daily_has_expected_commands.
+    """
     templates = {
-        "DAILY": TEMPLATE_DAILY,
         "MODULES": TEMPLATE_MODULES,
         "BUSINESS": TEMPLATE_BUSINESS,
         "BRIEF_NEW": TEMPLATE_BRIEF_NEW,

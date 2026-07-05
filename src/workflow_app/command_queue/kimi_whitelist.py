@@ -127,6 +127,7 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/test-autoflow-auto",          # 85 (comando de teste determinístico — aguarda 30s e finaliza)
     # Loop housekeeping
     "/loop:clear",                  # 89
+    "/loop:friendly-resume",        # 82
     # Meta — cmd hardening
     "/cmd:autocast-hardening",      # 94 (KIMI_PREFERRED)
     "/cmd:autocast-put",            # 91 (KIMI_PREFERRED)
@@ -179,6 +180,9 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/mkt-assets:scan",                              # 85
     "/mkt-assets:plan",                              # 74
     "/mkt-assets:noop-fallback",                     # 100 (KIMI_PREFERRED)
+
+    # Usabilidade detector (project/check deterministico, le JSON do script produtor unico)
+    "/usabilidade:detect",                           # 88
 })
 
 

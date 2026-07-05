@@ -79,13 +79,34 @@ ACTION_COHERENCE: dict[str, dict[str, set]] = {
     "Executar":         {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
     "Revisar execucao": {"target_path": {True},  "target_terminal": {"terminal-interactive-output"}},
     "Loop prepare":     {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
+    "Analisar complexidade": {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
 }
 
 CURRENT_SCHEMA_VERSION = 1
-SEED_COUNT = 10
+SEED_COUNT = 20
 
 _PROMPT_RX = re.compile(r"(^## Prompt canonico\s*$\n?)(.*?)(?=^## |\Z)", re.M | re.S)
 _FRONTMATTER_RX = re.compile(r"^---\n(.*?)\n---\n?(.*)\Z", re.S)
+
+# Prefixo historico "Seed - Botao N - " que o `title` carrega. O label efetivo
+# do botao da grade nunca o exibe (paridade com main_window._load_brainstorm_seeds).
+_LABEL_PREFIX_RX = re.compile(r"^Seed\s*-\s*Botao\s*\d+\s*-\s*")
+
+
+def effective_label(meta: dict[str, Any]) -> str:
+    """Label que o botao da grade realmente exibe, para um dado seed `meta`.
+
+    Precedencia IDENTICA ao loader em `main_window._load_brainstorm_seeds`:
+    campo `label` explicito (nao-vazio) vence; senao deriva do `title`
+    removendo o prefixo "Seed - Botao N - "; fallback final = `slug`. O
+    prefixo tambem e removido de labels legados que guardaram o title inteiro,
+    para que o gear nunca mostre "Seed - Botao N - ..." no campo Label.
+    """
+    explicit = _LABEL_PREFIX_RX.sub("", str(meta.get("label") or "").strip()).strip()
+    if explicit:
+        return explicit
+    stripped = _LABEL_PREFIX_RX.sub("", str(meta.get("title") or "").strip()).strip()
+    return stripped or str(meta.get("slug") or "").strip()
 
 
 def _sanitize(value: str, key: str) -> str:
@@ -413,7 +434,7 @@ class BrainstormMcpConfigDialog(QDialog):
             self._seed_prompt.append(extract_prompt_body(body))
 
             slug = str(meta.get("slug") or p.stem)
-            label = str(meta.get("label") or meta.get("title") or slug)
+            label = effective_label(meta) or slug
             item = QListWidgetItem(f"{p.name}  -  {label}")
             item.setData(Qt.ItemDataRole.UserRole, slug)
             item.setData(Qt.ItemDataRole.UserRole + 1, f"brainstorm-mcp-config-row-{slug}")
@@ -447,7 +468,7 @@ class BrainstormMcpConfigDialog(QDialog):
         ):
             w.blockSignals(True)
 
-        self._label_edit.setText(str(meta.get("label") or meta.get("title") or ""))
+        self._label_edit.setText(effective_label(meta))
         button_type = str(meta.get("button_type") or "Claude")
         if button_type in VALID_BUTTON_TYPES:
             self._type_combo.setCurrentText(button_type)

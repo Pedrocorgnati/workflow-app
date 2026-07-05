@@ -58,9 +58,9 @@ def test_loop_both_no_redundant_model_effort(qapp):
     widget = CommandQueueWidget()
     names = _capture_loop_specs(widget, "/loop --both tasks.md")
     _assert_anti_redundant(names)
-    # --both = 8 fases
+    # --both = 9 fases
     reals = [n for n in names if not n.startswith(("/clear", "/model ", "/effort "))]
-    assert len(reals) == 8, names
+    assert len(reals) == 9, names
     widget.deleteLater()
 
 
@@ -69,7 +69,7 @@ def test_loop_task_no_redundant_model_effort(qapp):
     names = _capture_loop_specs(widget, "/loop --task tasks.md")
     _assert_anti_redundant(names)
     reals = [n for n in names if not n.startswith(("/clear", "/model ", "/effort "))]
-    assert len(reals) == 6, names
+    assert len(reals) == 7, names
     widget.deleteLater()
 
 

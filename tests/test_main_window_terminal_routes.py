@@ -64,7 +64,7 @@ def test_mcp_toolbar_uses_provider_radio_and_three_actions(qtbot):
     assert _radio_by_testid(win, "output-mcp-provider-codex").text() == "Codex"
 
     personas = {
-        "output-mcp-persona-search-in": "seatch-in",
+        "output-mcp-persona-search-in": "search-in",
         "output-mcp-persona-search-out": "search-out",
         "output-mcp-persona-controversial": "controversial",
         "output-mcp-persona-hardening": "hardening",
@@ -79,6 +79,45 @@ def test_mcp_toolbar_uses_provider_radio_and_three_actions(qtbot):
     }
     for testid, label in actions.items():
         assert _button_by_testid(win, testid).text() == label
+
+
+def test_ws_rules_button_lives_in_rules_subtab_and_publishes_workspace_rules(qtbot):
+    from workflow_app.config.app_state import app_state
+    from workflow_app.config.config_parser import PipelineConfig
+
+    app_state.clear_all()
+    win = _new_window(qtbot)
+    _set_route(win, t1=True, t2=False, t3=False)
+    app_state.set_project_config(
+        PipelineConfig(
+            config_path="/tmp/project/.claude/project.json",
+            project_name="project-a",
+            brief_root="brief",
+            docs_root="docs",
+            wbs_root="wbs",
+            workspace_root="output/workspace/project-a",
+        )
+    )
+
+    btn = _button_by_testid(win, "queue-btn-ws-rules-path")
+    assert btn.text() == "ws-rules"
+    ancestor = btn.parentWidget()
+    while (
+        ancestor is not None
+        and ancestor.property("testid") != "queue-subtab-insertions-rules"
+    ):
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None
+
+    sent_t1: list[str] = []
+    signal_bus.paste_text_in_terminal.connect(sent_t1.append)
+    try:
+        btn.click()
+    finally:
+        signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
+        app_state.clear_all()
+
+    assert sent_t1 == ["output/workspace/project-a/rules"]
 
 
 def test_mcp_toolbar_claude_main_command_routes_by_toggles_not_provider(qtbot):
