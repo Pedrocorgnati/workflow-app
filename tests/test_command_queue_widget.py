@@ -13,10 +13,17 @@ Covers:
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
+from workflow_app.command_queue.command_item_widget import (
+    CommandItemWidget,
+    render_with_mcp_flags,
+)
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+from workflow_app.command_queue.provider_router import Provider
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -578,16 +585,19 @@ class TestForceKimi:
         assert chk.text() == "kimi"
 
     def test_single_llm_routing_container_has_two_sections(self, widget):
-        from PySide6.QtWidgets import QWidget
-        found = [
-            w for w in widget.findChildren(QWidget)
-            if w.property("testid") == "queue-div-llm-routing"
-        ]
-        assert len(found) == 1, "queue-div-llm-routing container nao encontrado"
-        llm_box = found[0]
-        assert llm_box.minimumHeight() == 112
-        assert llm_box.maximumHeight() == 112
-        assert llm_box.parentWidget().minimumHeight() >= 158
+        # queue-div-llm-routing deixou de morar na play bar: o MainWindow o
+        # reparenteia para a linha 1 da OutputToolbar (slot antes ocupado por
+        # output-toolbar-progress-boxes). Standalone, o box existe como atributo
+        # (self._llm_box) sem parent ate o reparent, entao ele nao aparece em
+        # findChildren(widget). Aqui validamos via o atributo direto.
+        llm_box = widget._llm_box
+        assert llm_box is not None
+        assert llm_box.property("testid") == "queue-div-llm-routing"
+        # Layout agora vertical (Main LLM / Parallel Worker / MCP Flags / ...):
+        # secoes empilhadas, cada uma com label+inputs em row. Sem altura fixa;
+        # o box cresce para acomodar as secoes empilhadas.
+        from PySide6.QtWidgets import QVBoxLayout
+        assert isinstance(llm_box.layout(), QVBoxLayout)
         assert widget._main_claude_radio.isChecked() is True
         assert widget._main_codex_radio.text() == "codex"
         assert widget._use_codex_chk.property("testid") == "queue-chk-use-codex"
@@ -3906,3 +3916,526 @@ class TestFix011BlueArrowUniversalRouting:
         # payload de recovery; um texto cru e deixado intacto (defensivo).
         assert self._route("hello world") == "hello world"
         assert self._route("/qa:prep") == "/qa:prep"
+
+
+# ══════════════════════════════════════════════════════════════════════════ #
+# Item 008 (loop 07-09-flags-multi-llm-mcp-distribution) — eixo-flag MCP:      #
+# helper render_with_mcp_flags (off/kimi/codex/ambos/dedupe/exclusoes),        #
+# paridade de label (set_flag_suffix), copy por provider                       #
+# (_on_copy_rendered_commands), dispatch T1-com-flag vs T2/T3-sem-flag,        #
+# snapshot limpo I1 (get_queue_snapshot), resolver de target do comando        #
+# /auto-improove:mcp-flags (slash/bare/path/invalido/wrapper bloqueado) e a    #
+# idempotencia I9 do implantador. Porta de regressao para o item 009.          #
+# Roda com Qt offscreen (QT_QPA_PLATFORM=offscreen) + pytest -o addopts="".    #
+# ══════════════════════════════════════════════════════════════════════════ #
+
+
+def _repo_root() -> Path:
+    """Walk up from this test file to the TRUE repo root.
+
+    O `ai-forge/workflow-app` tem seu proprio `.claude/commands` + `ai-forge`
+    embutidos (repo git aninhado), entao esses sentinels sozinhos param cedo
+    demais. O sentinel unico da raiz real e `ai-forge/workflow-app` (a raiz
+    contem o app; o app nao se contem).
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (
+            (parent / ".claude" / "commands").is_dir()
+            and (parent / "ai-forge" / "workflow-app").is_dir()
+            and (parent / "CLAUDE.md").is_file()
+        ):
+            return parent
+    raise AssertionError("repo root nao localizado a partir de " + str(here))
+
+
+class TestRenderWithMcpFlagsHelper:
+    """Helper puro render_with_mcp_flags: off/kimi/codex/ambos/dedupe/exclusoes (I1/I2/I3)."""
+
+    def test_off_is_identity(self):
+        """Caso off: sem flags ativas -> spec.name byte-a-byte (regressao zero)."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec, for_dispatch=False, provider=Provider.CLAUDE, active_flags=[]
+        )
+        assert out == "/prd-create"
+        assert out == spec.name
+
+    def test_kimi_only_appended_on_claude(self):
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec, for_dispatch=False, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        assert out == "/prd-create --kimi"
+
+    def test_codex_only_appended_on_claude(self):
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec, for_dispatch=False, provider=Provider.CLAUDE, active_flags=["--codex"]
+        )
+        assert out == "/prd-create --codex"
+
+    def test_both_flags_order_preserved(self):
+        """Ambas as flags: ordem de entrada preservada (kimi, codex)."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=False,
+            provider=Provider.CLAUDE,
+            active_flags=["--kimi", "--codex"],
+        )
+        assert out == "/prd-create --kimi --codex"
+
+    def test_dedupe_repeated_flag(self):
+        """Flag repetida e dedupada, mantendo uma unica ocorrencia."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=False,
+            provider=Provider.CLAUDE,
+            active_flags=["--kimi", "--kimi", "--codex"],
+        )
+        assert out == "/prd-create --kimi --codex"
+
+    def test_unsupported_token_ignored(self):
+        """Token nao suportado em active_flags e ignorado (Zero Assumido)."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=False,
+            provider=Provider.CLAUDE,
+            active_flags=["--kimi", "--wat", "-x"],
+        )
+        assert out == "/prd-create --kimi"
+
+    @pytest.mark.parametrize("directive", ["/clear", "/model opus", "/effort high"])
+    def test_exclusion_session_directives(self, directive):
+        """I2: /clear, /model, /effort nunca recebem sufixo, mesmo com flags."""
+        spec = CommandSpec(directive, ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=False,
+            provider=Provider.CLAUDE,
+            active_flags=["--kimi", "--codex"],
+        )
+        assert out == directive
+
+    def test_exclusion_local_action(self):
+        """I2: local-action nunca recebe sufixo, retorna a base crua."""
+        spec = CommandSpec(
+            "Carregar SPECIFIC-FLOW",
+            ModelName.OPUS,
+            position=1,
+            kind="local-action",
+            local_action_id="dcp:load-specific-flow",
+        )
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=False,
+            provider=Provider.CLAUDE,
+            active_flags=["--kimi", "--codex"],
+        )
+        assert out == "Carregar SPECIFIC-FLOW"
+
+    def test_strip_on_kimi_provider(self):
+        """I3: item roteado a worker Kimi (T2) sai limpo, sem flags."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=True,
+            provider=Provider.KIMI,
+            active_flags=["--kimi", "--codex"],
+        )
+        assert out == "/prd-create"
+
+    def test_strip_on_codex_provider(self):
+        """I3: item roteado a worker Codex (T3) sai limpo, sem flags."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec,
+            for_dispatch=True,
+            provider=Provider.CODEX,
+            active_flags=["--kimi", "--codex"],
+        )
+        assert out == "/prd-create"
+
+    def test_provider_none_no_suffix(self):
+        """provider None (Desabilitado) -> base sem sufixo."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec, for_dispatch=False, provider=None, active_flags=["--kimi"]
+        )
+        assert out == "/prd-create"
+
+    def test_pure_never_mutates_spec_name(self):
+        """I1: o helper e puro, nunca muta spec.name."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        render_with_mcp_flags(
+            spec, for_dispatch=True, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        assert spec.name == "/prd-create"
+
+
+class TestSetFlagSuffixLabelParity:
+    """Paridade de label: set_flag_suffix no CommandItemWidget (item 004)."""
+
+    def _item(self, qapp, qtbot, name="/prd-create"):
+        spec = CommandSpec(name, ModelName.OPUS, position=1)
+        it = CommandItemWidget(spec)
+        qtbot.addWidget(it)
+        return it, spec
+
+    def test_suffix_applied_to_label(self, qapp, qtbot):
+        it, _ = self._item(qapp, qtbot)
+        base = it._name_label.text()
+        it.set_flag_suffix("--kimi")
+        assert it._name_label.text() != base
+        assert "--kimi" in it._name_label.text()
+
+    def test_empty_suffix_restores_base(self, qapp, qtbot):
+        it, _ = self._item(qapp, qtbot)
+        base = it._name_label.text()
+        it.set_flag_suffix("--kimi --codex")
+        it.set_flag_suffix("")
+        assert it._name_label.text() == base
+
+    def test_set_flag_suffix_never_mutates_spec_name(self, qapp, qtbot):
+        it, spec = self._item(qapp, qtbot)
+        it.set_flag_suffix("--kimi --codex")
+        assert spec.name == "/prd-create"
+        assert it.get_spec().name == "/prd-create"
+
+
+class TestCopyRenderedCommandsPerProvider:
+    """Copy por provider: _on_copy_rendered_commands (item 005) — D1/I3/I4."""
+
+    def _widget(self, qapp, qtbot, specs):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.load_pipeline(specs)
+        return w
+
+    def _copy_lines(self, w):
+        from PySide6.QtWidgets import QApplication
+
+        w._on_copy_rendered_commands()
+        return QApplication.clipboard().text().split("\n")
+
+    def test_copy_t1_with_kimi_flag(self, qapp, qtbot):
+        """T1 (sem workers) + --kimi -> a linha copiada leva o sufixo."""
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w = self._widget(qapp, qtbot, specs)
+        w._flag_kimi_chk.setChecked(True)
+        assert self._copy_lines(w) == ["/prd-create --kimi"]
+
+    def test_copy_t1_with_codex_flag(self, qapp, qtbot):
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w = self._widget(qapp, qtbot, specs)
+        w._flag_codex_chk.setChecked(True)
+        assert self._copy_lines(w) == ["/prd-create --codex"]
+
+    def test_copy_t1_with_both_flags(self, qapp, qtbot):
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w = self._widget(qapp, qtbot, specs)
+        w._flag_kimi_chk.setChecked(True)
+        w._flag_codex_chk.setChecked(True)
+        assert self._copy_lines(w) == ["/prd-create --kimi --codex"]
+
+    def test_copy_off_has_no_suffix(self, qapp, qtbot):
+        """Caso off: nenhuma flag marcada -> copy identica ao spec.name."""
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w = self._widget(qapp, qtbot, specs)
+        assert self._copy_lines(w) == ["/prd-create"]
+
+    def test_copy_t2_kimi_worker_strips_flag(self, qapp, qtbot):
+        """T2 (kimi worker + kimi_eligible) -> a copy NAO leva a flag ao worker."""
+        specs = [
+            CommandSpec("/prd-create", ModelName.OPUS, position=1, kimi_eligible=True)
+        ]
+        w = self._widget(qapp, qtbot, specs)
+        w._use_kimi_chk.setChecked(True)   # eixo-worker T2 ativo
+        w._flag_kimi_chk.setChecked(True)  # flag marcada, mas item vai a worker
+        # provider efetivo do item e KIMI -> strip (I3).
+        assert w._resolve_item_provider(specs[0]) is Provider.KIMI
+        assert self._copy_lines(w) == ["/prd-create"]
+
+    def test_copy_session_directive_never_flagged(self, qapp, qtbot):
+        """/clear na fila e copiado sem sufixo, mesmo com flag ativa (I2)."""
+        specs = [
+            CommandSpec("/clear", ModelName.OPUS, position=1),
+            CommandSpec("/prd-create", ModelName.OPUS, position=2),
+        ]
+        w = self._widget(qapp, qtbot, specs)
+        w._flag_kimi_chk.setChecked(True)
+        assert self._copy_lines(w) == ["/clear", "/prd-create --kimi"]
+
+
+class TestDispatchProviderResolution:
+    """Dispatch T1-com-flag vs T2/T3-sem-flag via _resolve_item_provider."""
+
+    def _widget(self, qapp, qtbot, specs):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.load_pipeline(specs)
+        return w
+
+    def test_no_workers_is_claude_t1(self, qapp, qtbot):
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        w = self._widget(qapp, qtbot, [spec])
+        assert w._resolve_item_provider(spec) is Provider.CLAUDE
+
+    def test_kimi_worker_eligible_is_kimi(self, qapp, qtbot):
+        spec = CommandSpec(
+            "/prd-create", ModelName.OPUS, position=1, kimi_eligible=True
+        )
+        w = self._widget(qapp, qtbot, [spec])
+        w._use_kimi_chk.setChecked(True)
+        assert w._resolve_item_provider(spec) is Provider.KIMI
+
+    def test_worker_never_carries_flag_to_external(self, qapp, qtbot):
+        """T2/T3: mesmo com flag marcada, o render de dispatch sai sem flag."""
+        spec = CommandSpec(
+            "/prd-create", ModelName.OPUS, position=1, kimi_eligible=True
+        )
+        w = self._widget(qapp, qtbot, [spec])
+        w._use_kimi_chk.setChecked(True)
+        provider = w._resolve_item_provider(spec)
+        rendered = render_with_mcp_flags(
+            spec,
+            for_dispatch=True,
+            provider=provider,
+            active_flags=["--kimi", "--codex"],
+        )
+        assert rendered == "/prd-create"
+
+
+class TestQueueSnapshotCleanI1:
+    """Snapshot limpo I1: get_queue_snapshot serializa spec.name sem flag."""
+
+    def _widget(self, qapp, qtbot, specs):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.load_pipeline(specs)
+        return w
+
+    def test_snapshot_has_no_flag_after_toggle(self, qapp, qtbot):
+        specs = [
+            CommandSpec("/prd-create", ModelName.OPUS, position=1),
+            CommandSpec("/hld-create", ModelName.SONNET, position=2),
+        ]
+        w = self._widget(qapp, qtbot, specs)
+        w._flag_kimi_chk.setChecked(True)
+        w._flag_codex_chk.setChecked(True)
+        # Aplica os sufixos nos labels da UI (recompute do zero).
+        w._refresh_flag_suffix()
+        snap = w.get_queue_snapshot()
+        names = [entry["name"] for entry in snap]
+        assert names == ["/prd-create", "/hld-create"]
+        for name in names:
+            assert "--kimi" not in name
+            assert "--codex" not in name
+
+    def test_snapshot_clean_even_when_label_flagged(self, qapp, qtbot):
+        """Label na tela leva a flag, mas o snapshot sai limpo (I1)."""
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w = self._widget(qapp, qtbot, specs)
+        w._flag_kimi_chk.setChecked(True)
+        w._refresh_flag_suffix()
+        # Label tem a flag (paridade visual)...
+        assert "--kimi" in w._items[0]._name_label.text()
+        # ...mas o snapshot nao.
+        assert w.get_queue_snapshot()[0]["name"] == "/prd-create"
+
+
+class TestFlagLabelParityOnAddF1:
+    """F1 (review-executed-loop 07-09-flags): item criado com a flag JA marcada
+    nasce com o label em paridade com copy/dispatch, que computam o sufixo live.
+    Antes do fix, _refresh_flag_suffix so rodava no toggle, entao um item
+    adicionado depois do toggle mantinha o label base (divergencia label vs
+    payload). O fix aplica o sufixo em _make_item (read-at-create, espelhando o
+    eixo-worker), cobrindo os dois add-paths: add_command e load_pipeline."""
+
+    def _widget(self, qapp, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        return w
+
+    def test_add_command_after_flag_checked_labels_in_parity(self, qapp, qtbot):
+        w = self._widget(qapp, qtbot)
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        w._flag_kimi_chk.setChecked(True)  # toggle refresha o item existente
+        assert "--kimi" in w._items[0]._name_label.text()
+        # Novo item T1 Claude adicionado DEPOIS do toggle: deve nascer com a flag.
+        w.add_command(CommandSpec("/hld-create", ModelName.SONNET, position=2))
+        assert "--kimi" in w._items[1]._name_label.text()
+
+    def test_load_pipeline_after_flag_checked_labels_in_parity(self, qapp, qtbot):
+        w = self._widget(qapp, qtbot)
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        w._flag_codex_chk.setChecked(True)
+        # Recarrega a fila inteira com a flag ja marcada: itens novos em paridade.
+        w.load_pipeline(
+            [
+                CommandSpec("/prd-create", ModelName.OPUS, position=1),
+                CommandSpec("/fdd-create", ModelName.OPUS, position=2),
+            ]
+        )
+        for item in w._items:
+            assert "--codex" in item._name_label.text()
+
+    def test_added_session_directive_never_gets_flag_on_create(self, qapp, qtbot):
+        """I2 preservada no add-path: /clear adicionado com flag marcada sai limpo."""
+        w = self._widget(qapp, qtbot)
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        w._flag_kimi_chk.setChecked(True)
+        w.add_command(CommandSpec("/clear", ModelName.SONNET, position=2))
+        assert "--kimi" not in w._items[1]._name_label.text()
+
+    def test_no_flag_checked_add_is_noop(self, qapp, qtbot):
+        """Sem flag marcada, o add-path nao altera o label (regressao zero)."""
+        w = self._widget(qapp, qtbot)
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        w.add_command(CommandSpec("/hld-create", ModelName.SONNET, position=2))
+        assert w._items[1]._name_label.text().strip().startswith("/hld-create")
+        assert "--kimi" not in w._items[1]._name_label.text()
+        assert "--codex" not in w._items[1]._name_label.text()
+
+
+# ── Resolver de target do comando /auto-improove:mcp-flags (item 002) ──────── #
+# O resolver vive em prosa na FASE 1 do comando .md (nao ha simbolo Python a
+# importar). Abaixo: (a) uma implementacao de referencia PURA que encoda as
+# regras da FASE 1 (slash/bare/path + as 3 rejeicoes) e (b) uma assercao de
+# contrato que ancora essas regras ao arquivo real do comando, evitando
+# circularidade (o teste falha se o comando parar de documentar as rejeicoes).
+
+_MCP_WRAPPER_TARGETS = frozenset(
+    {
+        ".claude/commands/mcp/codex.md",
+        ".claude/commands/mcp/kimi.md",
+        ".claude/commands/mcp/dual.md",
+    }
+)
+
+
+def _resolve_mcp_flags_target(raw_target: str) -> str:
+    """Implementacao de referencia do resolver da FASE 1 de /auto-improove:mcp-flags.
+
+    Aceita 3 formas (slash `/grupo:nome`, bare `grupo:nome`, path
+    `.claude/commands/...md`), todas convertidas ao mesmo path canonico.
+    Levanta ValueError nas 3 rejeicoes: fora de `.claude/commands/`, glob
+    multiplo (`*`), wrapper `mcp/{codex,kimi,dual}.md`.
+    """
+    if not raw_target or not raw_target.strip():
+        raise ValueError("raw_target vazio")
+    tok = raw_target.strip().split(None, 1)[0].replace("\\", "/")
+
+    if "*" in tok:
+        raise ValueError("glob multiplo: nunca auto-pick")
+
+    if tok.endswith(".md") and "/" in tok:
+        path = tok
+    else:
+        slug = tok[1:] if tok.startswith("/") else tok
+        path = ".claude/commands/" + slug.replace(":", "/") + ".md"
+
+    path = path.lstrip("./") if path.startswith("./") else path
+    if not path.startswith(".claude/commands/"):
+        raise ValueError("fora de .claude/commands/: " + path)
+    if path in _MCP_WRAPPER_TARGETS:
+        raise ValueError("wrapper MCP nao e alvo de implantacao: " + path)
+    return path
+
+
+class TestMcpFlagsTargetResolver:
+    """Resolver de target: slash/bare/path/invalido/wrapper bloqueado (item 002)."""
+
+    def test_slash_form(self):
+        assert (
+            _resolve_mcp_flags_target("/cmd:update")
+            == ".claude/commands/cmd/update.md"
+        )
+
+    def test_slash_form_nested_namespace(self):
+        assert (
+            _resolve_mcp_flags_target("/loop:iteraction:execute-task")
+            == ".claude/commands/loop/iteraction/execute-task.md"
+        )
+
+    def test_bare_form(self):
+        assert (
+            _resolve_mcp_flags_target("cmd:update")
+            == ".claude/commands/cmd/update.md"
+        )
+
+    def test_path_form(self):
+        assert (
+            _resolve_mcp_flags_target(".claude/commands/cmd/update.md")
+            == ".claude/commands/cmd/update.md"
+        )
+
+    def test_invalid_outside_commands(self):
+        with pytest.raises(ValueError):
+            _resolve_mcp_flags_target("ai-forge/rules/foo.md")
+
+    def test_invalid_glob(self):
+        with pytest.raises(ValueError):
+            _resolve_mcp_flags_target("cmd/*")
+
+    @pytest.mark.parametrize("wrapper", ["mcp:codex", "mcp:kimi", "mcp:dual"])
+    def test_wrapper_blocked(self, wrapper):
+        with pytest.raises(ValueError):
+            _resolve_mcp_flags_target("/" + wrapper)
+
+    @pytest.mark.parametrize("wrapper", list(_MCP_WRAPPER_TARGETS))
+    def test_wrapper_blocked_path_form(self, wrapper):
+        with pytest.raises(ValueError):
+            _resolve_mcp_flags_target(wrapper)
+
+    def test_reference_targets_resolve_to_real_files(self):
+        """Sanidade: as formas resolvidas apontam para arquivos existentes."""
+        root = _repo_root()
+        for raw in ("/cmd:update", "cmd:update", ".claude/commands/cmd/update.md"):
+            resolved = _resolve_mcp_flags_target(raw)
+            assert (root / resolved).is_file(), resolved
+
+
+class TestMcpFlagsCommandContract:
+    """Contrato: o comando /auto-improove:mcp-flags documenta resolver + I9.
+
+    Ancora as regras da implementacao de referencia acima ao artefato real.
+    Se o item 002 parar de documentar as 3 rejeicoes ou a idempotencia I9,
+    este teste falha (porta de regressao, nao circularidade).
+    """
+
+    def _cmd_text(self) -> str:
+        p = _repo_root() / ".claude" / "commands" / "auto-improove" / "mcp-flags.md"
+        assert p.is_file(), "comando /auto-improove:mcp-flags ausente (item 002)"
+        return p.read_text(encoding="utf-8")
+
+    def test_documents_three_target_forms(self):
+        text = self._cmd_text().lower()
+        assert "slash" in text and "bare" in text and "path" in text
+
+    def test_documents_reject_outside_commands(self):
+        assert "fora de `.claude/commands/`" in self._cmd_text().lower()
+
+    def test_documents_reject_glob(self):
+        assert "glob multiplo" in self._cmd_text().lower()
+
+    def test_documents_reject_wrapper(self):
+        text = self._cmd_text()
+        assert "mcp/codex.md" in text
+        assert "mcp/kimi.md" in text
+        assert "mcp/dual.md" in text
+
+    def test_documents_idempotency_i9(self):
+        """I9: rodar 2x nao duplica nada (idempotencia do implantador)."""
+        text = self._cmd_text()
+        assert "I9" in text
+        assert "idempot" in text.lower()
+
+    def test_wrapper_files_exist(self):
+        """Os 3 wrappers bloqueados existem em disco (contrato do bloqueio)."""
+        root = _repo_root()
+        for w in _MCP_WRAPPER_TARGETS:
+            assert (root / w).is_file(), w

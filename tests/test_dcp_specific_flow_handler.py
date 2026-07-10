@@ -13,6 +13,7 @@ ai-forge/workflow-app/docs/refactor/T-050/README.md.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -1497,3 +1498,195 @@ def test_handle_dcp_load_clears_pending_context_on_failure(
     finally:
         widget.deleteLater()
         app_state.clear_config()
+
+
+# ─── Task 005: Build+Exec (modules) — existencia + golden fixture ─────────── #
+#
+# Spec: blacksmith/loop-archives/07-09-modules-build-execute-btn/tasks/items/
+# task-005-testes-existencia-golden-fixture.md — CA-1 (existencia do botao),
+# CA-6 (igualdade EXATA da sequencia emitida por
+# `_on_build_execute_modules_clicked` contra o golden fixture do apendice do
+# source.md do loop, incluindo tasks decimais), CA-2 (fila nunca contem
+# comandos de QA/commit/deploy/tdd/stack-review/docs/delivery).
+
+
+def _write_module_tasks(wbs_root: Path, module_id: str, task_names: list) -> None:
+    """Create `{wbs_root}/modules/{module_id}/{task_name}` for each task_name.
+
+    `enumerate_module_tasks` only inspects the filename pattern
+    (`TASK-<int|decimal>.md`), so a minimal stub body is sufficient.
+    """
+    module_dir = wbs_root / "modules" / module_id
+    module_dir.mkdir(parents=True, exist_ok=True)
+    for task_name in task_names:
+        (module_dir / task_name).write_text("# stub task\n", encoding="utf-8")
+
+
+def test_build_execute_modules_button_exists(qapp) -> None:
+    """CA-1: `queue-btn-build-execute-modules` renders na aba `queue-tab-workflow`,
+    habilitado no init (handler disk-only, fora do gating `_apply_dcp_reader_gating`,
+    task-004 aceite)."""
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+
+    widget = CommandQueueWidget()
+    try:
+        target = None
+        for btn in widget.header_widget.findChildren(QPushButton):
+            if btn.property("testid") == "queue-btn-build-execute-modules":
+                target = btn
+                break
+        assert target is not None, "queue-btn-build-execute-modules not found"
+        assert target.isEnabled() is True
+        assert "Build+Exec" in target.text()
+    finally:
+        widget.deleteLater()
+
+
+def test_build_execute_modules_golden_fixture_exact_sequence(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """CA-6: sequencia emitida por `_on_build_execute_modules_clicked` bate
+    caractere-a-caractere com o golden fixture do apendice (source.md, CA-6):
+    WBS com `module-1-a/` (TASK-1.md, TASK-2.md) e `module-2-b/` (TASK-1.md).
+
+    Cobre tambem CA-2: a fila emitida nunca contem `/qa:`, `/commit:`,
+    `/ci-cd`, `/pre-deploy`, `/staging`, `/post-deploy`, `/tdd:`,
+    `/{stack}:*-review`, `/documentation-update`, `/delivery:`.
+    """
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    _write_module_tasks(wbs_root, "module-1-a", ["TASK-1.md", "TASK-2.md"])
+    _write_module_tasks(wbs_root, "module-2-b", ["TASK-1.md"])
+
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+
+    emitted: list = []
+    signal_bus.pipeline_ready.connect(emitted.append)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._on_build_execute_modules_clicked()
+    finally:
+        try:
+            signal_bus.pipeline_ready.disconnect(emitted.append)
+        except (RuntimeError, TypeError):
+            pass
+        widget.deleteLater()
+        app_state.clear_config()
+
+    assert len(emitted) == 1, f"expected exactly 1 emission, got {len(emitted)}"
+    names = [s.name for s in emitted[0]]
+
+    wbs = str(wbs_root)
+    expected = [
+        "/clear",
+        "/model opus",
+        "/effort high",
+        f"/create-task {wbs}/modules/module-1-a/TASK-1.md",
+        f"/review-created-task {wbs}/modules/module-1-a/TASK-1.md",
+        "/clear",
+        "/model sonnet",
+        "/effort medium",
+        f"/execute-task {wbs}/modules/module-1-a/TASK-1.md",
+        f"/review-executed-task {wbs}/modules/module-1-a/TASK-1.md",
+        "/clear",
+        "/model opus",
+        "/effort high",
+        f"/create-task {wbs}/modules/module-1-a/TASK-2.md",
+        f"/review-created-task {wbs}/modules/module-1-a/TASK-2.md",
+        "/clear",
+        "/model sonnet",
+        "/effort medium",
+        f"/execute-task {wbs}/modules/module-1-a/TASK-2.md",
+        f"/review-executed-task {wbs}/modules/module-1-a/TASK-2.md",
+        "/clear",
+        "/model opus",
+        "/effort high",
+        f"/review-executed-module {wbs}/modules/module-1-a",
+        "/clear",
+        f"/create-task {wbs}/modules/module-2-b/TASK-1.md",
+        f"/review-created-task {wbs}/modules/module-2-b/TASK-1.md",
+        "/clear",
+        "/model sonnet",
+        "/effort medium",
+        f"/execute-task {wbs}/modules/module-2-b/TASK-1.md",
+        f"/review-executed-task {wbs}/modules/module-2-b/TASK-1.md",
+        "/clear",
+        "/model opus",
+        "/effort high",
+        f"/review-executed-module {wbs}/modules/module-2-b",
+    ]
+    assert names == expected, (
+        "emitted sequence diverges from golden fixture:\n"
+        f"got={names}\nexpected={expected}"
+    )
+
+    # CA-2: fila de proibicao — nenhum comando de QA/commit/deploy/tdd/stack-
+    # review/docs/delivery pode aparecer na fila do Build+Exec (modules).
+    _forbidden_prefixes = (
+        "/qa:", "/commit:", "/ci-cd", "/pre-deploy", "/staging",
+        "/post-deploy", "/tdd:", "/documentation-update", "/delivery:",
+    )
+    _stack_review_re = re.compile(r"^/[a-z0-9-]+:[a-z0-9-]*-review\b")
+    for name in names:
+        assert not name.startswith(_forbidden_prefixes), (
+            f"forbidden command found in Build+Exec queue: {name}"
+        )
+        assert not _stack_review_re.match(name), (
+            f"stack review command found in Build+Exec queue: {name}"
+        )
+
+
+def test_build_execute_modules_handles_decimal_task_ordering(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """CA-6 (caso de tasks decimais): `TASK-1.5.md` deve ordenar entre
+    `TASK-1.md` e `TASK-2.md` e renderizar com o basename decimal intacto no
+    argumento `{task}` emitido, mantendo a garantia de
+    `enumerate_module_tasks` (numeric-ordered, TASK-2 antes de TASK-10)."""
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.config.app_state import app_state
+    from workflow_app.signal_bus import signal_bus
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    # Written out of numeric order on purpose — enumeration must still sort
+    # them 1 < 1.5 < 2 regardless of filesystem iteration order.
+    _write_module_tasks(
+        wbs_root, "module-1-a", ["TASK-2.md", "TASK-1.5.md", "TASK-1.md"]
+    )
+
+    cfg = _make_config(tmp_path, wbs_root)
+    app_state.set_config(cfg)
+
+    emitted: list = []
+    signal_bus.pipeline_ready.connect(emitted.append)
+
+    widget = CommandQueueWidget()
+    try:
+        widget._on_build_execute_modules_clicked()
+    finally:
+        try:
+            signal_bus.pipeline_ready.disconnect(emitted.append)
+        except (RuntimeError, TypeError):
+            pass
+        widget.deleteLater()
+        app_state.clear_config()
+
+    assert len(emitted) == 1
+    names = [s.name for s in emitted[0]]
+    create_task_names = [n for n in names if n.startswith("/create-task ")]
+
+    wbs = str(wbs_root)
+    assert create_task_names == [
+        f"/create-task {wbs}/modules/module-1-a/TASK-1.md",
+        f"/create-task {wbs}/modules/module-1-a/TASK-1.5.md",
+        f"/create-task {wbs}/modules/module-1-a/TASK-2.md",
+    ], f"decimal task ordering diverged: {create_task_names}"

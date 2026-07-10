@@ -183,6 +183,8 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
 
     # Usabilidade detector (project/check deterministico, le JSON do script produtor unico)
     "/usabilidade:detect",                           # 88
+    # Auto-improove — eixo-flag multi-LLM (whitelist via --approved override; rubrica KEEP_CLAUDE score 64 < 70, >= threshold 54)
+    "/auto-improove:mcp-flags",                      # 64
 })
 
 

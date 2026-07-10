@@ -297,6 +297,90 @@ def _last_module_id(matrix: DcpCommandMatrix) -> Optional[str]:
     return sorted(matrix.modules.keys(), key=_sort_module_key)[-1]
 
 
+def enumerate_modules_on_disk(wbs_root: Optional[Path]) -> list[str]:
+    """List module dirnames under ``wbs_root/modules/``, filtered and ordered.
+
+    Single source of truth for "which modules exist" when the caller needs the
+    real filesystem state rather than ``delivery.json``/matrix bookkeeping
+    (e.g. the workflow-app "Build+Exec de todos os modules" queue button).
+    Mirrors the real-files-over-baked-count discipline already used by
+    ``task_enum.enumerate_module_tasks`` for TASK-*.md.
+
+    Rules:
+        - Only entries matching ``^module-\\d+[a-z]?-`` are considered (same
+          pattern as ``_sort_module_key``); everything else (``_shared``,
+          ``.DS_Store``, stray files) is skipped with a debug log, never a
+          crash (Zero Silencio: the skip is logged, not swallowed silently).
+        - Non-directories are skipped.
+        - Symlinks are followed only when they resolve to a path INSIDE
+          ``wbs_root`` (path-safety / R5 from source.md "Riscos previsiveis").
+          A symlink resolving outside `wbs_root`, or a broken symlink, is
+          skipped with a WARN.
+        - Result is sorted via ``_sort_module_key`` (numeric, `module-6a`
+          suffix-tolerant).
+
+    Returns:
+        ``[]`` when ``wbs_root`` is ``None`` or ``wbs_root/modules/`` does not
+        exist (never raises for the "no modules yet" case).
+    """
+    if wbs_root is None:
+        return []
+    modules_dir = Path(wbs_root) / "modules"
+    if not modules_dir.is_dir():
+        return []
+
+    try:
+        wbs_root_resolved = Path(wbs_root).resolve()
+    except OSError:  # pragma: no cover - defensive, unresolvable wbs_root
+        wbs_root_resolved = Path(wbs_root)
+
+    found: list[str] = []
+    for entry in modules_dir.iterdir():
+        name = entry.name
+        if not _MODULE_KEY_RE.match(name):
+            logger.debug(
+                "[dcp-queue] enumerate_modules_on_disk: ignorando entrada fora "
+                "do padrao module-N[letra]-slug: %s", name,
+            )
+            continue
+
+        if entry.is_symlink():
+            try:
+                resolved = entry.resolve(strict=True)
+            except OSError:
+                logger.warning(
+                    "[dcp-queue] enumerate_modules_on_disk: symlink quebrado "
+                    "ignorado: %s", name,
+                )
+                continue
+            try:
+                resolved.relative_to(wbs_root_resolved)
+            except ValueError:
+                logger.warning(
+                    "[dcp-queue] enumerate_modules_on_disk: symlink %s aponta "
+                    "para fora do wbs_root (%s); ignorado (path-safety R5).",
+                    name, resolved,
+                )
+                continue
+            if not resolved.is_dir():
+                logger.debug(
+                    "[dcp-queue] enumerate_modules_on_disk: symlink %s nao "
+                    "resolve para diretorio; ignorado.", name,
+                )
+                continue
+        elif not entry.is_dir():
+            logger.debug(
+                "[dcp-queue] enumerate_modules_on_disk: entrada nao-diretorio "
+                "ignorada: %s", name,
+            )
+            continue
+
+        found.append(name)
+
+    found.sort(key=_sort_module_key)
+    return found
+
+
 # ─── template rendering (mirror of _lib/specific_flow/templating.py) ────── #
 #
 # The widget cannot import from `.claude/commands/_lib/...` directly (not on
@@ -802,6 +886,7 @@ __all__ = [
     "canonical_bare_command_names",
     "_next_non_done_module_id",
     "_last_module_id",
+    "enumerate_modules_on_disk",
     "load_matrix",
     "derive_queue_from_matrix",
     "build_load_queue_trail_entry",

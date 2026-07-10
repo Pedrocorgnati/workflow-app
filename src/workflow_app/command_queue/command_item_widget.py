@@ -13,7 +13,7 @@ Visual states per DESIGN.md 2.3:
 from __future__ import annotations
 
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import QMimeData, QPoint, Qt, Signal
 from PySide6.QtGui import QDrag, QPainter, QPixmap
@@ -28,7 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.command_queue.kimi_whitelist import adapt_to_kimi, is_kimi_compatible
-from workflow_app.command_queue.provider_router import Provider
+from workflow_app.command_queue.provider_router import (
+    _SESSION_DIRECTIVES,
+    Provider,
+    normalize_command_name,
+)
 from workflow_app.domain import CommandSpec, CommandStatus, InteractionType, ModelName
 from workflow_app.widgets.model_badge import ModelBadge
 
@@ -125,6 +129,77 @@ def _format_command_label(name: str, config_path: str, *, max_lines: int = 3) ->
         lines.append(" ".join(groups[idx:idx + count]))
         idx += count
     return "\n".join(lines)
+
+
+# Flags MCP intra-comando suportadas (eixo-flag; distinto do eixo-worker
+# queue-chk-use-*). Apenas estes literais entram no sufixo; qualquer outro token
+# em active_flags e ignorado (Zero Assumido: o conjunto e explicito).
+_SUPPORTED_MCP_FLAGS: frozenset[str] = frozenset({"--kimi", "--codex"})
+
+
+def render_with_mcp_flags(
+    spec: CommandSpec,
+    *,
+    for_dispatch: bool,
+    provider: Provider | None,
+    active_flags: Sequence[str],
+) -> str:
+    """Render puro do nome do comando com o sufixo de flags MCP (--kimi/--codex).
+
+    Funcao PURA (I1): nao muta `spec.name`, nao le estado de UI/queue, sem I/O.
+    As flags marcadas entram exclusivamente por `active_flags` (o caller — handler
+    do checkbox queue-chk-flag-* do item 004 — le o estado dos checkboxes e passa
+    a lista adiante); assim o helper permanece testavel isolado (off / kimi /
+    codex / ambos / dedupe / exclusoes) sem acoplar ao widget.
+
+    Regras (grounded source.md apendice A3):
+      - Base = `spec.name`, sempre. NUNCA mutada (I1); get_queue_snapshot sai limpo.
+      - Exclusoes (I2): `local-action` e as diretivas de sessao `/clear`, `/model`,
+        `/effort` NUNCA recebem sufixo — retorna a base crua. Fonte unica do
+        conjunto de diretivas: provider_router._SESSION_DIRECTIVES (:48) +
+        classify_provider local-action (:108); nao duplicado aqui.
+      - provider KIMI ou CODEX (item vai a worker T2/T3): retorna a base SEM flags
+        (strip; decisao D1 / invariante I3). O strip e governado por `provider`,
+        nao por `for_dispatch`.
+      - provider CLAUDE (T1): anexa as flags de `active_flags` (apenas literais
+        suportados, dedupadas, ordem de entrada preservada) ao final da base.
+      - provider None (Desabilitado) ou active_flags vazio / sem literal suportado:
+        retorna `spec.name` sem sufixo (regressao zero).
+
+    Sobre `for_dispatch`: distingue conceitualmente o render do payload de
+    copy/dispatch (T1) do render do label da UI. Neste escopo (task 003) ambos
+    produzem a MESMA string: o sufixo de flags e identico no label e no payload
+    T1, e o strip a worker ja e governado por `provider`. Portanto `for_dispatch`
+    NAO introduz ramo distinto aqui (efeito declarado, nao indefinido); o
+    parametro fica reservado para uma eventual divergencia no item 005
+    (copy/dispatch T1), preservando a assinatura estavel para os consumidores.
+    """
+    _ = for_dispatch  # sem ramo distinto neste escopo (ver docstring).
+    base = spec.name
+
+    # I2: local-action nunca recebe sufixo.
+    if getattr(spec, "kind", "slash") == "local-action":
+        return base
+
+    # I2: diretivas de sessao (/clear, /model, /effort) nunca recebem sufixo.
+    if normalize_command_name(base) in _SESSION_DIRECTIVES:
+        return base
+
+    # I3: item roteado a worker (Kimi/Codex) sai limpo; None (Desabilitado)
+    # tambem nao recebe sufixo. Apenas CLAUDE/T1 anexa flags.
+    if provider is not Provider.CLAUDE:
+        return base
+
+    # provider CLAUDE: anexa flags suportadas, dedupadas, ordem preservada.
+    suffix_flags: list[str] = []
+    for flag in active_flags:
+        if flag in _SUPPORTED_MCP_FLAGS and flag not in suffix_flags:
+            suffix_flags.append(flag)
+
+    if not suffix_flags:
+        return base
+
+    return f"{base} {' '.join(suffix_flags)}"
 
 
 class CommandItemWidget(QWidget):
@@ -371,6 +446,28 @@ class CommandItemWidget(QWidget):
 
     def get_spec(self) -> CommandSpec:
         return self._spec
+
+    def set_flag_suffix(self, suffix: str) -> None:
+        """Recomputa o label do item aplicando `suffix` (flags MCP) e atualiza o QLabel.
+
+        Contraparte de UI do helper puro `render_with_mcp_flags`: o caller (handler
+        do checkbox queue-chk-flag-* do item 004) computa o sufixo via o helper e
+        re-renderiza o label chamando este metodo. `refresh_provider()` recolore
+        apenas o botao; este metodo cobre o texto do label, antes montado 1x no
+        `__init__` sem nenhum `_name_label.setText(...)`.
+
+        I1: NUNCA muta `self._spec.name` — o nome com sufixo e uma string local.
+        Sufixo vazio/whitespace restaura o label base (regressao zero). Preserva
+        o prefixo visual ⚙ dos itens local-action, identico ao `_setup_ui`.
+        """
+        suffix = (suffix or "").strip()
+        name = self._spec.name if not suffix else f"{self._spec.name} {suffix}"
+        label_text = _format_command_label(
+            name, self._spec.config_path, max_lines=3
+        )
+        if getattr(self._spec, "kind", "slash") == "local-action":
+            label_text = f"⚙ {label_text}"
+        self._name_label.setText(label_text)
 
     def command_text(self) -> str:
         """Return the full command text (name + config_path), shell-quoted when needed.

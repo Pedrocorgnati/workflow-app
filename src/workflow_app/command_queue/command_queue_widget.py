@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -44,7 +45,10 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app import dcp as dcp_pkg
-from workflow_app.command_queue.command_item_widget import CommandItemWidget
+from workflow_app.command_queue.command_item_widget import (
+    CommandItemWidget,
+    render_with_mcp_flags,
+)
 from workflow_app.command_queue.codex_whitelist import is_image_generation_command
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
@@ -1411,6 +1415,24 @@ class CommandQueueWidget(QWidget):
             specs.append(_cmd_spec(f"/cmd:kimi-pair-execute {force}{report_path}"))
             specs.append(_clear_spec(len(specs) + 1))
             specs.append(_cmd_spec("/cmd:readme-upd"))
+            # Ultima etapa: implanta as flags multi-LLM (--kimi/--codex) no
+            # comando recem criado/atualizado. Guard de existencia: so enfileira
+            # /auto-improove:mcp-flags se o proprio comando existir em disco;
+            # caso contrario emite toast warning e segue sem o passo, nunca
+            # enfileirando comando inexistente (task-006 do loop de flags).
+            mcp_flags_cmd_path = (
+                base_dir / ".claude" / "commands" / "auto-improove" / "mcp-flags.md"
+            )
+            if mcp_flags_cmd_path.exists():
+                specs.append(
+                    _cmd_spec(f"/auto-improove:mcp-flags --target {cmd_target_slash}")
+                )
+            else:
+                signal_bus.toast_requested.emit(
+                    "comando /auto-improove:mcp-flags ausente; "
+                    "passo mcp-flags omitido da fila --cmd-single",
+                    "warning",
+                )
             label = f"  \U0001f4cb  Loop --cmd-single: {cmd_target_slash} ({cmd_action})"
             auto_save_label = f"Loop --cmd-single {cmd_target_slash}"
         else:
@@ -2366,6 +2388,17 @@ class CommandQueueWidget(QWidget):
             ("Modules (Creation)", "Fase A do canonical loop — cria estrutura WBS, MODULE-META.json e delivery.json. Pre-requisito de [DCP: Build Module Pipeline].",
              self._on_modules_clicked,
              "queue-btn-modules"),
+            ("Build+Exec (modules)",
+             "Enfileira Build+Exec (5 comandos nucleares por task real, mais UM "
+             "/review-executed-module por module com task) para TODOS os modules "
+             "encontrados em disco sob {wbs_root}/modules/.\n"
+             "Modules sem task executavel sao pulados e logados; nenhum "
+             "/review-executed-module orfao e emitido para eles.\n"
+             "Habilitado quando ha projeto carregado; nao depende do reader de "
+             "SPECIFIC-FLOW.json (disk-only, fora do gating de "
+             "_apply_dcp_reader_gating).",
+             self._on_build_execute_modules_clicked,
+             "queue-btn-build-execute-modules"),
             ("DCP Build",
              "Enfileira pipeline B-dcp completo (5 cmds /dcp:* + carga local de SPECIFIC-FLOW) "
              "em queue-command-list para o modulo atual.\n"
@@ -2746,12 +2779,18 @@ class CommandQueueWidget(QWidget):
 
         # Play bar — big play button
         _PLAY_ROW_TOP_HEIGHT = 32
-        _LLM_ROUTING_HEIGHT = 112
+        # queue-div-llm-routing (_llm_box) deixou de morar na play bar: passou a
+        # ser reparenteado para a linha 1 da OutputToolbar do MainWindow (slot
+        # antes ocupado por output-toolbar-progress-boxes). As secoes agora sao
+        # verticais (Main LLM / Parallel Worker / MCP Flags / MCP / brainstorm),
+        # empilhadas uma sobre a outra; dentro de cada secao label e inputs ficam
+        # em row. play_row_third guarda so o copy-btn.
+        _COPY_ROW_HEIGHT = 26
         _PLAY_BAR_VERTICAL_MARGINS = 10
         _PLAY_BAR_SPACING = 4
         _PLAY_BAR_HEIGHT = (
             _PLAY_ROW_TOP_HEIGHT
-            + _LLM_ROUTING_HEIGHT
+            + _COPY_ROW_HEIGHT
             + _PLAY_BAR_VERTICAL_MARGINS
             + _PLAY_BAR_SPACING
         )
@@ -2943,46 +2982,71 @@ class CommandQueueWidget(QWidget):
 
         # LLM routing: one container with the main session selector and
         # optional worker preference toggles used by [Rodar proximo].
+        # Reparenteado pelo MainWindow para a linha 1 da OutputToolbar; por isso
+        # e exposto como self._llm_box. Layout horizontal: cada secao (label em
+        # cima, inputs embaixo) fica lado a lado, separada por divisores VLine
+        # (mesma leitura de separacao clara do brainstorm-buttons-grid).
         _llm_box = QWidget()
+        self._llm_box = _llm_box
         _llm_box.setProperty("testid", "queue-div-llm-routing")
-        _llm_box.setFixedHeight(_LLM_ROUTING_HEIGHT)
         _llm_box.setStyleSheet(
             "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
             "  border-radius: 5px; }"
         )
+        # Layout em coluna: cada secao (Main LLM | Parallel Worker | MCP Flags |
+        # MCP | brainstorm) fica empilhada uma sobre a outra, separada por
+        # divisores HLine. Dentro de cada secao, label e inputs ficam em row.
         _llm_layout = QVBoxLayout(_llm_box)
         _llm_layout.setContentsMargins(8, 4, 8, 4)
-        _llm_layout.setSpacing(4)
+        _llm_layout.setSpacing(6)
+        self._llm_layout = _llm_layout
 
+        # Mesma aparencia dos inputs de output-mcp-provider-radio-input e
+        # type-selector-radio-input: fonte 11px/700, indicador 12px, unchecked
+        # #18181B com borda #52525B, checked ambar #FBBF24, hover #FDE68A.
+        # Radios ficam circulares (radius 6px); checkboxes mantem o quadrado
+        # (radius 3px) com o mesmo esquema de cor.
         _control_qss = (
-            "QRadioButton, QCheckBox { color: #FAFAFA; font-size: 10px;"
-            "  font-weight: 600; background: transparent; border: none;"
+            "QRadioButton, QCheckBox { color: #FAFAFA; font-size: 11px;"
+            "  font-weight: 700; background: transparent; border: none;"
             "  padding: 0; }"
-            "QRadioButton::indicator, QCheckBox::indicator { width: 13px;"
-            "  height: 13px; }"
+            "QRadioButton::indicator, QCheckBox::indicator { width: 12px;"
+            "  height: 12px; }"
             "QRadioButton::indicator:unchecked, QCheckBox::indicator:unchecked {"
-            "  background-color: #3F3F46; border: 1px solid #52525B; }"
-            "QRadioButton::indicator:unchecked { border-radius: 7px; }"
+            "  background-color: #18181B; border: 1px solid #52525B; }"
+            "QRadioButton::indicator:unchecked { border-radius: 6px; }"
             "QCheckBox::indicator:unchecked { border-radius: 3px; }"
             "QRadioButton::indicator:checked, QCheckBox::indicator:checked {"
-            "  background-color: #3B82F6; border: 1px solid #3B82F6; }"
-            "QRadioButton::indicator:checked { border-radius: 7px; }"
+            "  background-color: #FBBF24; border: 1px solid #FBBF24; }"
+            "QRadioButton::indicator:checked { border-radius: 6px; }"
             "QCheckBox::indicator:checked { border-radius: 3px; }"
             "QRadioButton::indicator:hover, QCheckBox::indicator:hover {"
-            "  border-color: #93C5FD; }"
+            "  border-color: #FDE68A; }"
         )
         _section_label_qss = (
             "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
             "  text-transform: uppercase; background: transparent; border: none; }"
         )
+        self._llm_section_label_qss = _section_label_qss
+
+        def _make_llm_divider() -> QFrame:
+            """Divisor horizontal fino entre secoes empilhadas do _llm_box."""
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            line.setStyleSheet("color: #3F3F46; background: #3F3F46; border: none;")
+            line.setFixedHeight(1)
+            return line
+
+        self._make_llm_divider = _make_llm_divider
 
         _main_section = QWidget()
         _main_section.setProperty("testid", "queue-div-main-llm")
         _main_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em coluna: label em cima, inputs (radios) embaixo.
-        _main_layout = QVBoxLayout(_main_section)
+        # Layout em row: label a esquerda, inputs (radios) a direita.
+        _main_layout = QHBoxLayout(_main_section)
         _main_layout.setContentsMargins(0, 0, 0, 0)
-        _main_layout.setSpacing(2)
+        _main_layout.setSpacing(8)
         _main_label = QLabel("Main LLM:")
         _main_label.setStyleSheet(_section_label_qss)
         _main_options = QWidget()
@@ -3011,15 +3075,16 @@ class CommandQueueWidget(QWidget):
             _main_options_layout.addWidget(_btn)
         _main_layout.addWidget(_main_label)
         _main_layout.addWidget(_main_options)
-        _llm_layout.addWidget(_main_section, stretch=1)
+        _main_layout.addStretch(1)
+        _llm_layout.addWidget(_main_section)
 
         _worker_section = QWidget()
         _worker_section.setProperty("testid", "queue-div-parallel-worker")
         _worker_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em coluna: label em cima, inputs (checkboxes) embaixo.
-        _worker_layout = QVBoxLayout(_worker_section)
+        # Layout em row: label a esquerda, inputs (checkboxes) a direita.
+        _worker_layout = QHBoxLayout(_worker_section)
         _worker_layout.setContentsMargins(0, 0, 0, 0)
-        _worker_layout.setSpacing(2)
+        _worker_layout.setSpacing(8)
         _worker_label = QLabel("Parallel Worker:")
         _worker_label.setStyleSheet(_section_label_qss)
         _worker_options = QWidget()
@@ -3043,8 +3108,55 @@ class CommandQueueWidget(QWidget):
             _worker_options_layout.addWidget(_btn)
         _worker_layout.addWidget(_worker_label)
         _worker_layout.addWidget(_worker_options)
-        _llm_layout.addWidget(_worker_section, stretch=1)
-        play_row_third.addWidget(_llm_box, stretch=1)
+        _worker_layout.addStretch(1)
+        _llm_layout.addWidget(_make_llm_divider())
+        _llm_layout.addWidget(_worker_section)
+
+        # Terceira secao (item 004): flags MCP intra-comando (--kimi/--codex)
+        # anexadas ao label dos itens T1 (Claude). Espelha o padrao do worker;
+        # eixo-flag distinto do eixo-worker (queue-chk-use-*). Estado inicial
+        # desmarcado (nenhum sufixo por default). As exclusoes I2 (/clear,
+        # /model, /effort, local-action) e o strip a worker/Desabilitado (I3)
+        # vivem no helper puro render_with_mcp_flags; o handler apenas le os
+        # checkboxes e re-renderiza os labels afetados.
+        _flag_section = QWidget()
+        _flag_section.setProperty("testid", "queue-div-flag")
+        _flag_section.setStyleSheet("background: transparent; border: none;")
+        # Layout em row: label a esquerda, inputs (checkboxes) a direita.
+        _flag_layout = QHBoxLayout(_flag_section)
+        _flag_layout.setContentsMargins(0, 0, 0, 0)
+        _flag_layout.setSpacing(8)
+        _flag_label = QLabel("MCP Flags:")
+        _flag_label.setStyleSheet(_section_label_qss)
+        _flag_options = QWidget()
+        _flag_options.setStyleSheet("background: transparent; border: none;")
+        _flag_options_layout = QHBoxLayout(_flag_options)
+        _flag_options_layout.setContentsMargins(0, 0, 0, 0)
+        _flag_options_layout.setSpacing(8)
+        self._flag_kimi_chk = QCheckBox("--kimi")
+        self._flag_kimi_chk.setProperty("testid", "queue-chk-flag-kimi")
+        self._flag_kimi_chk.setToolTip(
+            "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
+            "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+        )
+        self._flag_codex_chk = QCheckBox("--codex")
+        self._flag_codex_chk.setProperty("testid", "queue-chk-flag-codex")
+        self._flag_codex_chk.setToolTip(
+            "Quando marcado, anexa --codex ao label dos itens T1 (Claude). "
+            "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+        )
+        for _btn in (self._flag_kimi_chk, self._flag_codex_chk):
+            _btn.setStyleSheet(_control_qss)
+            _btn.toggled.connect(self._on_flag_toggled)
+            _flag_options_layout.addWidget(_btn)
+        _flag_layout.addWidget(_flag_label)
+        _flag_layout.addWidget(_flag_options)
+        _flag_layout.addStretch(1)
+        _llm_layout.addWidget(_make_llm_divider())
+        _llm_layout.addWidget(_flag_section)
+        # _llm_box NAO entra na play bar: o MainWindow o reparenteia para a
+        # linha 1 da OutputToolbar. As secoes MCP/brainstorm sao anexadas la
+        # via append_llm_routing_section(). play_row_third guarda so o copy-btn.
 
         # Botao de copiar todos os comandos renderizados em queue-command-list.
         # Posicionado em play_row_third apos --force Kimi.
@@ -3347,6 +3459,30 @@ class CommandQueueWidget(QWidget):
         self._list_widget.setVisible(False)
         self._add_bar = add_bar
         content_layout.addWidget(self._add_bar)
+
+    def append_llm_routing_section(
+        self, label_text: str, control_widget: QWidget
+    ) -> QWidget:
+        """Anexa uma secao (label a esquerda, control a direita) ao queue-div-llm-routing.
+
+        Usado pelo MainWindow para dobrar os seletores MCP
+        (output-mcp-provider-radio-input) e brainstorm (type-selector-radio-input)
+        dentro do mesmo box vertical, precedidos por um divisor HLine para
+        separacao visual clara. Reparenteia `control_widget` para a nova secao.
+        Retorna o QWidget da secao criada.
+        """
+        section = QWidget()
+        section.setStyleSheet("background: transparent; border: none;")
+        section_layout = QHBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(8)
+        label = QLabel(label_text)
+        label.setStyleSheet(self._llm_section_label_qss)
+        section_layout.addWidget(label)
+        section_layout.addWidget(control_widget)
+        self._llm_layout.addWidget(self._make_llm_divider())
+        self._llm_layout.addWidget(section)
+        return section
 
     def _connect_signals(self) -> None:
         signal_bus.pipeline_ready.connect(self.load_pipeline)
@@ -6755,6 +6891,144 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save(f"multibackend {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
+    def _on_build_execute_modules_clicked(self) -> None:
+        """Enfileira Build+Exec (5 comandos nucleares por task real, mais UM
+        `/review-executed-module` por module com task) para TODOS os modules
+        encontrados em disco sob `{wbs_root}/modules/`.
+
+        Pre-condicoes (falha -> toast `warning` + return, nunca emit parcial):
+        1. Projeto carregado (`app_state.has_config and app_state.config`).
+        2. `wbs_root` resolvido via `_resolve_wbs_root(config)` existe em disco.
+        3. `wbs_root/modules/` existe.
+
+        Modules sem task executavel (`enumerate_module_tasks(...) == []`) sao
+        pulados e logados; nenhum `/review-executed-module` orfao e emitido para
+        eles. `_resolve_task_substitution` nunca recebe task vazia/None neste
+        fluxo, pois o loop de tasks so roda apos o guard de lista vazia.
+        """
+        from workflow_app.config.app_state import app_state
+
+        if not (app_state.has_config and app_state.config):
+            signal_bus.toast_requested.emit(
+                "Carregue um projeto antes de usar Build+Exec.", "warning"
+            )
+            return
+
+        config = app_state.config
+
+        from workflow_app.dcp.specific_flow_handler import _resolve_wbs_root
+
+        wbs_root = _resolve_wbs_root(config)
+        if not Path(wbs_root).exists():
+            signal_bus.toast_requested.emit(
+                f"wbs_root nao encontrado: {wbs_root}.", "warning"
+            )
+            return
+
+        modules_dir = Path(wbs_root) / "modules"
+        if not modules_dir.is_dir():
+            signal_bus.toast_requested.emit(
+                f"Nenhum diretorio modules/ em {wbs_root}. Rode Modules primeiro.",
+                "warning",
+            )
+            return
+
+        from workflow_app.dcp.queue_derivation import (
+            _module_path,
+            _resolve_task_substitution,
+            enumerate_modules_on_disk,
+        )
+        from workflow_app.dcp.task_enum import enumerate_module_tasks
+        from workflow_app.templates.quick_templates import _inject_clears
+
+        module_ids = enumerate_modules_on_disk(wbs_root)
+
+        real_specs: list[CommandSpec] = []
+        pos = 1
+        cm_id: str | None = None
+
+        for module_id in module_ids:
+            module_dir = modules_dir / module_id
+            task_names = enumerate_module_tasks(module_dir)
+            if not task_names:
+                logger.info(
+                    "[build-execute-modules] module %s sem task executavel; pulado.",
+                    module_id,
+                )
+                continue
+
+            if cm_id is None:
+                cm_id = module_id
+
+            module_path = _module_path(module_id, Path(wbs_root))
+            for task_name in task_names:
+                task_arg = _resolve_task_substitution(task_name, module_path)
+                real_specs.append(CommandSpec(
+                    name=f"/create-task {task_arg}",
+                    model=ModelName.OPUS,
+                    effort=EffortLevel.HIGH,
+                    interaction_type=InteractionType.AUTO,
+                    position=pos,
+                ))
+                pos += 1
+                real_specs.append(CommandSpec(
+                    name=f"/review-created-task {task_arg}",
+                    model=ModelName.SONNET,
+                    effort=EffortLevel.STANDARD,
+                    interaction_type=InteractionType.AUTO,
+                    position=pos,
+                ))
+                pos += 1
+                real_specs.append(CommandSpec(
+                    name=f"/execute-task {task_arg}",
+                    model=ModelName.SONNET,
+                    effort=EffortLevel.STANDARD,
+                    interaction_type=InteractionType.AUTO,
+                    position=pos,
+                ))
+                pos += 1
+                real_specs.append(CommandSpec(
+                    name=f"/review-executed-task {task_arg}",
+                    model=ModelName.SONNET,
+                    effort=EffortLevel.STANDARD,
+                    interaction_type=InteractionType.AUTO,
+                    position=pos,
+                ))
+                pos += 1
+
+            real_specs.append(CommandSpec(
+                name=f"/review-executed-module {module_path}",
+                model=ModelName.OPUS,
+                effort=EffortLevel.HIGH,
+                interaction_type=InteractionType.AUTO,
+                position=pos,
+            ))
+            pos += 1
+
+        if not real_specs:
+            signal_bus.toast_requested.emit(
+                "Nenhuma task executavel encontrada em nenhum module de "
+                f"{wbs_root}/modules/. Nada para enfileirar.",
+                "warning",
+            )
+            return
+
+        specs = _inject_clears(real_specs)
+
+        if not self._validate_no_bare_names(specs, cm_id or module_ids[0]):
+            return
+
+        logger.info(
+            "[build-execute-modules] enqueued %d specs across %d module(s)",
+            len(specs), len(module_ids),
+        )
+        self._template_label.setText(
+            f"  \U0001f4e6  build+exec modules: ({len(specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save("Build+Exec Modules")
+        signal_bus.pipeline_ready.emit(specs)
+
     def _usabilidade_gate_and_path(self) -> tuple[str, str] | None:
         """Gate compartilhado pelos dois handlers de Usabilidade.
 
@@ -7672,6 +7946,25 @@ class CommandQueueWidget(QWidget):
         _worker_kimi = getattr(self, "_use_kimi_chk", None) and self._use_kimi_chk.isChecked()
         if _main_kimi and not _worker_kimi:
             item.set_worker_arrow_visible(False)
+        # Eixo-flag (F1 do review-executed-loop 07-09-flags): um item criado com
+        # --kimi/--codex JA marcada precisa nascer com o label em paridade com
+        # copy/dispatch, que computam o sufixo live. Espelha o read-at-create do
+        # eixo-worker logo acima: le os checkboxes queue-chk-flag-* e aplica o
+        # sufixo via o helper puro. No-op quando nenhuma flag marcada (guard
+        # active_flags) ou item inelegivel (I2/I3 resolvidas no helper => sufixo
+        # vazio => set_flag_suffix restaura a base). Cobre load_pipeline E
+        # add_command (ambos passam por _make_item), fechando o gap de todos os
+        # add-paths com uma unica mudanca.
+        _active_flags = self._active_mcp_flags()
+        if _active_flags:
+            _provider = self._resolve_item_provider(spec)
+            _rendered = render_with_mcp_flags(
+                spec,
+                for_dispatch=False,
+                provider=_provider,
+                active_flags=_active_flags,
+            )
+            item.set_flag_suffix(_rendered[len(spec.name):].strip())
         return item
 
     def _on_single_button_codex_dispatch(
@@ -7952,6 +8245,61 @@ class CommandQueueWidget(QWidget):
             spec = item.get_spec()
             visible = is_kimi_compatible(spec.name) or spec.kimi_eligible
             item.set_worker_arrow_visible(visible)
+
+    def _on_flag_toggled(self, checked: bool) -> None:
+        """Eixo-flag (item 004): marcar/desmarcar --kimi/--codex re-renderiza os
+        labels dos itens T1 imediatamente, sem toast, sem reiniciar a fila e sem
+        tocar o estado de execucao.
+
+        Idempotente: o sufixo e sempre recomputado do zero a partir de spec.name
+        via render_with_mcp_flags, entao toggles repetidos nunca acumulam nem
+        duplicam flags. Espelha os handlers _on_use_*_toggled do eixo-worker."""
+        _ = checked
+        self._refresh_flag_suffix()
+
+    def _active_mcp_flags(self) -> list[str]:
+        """Le o estado dos checkboxes queue-chk-flag-* na ordem kimi, codex.
+
+        Ordem de entrada preservada (dedupe/ordenacao final ficam no helper puro
+        render_with_mcp_flags). Guard getattr para tolerar chamada antes do build
+        completo da UI."""
+        flags: list[str] = []
+        if (
+            getattr(self, "_flag_kimi_chk", None) is not None
+            and self._flag_kimi_chk.isChecked()
+        ):
+            flags.append("--kimi")
+        if (
+            getattr(self, "_flag_codex_chk", None) is not None
+            and self._flag_codex_chk.isChecked()
+        ):
+            flags.append("--codex")
+        return flags
+
+    def _refresh_flag_suffix(self) -> None:
+        """Recomputa e aplica o sufixo de flags MCP no label de cada item da fila.
+
+        Contraparte do eixo-flag ao _refresh_kimi_btn_visibility (eixo-worker).
+        Fila vazia (self._items sem itens) = no-op. Para cada item delega a
+        decisao ao helper puro render_with_mcp_flags: I2 (/clear, /model,
+        /effort, local-action) saem limpos; I3 (itens roteados a worker T2/T3 ou
+        Desabilitado) saem sem flags; so T1 Claude recebe o sufixo. O sufixo
+        passado a set_flag_suffix e a diferenca entre o render e spec.name (o
+        render sempre comeca por spec.name), entao itens inelegiveis recebem "" e
+        ficam inalterados. O recompute-do-zero garante idempotencia (I1: spec.name
+        nunca e mutado)."""
+        active_flags = self._active_mcp_flags()
+        for item in self._items:
+            spec = item.get_spec()
+            provider = self._resolve_item_provider(spec)
+            rendered = render_with_mcp_flags(
+                spec,
+                for_dispatch=False,
+                provider=provider,
+                active_flags=active_flags,
+            )
+            suffix = rendered[len(spec.name):].strip()
+            item.set_flag_suffix(suffix)
 
     # Diretorios pesquisados para resolver existencia de uma skill quando
     # --force Kimi reescreve `/cmd` como `/skill:cmd`. Caches resolvidos uma
@@ -8921,11 +9269,28 @@ class CommandQueueWidget(QWidget):
     def _on_copy_rendered_commands(self) -> None:
         """Copia todos os comandos renderizados em queue-command-list para o
         clipboard, um por linha, na ordem visual atual (inclui /clear, /model,
-        /effort e demais directivas — reflete exatamente o que esta na tela)."""
+        /effort e demais directivas — reflete exatamente o que esta na tela).
+
+        Item 005 (eixo-flag): o copy espelha o payload real por provider efetivo.
+        As flags MCP ativas sao lidas APENAS aqui, no momento do render (nunca no
+        snapshot — I1), e passadas ao helper puro render_with_mcp_flags, que decide
+        por provider: so T1 Claude efetivo recebe o sufixo; itens roteados a worker
+        T2 Kimi / T3 Codex e a Main Codex/Kimi saem sem flag (strip; decisao D1 /
+        I3/I4). O provider efetivo vem de _resolve_item_provider (mesma construcao
+        de RoutingState do dispatch), garantindo paridade byte-a-byte com o label
+        em tela (set_flag_suffix do _refresh_flag_suffix)."""
+        active_flags = self._active_mcp_flags()
         lines: list[str] = []
         for item in self._items:
             spec = item.get_spec()
-            name = (spec.name or "").strip()
+            provider = self._resolve_item_provider(spec)
+            rendered = render_with_mcp_flags(
+                spec,
+                for_dispatch=True,
+                provider=provider,
+                active_flags=active_flags,
+            )
+            name = (rendered or "").strip()
             if name:
                 lines.append(name)
         QApplication.clipboard().setText("\n".join(lines))
@@ -9453,8 +9818,26 @@ class CommandQueueWidget(QWidget):
             return
 
         # Claude main (default): raw dispatch to T1 interactive.
-        signal_bus.run_command_in_terminal.emit(cmd_text)
-        self._on_run_command(cmd_text)
+        # Item 005 (eixo-flag): SO o T1 Claude efetivo recebe o sufixo das flags
+        # MCP ativas. classify_provider ja rodou (:9447) e _last_classified_provider
+        # e CLAUDE neste ramo — o worker axis (use_kimi/use_codex) e as esteiras
+        # Main Codex/Kimi retornaram ANTES, entao seu payload nunca ganha flag
+        # (strip; decisao D1 / I3/I4 — Main Codex/Kimi sem contrato proprio). As
+        # flags sao lidas so aqui (nunca no snapshot — I1) e o sufixo vem do helper
+        # puro render_with_mcp_flags, reusando o mesmo delta rendered[len(name):]
+        # do _refresh_flag_suffix/_on_copy_rendered_commands (paridade label/copy/
+        # dispatch). O sufixo e anexado ao command_text() completo (apos args).
+        active_flags = self._active_mcp_flags()
+        rendered_t1 = render_with_mcp_flags(
+            spec,
+            for_dispatch=True,
+            provider=self._last_classified_provider,
+            active_flags=active_flags,
+        )
+        flag_suffix = rendered_t1[len(spec.name):]
+        cmd_text_t1 = f"{cmd_text}{flag_suffix}" if flag_suffix else cmd_text
+        signal_bus.run_command_in_terminal.emit(cmd_text_t1)
+        self._on_run_command(cmd_text_t1)
         next_item._mark_as_sent()
         # Pure interactive dispatch does not affect the workspace flag.
 

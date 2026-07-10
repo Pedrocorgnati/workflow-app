@@ -775,7 +775,6 @@ _DATATEST_FILTERED_IDS = frozenset({
     "output-toolbar-center",
     "terminal-route-toggles",
     "output-toolbar-mcp",
-    "output-toolbar-progress-boxes",
     "output-toolbar-test-mode",
     "terminal-interactive",
     "terminal-workspace",
@@ -1181,9 +1180,13 @@ class MainWindow(QMainWindow):
         # output-toolbar-left: abas primarias (Pipelines/Workflow/Auxiliar/Daily).
         _top_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
 
-        # Coluna progress-boxes
-        _progress_boxes_column = self._build_progress_boxes_column()
-        _top_row_layout.addWidget(_progress_boxes_column)                          # progress-boxes
+        # Slot antes ocupado por output-toolbar-progress-boxes (removido: coluna
+        # decorativa sem side effects). Agora hospeda o queue-div-llm-routing
+        # reparenteado da play bar do CommandQueueWidget. addWidget reparenteia
+        # o box (Main LLM | Parallel Worker | MCP Flags) para esta linha; as
+        # secoes MCP + brainstorm sao dobradas nele mais abaixo, apos o
+        # _build_mcp_column construir os respectivos radios.
+        _top_row_layout.addWidget(self._command_queue._llm_box)                    # llm-routing
 
         # Ultima coluna empilhada: test-mode em cima, queue-toggles embaixo.
         _queue_toggles_column = self._build_queue_toggles_column()
@@ -1232,6 +1235,21 @@ class MainWindow(QMainWindow):
         _mcp_column = self._build_mcp_column(self._mcp_column_btns)
         _mcp_column.setMinimumWidth(int(_mcp_column.sizeHint().width() * 1.25))
         _bottom_row_layout.addWidget(_mcp_column)                                  # mcp
+
+        # Dobra os seletores de LLM MCP + brainstorm dentro do
+        # queue-div-llm-routing (linha 1). _build_mcp_column ja construiu ambos
+        # os radios (output-mcp-provider-radio-input e type-selector-radio-input)
+        # sem os anexar aos layouts de origem; aqui eles sao reparenteados para
+        # o box horizontal, com labels 'MCP' e 'brainstorm'. Funcionalidade
+        # preservada: os QButtonGroup e signals seguem intactos.
+        _provider_row = getattr(self, "_mcp_provider_radio_input", None)
+        if _provider_row is not None:
+            self._command_queue.append_llm_routing_section("MCP", _provider_row)
+        _brainstorm_row = getattr(self, "_brainstorm_type_selector_row", None)
+        if _brainstorm_row is not None:
+            self._command_queue.append_llm_routing_section(
+                "brainstorm", _brainstorm_row
+            )
 
         _toolbar_row_layout.addWidget(_bottom_row)
         output_layout.addWidget(_toolbar_row)
@@ -2287,7 +2305,11 @@ class MainWindow(QMainWindow):
         self._mcp_toolbar_provider_group.buttonToggled.connect(
             _on_mcp_provider_changed
         )
-        mcps_layout.addWidget(provider_row)
+        # provider_row NAO entra mais em mcps_layout: e reparenteado para o
+        # queue-div-llm-routing (linha 1 da OutputToolbar) via
+        # append_llm_routing_section, com label 'MCP'. Ref guardada para o
+        # MainWindow dobrar apos o build do bottom row.
+        self._mcp_provider_radio_input = provider_row
 
         # Personas/agentes (output-mcp-persona-checkboxes*): grade de 4 por linha
         # x 3 linhas (12 agentes). Os checkboxes marcados tem seus prompts
@@ -2796,7 +2818,12 @@ class MainWindow(QMainWindow):
         # garante valor canonico mesmo se buttonToggled nao disparar.
         self._brainstorm_runtime_type = "claude"
 
-        page_layout.addWidget(radio_row)
+        # radio_row NAO entra mais em page_layout: e reparenteado para o
+        # queue-div-llm-routing (linha 1 da OutputToolbar) via
+        # append_llm_routing_section, com label 'brainstorm'. Ref guardada para
+        # o MainWindow dobrar apos o build do bottom row. O radio_state_getter
+        # (self._brainstorm_runtime_type) e os signals seguem intactos.
+        self._brainstorm_type_selector_row = radio_row
 
         # Grade seed-driven (T2 loop 05-21-implantation-tasklist-aba-brainstorm).
         # 1 MCPPromptButton por seed em blacksmith/brainstorm-mcp/NN-*.md,
@@ -3529,67 +3556,10 @@ class MainWindow(QMainWindow):
             host.removeEventFilter(filter_obj)
         self._px_ruler_resize_filter = None
 
-    _PROGRESS_BOX_BTN_STYLE_TPL = (
-        "QPushButton {{ background-color: {bg}; color: #FAFAFA;"
-        "  border: 1px solid {border}; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 700; padding: 0.5px 10px; text-align: left; }}"
-        "QPushButton:hover {{ background-color: {hover}; }}"
-    )
-    _PROGRESS_BOX_BTN_STYLE_GRAY = (
-        "QPushButton { background-color: #52525B; color: #A1A1AA;"
-        "  border: 1px solid #3F3F46; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 600; padding: 0.5px 10px; text-align: left; }"
-        "QPushButton:hover { background-color: #5E5E66; }"
-    )
-    # Estado intermediario: checkbox amarelo (PartiallyChecked) -> botao verde
-    # marcando "tarefa em andamento". Verde foi liberado de Prepare loop.
-    _PROGRESS_BOX_BTN_STYLE_GREEN = (
-        "QPushButton { background-color: #16A34A; color: #FAFAFA;"
-        "  border: 1px solid #15803D; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 700; padding: 0.5px 10px; text-align: left; }"
-        "QPushButton:hover { background-color: #15803D; }"
-    )
-    # Tri-state checkbox: Unchecked (sem fill) -> PartiallyChecked (verde)
-    # -> Checked (preto) -> Unchecked. Ciclo nativo do QCheckBox tristate.
-    # Mapeamento card-irmao (ver _on_state):
-    #   Unchecked      -> card colorido (pendente)
-    #   PartiallyCheck -> card verde   (em andamento)
-    #   Checked        -> card cinza   (concluido/arquivado)
-    _PROGRESS_BOX_CHK_STYLE = (
-        "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
-        "  background: transparent; border: none; padding: 0; spacing: 0; margin-right: 1px; }"
-        "QCheckBox::indicator { width: 14px; height: 14px; }"
-        "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
-        "  border: 1px solid #52525B; border-radius: 3px; }"
-        "QCheckBox::indicator:indeterminate { background-color: #16A34A;"
-        "  border: 2px solid #FFFFFF; border-radius: 3px; }"
-        "QCheckBox::indicator:checked { background-color: #000000;"
-        "  border: 1px solid #18181B; border-radius: 3px; }"
-    )
-    _PROGRESS_BOX_MINI_BTN_STYLE = (
-        "QPushButton { background-color: #27272A; color: #FAFAFA;"
-        "  border: 1px solid #52525B; border-radius: 5px;"
-        "  font-size: 11px; font-weight: 700; padding: 0; text-align: center; }"
-        "QPushButton:hover { background-color: #3F3F46; border-color: #71717A; }"
-        "QPushButton:pressed { background-color: #FBBF24; color: #18181B; border-color: #FBBF24; }"
-    )
-
-    _PROGRESS_BOX_DEFS = (
-        # (slug, label, bg, hover, border, paste_text)
-        # Cores disjuntas: roxo / azul / teal / laranja / rosa. Verde liberado
-        # para indicar estado "em andamento" (checkbox amarelo) no botao irmao.
-        ("prompt-to-md",      "Prompt to md",      "#7C3AED", "#6D28D9", "#6D28D9",
-            "/tools:prompt-to-md"),
-        ("study-that-prompt", "Study",             "#2563EB", "#1D4ED8", "#1D4ED8",
-            "limpe as importações, copie o path.md, clique no botão study"),
-        ("loop-the-study",    "Prepare loop",      "#0D9488", "#0F766E", "#0F766E",
-            "Instrução: apague o import, copie o link e clique no botão loop"),
-        ("rocksmash-the-loop","Rocksmash",         "#EA580C", "#C2410C", "#C2410C",
-            "abra o json e clique em rocksmash"),
-        ("execute-loop",      "Execute loop",      "#DB2777", "#BE185D", "#BE185D",
-            "abra o json e clique em loop"),
-    )
-    _PROGRESS_BOX_CANONIC_LABELS = ("Brieg", "Prd", "Modules", "DCP", "QA")
+    # _PROGRESS_TAB_ACTIVE_STYLE / _INACTIVE_STYLE sao compartilhados com a tab
+    # bar do _build_mcp_column (_switch_mcp_tab). Os antigos constantes
+    # _PROGRESS_BOX_* (cards decorativos de output-toolbar-progress-boxes) foram
+    # removidos junto com a coluna, que nao tinha side effects.
     _PROGRESS_TAB_ACTIVE_STYLE = (
         "QPushButton { background-color: #FBBF24; color: #18181B;"
         "  border: none; border-radius: 3px;"
@@ -3612,191 +3582,6 @@ class MainWindow(QMainWindow):
             if btn.property("testid") == testid:
                 btn.click()
                 return
-
-    def _build_progress_boxes_column(self) -> QWidget:
-        """Coluna irma entre output-toolbar-left e output-toolbar-queue-toggles.
-
-        5 linhas, cada uma com `[checkbox] [botao colorido com label]`.
-        Checkbox tri-state: Unchecked (sem fill) -> PartiallyChecked (amarelo)
-        -> Checked (verde) -> Unchecked. O botao irmao fica cinza em qualquer
-        estado != Unchecked, voltando a colorido so quando o ciclo zera.
-        Nenhum side effect adicional (sem signals, sem persistencia).
-        """
-        from PySide6.QtWidgets import (
-            QCheckBox,
-            QHBoxLayout,
-            QInputDialog,
-            QPushButton,
-            QStackedWidget,
-            QVBoxLayout,
-        )
-
-        column = QWidget()
-        column.setObjectName("OutputToolbarProgressBoxes")
-        column.setProperty("testid", "output-toolbar-progress-boxes")
-        column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        column.setStyleSheet(
-            "QWidget#OutputToolbarProgressBoxes { background-color: #1C1C1F;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
-        )
-        col_layout = QVBoxLayout(column)
-        col_layout.setContentsMargins(8, 4, 8, 4)
-        col_layout.setSpacing(3)
-
-        self._progress_box_buttons: dict[str, QPushButton] = {}
-        self._progress_box_checks: dict[str, QCheckBox] = {}
-        self._progress_tab_buttons: list[QPushButton] = []
-
-        tab_bar = QWidget()
-        tab_bar.setProperty("testid", "output-progress-tabbar")
-        tab_bar_layout = QHBoxLayout(tab_bar)
-        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
-        tab_bar_layout.setSpacing(3)
-        for mode, label in (("loop", "LOOP"), ("canonic", "CANONIC"), ("custom", "CUSTOM")):
-            btn = QPushButton(label)
-            btn.setFixedHeight(22)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setProperty("testid", f"output-progress-tab-{mode}")
-            btn.clicked.connect(lambda _ch=False, m=mode: self._switch_progress_boxes_mode(m))
-            tab_bar_layout.addWidget(btn, stretch=1)
-            self._progress_tab_buttons.append(btn)
-        col_layout.addWidget(tab_bar)
-
-        self._progress_boxes_stack = QStackedWidget()
-        col_layout.addWidget(self._progress_boxes_stack, stretch=1)
-
-        def _build_page(
-            labels: tuple[str, ...], *, mode_tag: str, custom_mode: bool = False
-        ) -> QWidget:
-            page = QWidget()
-            page_layout = QVBoxLayout(page)
-            page_layout.setContentsMargins(0, 0, 0, 0)
-            page_layout.setSpacing(3)
-            for idx, (slug, _base_label, bg, hover, border, paste_text) in enumerate(self._PROGRESS_BOX_DEFS):
-                row = QWidget()
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(8)
-
-                chk = QCheckBox()
-                chk_testid = (
-                    f"progress-box-{slug}-chk"
-                    if mode_tag == "loop"
-                    else f"progress-box-{mode_tag}-{slug}-chk"
-                )
-                chk.setProperty("testid", chk_testid)
-                chk.setCursor(Qt.CursorShape.PointingHandCursor)
-                chk.setTristate(True)
-                chk.setStyleSheet(self._PROGRESS_BOX_CHK_STYLE)
-
-                btn_label = labels[idx] if idx < len(labels) else ""
-                btn = QPushButton(btn_label)
-                btn_testid = (
-                    f"progress-box-{slug}-btn"
-                    if mode_tag == "loop"
-                    else f"progress-box-{mode_tag}-{slug}-btn"
-                )
-                btn.setProperty("testid", btn_testid)
-                btn.setFixedHeight(22)
-                btn.setMinimumWidth(160)
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                colored_style = self._PROGRESS_BOX_BTN_STYLE_TPL.format(
-                    bg=bg, hover=hover, border=border,
-                )
-                btn.setProperty("_colored_style", colored_style)
-                btn.setStyleSheet(colored_style)
-
-                def _on_state(state: int, b=btn) -> None:
-                    if state == 0:
-                        b.setStyleSheet(b.property("_colored_style"))
-                    elif state == 1:
-                        b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GREEN)
-                    else:
-                        b.setStyleSheet(self._PROGRESS_BOX_BTN_STYLE_GRAY)
-
-                chk.stateChanged.connect(_on_state)
-                if custom_mode:
-                    def _edit_label(_checked: bool = False, b=btn) -> None:
-                        new_text, ok = QInputDialog.getText(
-                            self, "Editar card", "Texto do card:", text=b.text()
-                        )
-                        if ok:
-                            b.setText(new_text.strip())
-                    btn.clicked.connect(_edit_label)
-                else:
-                    btn.clicked.connect(
-                        lambda _checked=False, t=paste_text: self._publish_to_terminal(t)
-                    )
-
-                # Mini-botao (apenas aba LOOP) — criado antes de montar a row
-                # para permitir a ordem invertida 3-2-1.
-                mini_btn = None
-                if mode_tag == "loop" and not custom_mode:
-                    mini_map: dict[str, tuple[str, str | None, str | None]] = {
-                        "prompt-to-md": ("P", None, paste_text),
-                        "study-that-prompt": ("s", "queue-btn-study", None),
-                        "loop-the-study": ("l", "queue-btn-loop", None),
-                        "rocksmash-the-loop": ("r", "queue-btn-rocksmash", None),
-                        "execute-loop": ("l", "queue-btn-loop", None),
-                    }
-                    letter, queue_btn_testid, publish_text = mini_map.get(slug, ("", None, None))
-                    if letter:
-                        mini_btn = QPushButton(letter)
-                        mini_btn.setProperty("testid", f"progress-box-{slug}-mini")
-                        mini_btn.setFixedSize(btn.height(), btn.height())
-                        mini_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                        mini_btn.setStyleSheet(self._PROGRESS_BOX_MINI_BTN_STYLE)
-                        if queue_btn_testid:
-                            mini_btn.clicked.connect(
-                                lambda _checked=False, tid=queue_btn_testid: self._click_command_queue_button(tid)
-                            )
-                        elif publish_text is not None:
-                            mini_btn.clicked.connect(
-                                lambda _checked=False, t=publish_text: self._publish_to_terminal(t)
-                            )
-                        btn.setMinimumWidth(max(120, btn.minimumWidth() - mini_btn.width() - 8))
-
-                # Ordem dos itens na row, invertida em todas as abas:
-                # LOOP -> [mini] [chk] [btn] (3-2-1);
-                # CANONIC / CUSTOM -> [chk] [btn] (2-1).
-                if mode_tag == "loop":
-                    if mini_btn is not None:
-                        row_layout.addWidget(mini_btn)
-                    row_layout.addWidget(chk)
-                    row_layout.addWidget(btn, stretch=1)
-                else:
-                    row_layout.addWidget(chk)
-                    row_layout.addWidget(btn, stretch=1)
-                page_layout.addWidget(row)
-
-                if mode_tag == "loop" and not custom_mode:
-                    self._progress_box_buttons[slug] = btn
-                    self._progress_box_checks[slug] = chk
-
-            page_layout.addStretch(1)
-            return page
-
-        loop_labels = tuple(d[1] for d in self._PROGRESS_BOX_DEFS)
-        canonic_labels = self._PROGRESS_BOX_CANONIC_LABELS
-        custom_labels = tuple("" for _ in self._PROGRESS_BOX_DEFS)
-
-        self._progress_boxes_stack.addWidget(_build_page(loop_labels, mode_tag="loop"))
-        self._progress_boxes_stack.addWidget(_build_page(canonic_labels, mode_tag="canonic"))
-        self._progress_boxes_stack.addWidget(
-            _build_page(custom_labels, mode_tag="custom", custom_mode=True)
-        )
-        self._switch_progress_boxes_mode("loop")
-        return column
-
-    def _switch_progress_boxes_mode(self, mode: str) -> None:
-        index_map = {"loop": 0, "canonic": 1, "custom": 2}
-        idx = index_map.get(mode, 0)
-        if hasattr(self, "_progress_boxes_stack"):
-            self._progress_boxes_stack.setCurrentIndex(idx)
-        for i, btn in enumerate(getattr(self, "_progress_tab_buttons", [])):
-            btn.setStyleSheet(
-                self._PROGRESS_TAB_ACTIVE_STYLE if i == idx else self._PROGRESS_TAB_INACTIVE_STYLE
-            )
 
     def _build_queue_toggles_column(self) -> QWidget:
         """Coluna irma de output-toolbar-test-mode, posicionada a esquerda dela.
