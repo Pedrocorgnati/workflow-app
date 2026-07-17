@@ -27,7 +27,6 @@ from workflow_app.daily_loop.loader import (
     build_loop_specs,
 )
 
-
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers (intentionally duplicated from test_daily_loop_loader.py so this
 # file is self-contained and the precedence tests stay isolated from the
@@ -442,3 +441,91 @@ class TestBuildLoopSpecsPrecedence:
         assert names.count("/clear") >= 4, (
             f"clear_between_items deve manter os /clear inter-item; names={names}"
         )
+
+    def test_loop_embedded_finalization_closer_is_unique_and_last(
+        self, loop_root: Path
+    ) -> None:
+        """Finalizacao canonica nao recebe um segundo review global do loader."""
+        _write_progress(
+            loop_root,
+            [("003", " ", "tasks/items/task-003-finalizacao.md", "T-sonnet-medium")],
+        )
+        reconcile = "/loop:reconcile-check --name test-slug"
+        closer = "/loop:iteraction:review-executed-loop --name test-slug"
+        finalization_commands = [
+            "/loop:iteraction:execute-task --task task-003-finalizacao",
+            "/clear",
+            "/loop:iteraction:review-executed-task --task task-003-finalizacao",
+            "/clear",
+            reconcile,
+            closer,
+        ]
+        cfg = _cfg(
+            loop_root,
+            [
+                {
+                    "id": "003",
+                    "kind": "finalizacao",
+                    "commands": finalization_commands,
+                }
+            ],
+            kind="loop",
+        )
+        cfg["daily_loop"]["review_command"] = "/daily-loop:review"
+
+        names = _names(build_loop_specs(cfg, loop_root))
+
+        assert names.count(reconcile) == 1
+        assert names.count(closer) == 1
+        assert names[-2:] == [reconcile, closer]
+        assert "/daily-loop:review --slug test-slug" not in names
+
+
+@pytest.mark.parametrize(
+    ("builder", "kind", "injects_daily_review_done"),
+    [
+        (build_daily_loop_specs, "daily-loop", True),
+        (build_loop_specs, "loop", False),
+    ],
+)
+def test_item_commands_override_global_wrapper_and_preserve_review_order(
+    loop_root: Path,
+    builder,
+    kind: str,
+    injects_daily_review_done: bool,
+) -> None:
+    """V3 commands[] vence do_command nos dois builders sem perder reviews.
+
+    O builder daily-loop injeta seu review-done de lane. O builder /loop nao
+    injeta esse wrapper no caminho canonico porque o reviewer do item ja esta
+    materializado em commands[]. Ambos preservam o review final como ultimo
+    comando real.
+    """
+    _write_progress(
+        loop_root, [("001", " ", "tasks/items/task-001.md", "T-sonnet-medium")]
+    )
+    item_commands = [
+        "/loop:iteraction:create-task --task task-001",
+        "/loop:iteraction:execute-task --task task-001",
+        "/loop:iteraction:review-executed-task --task task-001",
+    ]
+    cfg = _cfg(
+        loop_root,
+        [{"id": "001", "kind": "iteration", "commands": item_commands}],
+        kind=kind,
+    )
+    cfg["daily_loop"]["do_command"] = "/legacy:must-not-win"
+    cfg["daily_loop"]["review_command"] = "/loop:review-final"
+
+    names = _names(builder(cfg, loop_root))
+    assert not any(name.startswith("/legacy:must-not-win") for name in names)
+    positions = [names.index(command) for command in item_commands]
+    assert positions == sorted(positions)
+
+    final_review = "/loop:review-final --slug test-slug"
+    assert names[-1] == final_review
+    assert positions[-1] < names.index(final_review)
+    daily_review_done = "/daily-loop:review-done --slug test-slug --item 001"
+    assert (daily_review_done in names) is injects_daily_review_done
+    if injects_daily_review_done:
+        assert positions[-1] < names.index(daily_review_done) < names.index(final_review)

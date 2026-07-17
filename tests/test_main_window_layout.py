@@ -140,6 +140,30 @@ def test_output_toolbar_left_subtabs_use_responsive_flow(app):
     assert max_right < 180
 
 
+def test_personas_flow_keeps_34_agents_and_utilities_within_four_lines(app):
+    """34 personas + gear/update continuam acionaveis em quatro linhas."""
+    from workflow_app.main_window import MainWindow
+
+    win = MainWindow()
+    layout = win._command_queue._subtab_personas_layout
+    win._command_queue._personas_filter_bar.setCurrentIndex(0)
+    win._command_queue._apply_persona_filter()
+
+    assert layout.count() == 36
+    layout.setGeometry(QRect(0, 0, 640, 220))
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    assert all(widget is not None for widget in widgets)
+    assert len({widget.geometry().y() for widget in widgets}) <= 4
+    assert max(widget.geometry().right() for widget in widgets) < 640
+
+    persona_widgets = [
+        widget for widget in widgets
+        if str(widget.property("testid")).startswith("queue-btn-persona-")
+    ]
+    assert len(persona_widgets) == 34
+    assert all(widget.accessibleName() for widget in persona_widgets)
+
+
 def test_attachment_row_keeps_visible_controls_non_overlapping(app):
     """Project/loop/brainstorm attachments stay split and non-overlapping."""
     from workflow_app.config.app_state import app_state

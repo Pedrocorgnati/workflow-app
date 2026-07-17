@@ -15,7 +15,7 @@ Contract enforced here:
 
 from __future__ import annotations
 
-import json
+import copy
 import os
 from pathlib import Path
 
@@ -33,7 +33,6 @@ from workflow_app.daily_loop import (
     resolve_effective_workspace_root,
     resolve_loop_path,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Fixtures — minimal but representative loop structure on tmp_path
@@ -491,6 +490,92 @@ class TestBuildDailyLoopSpecs:
         effort_headers = [s for s in specs if s.name.startswith("/effort")]
         assert len(model_headers) == 2
         assert len(effort_headers) == 4
+
+
+class TestV3DictLifecycleItems:
+    """Shape V3 deve preservar lifecycle e commands materializados por item."""
+
+    def test_preparo_iteration_finalizacao_keep_kind_and_order(
+        self, loop_root: Path
+    ) -> None:
+        cfg = _base_config(loop_root)
+        cfg["kind"] = "loop"
+        items = [
+            {
+                "id": "001",
+                "kind": "preparo",
+                "task_path": "tasks/items/task-001-preparo.md",
+                "commands": ["/test:preparo"],
+            },
+            {
+                "id": "002",
+                "kind": "iteration",
+                "delegate_kind": "implementation",
+                "task_path": "tasks/items/task-002-iteration.md",
+                "commands": ["/test:iteration"],
+            },
+            {
+                "id": "003",
+                "kind": "finalizacao",
+                "task_path": "tasks/items/task-003-finalizacao.md",
+                "commands": ["/test:finalizacao"],
+            },
+        ]
+        cfg["daily_loop"]["total_items"] = len(items)
+        cfg["daily_loop"]["buckets"][0]["items"] = items
+        cfg["daily_loop"]["buckets"][0]["items_count"] = len(items)
+        cfg["daily_loop"]["items_index"] = {
+            item["id"]: {
+                "id": item["id"],
+                "kind": item["kind"],
+                "task_path": item["task_path"],
+                "commands": list(item["commands"]),
+                "model": "sonnet",
+                "effort": "medium",
+            }
+            for item in items
+        }
+        _write_progress(
+            loop_root,
+            items=[
+                (item["id"], " ", item["task_path"], "T-sonnet-medium")
+                for item in items
+            ],
+        )
+        before = copy.deepcopy(cfg)
+
+        names = [spec.name for spec in build_loop_specs(cfg, loop_root)]
+
+        real_positions = [
+            names.index("/test:preparo"),
+            names.index("/test:iteration"),
+            names.index("/test:finalizacao"),
+        ]
+        assert real_positions == sorted(real_positions)
+        assert not any(name.startswith("/daily-loop:do") for name in names)
+        assert cfg == before
+        assert [
+            item["kind"] for item in cfg["daily_loop"]["buckets"][0]["items"]
+        ] == ["preparo", "iteration", "finalizacao"]
+        assert cfg["daily_loop"]["items_index"]["002"]["kind"] == "iteration"
+        assert (
+            cfg["daily_loop"]["buckets"][0]["items"][1]["delegate_kind"]
+            == "implementation"
+        )
+
+    def test_task_path_contract_accepts_relative_and_rejects_embedded_loop_root(
+        self, loop_root: Path
+    ) -> None:
+        clean = "tasks/items/task-001-preparo.md"
+        assert_loop_root_relative_path(clean, loop_root, label="items[001].task_path")
+
+        duplicated = f"blacksmith/loop-archives/{loop_root.name}/{clean}"
+        with pytest.raises(DailyLoopConfigError, match="workspace-relative detectado"):
+            assert_loop_root_relative_path(
+                duplicated,
+                loop_root,
+                label="items[001].task_path",
+            )
 
 
 # ────────────────────────────────────────────────────────────────────────────

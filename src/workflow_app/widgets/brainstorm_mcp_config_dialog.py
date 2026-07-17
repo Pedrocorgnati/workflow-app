@@ -74,6 +74,7 @@ MAX_FIELD_LEN: dict[str, int] = {
 ACTION_COHERENCE: dict[str, dict[str, set]] = {
     "Criar arquivo":    {"target_path": {False}, "target_terminal": {"terminal-interactive-output"}},
     "Otimizar":         {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
+    "Revisar":          {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
     "Criar tasks":      {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
     "Revisar tasks":    {"target_path": {True},  "target_terminal": {"terminal-interactive-output"}},
     "Executar":         {"target_path": {True},  "target_terminal": {"terminal-interactive-output", "terminal-workspace-output", "terminal-codex-output"}},
@@ -83,7 +84,7 @@ ACTION_COHERENCE: dict[str, dict[str, set]] = {
 }
 
 CURRENT_SCHEMA_VERSION = 1
-SEED_COUNT = 20
+SEED_COUNT = 24
 
 _PROMPT_RX = re.compile(r"(^## Prompt canonico\s*$\n?)(.*?)(?=^## |\Z)", re.M | re.S)
 _FRONTMATTER_RX = re.compile(r"^---\n(.*?)\n---\n?(.*)\Z", re.S)

@@ -68,6 +68,10 @@ def test_mcp_toolbar_uses_provider_radio_and_three_actions(qtbot):
         "output-mcp-persona-search-out": "search-out",
         "output-mcp-persona-controversial": "controversial",
         "output-mcp-persona-hardening": "hardening",
+        "output-mcp-persona-scaffolds-blueprints-updater": "scaffold-update",
+        "output-mcp-persona-questioner": "questionador",
+        "output-mcp-persona-ux-ui": "UX/UI",
+        "output-mcp-persona-performance-engineer": "performance",
     }
     for testid, label in personas.items():
         assert _checkbox_by_testid(win, testid).text() == label
@@ -200,6 +204,58 @@ def test_mcp_toolbar_joins_multiple_persona_prompts_in_ui_order(qtbot):
         "ai-forge/MCP/agents/search-in-rules.md; e depois disso "
         "no papel de engenheiro de hardening, conforme regras em "
         "ai-forge/MCP/agents/hardening-engineer-rules.md"
+    ]
+
+
+def test_mcp_toolbar_fourth_persona_row_has_exact_paths_and_order(qtbot):
+    win = _new_window(qtbot)
+    expected = [
+        (
+            "output-mcp-persona-scaffolds-blueprints-updater",
+            "ai-forge/MCP/agents/scaffolds-blueprints-updater.md",
+        ),
+        ("output-mcp-persona-questioner", "ai-forge/MCP/agents/questioner-rules.md"),
+        ("output-mcp-persona-ux-ui", "ai-forge/MCP/agents/ux-ui-specialist.md"),
+        (
+            "output-mcp-persona-performance-engineer",
+            "ai-forge/MCP/agents/performance-engineer.md",
+        ),
+    ]
+    # Partir do checkbox conhecido evita materializar wrappers de TODOS os
+    # QWidget da MainWindow, operacao que corrompe o teardown do PySide6.
+    row = _checkbox_by_testid(win, expected[0][0]).parentWidget()
+    assert row is not None
+    assert row.property("testid") == "output-mcp-persona-checkboxes-4"
+    row_checkboxes = row.findChildren(type(_checkbox_by_testid(win, expected[0][0])))
+    assert len(row_checkboxes) == 4
+    assert [checkbox.property("testid") for checkbox in row_checkboxes] == [
+        testid for testid, _path in expected
+    ]
+    for testid, path in expected:
+        assert path in str(_checkbox_by_testid(win, testid).property("persona_prompt"))
+
+
+def test_mcp_toolbar_joins_old_and_fourth_row_personas_in_ui_order(qtbot):
+    win = _new_window(qtbot)
+    _set_route(win, t1=True, t2=False, t3=False)
+
+    sent_t1: list[str] = []
+    signal_bus.paste_text_in_terminal.connect(sent_t1.append)
+    try:
+        _radio_by_testid(win, "output-mcp-provider-claude").setChecked(True)
+        _checkbox_by_testid(win, "output-mcp-persona-search-in").setChecked(True)
+        _checkbox_by_testid(
+            win, "output-mcp-persona-performance-engineer"
+        ).setChecked(True)
+        _button_by_testid(win, "output-mcp-action-main").click()
+    finally:
+        signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
+
+    assert sent_t1 == [
+        "/mcp:codex no papel de search-in, conforme regras em "
+        "ai-forge/MCP/agents/search-in-rules.md; e depois disso "
+        "no papel de performance engineer, conforme regras em "
+        "ai-forge/MCP/agents/performance-engineer.md"
     ]
 
 

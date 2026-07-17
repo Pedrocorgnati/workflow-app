@@ -1943,7 +1943,7 @@ class MainWindow(QMainWindow):
     # agents prompt dir, slot por cor) removidas em T2.
 
     _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
-    _BRAINSTORM_SEED_COUNT = 20
+    _BRAINSTORM_SEED_COUNT = 24
     _BRAINSTORM_GRID_COLUMNS = 4
 
     @staticmethod
@@ -2312,11 +2312,11 @@ class MainWindow(QMainWindow):
         self._mcp_provider_radio_input = provider_row
 
         # Personas/agentes (output-mcp-persona-checkboxes*): grade de 4 por linha
-        # x 3 linhas (12 agentes). Os checkboxes marcados tem seus prompts
+        # x 4 linhas (16 agentes). Os checkboxes marcados tem seus prompts
         # anexados ao comando MCP via _compose_mcp_text na ORDEM da UI (row-major).
         # A familia de pesquisa (search-in/search-out/search-forge) ocupa as 3
         # primeiras posicoes da Linha 1. exec-slash foi removido desta grade de
-        # output para abrir espaco a search-forge sem estourar 3 linhas (continua
+        # output para abrir espaco a search-forge na composicao original (continua
         # disponivel em queue-subtab-insertions-personas, que auto-descobre).
         persona_specs = (
             # Linha 1 — pesquisa + analise
@@ -2358,6 +2358,19 @@ class MainWindow(QMainWindow):
             ("delegador", "output-mcp-persona-delegador",
              "no papel de analista-delegador, conforme regras em "
              "ai-forge/MCP/agents/analista-delegador-rules.md"),
+            # Linha 4 — novos agentes de catalogo, clareza, UX e performance
+            ("scaffold-update", "output-mcp-persona-scaffolds-blueprints-updater",
+             "no papel de atualizador de scaffolds e blueprints, conforme regras em "
+             "ai-forge/MCP/agents/scaffolds-blueprints-updater.md"),
+            ("questionador", "output-mcp-persona-questioner",
+             "no papel de questionador, conforme regras em "
+             "ai-forge/MCP/agents/questioner-rules.md"),
+            ("UX/UI", "output-mcp-persona-ux-ui",
+             "no papel de especialista UX/UI, conforme regras em "
+             "ai-forge/MCP/agents/ux-ui-specialist.md"),
+            ("performance", "output-mcp-persona-performance-engineer",
+             "no papel de performance engineer, conforme regras em "
+             "ai-forge/MCP/agents/performance-engineer.md"),
         )
         checkbox_style = (
             "QCheckBox { color: #D4D4D8; font-size: 10px;"
@@ -2371,7 +2384,7 @@ class MainWindow(QMainWindow):
         )
         self._mcp_persona_checkboxes: list[QCheckBox] = []
         # 4 checkboxes por linha (stretch igual); testids das linhas estaveis
-        # (output-mcp-persona-checkboxes, -2, -3).
+        # (output-mcp-persona-checkboxes, -2, -3, -4).
         _persona_rows = [persona_specs[i:i + 4] for i in range(0, len(persona_specs), 4)]
         for _row_idx, _row_specs in enumerate(_persona_rows):
             _suffix = "" if _row_idx == 0 else f"-{_row_idx + 1}"
@@ -2550,9 +2563,8 @@ class MainWindow(QMainWindow):
         O caminho selecionado fica em `self._brainstorm_md_path` e o proprio
         botao passa a exibir o nome do arquivo.
 
-        Abaixo: grade 3x3 — 3 linhas (`study` / `controversial` / `hardening`),
-        3 colunas (laranja / azul / roxo). Cada botao publica
-        "<label> <path-do-md>" no terminal roteado via `_publish_to_terminal`.
+        Abaixo: grade seed-driven 4x6 (24 botoes), em ordem row-major. Cada
+        botao monta o prompt da persona e publica no terminal selecionado.
         """
         from PySide6.QtWidgets import (
             QButtonGroup,
@@ -2566,7 +2578,7 @@ class MainWindow(QMainWindow):
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(4)
 
-        # Picker de .md — guarda o path para os 9 botoes da grade.
+        # Picker de .md — guarda o path para os 24 botoes da grade.
         self._brainstorm_md_path: str | None = None
         md_btn = QPushButton("Selecionar .md")
         md_btn.setProperty("testid", "brainstorm-md-picker")
@@ -2853,7 +2865,7 @@ class MainWindow(QMainWindow):
             page_layout.addStretch(1)
             return page
 
-        # Atomic widget construction: ou os 9 sobem, ou nenhum.
+        # Atomic widget construction: ou os 24 sobem, ou nenhum.
         built: list[MCPPromptButton] = []
         try:
             for seed in seeds:
@@ -2973,9 +2985,9 @@ class MainWindow(QMainWindow):
         dlg.open()
 
     def _rebuild_brainstorm_grid(self) -> None:
-        """Reconstroi a grade 3x3 apos save do modal de config (T4).
+        """Reconstroi a grade 4x6 apos save do modal de config (T4).
 
-        Atomic: ou os 9 botoes sobem, ou a grade fica vazia com toast erro
+        Atomic: ou os 24 botoes sobem, ou a grade fica vazia com toast erro
         (mesma politica do build inicial em `_build_brainstorm_page`).
         Desconecta signals e chama `deleteLater()` em cada botao antigo
         para evitar slots disparando em widgets em destruicao.
@@ -5043,6 +5055,10 @@ class MainWindow(QMainWindow):
         "deployment-reliability-specialist": "Deploy Reliability",
         "soft-engineer": "soft Engen",
         "engenheiro-solucionador": "Eng Solucionador",
+        "scaffolds-blueprints-updater": "Scaffold Update",
+        "questioner-rules": "Questionador",
+        "ux-ui-specialist": "UX/UI",
+        "performance-engineer": "Performance",
     }
 
     # Atribuicao canonica persona -> categoria de filtro da sub-aba 'Agentes'.
@@ -5072,6 +5088,7 @@ class MainWindow(QMainWindow):
         "criar-task-rules": "Build",
         "executar-task-rules": "Build",
         "executor-de-slash-commands-rules": "Build",
+        "scaffolds-blueprints-updater": "Build",
         # Review — revisao, QA, hardening, debug, critica adversarial
         "revisar-task-rules": "Review",
         "revisar-execucao-rules": "Review",
@@ -5080,12 +5097,16 @@ class MainWindow(QMainWindow):
         "hardening-engineer-rules": "Review",
         "code-debugger": "Review",
         "specific-reviewer": "Review",
+        "questioner-rules": "Review",
         # specialists — especialistas de dominio acionados sob demanda
         "billing-scpecialist": "specialists",
         "auth-security-specialist": "specialists",
         "deployment-reliability-specialist": "specialists",
         "soft-engineer": "specialists",
         "engenheiro-solucionador": "specialists",
+        "performance-engineer": "specialists",
+        # UX/UI coordena jornada/IA/interacao; Visual/Layout mantem suas faixas.
+        "ux-ui-specialist": "Design",
     }
 
     @staticmethod
@@ -5228,6 +5249,7 @@ class MainWindow(QMainWindow):
             # Consumido pela barra de filtros da sub-aba 'Agentes'
             # (CommandQueueWidget._apply_persona_filter).
             btn.setProperty("persona_category", category)
+            btn.setAccessibleName(f"{label} - persona {category}")
             btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(

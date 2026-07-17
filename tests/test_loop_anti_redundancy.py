@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 from workflow_app.signal_bus import signal_bus
 
@@ -80,13 +82,75 @@ def test_loop_cmd_no_redundant_model_effort(qapp):
     widget.deleteLater()
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_real_commands"),
+    [
+        (
+            "--task",
+            [
+                "/loop:create-structure --task tasks.md --name 06-01-x",
+                "/loop:individual-analysis --name 06-01-x",
+                "/loop:integration --name 06-01-x",
+                "/loop:review --name 06-01-x",
+                "/loop:integrated-architecture --loop-slug 06-01-x",
+                "/loop:workflow-app --name 06-01-x",
+                "/loop:friendly-resume --name 06-01-x",
+            ],
+        ),
+        (
+            "--cmd",
+            [
+                "/loop:create-structure --cmd tasks.md --name 06-01-x",
+                "/loop:individual-analysis --cmd --name 06-01-x",
+                "/loop:integration --cmd --name 06-01-x",
+                "/loop:review --cmd --name 06-01-x",
+                "/loop:integrated-architecture --loop-slug 06-01-x",
+                "/loop:workflow-app --cmd --name 06-01-x",
+                "/loop:friendly-resume --name 06-01-x",
+            ],
+        ),
+        (
+            "--both",
+            [
+                "/loop:create-structure --both tasks.md --name 06-01-x",
+                "/loop:individual-analysis --both --name 06-01-x",
+                "/loop:integration --both --name 06-01-x",
+                "/loop:review --both --name 06-01-x",
+                "/loop:integrated-architecture --loop-slug 06-01-x",
+                "/loop:mark-type --name 06-01-x",
+                "/loop:check-tasks-and-cmd --name 06-01-x",
+                "/loop:workflow-app --both --name 06-01-x",
+                "/loop:friendly-resume --name 06-01-x",
+            ],
+        ),
+    ],
+)
+def test_loop_modes_emit_each_real_command_exactly_once(
+    qapp, mode, expected_real_commands
+):
+    widget = CommandQueueWidget()
+    names = _capture_loop_specs(widget, f"/loop {mode} tasks.md")
+    real_commands = [
+        name
+        for name in names
+        if not name.startswith(("/clear", "/model ", "/effort "))
+    ]
+
+    assert real_commands == expected_real_commands
+    assert len(real_commands) == len(set(real_commands))
+    assert names.count("/model opus") == 1
+    assert names.count("/effort high") == 1
+    assert names.count("/clear") == len(real_commands)
+    widget.deleteLater()
+
+
 def test_legacy_to_dcp_anti_redundant_via_inject_clears():
     """queue-btn-legacy-to-dcp agora delega a _inject_clears (5 comandos reais,
     4 em sonnet/standard + 1 em sonnet/high). Garante: /clear /model sonnet
     /effort <std> so na 1a; /clear-only nas 2 a 4; /effort reemitido no salto
     para high mas /model sonnet SUPRIMIDO (inalterado). secao 3.1 + 3.4 + 4.
     """
-    from workflow_app.domain import CommandSpec, ModelName, InteractionType, EffortLevel
+    from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
     from workflow_app.templates.quick_templates import _inject_clears
 
     std = EffortLevel.STANDARD

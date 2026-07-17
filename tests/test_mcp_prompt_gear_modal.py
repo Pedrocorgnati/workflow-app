@@ -1,11 +1,11 @@
 """Testes do modal de configuracao gear (T4).
 
 Cobre 3 cenarios do T4 (loop 05-21-implantation-tasklist-aba-brainstorm):
-- test_gear_dialog_opens_with_seeds_loaded: dialog carrega 20 seeds com testid.
+- test_gear_dialog_opens_with_seeds_loaded: dialog carrega 24 seeds com testid.
 - test_gear_modal_persists_seed_edits_to_disk: save grava no .md (atomic write).
 - test_gear_modal_revert_discards_edits: reject() preserva conteudo do .md.
 
-Usa `tmp_path` para criar workspace temporario com 20 seeds canonicos.
+Usa `tmp_path` para criar workspace temporario com 24 seeds canonicos.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ target_terminal: {target_terminal}
 
 
 def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
-    """Cria 20 seeds canonicos + diretorio de agentes. Retorna (seeds_dir, agents_dir)."""
+    """Cria 24 seeds canonicos + diretorio de agentes. Retorna (seeds_dir, agents_dir)."""
     seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
     agents_dir = repo_root / "agents"
     seeds_dir.mkdir(parents=True)
@@ -67,7 +67,7 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
         ("10-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
         ("11-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
         ("12-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
-        ("13-visual-design", "visual-design", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("13-visual-design", "repo-ruler", "Claude", "Revisar", True, "terminal-interactive-output"),
         ("14-layout-architect", "layout-architect", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("15-analise-complexidade", "analise-complexidade", "Claude", "Analisar complexidade", True, "terminal-interactive-output"),
         ("16-billing", "billing", "Claude", "Otimizar", True, "terminal-interactive-output"),
@@ -75,6 +75,10 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
         ("18-delegador", "delegador", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("19-pdca", "pdca", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("20-soft-engen", "soft-engen", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("21-scaffolds-blueprints-updater", "scaffolds-blueprints-updater", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("22-questioner", "questioner", "Claude", "Revisar", True, "terminal-interactive-output"),
+        ("23-ux-ui", "ux-ui", "Claude", "Revisar", True, "terminal-interactive-output"),
+        ("24-performance-engineer", "performance-engineer", "Claude", "Revisar", True, "terminal-interactive-output"),
     ]
     for fname, slug, btype, action, tp, tt in specs:
         agent_path = f"agents/{slug}-rules.md"
@@ -95,7 +99,7 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
 
 
 def test_gear_dialog_opens_with_seeds_loaded(qtbot, tmp_path):
-    """Dialog inicializa com 20 seeds carregados na lista lateral."""
+    """Dialog inicializa com 24 seeds carregados na lista lateral."""
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     seeds_dir, _ = _materialize_seeds(repo_root)
@@ -105,10 +109,10 @@ def test_gear_dialog_opens_with_seeds_loaded(qtbot, tmp_path):
     )
     qtbot.addWidget(dlg)
     assert dlg.property("testid") == "brainstorm-mcp-config-dialog"
-    # Lista lateral tem 20 itens (1 por seed).
-    assert dlg._list_widget.count() == 20
-    # Os 20 paths foram registrados internamente.
-    assert len(dlg._seed_paths) == 20
+    # Lista lateral tem 24 itens (1 por seed).
+    assert dlg._list_widget.count() == 24
+    # Os 24 paths foram registrados internamente.
+    assert len(dlg._seed_paths) == 24
 
 
 def test_gear_modal_persists_seed_edits_to_disk(qtbot, tmp_path):
@@ -206,7 +210,7 @@ def test_gear_label_edit_reflects_on_grid_button_label(tmp_path):
 
     class _Fake:
         _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
-        _BRAINSTORM_SEED_COUNT = 20
+        _BRAINSTORM_SEED_COUNT = 24
 
         def __init__(self, root: Path) -> None:
             self._root = root

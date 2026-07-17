@@ -224,6 +224,29 @@ class QaArtifact(BaseModel):
     report_path: Optional[str] = None
 
 
+class HealthCheckEntry(BaseModel):
+    """Single post-deploy verification probe (T-024)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: Iso8601Utc
+    status: Literal["ok", "failed", "skipped"]
+    endpoint: Optional[str] = None
+    http_status: Optional[int] = Field(default=None, ge=0, le=599)
+    response_ms: Optional[int] = Field(default=None, ge=0)
+    error: Optional[str] = None
+
+
+class DeployArtifact(BaseModel):
+    """Evidence persisted by /post-deploy-verify (T-024)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    verified_at: Iso8601Utc
+    health_checks: List[HealthCheckEntry] = Field(default_factory=list, max_length=5)
+
+
 class SignedOff(BaseModel):
     """Final delivery sign-off block written by `/delivery:sign-off`.
 
@@ -268,6 +291,9 @@ class ModuleArtifacts(BaseModel):
     git_tag: Optional[str] = None
     execution: Optional[ExecutionArtifact] = None
     qa: Optional[QaArtifact] = None
+    deploy: Optional[DeployArtifact] = None
+    reviews: List[Dict[str, Any]] = Field(default_factory=list)
+    review_executed_task: Optional[Dict[str, Any]] = None
     build_verify_report: Optional[BuildVerifyReport] = None
     directive_injector_run_at: Optional[Iso8601Utc] = None
     """ISO-8601 timestamp do ultimo /dcp:directive-injector neste modulo (tripwire HT-04 #1 idempotencia)."""
@@ -347,6 +373,7 @@ class ModuleState(BaseModel):
     signed_off: Optional[SignedOff] = None
     tasks: Dict[str, Any] = Field(default_factory=dict)
     tdd: Optional[Tdd] = None
+    updated_at: Optional[Iso8601Utc] = None
 
     @model_validator(mode="after")
     def _per_module_invariants(self) -> "ModuleState":
@@ -519,6 +546,11 @@ class Delivery(BaseModel):
     skeleton: Skeleton
     locks: Locks = Field(default_factory=Locks)
     metadata: Metadata
+    # Compatibility fields still emitted by pre-v2 writers. Canonical
+    # timestamps remain under metadata and deploy evidence under artifacts.
+    last_modified_by: Optional[str] = None
+    updated_at: Optional[Iso8601Utc] = None
+    last_deploy_url: Optional[str] = None
 
     # Private attribute to accumulate soft warnings (pydantic v2: prefix `_`).
     _invariant_warnings: List[DeliveryInvariantWarning] = []

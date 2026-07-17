@@ -3,11 +3,11 @@
 Cobre o seed loader `_load_brainstorm_seeds` e o slot
 `_on_mcp_prompt_requested` sem depender da inicializacao completa da
 MainWindow (que requer QApplication + setup pesado). Os testes operam
-sobre um workspace temporario com 20 seeds materializados pelo helper
+sobre um workspace temporario com 24 seeds materializados pelo helper
 `_write_seeds`.
 
 Cenarios cobertos:
-1. 20 seeds validos -> grade com 20 MCPPromptButton.
+1. 24 seeds validos -> grade com 24 MCPPromptButton.
 2. seed yaml malformado -> _BrainstormSeedError + grade vazia.
 3. seed com agent_path inexistente -> _BrainstormSeedError (G6).
 4. clique duplo rapido (debounce 300ms) -> 1 publish.
@@ -159,12 +159,12 @@ _SEED_TEMPLATES = {
         "target_terminal": "terminal-interactive-output",
     },
     "13-visual-design.md": {
-        "slug": "visual-design",
-        "title": "Seed - Botao 11 - Visual design",
+        "slug": "repo-ruler",
+        "title": "Seed - Botao 13 - Repo ruler",
         "button_type": "type-selector-radio-input",
-        "agent_name": "visual-design",
-        "agent_path": "agents/visual-designer-rules.md",
-        "action": "Otimizar",
+        "agent_name": "repo-ruler",
+        "agent_path": "agents/specific-reviewer.md",
+        "action": "Revisar",
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
@@ -238,6 +238,46 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
+    "21-scaffolds-blueprints-updater.md": {
+        "slug": "scaffolds-blueprints-updater",
+        "title": "Seed - Botao 21 - Scaffold Update",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "scaffolds-blueprints-updater",
+        "agent_path": "agents/scaffolds-blueprints-updater.md",
+        "action": "Otimizar",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
+    "22-questioner.md": {
+        "slug": "questioner",
+        "title": "Seed - Botao 22 - Questionador",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "questioner",
+        "agent_path": "agents/questioner-rules.md",
+        "action": "Revisar",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
+    "23-ux-ui.md": {
+        "slug": "ux-ui",
+        "title": "Seed - Botao 23 - UX/UI",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "ux-ui",
+        "agent_path": "agents/ux-ui-specialist.md",
+        "action": "Revisar",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
+    "24-performance-engineer.md": {
+        "slug": "performance-engineer",
+        "title": "Seed - Botao 24 - Performance",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "performance-engineer",
+        "agent_path": "agents/performance-engineer.md",
+        "action": "Revisar",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
 }
 
 
@@ -253,7 +293,7 @@ def _frontmatter(d: dict) -> str:
 
 
 def _write_seeds(tmp_path: Path, overrides: dict[str, dict | None] | None = None) -> Path:
-    """Materializa 20 seeds (+ personas) em tmp_path. Overrides[fname]=None remove o seed."""
+    """Materializa 24 seeds (+ personas) em tmp_path. Overrides[fname]=None remove o seed."""
     overrides = overrides or {}
     repo_root = tmp_path / "repo"
     seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
@@ -301,14 +341,14 @@ class _FakeMainWindow:
         return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
 
 
-# Cenario 1: 20 seeds validos -> 20 carregam, ordem deterministica
+# Cenario 1: 24 seeds validos -> 24 carregam, ordem deterministica
 
 
-def test_load_seeds_happy_path_20_valid(tmp_path):
+def test_load_seeds_happy_path_24_valid(tmp_path):
     repo_root = _write_seeds(tmp_path)
     fake = _FakeMainWindow(repo_root)
     seeds = fake._load_brainstorm_seeds()
-    assert len(seeds) == 20
+    assert len(seeds) == 24
     expected_order = [
         "criar-md",
         "search-in",
@@ -322,7 +362,7 @@ def test_load_seeds_happy_path_20_valid(tmp_path):
         "revisar-task",
         "executar-task",
         "revisar-execucao",
-        "visual-design",
+        "repo-ruler",
         "layout-architect",
         "analise-complexidade",
         "billing",
@@ -330,6 +370,10 @@ def test_load_seeds_happy_path_20_valid(tmp_path):
         "delegador",
         "pdca",
         "soft-engen",
+        "scaffolds-blueprints-updater",
+        "questioner",
+        "ux-ui",
+        "performance-engineer",
     ]
     assert [s["slug"] for s in seeds] == expected_order
     # Cada seed tem campos canonicos
@@ -344,8 +388,8 @@ def test_load_seeds_happy_path_20_valid(tmp_path):
         assert "seed_path" in s
 
 
-def test_brainstorm_grid_contract_is_4x5():
-    assert MainWindow._BRAINSTORM_SEED_COUNT == 20
+def test_brainstorm_grid_contract_is_4x6():
+    assert MainWindow._BRAINSTORM_SEED_COUNT == 24
     assert MainWindow._BRAINSTORM_GRID_COLUMNS == 4
 
 
@@ -532,12 +576,12 @@ def test_compat_layer_target_path_boolean(tmp_path):
 
 def test_glob_rejects_renamed_seed(tmp_path):
     repo_root = _write_seeds(tmp_path)
-    # Renomeia 20 -> 21, quebrando a sequencia canonica de prefixos (01..20).
-    old = repo_root / "blacksmith" / "brainstorm-mcp" / "20-soft-engen.md"
-    new = old.parent / "21-soft-engen.md"
+    # Renomeia 24 -> 25, quebrando a sequencia canonica de prefixos (01..24).
+    old = repo_root / "blacksmith" / "brainstorm-mcp" / "24-performance-engineer.md"
+    new = old.parent / "25-performance-engineer.md"
     old.rename(new)
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 20"):
+    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 24"):
         fake._load_brainstorm_seeds()
 
 

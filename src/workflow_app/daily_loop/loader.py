@@ -1827,6 +1827,23 @@ def build_loop_specs(
                 )
             )
 
+    # A finalizacao V3 canonica ja materializa o fechamento global dentro de
+    # ``items[*].commands``. Nesse shape, reconcile + review-executed-loop sao
+    # as duas ultimas entradas reais da fila. Reanexar ``daily_loop.review_command``
+    # criaria um segundo reviewer mutante depois do selo global. A deteccao usa
+    # a fila efetivamente expandida (nao apenas o JSON), preservando o fallback
+    # legado quando o closer nao foi emitido entre os itens pendentes.
+    canonical_reconcile = f"/loop:reconcile-check --name {slug}"
+    canonical_closer = f"/loop:iteraction:review-executed-loop --name {slug}"
+    if (
+        len(specs) >= 2
+        and specs[-2].name == canonical_reconcile
+        and specs[-1].name == canonical_closer
+    ):
+        for i, spec in enumerate(specs, start=1):
+            spec.position = i
+        return specs
+
     review_command = str(
         daily_loop.get("review_command", "/daily-loop:review")
     ).strip() or "/daily-loop:review"

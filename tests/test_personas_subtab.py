@@ -16,6 +16,7 @@ from workflow_app.command_queue.command_queue_widget import (
     PERSONA_FILTER_CATEGORIES,
     PERSONA_FILTER_DEFAULT,
 )
+from workflow_app.signal_bus import signal_bus
 
 
 def _new_window(qtbot):
@@ -71,6 +72,10 @@ def test_persona_buttons_use_user_friendly_labels(qtbot):
         "queue-btn-persona-controversial-devils-advocate-rules": "Controversial",
         "queue-btn-persona-executar-task-rules": "Executor",
         "queue-btn-persona-code-debugger": "Debugger",
+        "queue-btn-persona-scaffolds-blueprints-updater": "Scaffold Update",
+        "queue-btn-persona-questioner-rules": "Questionador",
+        "queue-btn-persona-ux-ui-specialist": "UX/UI",
+        "queue-btn-persona-performance-engineer": "Performance",
     }
     for testid, label in expected.items():
         btn = _button_by_testid(win, testid)
@@ -90,6 +95,41 @@ def test_persona_button_pastes_relative_path(qtbot, monkeypatch):
 
     assert captured == [rel_path]
     assert rel_path == str(Path("ai-forge/MCP/agents") / f"{slug}.md")
+
+
+def test_four_new_persona_shortcuts_publish_exact_paths(qtbot, monkeypatch):
+    win = _new_window(qtbot)
+    captured: list[str] = []
+    toasts: list[tuple[str, str]] = []
+    monkeypatch.setattr(win, "_publish_to_terminal", lambda text: captured.append(text))
+
+    def _capture_toast(message: str, level: str) -> None:
+        toasts.append((message, level))
+
+    slugs = (
+        "scaffolds-blueprints-updater",
+        "questioner-rules",
+        "ux-ui-specialist",
+        "performance-engineer",
+    )
+    signal_bus.toast_requested.connect(_capture_toast)
+    try:
+        for slug in slugs:
+            btn = _button_by_testid(win, f"queue-btn-persona-{slug}")
+            assert btn.accessibleName()
+            btn.click()
+    finally:
+        signal_bus.toast_requested.disconnect(_capture_toast)
+
+    assert captured == [f"ai-forge/MCP/agents/{slug}.md" for slug in slugs]
+    assert toasts == [
+        (
+            "Persona copiada e colada no terminal: "
+            f"ai-forge/MCP/agents/{slug}.md",
+            "info",
+        )
+        for slug in slugs
+    ]
 
 
 def test_personas_update_button_is_green_square_with_icon(qtbot):
@@ -347,10 +387,35 @@ def test_persona_category_known_mappings(qtbot):
         "queue-btn-persona-deployment-reliability-specialist": "specialists",
         "queue-btn-persona-soft-engineer": "specialists",
         "queue-btn-persona-engenheiro-solucionador": "specialists",
+        "queue-btn-persona-scaffolds-blueprints-updater": "Build",
+        "queue-btn-persona-questioner-rules": "Review",
+        "queue-btn-persona-ux-ui-specialist": "Design",
+        "queue-btn-persona-performance-engineer": "specialists",
     }
     for tid, cat in expected.items():
         btn = _button_by_testid(win, tid)
         assert btn.property("persona_category") == cat, tid
+
+
+def test_four_new_personas_follow_their_exact_filters(qtbot):
+    win = _new_window(qtbot)
+    expected = {
+        "queue-btn-persona-scaffolds-blueprints-updater": "Build",
+        "queue-btn-persona-questioner-rules": "Review",
+        "queue-btn-persona-ux-ui-specialist": "Design",
+        "queue-btn-persona-performance-engineer": "specialists",
+    }
+    try:
+        for active_category in expected.values():
+            _set_persona_filter(win, active_category)
+            for testid, category in expected.items():
+                button = _button_by_testid(win, testid)
+                assert button.isHidden() is (category != active_category), testid
+
+            assert not _button_by_testid(win, "queue-btn-personas-config").isHidden()
+            assert not _button_by_testid(win, "queue-btn-personas-update").isHidden()
+    finally:
+        _set_persona_filter(win, PERSONA_FILTER_ALL_LABEL)
 
 
 def test_filter_hides_non_matching_personas_keeps_utilities(qtbot):
@@ -408,6 +473,7 @@ def test_specialists_filter_shows_new_specialist_agents(qtbot):
             "queue-btn-persona-deployment-reliability-specialist",
             "queue-btn-persona-soft-engineer",
             "queue-btn-persona-engenheiro-solucionador",
+            "queue-btn-persona-performance-engineer",
         }
         for tid, btn in _buttons_by_testid_prefix(win, "queue-btn-persona-").items():
             if tid in expected_visible:
