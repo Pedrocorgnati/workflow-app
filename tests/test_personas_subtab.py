@@ -2,7 +2,9 @@
 
 Cobre: (1) um botao por persona REAL de ai-forge/MCP/agents/ que cola o path
 no terminal; (2) o botao 'update' 1:1 (queue-btn-personas-update) que re-varre
-a pasta e cria botao para personas novas ao vivo, sem reiniciar o app.
+a pasta e cria botao para personas novas ao vivo, sem reiniciar o app;
+(3) o botao create 1:1 (queue-btn-personas-create) verde com '+' sempre
+na primeira posicao e fora do prefixo filtravel queue-btn-persona-.
 """
 
 from __future__ import annotations
@@ -15,6 +17,10 @@ from workflow_app.command_queue.command_queue_widget import (
     PERSONA_FILTER_ALL_LABEL,
     PERSONA_FILTER_CATEGORIES,
     PERSONA_FILTER_DEFAULT,
+)
+from workflow_app.main_window import (
+    _PERSONA_BTN_WIDTH,
+    _PERSONAS_UTIL_BTN_SIZE,
 )
 from workflow_app.signal_bus import signal_bus
 
@@ -55,13 +61,21 @@ def test_personas_subtab_has_one_button_per_real_persona(qtbot):
     assert rendered == expected
 
 
-def test_personas_subtab_uses_user_friendly_tab_label(qtbot):
+def test_personas_is_a_header_section_not_an_insertions_subtab(qtbot):
+    """2026-07-27: 'Agentes' saiu do queue-subtabs-insertions e virou a 4a
+    secao do output-toolbar-section-selector."""
     win = _new_window(qtbot)
 
     tabs = win._command_queue._insertions_subtabs
     labels = [tabs.tabText(i) for i in range(tabs.count())]
-    assert "Agentes" in labels
+    assert "Agentes" not in labels
     assert "PERSONAS" not in labels
+
+    btn = _button_by_testid(win, "output-toolbar-section-agentes")
+    assert btn.text() == "AGENTES"
+    stack = win._toolbar_section_stack
+    btn.click()
+    assert stack.currentWidget().property("testid") == "output-toolbar-agentes"
 
 
 def test_persona_buttons_use_user_friendly_labels(qtbot):
@@ -81,6 +95,16 @@ def test_persona_buttons_use_user_friendly_labels(qtbot):
         btn = _button_by_testid(win, testid)
         assert btn.text() == label
         assert "-rules" not in btn.text()
+
+
+def test_persona_buttons_share_one_fixed_width(qtbot):
+    """2026-07-27: todos os botoes de `queue-subtab-insertions-personas` medem
+    o mesmo (120px), independente do tamanho do label."""
+    win = _new_window(qtbot)
+
+    btns = _buttons_by_testid_prefix(win, "queue-btn-persona-")
+    assert btns, "a aba precisa ter personas para o contrato valer"
+    assert {b.width() for b in btns.values()} == {_PERSONA_BTN_WIDTH}
 
 
 def test_persona_button_pastes_relative_path(qtbot, monkeypatch):
@@ -132,11 +156,53 @@ def test_four_new_persona_shortcuts_publish_exact_paths(qtbot, monkeypatch):
     ]
 
 
+def test_personas_create_button_is_green_square_with_plus(qtbot):
+    win = _new_window(qtbot)
+
+    btn = _button_by_testid(win, "queue-btn-personas-create")
+    # 1:1 no lado canonico dos utilitarios (34 -> 24, -30% em 2026-07-27).
+    assert btn.width() == _PERSONAS_UTIL_BTN_SIZE
+    assert btn.height() == _PERSONAS_UTIL_BTN_SIZE
+    assert "#16A34A" in btn.styleSheet()  # verde
+    assert btn.text() == "+"
+    assert btn.accessibleName() == "Criar agente"
+    assert "primeira posicao" in btn.toolTip()
+
+
+def test_personas_create_button_is_first_widget_in_utils_div(qtbot):
+    win = _new_window(qtbot)
+
+    layout = win._command_queue._subtab_personas_utils_layout
+    first = layout.itemAt(0).widget()
+    assert first is not None
+    assert first.property("testid") == "queue-btn-personas-create"
+    # Unico no flow (e no MainWindow via findChildren helper).
+    create_btns = [
+        b for b in win.findChildren(QPushButton)
+        if b.property("testid") == "queue-btn-personas-create"
+    ]
+    assert len(create_btns) == 1
+
+
+def test_personas_create_is_not_a_persona_button(qtbot):
+    """queue-btn-personas-create NAO usa o prefixo filtravel queue-btn-persona-."""
+    win = _new_window(qtbot)
+    persona_btns = _buttons_by_testid_prefix(win, "queue-btn-persona-")
+    assert "queue-btn-personas-create" not in persona_btns
+    # startswith("queue-btn-persona-") casa com "queue-btn-persona-" (singular)
+    # mas NAO com "queue-btn-personas-create" porque apos "persona" vem "s".
+    # Garante o contrato: create e utilitario plural, fora da contagem de personas.
+    for tid in persona_btns:
+        assert tid.startswith("queue-btn-persona-")
+        assert not tid.startswith("queue-btn-personas-")
+
+
 def test_personas_update_button_is_green_square_with_icon(qtbot):
     win = _new_window(qtbot)
 
     btn = _button_by_testid(win, "queue-btn-personas-update")
-    assert btn.width() == 34 and btn.height() == 34  # 1:1
+    assert btn.width() == _PERSONAS_UTIL_BTN_SIZE
+    assert btn.height() == _PERSONAS_UTIL_BTN_SIZE
     assert "#16A34A" in btn.styleSheet()  # verde
     assert btn.accessibleName() == "Recarregar personas"
     assert "mantem este botao sempre no final" in btn.toolTip()
@@ -144,12 +210,75 @@ def test_personas_update_button_is_green_square_with_icon(qtbot):
     assert (not btn.icon().isNull()) or btn.text() == "⟳"
 
 
-def test_personas_update_button_is_last_widget_in_flow(qtbot):
+def test_personas_update_button_is_last_widget_in_utils_div(qtbot):
     win = _new_window(qtbot)
 
-    layout = win._command_queue._subtab_personas_layout
+    layout = win._command_queue._subtab_personas_utils_layout
     last = layout.itemAt(layout.count() - 1).widget()
     assert last.property("testid") == "queue-btn-personas-update"
+
+
+def test_personas_utils_div_is_the_right_column_of_the_agentes_row(qtbot):
+    """A div dos 3 utilitarios e a coluna DIREITA da row `output-toolbar-agentes`,
+    fora do grupo de botoes, empilhada em coluna e ocupando so o espaco necessario."""
+    from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+
+    win = _new_window(qtbot)
+    cq = win._command_queue
+
+    div = cq._personas_utils_div
+    assert div is cq.personas_utils_div
+    assert div.property("testid") == "queue-subtab-insertions-personas-utils"
+    assert isinstance(div.layout(), QVBoxLayout), "os 3 botoes ficam em coluna"
+
+    # Exatamente os 3 utilitarios, nenhuma persona.
+    tids = [
+        div.layout().itemAt(i).widget().property("testid")
+        for i in range(div.layout().count())
+    ]
+    assert tids == [
+        "queue-btn-personas-create",
+        "queue-btn-personas-config",
+        "queue-btn-personas-update",
+    ]
+
+    # Row (nao coluna) com o conteudo da aba a esquerda e a div encostada a
+    # direita: ela e o ULTIMO item de `output-toolbar-agentes`, alinhada a
+    # direita e sem stretch (todo o stretch e do conteudo).
+    from PySide6.QtWidgets import QSizePolicy
+
+    from PySide6.QtCore import Qt
+
+    agentes = div.parentWidget()
+    assert agentes.property("testid") == "output-toolbar-agentes"
+    row = agentes.layout()
+    assert isinstance(row, QHBoxLayout), "agentes e uma row"
+    assert row.itemAt(0).widget() is cq.personas_content
+    assert row.itemAt(row.count() - 1).widget() is div
+    assert row.stretch(0) == 1
+    assert row.stretch(row.count() - 1) == 0
+    assert row.itemAt(row.count() - 1).alignment() & Qt.AlignmentFlag.AlignRight
+
+    # A div saiu de dentro da aba: nem ela nem o divisor antigo continuam la.
+    outer = cq.personas_content.layout()
+    assert all(
+        outer.itemAt(i).widget() is not div for i in range(outer.count())
+    )
+
+    # So o espaco necessario: uma coluna de um botao de largura, nunca a faixa
+    # inteira da row.
+    assert div.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
+    assert div.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+    assert div.sizeHint().width() < 60
+    assert div.sizeHint().height() > div.sizeHint().width()  # coluna, nao row
+
+    # Nenhum utilitario sobrou no flow filtravel.
+    flow_tids = {
+        cq._subtab_personas_layout.itemAt(i).widget().property("testid")
+        for i in range(cq._subtab_personas_layout.count())
+        if cq._subtab_personas_layout.itemAt(i).widget() is not None
+    }
+    assert not flow_tids & set(tids)
 
 
 def test_personas_update_adds_button_for_new_persona(qtbot, tmp_path, monkeypatch):
@@ -185,10 +314,16 @@ def test_personas_update_adds_button_for_new_persona(qtbot, tmp_path, monkeypatc
     added = after - before
     assert added == {f"queue-btn-persona-{new_slug}"}
 
-    # update permanece o ultimo widget do flow.
-    layout = win._command_queue._subtab_personas_layout
-    last = layout.itemAt(layout.count() - 1).widget()
-    assert last.property("testid") == "queue-btn-personas-update"
+    # A persona nova entra no flow; os utilitarios seguem na div em coluna.
+    flow = win._command_queue._subtab_personas_layout
+    flow_last = flow.itemAt(flow.count() - 1).widget()
+    assert flow_last.property("testid") == f"queue-btn-persona-{new_slug}"
+    utils = win._command_queue._subtab_personas_utils_layout
+    assert utils.itemAt(0).widget().property("testid") == "queue-btn-personas-create"
+    assert (
+        utils.itemAt(utils.count() - 1).widget().property("testid")
+        == "queue-btn-personas-update"
+    )
 
 
 def test_personas_update_is_idempotent_when_nothing_new(qtbot, monkeypatch):
@@ -208,25 +343,30 @@ def test_personas_update_is_idempotent_when_nothing_new(qtbot, monkeypatch):
 def test_personas_subtab_has_config_gear_before_update(qtbot):
     win = _new_window(qtbot)
 
-    layout = win._command_queue._subtab_personas_layout
+    layout = win._command_queue._subtab_personas_utils_layout
     tids = [
         layout.itemAt(i).widget().property("testid")
         for i in range(layout.count())
         if layout.itemAt(i).widget() is not None
     ]
-    assert "queue-btn-personas-config" in tids, "gear de agentes ausente na sub-aba"
-    # update permanece o ultimo widget; o gear vem antes dele.
+    assert tids[0] == "queue-btn-personas-create", "create deve ser o primeiro"
+    assert "queue-btn-personas-config" in tids, "gear de agentes ausente na aba"
+    # update permanece o ultimo widget da coluna; o gear vem antes dele.
     assert tids[-1] == "queue-btn-personas-update"
+    assert tids.index("queue-btn-personas-create") < tids.index(
+        "queue-btn-personas-config"
+    )
     assert tids.index("queue-btn-personas-config") < tids.index(
         "queue-btn-personas-update"
     )
 
 
 def test_personas_config_gear_is_not_a_persona_button(qtbot):
-    # O testid do gear (queue-btn-personas-config) NAO pode contaminar a
-    # contagem de botoes de persona (prefixo queue-btn-persona-).
+    # Os testids utilitarios plurais NAO contaminam a contagem de personas
+    # (prefixo queue-btn-persona- singular).
     win = _new_window(qtbot)
     persona_btns = _buttons_by_testid_prefix(win, "queue-btn-persona-")
+    assert "queue-btn-personas-create" not in persona_btns
     assert "queue-btn-personas-config" not in persona_btns
     assert "queue-btn-personas-update" not in persona_btns
 
@@ -412,6 +552,7 @@ def test_four_new_personas_follow_their_exact_filters(qtbot):
                 button = _button_by_testid(win, testid)
                 assert button.isHidden() is (category != active_category), testid
 
+            assert not _button_by_testid(win, "queue-btn-personas-create").isHidden()
             assert not _button_by_testid(win, "queue-btn-personas-config").isHidden()
             assert not _button_by_testid(win, "queue-btn-personas-update").isHidden()
     finally:
@@ -431,9 +572,14 @@ def test_filter_hides_non_matching_personas_keeps_utilities(qtbot):
             else:
                 assert btn.isHidden(), f"{tid} deveria estar oculto sob filtro Research"
 
-        # Gear de config e botao update nunca sao filtrados.
+        # Create, gear de config e botao update nunca sao filtrados.
+        assert not _button_by_testid(win, "queue-btn-personas-create").isHidden()
         assert not _button_by_testid(win, "queue-btn-personas-config").isHidden()
         assert not _button_by_testid(win, "queue-btn-personas-update").isHidden()
+        # create permanece o primeiro widget da coluna de utilitarios.
+        layout = win._command_queue._subtab_personas_utils_layout
+        first = layout.itemAt(0).widget()
+        assert first.property("testid") == "queue-btn-personas-create"
     finally:
         _set_persona_filter(win, PERSONA_FILTER_ALL_LABEL)
 

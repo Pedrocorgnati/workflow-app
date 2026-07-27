@@ -33,7 +33,15 @@ class BrainstormMdReaderDialog(QDialog):
         self.setProperty("testid", "brainstorm-md-reader-dialog")
         self.setWindowTitle(self._md_path.name)
         self.setModal(True)
-        self.resize(980, 720)
+        # 2026-07-20: o modal abre cobrindo exatamente a janela principal do
+        # workflow-app (mesmo tamanho e mesma posicao) em vez de um retangulo
+        # fixo centralizado. Fallback 980x720 quando nao ha parent-window
+        # (testes headless instanciam o dialog sem MainWindow).
+        _host = parent.window() if parent is not None else None
+        if _host is not None:
+            self.setGeometry(_host.geometry())
+        else:
+            self.resize(980, 720)
 
         self._reader = MarkdownReader(repo=None, parent=self)
         self._reader.setProperty("testid", "brainstorm-md-reader")

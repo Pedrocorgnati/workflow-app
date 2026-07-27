@@ -130,6 +130,30 @@ PROMPT_FILTER_CATEGORIES: tuple[str, ...] = (
 PROMPT_FILTER_DEFAULT = "Ops"
 
 
+# `QWIDGETSIZE_MAX` do Qt (nao exposto pelo PySide6): valor de "sem teto" que
+# `QWidget.setMaximumHeight` reconhece. Espelha a constante homonima de
+# `main_window.py` (duplicada de proposito: importar de la seria circular).
+_QT_WIDGET_SIZE_MAX = 16777215
+
+
+def enable_height_for_width(widget: QWidget) -> None:
+    """Faz um container de `ResponsiveButtonFlowLayout` reportar altura real.
+
+    `QWidgetItem.hasHeightForWidth()` consulta a size policy do WIDGET, nao o
+    layout interno. Sem esta marca, o layout pai dimensiona o container pelo
+    `sizeHint()` do flow — calculado numa largura de referencia fixa de 360px —
+    e nao pela altura verdadeira na largura efetiva, entregando uma faixa vazia
+    (ou cortando linhas, quando a coluna e mais estreita que a referencia).
+
+    Gemeo de `main_window._enable_height_for_width` (que delega para ca): a
+    funcao vive junto do flow porque quem monta as sub-abas e as secoes do
+    header e este modulo.
+    """
+    policy = widget.sizePolicy()
+    policy.setHeightForWidth(True)
+    widget.setSizePolicy(policy)
+
+
 class ResponsiveButtonFlowLayout(QLayout):
     """Flow layout para botoes compactos das subtabs de insercoes.
 
@@ -2659,6 +2683,9 @@ class CommandQueueWidget(QWidget):
             w.setProperty("testid", testid)
             lay = ResponsiveButtonFlowLayout(w, spacing=4, v_spacing=1, max_lines=None)
             lay.setContentsMargins(0, 2, 0, 2)
+            # Sem esta marca a sub-aba e medida pelo sizeHint de referencia
+            # (360px) do flow, e nao pela altura real na largura do header.
+            enable_height_for_width(w)
             return w, lay
 
         # paths & IDs agora usa o mesmo flow responsivo das demais subtabs.
@@ -2670,6 +2697,7 @@ class CommandQueueWidget(QWidget):
             _paths_tab, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_paths_layout.setContentsMargins(0, 2, 0, 2)
+        enable_height_for_width(_paths_tab)
         _prompts_tab = QWidget()
         _prompts_tab.setProperty("testid", "queue-subtab-insertions-prompts")
         _prompts_outer = QVBoxLayout(_prompts_tab)
@@ -2701,6 +2729,11 @@ class CommandQueueWidget(QWidget):
             _prompts_flow_host, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_prompts_layout.setContentsMargins(0, 2, 0, 2)
+        # heightForWidth precisa subir host -> _prompts_outer -> _prompts_tab
+        # para a sub-aba ser medida pela altura real (o QVBoxLayout so propaga
+        # se o item filho anunciar hfw na size policy).
+        enable_height_for_width(_prompts_flow_host)
+        enable_height_for_width(_prompts_tab)
         _prompts_outer.addWidget(_prompts_flow_host, stretch=1)
 
         _prf = QSettings("systemForge", "workflow-app")
@@ -2721,7 +2754,8 @@ class CommandQueueWidget(QWidget):
         # flow unico de botoes. A 1a aba ("All") mostra todos; as demais filtram
         # por `persona_category`. O flow continua sendo _subtab_personas_layout
         # e so hospeda botoes de persona; os tres utilitarios (+ / gear / update)
-        # vivem na div `queue-subtab-insertions-personas-utils` no fim da aba e
+        # vivem na div `queue-subtab-insertions-personas-utils` (coluna direita da
+        # row `output-toolbar-agentes`) e
         # nunca sao filtrados. Ver _on_personas_filter_changed.
         #
         # 2026-07-27: deixou de ser sub-aba do `queue-subtabs-insertions` e
@@ -2760,14 +2794,24 @@ class CommandQueueWidget(QWidget):
             _personas_flow_host, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_personas_layout.setContentsMargins(0, 2, 0, 2)
+        # Mesma cadeia do PROMPTS: sem hfw, `output-toolbar-agentes` e medida
+        # pelo sizeHint de 360px do flow de personas.
+        enable_height_for_width(_personas_flow_host)
+        enable_height_for_width(_personas_tab)
         _personas_outer.addWidget(_personas_flow_host, stretch=1)
 
         # Div dos utilitarios (2026-07-27): os tres botoes 1:1 que nao sao
         # personas (`+` create, gear de config e update) saem do flow e passam a
-        # viver AQUI, no fim da aba, separados do grupo de botoes por uma linha
-        # divisoria. Coluna vertical com size policy Fixed nos dois eixos: a div
-        # ocupa exatamente a largura de um botao 34px (mais as margens) e a
-        # altura dos tres empilhados, nunca a faixa inteira da aba.
+        # viver AQUI, numa div propria. Coluna vertical com size policy Fixed nos
+        # dois eixos: a div ocupa exatamente a largura de um botao (mais as
+        # margens) e a altura dos tres empilhados, nunca a faixa inteira da aba.
+        #
+        # 2026-07-27 (2a rodada): deixou de ser o ultimo item EMPILHADO dentro de
+        # `queue-subtab-insertions-personas` e passou a ser a coluna DIREITA da
+        # row `output-toolbar-agentes`, montada pelo MainWindow. Aqui a div nasce
+        # sem parent (mesmo precedente de `insertions_bar`) e e exposta via o
+        # atributo publico `personas_utils_div`; o testid nao muda com a mudanca
+        # de pai (regra D1).
         _personas_utils = QWidget()
         _personas_utils.setObjectName("PersonasUtilsColumn")
         _personas_utils.setProperty("testid", "queue-subtab-insertions-personas-utils")
@@ -2785,15 +2829,12 @@ class CommandQueueWidget(QWidget):
         self._subtab_personas_utils_layout.setSizeConstraint(
             QLayout.SizeConstraint.SetFixedSize
         )
-        _personas_utils_sep = QFrame()
-        _personas_utils_sep.setFrameShape(QFrame.Shape.HLine)
-        _personas_utils_sep.setFixedHeight(1)
-        _personas_utils_sep.setStyleSheet("background-color: #3F3F46; border: none;")
-        _personas_outer.addWidget(_personas_utils_sep)
-        _personas_outer.addWidget(
-            _personas_utils, alignment=Qt.AlignmentFlag.AlignLeft
-        )
+        # O divisor horizontal que separava a div do flow saiu junto: em row a
+        # separacao e espacial (colunas distintas), nao precisa de linha.
         self._personas_utils_div = _personas_utils
+        #: Consumido pelo MainWindow como a coluna direita de
+        #: `output-toolbar-agentes` (nasce sem parent, como `insertions_bar`).
+        self.personas_utils_div = _personas_utils
 
         # Restaura o filtro ativo da sessao anterior; persiste ao trocar. O
         # filtro real so tem efeito apos o MainWindow popular os botoes — por
@@ -2837,6 +2878,15 @@ class CommandQueueWidget(QWidget):
                 "insertions/active_subtab", idx
             )
         )
+        # O QStackedLayout interno do QTabWidget dimensiona pelo MAXIMO entre as
+        # 6 sub-abas: PATHS (1 linha) herdava a altura de PROMPTS (5 linhas) e o
+        # pane sobrava vazio. `_sync_insertions_subtabs_height` poe um teto na
+        # altura real da sub-aba ATIVA. Resize/LayoutRequest (populate, filtro,
+        # resize da janela) chegam pelo eventFilter.
+        self._insertions_subtabs.currentChanged.connect(
+            lambda _idx: self._sync_insertions_subtabs_height()
+        )
+        self._insertions_subtabs.installEventFilter(self)
 
         _ti_layout.addWidget(self._insertions_subtabs)
 
@@ -3627,6 +3677,10 @@ class CommandQueueWidget(QWidget):
             content, spacing=3, v_spacing=1, max_lines=None
         )
         flow.setContentsMargins(5, 4, 5, 5)
+        # Sem hfw o `output-toolbar-left` mede esta secao pelo sizeHint de
+        # referencia (360px) do flow: varias linhas a mais do que a largura
+        # real do header exige, tudo virando faixa vazia sob os botoes.
+        enable_height_for_width(content)
         for item in buttons:
             if isinstance(item, QWidget):
                 flow.addWidget(item)
@@ -3748,7 +3802,8 @@ class CommandQueueWidget(QWidget):
 
     #: testids dos tres botoes utilitarios da aba 'Agentes'. Nao sao personas
     #: (prefixo plural `personas`), nunca entram no flow filtravel e vivem na
-    #: div `queue-subtab-insertions-personas-utils`, em coluna, no fim da aba.
+    #: div `queue-subtab-insertions-personas-utils`, em coluna, encostada no
+    #: canto direito da row `output-toolbar-agentes`.
     _PERSONAS_UTIL_TESTIDS = (
         "queue-btn-personas-create",
         "queue-btn-personas-config",
@@ -3760,7 +3815,7 @@ class CommandQueueWidget(QWidget):
 
         `widgets` chega do MainWindow como uma lista unica (create + personas +
         gear + update, nessa ordem). O particionamento acontece AQUI: os tres
-        utilitarios vao para a div em coluna do fim da aba e o resto para o
+        utilitarios vao para a div em coluna da direita da row 'Agentes' e o resto para o
         flow responsivo filtravel.
 
         Re-aplica o filtro de categoria ativo apos popular (os botoes recem
@@ -3959,7 +4014,66 @@ class CommandQueueWidget(QWidget):
             if idx < len(self._sec_contents):
                 self._sec_contents[idx].installEventFilter(self)
 
+    def _sync_insertions_subtabs_height(self) -> None:
+        """Encolhe `queue-subtabs-insertions` ate a altura real da sub-aba ATIVA.
+
+        Motivacao (2026-07-27): o `QStackedLayout` interno de um QTabWidget
+        dimensiona pelo maximo entre TODAS as paginas. Com PROMPTS (5 linhas de
+        botoes) no mesmo stack, PATHS e PERSONAL (1 linha) recebiam ~83px a mais
+        do que precisam e o pane ficava vazio abaixo dos botoes.
+
+        A altura verdadeira vem do `heightForWidth` do flow da sub-aba ativa
+        (exato na largura efetiva, ao contrario do `sizeHint()`, que usa uma
+        largura de referencia fixa de 360px) e vira `maximumHeight` do
+        QTabWidget. `QWidgetItem` respeita `maximumHeight` tanto em
+        `heightForWidth` quanto em `sizeHint`, entao o teto propaga sozinho
+        para `output-toolbar-center` e para o stack do header.
+
+        Nunca corta abaixo do `minimumSizeHint` da pagina, e libera o teto
+        quando nao ha `heightForWidth` utilizavel (pagina ainda sem geometria).
+        """
+        tabs = getattr(self, "_insertions_subtabs", None)
+        if tabs is None:
+            return
+        page = tabs.currentWidget()
+        if page is None:
+            return
+
+        def _apply(limit: int) -> None:
+            if tabs.maximumHeight() == limit:
+                return
+            tabs.setMaximumHeight(limit)
+            # Na troca de sub-aba a pagina recem-exposta ainda carrega a
+            # geometria antiga, entao esta medida pode estar um ciclo atras.
+            # Re-mede no proximo turno do event loop; a guarda de igualdade
+            # acima encerra a cadeia assim que o valor estabiliza.
+            QTimer.singleShot(0, self._sync_insertions_subtabs_height)
+
+        page_layout = page.layout()
+        width = page.width() or tabs.width()
+        content = -1
+        if page_layout is not None and width > 0 and page_layout.hasHeightForWidth():
+            content = page_layout.heightForWidth(width)
+        if content <= 0:
+            _apply(_QT_WIDGET_SIZE_MAX)
+            return
+        content = max(content, page.minimumSizeHint().height())
+
+        # Cromo = tab bar + moldura do pane. Medido pela geometria viva (exato,
+        # e estavel quando o teto ja foi aplicado, porque encolhe os dois
+        # juntos); o sizeHint da tab bar cobre o boot, antes do 1o layout.
+        chrome = tabs.height() - page.height()
+        if chrome <= 0:
+            chrome = tabs.tabBar().sizeHint().height()
+        _apply(chrome + content)
+
     def eventFilter(self, obj, event):  # noqa: N802 - Qt API
+        # NOTA (2026-07-27): este metodo esta SOMBREADO — a classe redefine
+        # `eventFilter` mais abaixo (drag-and-drop do items_container) e a
+        # ultima definicao vence. O rastreio P4 abaixo nunca roda. Bug
+        # pre-existente, deixado como esta para nao mudar comportamento fora do
+        # escopo desta correcao de layout; o hook de altura das sub-abas foi
+        # instalado na definicao viva.
         # P4: detecta MouseButtonRelease em QPushButton dentro das 3 tabs
         # rastreadas, e atualiza queue-template-label com o testid do botao
         # via QTimer.singleShot(0, ...) — defer garante que executa apos os
@@ -9585,7 +9699,18 @@ class CommandQueueWidget(QWidget):
         return True
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if obj is self._items_container:
+        # Teto por sub-aba ativa de `queue-subtabs-insertions`: Resize cobre o
+        # resize da janela (muda quantas linhas o flow usa) e LayoutRequest
+        # cobre populate_*_subtab e a troca de filtro (PROMPTS/AGENTES).
+        # getattr: o filtro e instalado durante `_setup_ui`, antes de varios
+        # atributos existirem (inclusive `_items_container`, logo abaixo).
+        if obj is getattr(self, "_insertions_subtabs", None) and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.LayoutRequest,
+        ):
+            self._sync_insertions_subtabs_height()
+
+        if obj is getattr(self, "_items_container", None):
             if event.type() == QEvent.Type.DragEnter:
                 if event.mimeData().hasText():
                     event.acceptProposedAction()

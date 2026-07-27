@@ -185,7 +185,10 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
     output-toolbar-datatest-queue-stack. As tres divs que antes disputavam
     espaco em duas linhas viraram paginas de `output-toolbar-section-stack`,
     e nenhuma delas troca de testid (D1). Em 2026-07-27 entrou a QUARTA
-    pagina (AGENTES), promovida de sub-aba do `queue-subtabs-insertions`.
+    pagina (AGENTES), promovida de sub-aba do `queue-subtabs-insertions`, e
+    logo depois a secao unica `MCP & BRAINSTORM` foi dissolvida: suas duas
+    sub-abas internas subiram para as duas ULTIMAS posicoes do seletor (MCPs
+    e BRAINSTORM), totalizando CINCO secoes.
 
     O stack e filho do proprio seletor (logo abaixo da fileira de botoes), nao
     um irmao full-width por baixo dos tres blocos da linha.
@@ -208,12 +211,13 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
         == "output-toolbar-datatest-queue-stack"
     )
 
-    # Quatro botoes de select, na ordem e com os rotulos decididos (D14).
+    # Cinco botoes de select, na ordem e com os rotulos decididos (D14).
     expected = [
         ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
         ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
-        ("output-toolbar-section-mcp-brainstorm", "MCP & BRAINSTORM"),
         ("output-toolbar-section-agentes", "AGENTES"),
+        ("output-toolbar-section-mcps", "MCPs"),
+        ("output-toolbar-section-brainstorm", "BRAINSTORM"),
     ]
     btns = win._toolbar_section_btns
     assert [(b.property("testid"), b.text()) for b in btns] == expected
@@ -228,27 +232,66 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
     selector_layout = selector.layout()
     assert selector_layout.count() == 2, "fileira de botoes + stack"
     assert selector_layout.itemAt(1).widget() is stack
-    assert stack.count() == 4
+    assert stack.count() == 5
     assert stack.widget(0) is win._command_queue.header_widget
     assert stack.widget(0).property("testid") == "output-toolbar-left"
     assert stack.widget(1).property("testid") == "output-toolbar-center"
-    assert stack.widget(2).property("testid") == "output-toolbar-mcp"
-    assert stack.widget(3).property("testid") == "output-toolbar-agentes"
-    # A pagina 3 hospeda a aba 'Agentes' com o testid original preservado (D1).
+    assert stack.widget(2).property("testid") == "output-toolbar-agentes"
+    assert stack.widget(3).property("testid") == "output-toolbar-mcp"
+    assert stack.widget(4).property("testid") == "output-toolbar-brainstorm"
+    # A pagina 2 hospeda a aba 'Agentes' com o testid original preservado (D1).
     personas = win._command_queue.personas_content
     assert personas.property("testid") == "queue-subtab-insertions-personas"
-    assert personas.parentWidget() is stack.widget(3)
+    assert personas.parentWidget() is stack.widget(2)
 
     # Boot fixo em COMMAND SEQUENCE (D14) e troca de pagina pelo clique.
     assert stack.currentIndex() == 0
-    btns[1].click()
-    assert stack.currentIndex() == 1
-    btns[2].click()
-    assert stack.currentIndex() == 2
-    btns[3].click()
-    assert stack.currentIndex() == 3
+    for i in range(1, 5):
+        btns[i].click()
+        assert stack.currentIndex() == i
     btns[0].click()
     assert stack.currentIndex() == 0
+
+
+def test_mcps_e_brainstorm_sao_secoes_de_primeiro_nivel(app):
+    """A secao unica `MCP & BRAINSTORM` foi dissolvida (2026-07-27).
+
+    Suas duas sub-abas internas viraram as duas ULTIMAS secoes do seletor, com
+    o MESMO conteudo de antes: MCPs renderiza as personas/acoes MCP, BRAINSTORM
+    renderiza `brainstorm-buttons-grid`. A tab bar interna que fazia o segundo
+    nivel (`output-progress-tabbar` + `output-mcp-tab-*`) nao existe mais.
+    """
+    from workflow_app.main_window import MainWindow
+
+    win = MainWindow()
+
+    # O botao e a secao dissolvida sumiram por completo do seletor.
+    selector = win._toolbar_section_selector
+    assert _find_by_testid(selector, "output-toolbar-section-mcp-brainstorm") is None
+    for testid in ("output-mcp-tab-mcps", "output-mcp-tab-brainstorm"):
+        assert _find_by_testid(win, testid) is None
+    assert _find_widget_by_testid(selector, "output-progress-tabbar") is None
+
+    stack = win._toolbar_section_stack
+    mcps_btn = _find_by_testid(selector, "output-toolbar-section-mcps")
+    brainstorm_btn = _find_by_testid(selector, "output-toolbar-section-brainstorm")
+
+    # Cada botao mostra a moldura da sua secao, e o conteudo herdado esta la.
+    mcps_btn.click()
+    mcps_column = stack.currentWidget()
+    assert mcps_column.property("testid") == "output-toolbar-mcp"
+    for action_id in ("main", "parallel", "dual"):
+        assert _find_by_testid(mcps_column, f"output-mcp-action-{action_id}")
+    assert _find_widget_by_testid(mcps_column, "output-mcp-persona-checkboxes")
+
+    brainstorm_btn.click()
+    brainstorm_column = stack.currentWidget()
+    assert brainstorm_column.property("testid") == "output-toolbar-brainstorm"
+    assert _find_widget_by_testid(brainstorm_column, "brainstorm-buttons-grid")
+
+    # As duas molduras sao irmas no stack: nenhuma vive dentro da outra.
+    assert _find_widget_by_testid(mcps_column, "output-toolbar-brainstorm") is None
+    assert _find_widget_by_testid(brainstorm_column, "output-toolbar-mcp") is None
 
 
 def test_output_toolbar_left_subtabs_use_responsive_flow(app):
@@ -336,12 +379,15 @@ def test_personas_flow_ajusta_botoes_por_linha_conforme_largura(app):
     assert len(persona_widgets) == 34
     assert all(widget.accessibleName() for widget in persona_widgets)
 
-    # Largura congruente com o label: nenhum botao de texto e compactado.
-    assert all(
-        widget.geometry().width() == widget.sizeHint().width()
-        for widget in persona_widgets
-    )
-    assert len({widget.geometry().width() for widget in persona_widgets}) > 1
+    # 2026-07-27: a largura deixou de acompanhar o label e passou a ser
+    # padronizada em `_PERSONA_BTN_WIDTH` para TODOS os botoes da aba. O flow
+    # continua responsivo (quantos cabem por linha varia com a largura), so o
+    # item virou uniforme.
+    from workflow_app.main_window import _PERSONA_BTN_WIDTH
+
+    assert {widget.geometry().width() for widget in persona_widgets} == {
+        _PERSONA_BTN_WIDTH
+    }
 
     # Gap vertical de 1px entre linhas (altura da linha = maior botao dela).
     line_height = max(widget.geometry().height() for widget in widgets)

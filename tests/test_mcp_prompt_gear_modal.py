@@ -61,22 +61,22 @@ def _materialize_seeds(repo_root: Path) -> tuple[Path, Path]:
         ("04-search-forge", "search-forge", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("05-deep-detailer", "deep-detailer", "Claude", "Otimizar", True, "terminal-interactive-output"),
         ("06-controversial", "controversial", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("07-hardening", "hardening", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("08-loop-prepare", "loop-prepare", "Claude", "Loop prepare", True, "terminal-interactive-output"),
-        ("09-criar-task", "criar-task", "Claude", "Criar tasks", True, "terminal-interactive-output"),
-        ("10-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
-        ("11-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
-        ("12-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
-        ("13-visual-design", "repo-ruler", "Claude", "Revisar", True, "terminal-interactive-output"),
-        ("14-layout-architect", "layout-architect", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("15-analise-complexidade", "analise-complexidade", "Claude", "Analisar complexidade", True, "terminal-interactive-output"),
-        ("16-billing", "billing", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("17-debugger", "debugger", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("18-delegador", "delegador", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("19-pdca", "pdca", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("20-soft-engen", "soft-engen", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("21-scaffolds-blueprints-updater", "scaffolds-blueprints-updater", "Claude", "Otimizar", True, "terminal-interactive-output"),
-        ("22-questioner", "questioner", "Claude", "Revisar", True, "terminal-interactive-output"),
+        ("08-hardening", "hardening", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("09-loop-prepare", "loop-prepare", "Claude", "Loop prepare", True, "terminal-interactive-output"),
+        ("10-criar-task", "criar-task", "Claude", "Criar tasks", True, "terminal-interactive-output"),
+        ("11-revisar-task", "revisar-task", "Claude", "Revisar tasks", True, "terminal-interactive-output"),
+        ("12-executar-task", "executar-task", "Claude", "Executar", True, "terminal-interactive-output"),
+        ("13-revisar-execucao", "revisar-execucao", "Claude", "Revisar execucao", True, "terminal-interactive-output"),
+        ("14-visual-design", "repo-ruler", "Claude", "Revisar", True, "terminal-interactive-output"),
+        ("15-layout-architect", "layout-architect", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("16-analise-complexidade", "analise-complexidade", "Claude", "Analisar complexidade", True, "terminal-interactive-output"),
+        ("17-billing", "billing", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("18-debugger", "debugger", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("19-delegador", "delegador", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("20-pdca", "pdca", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("21-soft-engen", "soft-engen", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("22-scaffolds-blueprints-updater", "scaffolds-blueprints-updater", "Claude", "Otimizar", True, "terminal-interactive-output"),
+        ("07-questioner", "questioner", "Claude", "Revisar", True, "terminal-interactive-output"),
         ("23-ux-ui", "ux-ui", "Claude", "Revisar", True, "terminal-interactive-output"),
         ("24-performance-engineer", "performance-engineer", "Claude", "Revisar", True, "terminal-interactive-output"),
     ]
@@ -203,7 +203,7 @@ def test_gear_label_edit_reflects_on_grid_button_label(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     seeds_dir, _ = _materialize_seeds(repo_root)
-    seed_path = seeds_dir / "15-analise-complexidade.md"
+    seed_path = seeds_dir / "16-analise-complexidade.md"
 
     # Simula o save do gear: grava `label` novo no frontmatter.
     save_seed(seed_path, {"label": "Complexidade"}, "prompt body for analise-complexidade")

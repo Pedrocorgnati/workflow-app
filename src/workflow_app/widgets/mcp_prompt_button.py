@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Callable, Literal
 from weakref import WeakMethod
 
-from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -97,6 +97,13 @@ VALID_TERMINALS: set[str] = {
 }
 # Alias publico para compat com leitores externos do widget.
 _VALID_TARGETS: set[str] = VALID_TERMINALS
+
+#: Padding vertical (px, por lado) dos botoes da grade `brainstorm-buttons-grid`.
+#: Unico knob de altura: o botao mede `conteudo + 2 * BUTTON_V_PADDING_PX`. Era 1px
+#: sobre um piso de estilo de 19px (folga real de 2.5px/lado); com o piso
+#: removido do `sizeHint`, este 1px passou a valer e o botao caiu para 16px —
+#: a "metade do padding" pedida em 2026-07-27.
+BUTTON_V_PADDING_PX = 1
 
 # Cores canonicas conforme mcp-flow-implantation-base-archive.md §4:
 # Claude=laranja, Codex=roxo, Kimi=azul, type-selector-radio-input=verde.
@@ -388,7 +395,16 @@ class MCPPromptButton(QPushButton):
         )
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(6, 0, 8, 0)
+        # Padding vertical: sem altura fixa, a altura do botao e o conteudo
+        # mais a margem de cima/baixo declarada AQUI — este layout e o unico
+        # knob de padding vertical da grade `brainstorm-buttons-grid`.
+        #
+        # 07-27 (2a rodada): o pedido de "metade do padding" so teve efeito
+        # depois que `sizeHint()` parou de herdar o piso vertical do
+        # QPushButton (ver `_CONTENT_DRIVEN_HEIGHT` abaixo): com o piso, o
+        # botao media 19px independente da margem (2.5px de folga por lado).
+        # Sem ele, a margem de 1px vale de verdade e o botao mede 16px.
+        row.setContentsMargins(6, BUTTON_V_PADDING_PX, 8, BUTTON_V_PADDING_PX)
         row.setSpacing(4)
         row.addWidget(self._checkbox, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self._label_widget, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -426,6 +442,47 @@ class MCPPromptButton(QPushButton):
             self._sync_visual_state()
             if not alive:
                 self.setToolTip(_CODEX_TOAST_SHORT)
+
+    # Geometria
+
+    def _layout_size(self, *, minimum: bool) -> QSize | None:
+        layout = self.layout()
+        if layout is None:
+            return None
+        return layout.totalMinimumSize() if minimum else layout.totalSizeHint()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        """Largura suficiente para o label inteiro (checkbox + texto + margens).
+
+        `QPushButton.sizeHint()` deriva do texto NATIVO do botao, que aqui e
+        vazio de proposito (o label visivel e um QLabel filho). Sem este
+        override o hint fica em ~34px e o `ResponsiveButtonFlowLayout`, que
+        dimensiona cada item pelo proprio hint, corta o label. Mesclar com o
+        `totalSizeHint()` do QHBoxLayout interno devolve a largura real do
+        conteudo.
+
+        ALTURA (07-27): vem SO do layout interno, nunca do piso do QPushButton.
+        O piso do estilo (19px, insensivel a QSS `min-height` e a margem do
+        layout) congelava a altura e fazia qualquer ajuste de padding vertical
+        virar no-op. Largura continua sendo o maximo entre os dois.
+        """
+        base = super().sizeHint()
+        content = self._layout_size(minimum=False)
+        if content is None:
+            return base
+        return QSize(max(base.width(), content.width()), content.height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        """Piso de largura tambem ancorado no conteudo real do botao.
+
+        Altura pelo mesmo criterio do `sizeHint` (conteudo, sem o piso do
+        estilo) — do contrario o minimo reintroduziria os 19px.
+        """
+        base = super().minimumSizeHint()
+        content = self._layout_size(minimum=True)
+        if content is None:
+            return base
+        return QSize(max(base.width(), content.width()), content.height())
 
     # API
 

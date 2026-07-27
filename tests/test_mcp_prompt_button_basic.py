@@ -172,3 +172,39 @@ def test_modal_opens_on_right_click(qtbot, monkeypatch):
     assert values["label"] == "Configure"
     assert values["prompt"] == "initial prompt"
     assert values["target_path"] == "terminal-workspace-output"
+
+
+def test_size_hint_cabe_o_label_inteiro(qtbot):
+    """Refactor 07-27: o hint do botao vem do conteudo, nao do texto nativo.
+
+    O label visivel e um QLabel filho (o texto nativo do QPushButton fica
+    vazio de proposito), entao `QPushButton.sizeHint()` reportava ~34px e o
+    `ResponsiveButtonFlowLayout` — que dimensiona cada item pelo proprio hint —
+    cortava o texto na grade da aba Brainstorm.
+    """
+    btn = MCPPromptButton(
+        label="Revisar execucao de task longa",
+        button_type="Claude",
+        prompt="Prompt qualquer.",
+        action="send",
+        target_path="terminal-interactive-output",
+        testid_slug="hint-label-longo",
+    )
+    qtbot.addWidget(btn)
+
+    conteudo = btn.layout().totalSizeHint().width()
+    assert btn.sizeHint().width() >= conteudo
+    assert btn.minimumSizeHint().width() >= btn.layout().totalMinimumSize().width()
+
+    curto = MCPPromptButton(
+        label="ok",
+        button_type="Claude",
+        prompt="Prompt qualquer.",
+        action="send",
+        target_path="terminal-interactive-output",
+        testid_slug="hint-label-curto",
+    )
+    qtbot.addWidget(curto)
+
+    # Largura congruente com o proprio label: label maior, botao mais largo.
+    assert btn.sizeHint().width() > curto.sizeHint().width()

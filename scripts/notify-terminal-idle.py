@@ -70,6 +70,11 @@ _VALID_STATUS = ("success", "failure", "awaiting_user")
 _VALID_REASONS = (
     "VERIFY_FAILED", "BLOCKED", "RESSALVAS",
     "TIMEOUT", "EXIT_NONZERO", "MISSING_ARG",
+    # NO_VERDICT: reason INTERNO do app (nao emitido por comando). O turno do
+    # agente terminou sem que o bloco "FASE FINAL - Autocast contract" rodasse,
+    # entao nenhum veredito autoritativo existe. Emitido apenas por
+    # .claude/hooks/stop-autocast-backstop.sh. Ver ai-forge/rules/listener-vermelho.md.
+    "NO_VERDICT",
 )
 _STATUS_TO_STATE = {
     "success": "idle",

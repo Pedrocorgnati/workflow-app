@@ -16,6 +16,9 @@
 #   --reason <r>   enum canonico (§2.2): VERIFY_FAILED | BLOCKED | RESSALVAS |
 #                  TIMEOUT | EXIT_NONZERO | MISSING_ARG. OBRIGATORIO quando
 #                  --status=failure; ignorado nos demais casos.
+#                  NO_VERDICT e reason INTERNO do app: NAO usar em comando —
+#                  so .claude/hooks/stop-autocast-backstop.sh o emite, quando o
+#                  turno acaba sem o bloco "FASE FINAL - Autocast contract".
 #   --exit-code N  inteiro (opcional). Em success vale 0; em failure vale o
 #                  exit code real do comando. Default: 0/1 conforme status.
 #   --run-id S     string (opcional). Default: ISO-8601 + pid se ausente.
@@ -138,7 +141,7 @@ if [ "$status" = "failure" ]; then
     exit 2
   fi
   case "$reason" in
-    VERIFY_FAILED|BLOCKED|RESSALVAS|TIMEOUT|EXIT_NONZERO|MISSING_ARG) ;;
+    VERIFY_FAILED|BLOCKED|RESSALVAS|TIMEOUT|EXIT_NONZERO|MISSING_ARG|NO_VERDICT) ;;
     *)
       wf_err "invalid --reason '$reason' (expected canonical enum, see ai-forge/rules/workflow-app-listeners.md §2.2)"
       exit 2

@@ -66,6 +66,9 @@ from workflow_app.command_queue.command_queue_widget import (
     ResponsiveButtonFlowLayout,
 )
 from workflow_app.command_queue.command_queue_widget import (
+    enable_height_for_width as _enable_height_for_width_impl,
+)
+from workflow_app.command_queue.command_queue_widget import (
     _TAB_ACTIVE_STYLE,
     _TAB_INACTIVE_STYLE,
 )
@@ -91,6 +94,7 @@ from workflow_app.widgets.mcp_prompt_button import (
     VALID_BUTTON_TYPES,
     VALID_TERMINALS,
     MCPPromptButton,
+    BUTTON_V_PADDING_PX,
 )
 from workflow_app.widgets.toast_notifier import ToastNotifier
 from workflow_app.widgets.version_update_banner import VersionUpdateBanner
@@ -173,6 +177,26 @@ _BRAINSTORM_PROVIDER_LABELS: dict[str, str] = {
 }
 _BRAINSTORM_PROVIDER_SLUGS: frozenset[str] = frozenset(_BRAINSTORM_PROVIDER_LABELS)
 
+# Indices das secoes de `output-toolbar-section-stack`. TODAS as cinco tem
+# conteudo de flow responsivo (altura real != sizeHint) e todas passam pelo teto
+# de `_sync_flow_section_height()` desde 2026-07-27 — antes so as duas ultimas
+# eram medidas, e as tres primeiras herdavam a altura da pagina mais alta do
+# stack. Ordem de `_build_toolbar_section_selector`
+# desde 2026-07-27: 0=command sequence, 1=terminal insertions, 2=agentes,
+# 3=mcps, 4=brainstorm. A antiga secao unica `MCP & BRAINSTORM` (index 2) foi
+# dissolvida: suas duas sub-abas viraram secoes de primeiro nivel, nas duas
+# ultimas posicoes. Consumidos por `_sync_flow_section_height()`.
+_TOOLBAR_SECTION_COMMAND_SEQUENCE = 0
+_TOOLBAR_SECTION_TERMINAL_INSERTIONS = 1
+_TOOLBAR_SECTION_AGENTES = 2
+_TOOLBAR_SECTION_MCPS = 3
+_TOOLBAR_SECTION_BRAINSTORM = 4
+
+# `QWIDGETSIZE_MAX` do Qt (nao exposto pelo PySide6): valor de "sem teto" que
+# `QWidget.setMaximumHeight` reconhece. Usado por `_sync_flow_section_height()`
+# para liberar o teto do selector fora das secoes MCPs/BRAINSTORM.
+_QT_WIDGET_SIZE_MAX = 16777215
+
 
 # QSS canonico dos checkboxes de rota de terminal (terminal-route-t1/t2/t3) e do
 # checkbox de Notes do T1 (terminal-notes-t1). Promovido de local de
@@ -193,6 +217,20 @@ _TERMINAL_ROUTE_CHK_STYLE = (
 )
 
 
+#: Largura fixa dos botoes de persona da aba `queue-subtab-insertions-personas`
+#: (2026-07-27): todos iguais, independente do tamanho do label.
+_PERSONA_BTN_WIDTH = 120
+
+# Lado dos tres botoes 1:1 da div `queue-subtab-insertions-personas-utils`
+# (create `+`, gear de config e update). Eram 34x34; reduzidos em 30% em
+# 2026-07-27 quando a div virou a coluna direita da row `output-toolbar-agentes`
+# (34 * 0.7 = 23.8 -> 24). Os dois tamanhos de glifo/icone acompanham a mesma
+# proporcao para o conteudo continuar centralizado e legivel.
+_PERSONAS_UTIL_BTN_SIZE = 24   # 34 * 0.7
+_PERSONAS_UTIL_GLYPH_PX = 13   # 18 * 0.7
+_PERSONAS_UTIL_ICON_PX = 13    # 18 * 0.7
+
+
 # QSS canonico do gear (reuso do toolbar-prompts-config-gear original em
 # main_window.py:1517-1537). Aplicado pelo `_GearButton` abaixo.
 _GEAR_QSS = (
@@ -211,10 +249,11 @@ def _enable_height_for_width(widget: QWidget) -> None:
     layout interno. Sem esta marca, um QVBoxLayout pai dimensiona o container
     pelo `sizeHint()` do flow (calculado numa largura de referencia fixa) e as
     ultimas linhas de botoes ficam cortadas quando a coluna e mais estreita.
+
+    Alias historico: a implementacao vive junto do flow, em
+    `command_queue_widget.enable_height_for_width`.
     """
-    policy = widget.sizePolicy()
-    policy.setHeightForWidth(True)
-    widget.setSizePolicy(policy)
+    _enable_height_for_width_impl(widget)
 
 
 class _GearButton(QPushButton):
@@ -878,8 +917,12 @@ _DATATEST_FILTERED_IDS = frozenset({
     # passou a ser o seletor de tres secoes da linha unica.
     "output-toolbar-section-selector",
     "output-toolbar-mcp",
-    # 4a secao do seletor (2026-07-27): aba 'Agentes' promovida de sub-aba.
+    # Secoes promovidas a primeiro nivel do seletor (2026-07-27): 'Agentes' veio
+    # de sub-aba do `queue-subtabs-insertions`; 'Brainstorm' veio da sub-aba
+    # interna da extinta secao `MCP & BRAINSTORM` (a outra sub-aba, MCPs, ficou
+    # com o testid original `output-toolbar-mcp`).
     "output-toolbar-agentes",
+    "output-toolbar-brainstorm",
     "output-toolbar-test-mode",
     "terminal-interactive",
     "terminal-workspace",
@@ -1310,9 +1353,12 @@ class MainWindow(QMainWindow):
         # Inserções continua em output-toolbar-center.
         _center_layout.addWidget(self._command_queue.insertions_content)
 
-        # Coluna MCP: acoes Main MCP/Parallel/Dual (os radios de provider foram
-        # eliminados em I2.1 — o provider vem do queue-div-main-llm).
-        _mcp_column = self._build_mcp_column(self._mcp_column_btns)
+        # Secoes MCPs e BRAINSTORM: ate 2026-07-27 eram as duas sub-abas de uma
+        # unica secao `MCP & BRAINSTORM` (tab bar interna `output-progress-tabbar`).
+        # A tab bar interna morreu e cada pagina virou secao de primeiro nivel do
+        # seletor — o conteudo e o mesmo, so o controle que o mostra mudou (D1:
+        # `output-toolbar-mcp` seguiu com a pagina MCPs).
+        _mcp_column, _brainstorm_column = self._build_mcp_column(self._mcp_column_btns)
         # O setMinimumWidth de 1.5x que existia aqui deixou de fazer sentido
         # quando a coluna MCP virou pagina de largura total do stack (I3.1).
 
@@ -1328,20 +1374,56 @@ class MainWindow(QMainWindow):
             "QWidget#OutputToolbarAgentes { background-color: #1E1E21;"
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
-        _agentes_layout = QVBoxLayout(_agentes_widget)
+        # Row (nao coluna): o conteudo da aba ocupa a faixa util e a div
+        # `queue-subtab-insertions-personas-utils` (os tres botoes 1:1 create /
+        # gear / update) fica encostada no canto DIREITO, ocupando apenas a
+        # largura de um botao — size policy Fixed nos dois eixos, sem stretch.
+        _agentes_layout = QHBoxLayout(_agentes_widget)
         _agentes_layout.setContentsMargins(4, 4, 4, 4)
-        _agentes_layout.setSpacing(0)
-        _agentes_layout.addWidget(self._command_queue.personas_content)
+        _agentes_layout.setSpacing(6)
+        _agentes_layout.addWidget(self._command_queue.personas_content, stretch=1)
+        _agentes_layout.addWidget(
+            self._command_queue.personas_utils_div,
+            alignment=(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+            ),
+        )
 
-        # Paginas do stack, na ordem do seletor (D1: nenhum dos quatro testids
+        # Paginas do stack, na ordem do seletor (D1: nenhum dos cinco testids
         # troca de widget, so muda quem e o pai).
         _section_stack.addWidget(self._command_queue.header_widget)   # 0 = left
         _section_stack.addWidget(_center_widget)                      # 1 = center
-        _section_stack.addWidget(_mcp_column)                         # 2 = mcp
-        _section_stack.addWidget(_agentes_widget)                     # 3 = agentes
+        _section_stack.addWidget(_agentes_widget)                     # 2 = agentes
+        _section_stack.addWidget(_mcp_column)                         # 3 = mcps
+        _section_stack.addWidget(_brainstorm_column)                  # 4 = brainstorm
         # Boot fixo em COMMAND SEQUENCE (D14), sem persistencia entre sessoes
         # (mesmo precedente do `_active_section = 0` do CommandQueueWidget).
         _section_stack.setCurrentIndex(0)
+
+        # As tres primeiras secoes entram no MESMO mecanismo de teto das duas de
+        # flow (`_flow_section_pages`, semeado por `_build_mcp_column`). Sem
+        # isso o QStackedLayout as dimensiona pelo maximo entre as cinco paginas
+        # e sobra faixa vazia em COMMAND SEQUENCE / TERMINAL INSERTIONS /
+        # AGENTES. Aqui moldura e pagina sao o MESMO widget (as tres entram nuas
+        # no stack, sem coluna externa) — `_sync_flow_section_height` trata esse
+        # caso sem somar as margens duas vezes.
+        _header_widget = self._command_queue.header_widget
+        self._flow_section_pages.update(
+            {
+                _TOOLBAR_SECTION_COMMAND_SEQUENCE: (_header_widget, _header_widget),
+                _TOOLBAR_SECTION_TERMINAL_INSERTIONS: (_center_widget, _center_widget),
+                _TOOLBAR_SECTION_AGENTES: (_agentes_widget, _agentes_widget),
+            }
+        )
+        for _watched in (_header_widget, _center_widget, _agentes_widget):
+            _watched.installEventFilter(self)
+
+        # A troca de sub-aba de `queue-subtabs-insertions` muda a altura real da
+        # secao TERMINAL INSERTIONS. O teto interno (CommandQueueWidget) roda
+        # primeiro; o externo le o resultado ja aplicado.
+        self._command_queue._insertions_subtabs.currentChanged.connect(
+            lambda _idx: self._sync_flow_section_height()
+        )
 
         # --- Linha unica ---
         _top_row = QWidget()
@@ -1593,8 +1675,12 @@ class MainWindow(QMainWindow):
         """Seletor das secoes do header (I3.2 de
         07-27-workflow-app-header-toggles-llm-unico).
 
-        Sao QUATRO desde 2026-07-27: a aba 'Agentes' saiu do
-        `queue-subtabs-insertions` e virou a quarta pagina do stack.
+        Sao CINCO desde 2026-07-27: a aba 'Agentes' saiu do
+        `queue-subtabs-insertions` e virou pagina do stack, e a secao unica
+        `MCP & BRAINSTORM` foi dissolvida — suas duas sub-abas internas (MCPs e
+        Brainstorm) subiram para as duas ULTIMAS posicoes do seletor, cada uma
+        como secao de primeiro nivel. O conteudo renderizado e o mesmo de antes;
+        o que morreu foi a tab bar interna que servia de segundo nivel.
 
         Substitui a segunda linha da OutputToolbar: em vez de
         `output-toolbar-center` e `output-toolbar-mcp` sempre visiveis abaixo do
@@ -1626,7 +1712,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(6)
 
-        # Fileira dos tres botoes (sublayout, para nao criar um nivel de widget
+        # Fileira dos botoes (sublayout, para nao criar um nivel de widget
         # a mais entre o container e os testids dos botoes).
         _tabs_row = QHBoxLayout()
         _tabs_row.setContentsMargins(0, 0, 0, 0)
@@ -1636,8 +1722,9 @@ class MainWindow(QMainWindow):
         _specs = (
             ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
             ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
-            ("output-toolbar-section-mcp-brainstorm", "MCP & BRAINSTORM"),
             ("output-toolbar-section-agentes", "AGENTES"),
+            ("output-toolbar-section-mcps", "MCPs"),
+            ("output-toolbar-section-brainstorm", "BRAINSTORM"),
         )
         for idx, (testid, label) in enumerate(_specs):
             btn = QPushButton(label)
@@ -1654,7 +1741,109 @@ class MainWindow(QMainWindow):
         lay.addLayout(_tabs_row)
         lay.addWidget(stack)
 
+        # Refs para `_sync_flow_section_height()`: o teto e aplicado no
+        # container (nao no stack), porque a altura do selector e o que o
+        # `_top_row` propaga para o resto do header.
+        self._toolbar_section_selector = container
+        self._toolbar_section_selector_layout = lay
+        self._toolbar_section_tabs_row = _tabs_row
+
         return container
+
+    def _sync_flow_section_height(self) -> None:
+        """Encolhe `output-toolbar-section-selector` ate o conteudo real da
+        secao ativa. Vale para as CINCO secoes desde 2026-07-27.
+
+        Motivacao: `ResponsiveButtonFlowLayout.sizeHint()` reporta a altura de
+        uma largura de referencia estreita (360px, varias linhas de botoes),
+        muito maior que a altura real na largura efetiva do header. Como o
+        QStackedLayout dimensiona pela pagina mais alta do stack, a secao ativa
+        recebia a altura de uma IRMA e sobrava uma faixa vazia entre o ultimo
+        botao e a borda inferior da moldura.
+
+        A altura verdadeira vem de `heightForWidth` (que o flow implementa) e
+        vira `maximumHeight` do selector.
+
+        Historico: a 1a versao (2026-07-27) media so MCPs/BRAINSTORM e liberava
+        o teto nas outras tres — que por isso herdavam a altura da pagina mais
+        alta entre elas (TERMINAL INSERTIONS, inflada pelo QTabWidget interno).
+        Hoje as cinco entram em `_flow_section_pages`; o teto so e liberado
+        quando nao ha `heightForWidth` utilizavel.
+
+        Nunca corta abaixo do `minimumSizeHint` da pagina: o piso e o proprio
+        minimo do Qt, entao um `heightForWidth` subestimado nao esconde botao.
+        """
+        selector = getattr(self, "_toolbar_section_selector", None)
+        stack = getattr(self, "_toolbar_section_stack", None)
+        if selector is None or stack is None:
+            return
+
+        def _apply(limit: int) -> None:
+            if selector.maximumHeight() == limit:
+                return
+            selector.setMaximumHeight(limit)
+            # Na troca de secao a pagina recem-exposta ainda carrega a geometria
+            # antiga (e o teto interno do `queue-subtabs-insertions` so aparece
+            # no proximo ciclo). Re-mede no turno seguinte; a guarda de
+            # igualdade acima encerra a cadeia quando o valor estabiliza.
+            QTimer.singleShot(0, self._sync_flow_section_height)
+
+        # Fora das secoes de flow o teto e sempre liberado.
+        entry = getattr(self, "_flow_section_pages", {}).get(stack.currentIndex())
+        if entry is None:
+            _apply(_QT_WIDGET_SIZE_MAX)
+            return
+        column, page = entry
+
+        page_layout = page.layout()
+        width = page.width() or column.width()
+        content = -1
+        if page_layout is not None and width > 0 and page_layout.hasHeightForWidth():
+            content = page_layout.heightForWidth(width)
+        if content <= 0:
+            # Sem heightForWidth utilizavel (stub de teste, pagina ainda sem
+            # geometria): mantem o comportamento antigo em vez de chutar altura.
+            _apply(_QT_WIDGET_SIZE_MAX)
+            return
+        content = max(content, page.minimumSizeHint().height())
+
+        if column is page:
+            # Secoes que entram nuas no stack (COMMAND SEQUENCE, TERMINAL
+            # INSERTIONS, AGENTES): nao ha coluna externa, e `heightForWidth` de
+            # um QBoxLayout ja soma as proprias margens. Somar de novo devolveria
+            # parte da faixa vazia que este teto existe para eliminar.
+            column_h = content
+        else:
+            col_margins = column.layout().contentsMargins()
+            column_h = col_margins.top() + content + col_margins.bottom()
+
+        sel_margins = self._toolbar_section_selector_layout.contentsMargins()
+        tabs_row_h = self._toolbar_section_tabs_row.sizeHint().height()
+        _apply(
+            sel_margins.top()
+            + tabs_row_h
+            + self._toolbar_section_selector_layout.spacing()
+            + column_h
+            + sel_margins.bottom()
+        )
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt API
+        """Recalcula o teto das secoes de flow quando a moldura muda de tamanho.
+
+        `Resize` cobre o resize da janela (que muda quantas linhas o flow usa)
+        e `LayoutRequest` cobre o rebuild da grade pelo gear, o populate das
+        sub-abas e a troca de aba primaria (Workflow/LOOPs/Auxiliar). Desde
+        2026-07-27 sao CINCO molduras vigiadas — uma por secao do seletor.
+        """
+        watched_columns = {
+            column for column, _page in getattr(self, "_flow_section_pages", {}).values()
+        }
+        if watched in watched_columns and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.LayoutRequest,
+        ):
+            self._sync_flow_section_height()
+        return super().eventFilter(watched, event)
 
     def _select_toolbar_section(self, index: int) -> None:
         """Troca a pagina do stack do header e o estilo do botao ativo.
@@ -1669,6 +1858,7 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(
                 _TAB_ACTIVE_STYLE if i == index else _TAB_INACTIVE_STYLE
             )
+        self._sync_flow_section_height()
 
     def _build_output_toolbar(self) -> tuple[QWidget, QWidget]:
         """Toolbar acima do dual-terminal splitter, agora reduzido a 2 widgets.
@@ -2572,15 +2762,24 @@ class MainWindow(QMainWindow):
             return ()
         return specs
 
-    def _build_mcp_column(self, mcp_btns: list[QPushButton]) -> QWidget:
-        """Coluna entre output-toolbar-left e output-toolbar-progress-boxes.
+    def _build_mcp_column(
+        self, mcp_btns: list[QPushButton]
+    ) -> tuple[QWidget, QWidget]:
+        """Molduras das secoes MCPs e BRAINSTORM do seletor do header.
 
-        2 tabs + stacked pages:
-        - Tab `MCPs`: radio Claude/Kimi/Codex + 3 botoes Main MCP/Parallel/Dual.
+        Devolve `(output-toolbar-mcp, output-toolbar-brainstorm)`:
+        - `output-toolbar-mcp`: personas/agentes + 3 botoes Main MCP/Parallel/Dual.
           A combinacao substitui a antiga matriz 3x3:
           Claude -> T1/linha laranja, Kimi -> T2/linha azul, Codex -> T3/linha roxa.
-        - Tab `brainstorm`: picker de .md + grade 3x3 de botoes que publicam
+        - `output-toolbar-brainstorm`: picker de .md + grade de botoes que publicam
           "<label> <path-do-md>" no terminal roteado (T1/T2/T3).
+
+        Ate 2026-07-27 as duas eram PAGINAS de um QStackedWidget interno, atras
+        de uma tab bar propria (`output-progress-tabbar`, botoes
+        `output-mcp-tab-mcps`/`-brainstorm`) dentro da secao unica
+        `MCP & BRAINSTORM`. Esse segundo nivel de aba foi deletado: cada pagina
+        virou secao de primeiro nivel do `output-toolbar-section-selector` e o
+        conteudo permaneceu identico (D1 para `output-toolbar-mcp`).
 
         `mcp_btns` na ordem fixa retornada por `_populate_header_actions`:
         [mcp-codex, mcp-kimi, double-mcp, kimi-claude, kimi-codex, kimi-dual,
@@ -2595,7 +2794,6 @@ class MainWindow(QMainWindow):
             QFileDialog,
             QGridLayout,
             QHBoxLayout,
-            QStackedWidget,
             QVBoxLayout,
         )
 
@@ -2611,25 +2809,7 @@ class MainWindow(QMainWindow):
         col_layout.setContentsMargins(8, 6, 8, 6)
         col_layout.setSpacing(4)
 
-        # Tab bar com 2 tabs: MCPs / brainstorm
-        tab_bar = QWidget()
-        tab_bar.setProperty("testid", "output-progress-tabbar")
-        tab_bar_layout = QHBoxLayout(tab_bar)
-        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
-        tab_bar_layout.setSpacing(3)
-
-        self._mcp_tab_buttons: list[QPushButton] = []
-        for label, slug in (("MCPs", "mcps"), ("Brainstorm (md)", "brainstorm")):
-            btn = QPushButton(label)
-            btn.setFixedHeight(22)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setProperty("testid", f"output-mcp-tab-{slug}")
-            tab_bar_layout.addWidget(btn, stretch=1)
-            self._mcp_tab_buttons.append(btn)
-
-        col_layout.addWidget(tab_bar)
-
-        # Page 0 - MCPs: radio de provider + 3 acoes. Os 9 botoes legados
+        # Conteudo da secao MCPs: personas/agentes + 3 acoes. Os 9 botoes legados
         # ficam parented em holder oculto para evitar coleta prematura pelo Qt.
         mcps_page = QWidget()
         mcps_layout = QVBoxLayout(mcps_page)
@@ -2736,10 +2916,17 @@ class MainWindow(QMainWindow):
         # Brainstorm: apagada quando inativa, verde quando ativa. O padding
         # horizontal entra no sizeHint, entao o flow reserva a largura do label
         # inteiro — nenhum texto e cortado.
+        # Padding vertical 1px (2026-07-27): a MESMA medida final dos botoes da
+        # grade `brainstorm-buttons-grid` (`BUTTON_V_PADDING_PX` em
+        # widgets/mcp_prompt_button.py), que ali era mascarada por um piso de
+        # altura do QPushButton e passou a valer de verdade. Era 2px aqui. O
+        # padding horizontal (7px) continua entrando no sizeHint e preservando
+        # a largura do label.
         checkbox_style = (
             "QCheckBox { color: #D4D4D8; font-size: 10px; font-weight: 700;"
             "  background-color: #27272A; border: 1px solid #3F3F46;"
-            "  border-radius: 4px; padding: 2px 7px; spacing: 4px; }"
+            f"  border-radius: 4px; padding: {BUTTON_V_PADDING_PX}px 7px;"
+            "  spacing: 4px; }"
             "QCheckBox:hover { border-color: #52525B; }"
             "QCheckBox:checked { background-color: #16A34A; color: #FAFAFA;"
             "  border-color: #16A34A; }"
@@ -2792,7 +2979,6 @@ class MainWindow(QMainWindow):
         self._mcp_agent_buttons: list[QPushButton] = []
         agent_specs = self._collect_mcp_agent_specs(
             [str(chk.property("testid")) for chk in self._mcp_persona_checkboxes]
-            + [str(btn.property("testid")) for btn in self._mcp_tab_buttons]
             + [
                 "output-mcp-action-main",
                 "output-mcp-action-parallel",
@@ -2911,29 +3097,38 @@ class MainWindow(QMainWindow):
             self._mcp_action_buttons.append(btn)
         mcps_layout.addWidget(action_row)
         mcps_layout.addStretch(1)
+        col_layout.addWidget(mcps_page, stretch=1)
 
-        # Page 1 — brainstorm: picker .md + grade 3x3.
+        # Secao BRAINSTORM: picker .md + grade seed-driven. Mesma moldura visual
+        # da secao MCPs — sao duas secoes irmas do seletor, nao mais duas
+        # sub-abas de uma so.
         brainstorm_page = self._build_brainstorm_page(QFileDialog, QGridLayout)
+        brainstorm_column = QWidget()
+        brainstorm_column.setObjectName("OutputToolbarBrainstorm")
+        brainstorm_column.setProperty("testid", "output-toolbar-brainstorm")
+        brainstorm_column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        brainstorm_column.setStyleSheet(
+            "QWidget#OutputToolbarBrainstorm { background-color: #1C1C1F;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        brainstorm_col_layout = QVBoxLayout(brainstorm_column)
+        brainstorm_col_layout.setContentsMargins(8, 6, 8, 6)
+        brainstorm_col_layout.setSpacing(4)
+        brainstorm_col_layout.addWidget(brainstorm_page, stretch=1)
 
-        stack = QStackedWidget()
-        stack.addWidget(mcps_page)       # page 0
-        stack.addWidget(brainstorm_page) # page 1
-        col_layout.addWidget(stack, stretch=1)
+        # Mapa consumido por `_sync_flow_section_height()` e pelo `eventFilter`:
+        # index da secao no `output-toolbar-section-stack` -> (moldura, pagina).
+        self._flow_section_pages: dict[int, tuple[QWidget, QWidget]] = {
+            _TOOLBAR_SECTION_MCPS: (column, mcps_page),
+            _TOOLBAR_SECTION_BRAINSTORM: (brainstorm_column, brainstorm_page),
+        }
+        # Cada resize/rebuild muda a altura real do conteudo: o filtro recalcula
+        # o teto da secao (LayoutRequest/Resize cobrem tambem o rebuild da grade
+        # pelo gear e o resize da janela).
+        column.installEventFilter(self)
+        brainstorm_column.installEventFilter(self)
 
-        # Conectar tabs ao stack
-        def _switch_mcp_tab(idx: int) -> None:
-            stack.setCurrentIndex(idx)
-            for i, b in enumerate(self._mcp_tab_buttons):
-                b.setStyleSheet(
-                    self._PROGRESS_TAB_ACTIVE_STYLE if i == idx else self._PROGRESS_TAB_INACTIVE_STYLE
-                )
-
-        for i, btn in enumerate(self._mcp_tab_buttons):
-            btn.clicked.connect(lambda _ch=False, idx=i: _switch_mcp_tab(idx))
-
-        _switch_mcp_tab(0)
-
-        return column
+        return column, brainstorm_column
 
     def _codex_terminal_available(self) -> bool:
         """True quando existe um widget canonico T3 com testid
@@ -3235,7 +3430,7 @@ class MainWindow(QMainWindow):
             layout.addWidget(btn, i // cols, i % cols)
 
     def _build_brainstorm_page(self, q_file_dialog, q_grid_layout) -> QWidget:
-        """Page da aba `brainstorm` da coluna MCP.
+        """Conteudo da secao BRAINSTORM (moldura `output-toolbar-brainstorm`).
 
         Topo: botao picker de .md (abre QFileDialog, igual metrics-project-pill).
         O caminho selecionado fica em `self._brainstorm_md_path` e o proprio
@@ -3253,6 +3448,12 @@ class MainWindow(QMainWindow):
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(4)
+        # Sem `addStretch` no fim (fix 2026-07-27): o stretch empurrava a grade
+        # para o topo e deixava uma faixa vazia entre a borda inferior de
+        # `brainstorm-buttons-grid` e a de `output-toolbar-brainstorm`. A altura
+        # da secao passou a ser cravada por `_sync_flow_section_height()`, que
+        # encolhe `output-toolbar-section-selector` ate a altura real do
+        # conteudo (heightForWidth do flow), entao nao ha folga para distribuir.
 
         # Picker de .md — guarda o path para os 24 botoes da grade.
         self._brainstorm_md_path: str | None = None
@@ -3457,7 +3658,6 @@ class MainWindow(QMainWindow):
                 "error",
             )
             page_layout.addWidget(grid_widget)
-            page_layout.addStretch(1)
             return page
 
         # Atomic widget construction: ou os 24 sobem, ou nenhum. Suplementos
@@ -3470,7 +3670,6 @@ class MainWindow(QMainWindow):
                 "error",
             )
             page_layout.addWidget(grid_widget)
-            page_layout.addStretch(1)
             return page
 
         self._place_brainstorm_buttons(grid, built + agent_built)
@@ -3478,7 +3677,6 @@ class MainWindow(QMainWindow):
         self._brainstorm_agent_btns = agent_built
 
         page_layout.addWidget(grid_widget)
-        page_layout.addStretch(1)
         # T7 (task-008): publica estado inicial de T3 para que botoes Codex
         # fixos sincronizem o cache via signal logo apos a montagem da grade.
         signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
@@ -4132,21 +4330,13 @@ class MainWindow(QMainWindow):
             host.removeEventFilter(filter_obj)
         self._px_ruler_resize_filter = None
 
-    # _PROGRESS_TAB_ACTIVE_STYLE / _INACTIVE_STYLE sao compartilhados com a tab
-    # bar do _build_mcp_column (_switch_mcp_tab). Os antigos constantes
-    # _PROGRESS_BOX_* (cards decorativos de output-toolbar-progress-boxes) foram
-    # removidos junto com a coluna, que nao tinha side effects.
-    _PROGRESS_TAB_ACTIVE_STYLE = (
-        "QPushButton { background-color: #FBBF24; color: #18181B;"
-        "  border: none; border-radius: 3px;"
-        "  font-size: 10px; font-weight: 700; letter-spacing: 0.5px; }"
-    )
-    _PROGRESS_TAB_INACTIVE_STYLE = (
-        "QPushButton { background-color: transparent; color: #A1A1AA;"
-        "  border: none; border-radius: 3px;"
-        "  font-size: 10px; font-weight: 600; letter-spacing: 0.5px; }"
-        "QPushButton:hover { color: #D4D4D8; background-color: #2D2D30; }"
-    )
+    # _PROGRESS_TAB_ACTIVE_STYLE / _INACTIVE_STYLE existiam para a tab bar
+    # interna do _build_mcp_column (`output-progress-tabbar`), deletada em
+    # 2026-07-27 quando MCPs e BRAINSTORM viraram secoes de primeiro nivel do
+    # `output-toolbar-section-selector` — que usa `_TAB_ACTIVE_STYLE` /
+    # `_TAB_INACTIVE_STYLE`, os mesmos de `output-toolbar-left-primary-tabs`.
+    # Sairam junto com o unico consumidor (mesma politica dos _PROGRESS_BOX_*,
+    # cards decorativos removidos com output-toolbar-progress-boxes).
 
     def _click_command_queue_button(self, testid: str) -> None:
         """Programa um click no botão da command queue identificado por testid."""
@@ -6029,6 +6219,11 @@ class MainWindow(QMainWindow):
             # (CommandQueueWidget._apply_persona_filter).
             btn.setProperty("persona_category", category)
             btn.setAccessibleName(f"{label} - persona {category}")
+            # Largura padronizada (2026-07-27): todos os botoes da aba
+            # `queue-subtab-insertions-personas` medem o mesmo, em vez de cada
+            # um herdar a largura do proprio label. O flow responsivo continua
+            # decidindo quantos cabem por linha — so o item virou uniforme.
+            btn.setFixedWidth(_PERSONA_BTN_WIDTH)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(
                 f"{label}  ·  {category}\n"
@@ -6068,7 +6263,8 @@ class MainWindow(QMainWindow):
 
         Quem particiona e `CommandQueueWidget.populate_personas_subtab`: os
         itens 2 vao para o flow filtravel e os utilitarios (1, 3 e 4) para a
-        div em coluna do fim da aba, preservando esta ordem relativa.
+        div em coluna encostada a direita da row `output-toolbar-agentes`,
+        preservando esta ordem relativa.
 
         O create usa o prefixo plural `queue-btn-personas-*` (utilitario),
         nunca o prefixo filtravel `queue-btn-persona-` (singular + slug).
@@ -6079,23 +6275,29 @@ class MainWindow(QMainWindow):
         # Carregados aqui para que _persona_button_label os consulte ao montar.
         self._persona_label_overrides = self._load_persona_label_overrides()
 
-        # Botao 'create' 1:1 (34x34) verde com '+' centralizado — SEMPRE o
-        # primeiro widget do flow. Utilitario (testid plural) permanece visivel
-        # em todos os filtros de categoria e sobrevive a update ao vivo.
+        # Botao 'create' 1:1 verde com '+' centralizado — SEMPRE o primeiro
+        # widget da div de utilitarios. Utilitario (testid plural) permanece
+        # visivel em todos os filtros de categoria e sobrevive a update ao vivo.
+        # Lado de 34 -> _PERSONAS_UTIL_BTN_SIZE (-30%, 2026-07-27) junto com os
+        # outros dois: a div virou a coluna direita da row `output-toolbar-agentes`
+        # e nao deve roubar largura do flow de personas.
         create_btn = QPushButton("+")
         create_btn.setAccessibleName("Criar agente")
         create_btn.setProperty("testid", "queue-btn-personas-create")
-        create_btn.setFixedSize(34, 34)
+        create_btn.setFixedSize(_PERSONAS_UTIL_BTN_SIZE, _PERSONAS_UTIL_BTN_SIZE)
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         create_btn.setToolTip(
             "Criar agente\n"
             "Abre o modal de criacao guiada. Permanece na primeira posicao\n"
             "apos filtros, configuracao e atualizacao ao vivo."
         )
+        # text-align/padding/margin zerados: o glifo fica no centro geometrico
+        # do quadrado, sem deslocamento herdado do estilo nativo.
         create_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FFFFFF;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 20px; font-weight: 700; padding: 0; }"
+            "  font-size: 14px; font-weight: 700;"
+            "  text-align: center; padding: 0; margin: 0; }"
             "QPushButton:hover { background-color: #15803D; }"
             "QPushButton:pressed { background-color: #166534; }"
         )
@@ -6107,7 +6309,8 @@ class MainWindow(QMainWindow):
             self._build_persona_buttons(self._scan_persona_files())
         )
 
-        # Gear de configuracao (34x34) — abre modal que lista os agentes atuais
+        # Gear de configuracao (mesmo lado dos outros dois utilitarios) — abre
+        # modal que lista os agentes atuais
         # (sincronizado com os botoes) e permite renomear o label de cada um.
         # Vive DENTRO da sub-aba 'Agentes' (so renderiza com ela aberta).
         config_gear = _GearButton(
@@ -6117,19 +6320,19 @@ class MainWindow(QMainWindow):
                 "Lista os agentes atuais de ai-forge/MCP/agents/ (em sincronia\n"
                 "com os botoes) e permite renomear o label de cada um."
             ),
-            size=34,
-            font_px=18,
+            size=_PERSONAS_UTIL_BTN_SIZE,
+            font_px=_PERSONAS_UTIL_GLYPH_PX,
         )
         config_gear.clicked.connect(self._open_personas_config_dialog)
         self._personas_config_gear = config_gear
         btns.append(config_gear)
 
-        # Botao 'update' 1:1 (34x34) verde com seta de refresh branca dentro.
+        # Botao 'update' 1:1 verde com seta de refresh branca dentro.
         # Re-varre ai-forge/MCP/agents/ e cria botao para cada persona nova.
         update_btn = QPushButton()
         update_btn.setAccessibleName("Recarregar personas")
         update_btn.setProperty("testid", "queue-btn-personas-update")
-        update_btn.setFixedSize(34, 34)
+        update_btn.setFixedSize(_PERSONAS_UTIL_BTN_SIZE, _PERSONAS_UTIL_BTN_SIZE)
         update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         update_btn.setToolTip(
             "Recarregar personas\n"
@@ -6139,14 +6342,20 @@ class MainWindow(QMainWindow):
         _refresh_icon = Path(_WORKFLOW_APP_DIR) / "assets" / "refresh.svg"
         if _refresh_icon.is_file():
             update_btn.setIcon(QIcon(str(_refresh_icon)))
-            update_btn.setIconSize(QSize(18, 18))
+            update_btn.setIconSize(
+                QSize(_PERSONAS_UTIL_ICON_PX, _PERSONAS_UTIL_ICON_PX)
+            )
         else:
             # Fallback textual: glifo de refresh (U+27F3) em branco.
             update_btn.setText("⟳")
+        # Sem texto ao lado do icone, `text-align: center` + padding/margin
+        # zerados deixam o SVG no centro geometrico do botao (o estilo nativo
+        # reserva recuo lateral quando o botao tem icone).
         update_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FFFFFF;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 18px; font-weight: 700; padding: 0; }"
+            f"  font-size: {_PERSONAS_UTIL_GLYPH_PX}px; font-weight: 700;"
+            "  text-align: center; padding: 0; margin: 0; }"
             "QPushButton:hover { background-color: #15803D; }"
             "QPushButton:pressed { background-color: #166534; }"
         )

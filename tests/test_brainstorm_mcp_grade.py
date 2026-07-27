@@ -22,6 +22,7 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 
 from workflow_app.main_window import MainWindow, _BrainstormSeedError
 from workflow_app.widgets.mcp_prompt_button import MCPPromptButton
@@ -98,7 +99,17 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "07-hardening.md": {
+    "07-questioner.md": {
+        "slug": "questioner",
+        "title": "Seed - Botao 22 - Questionador",
+        "button_type": "type-selector-radio-input",
+        "agent_name": "questioner",
+        "agent_path": "agents/questioner-rules.md",
+        "action": "Revisar",
+        "target_path": "true",
+        "target_terminal": "depende-do-radio",
+    },
+    "08-hardening.md": {
         "slug": "hardening",
         "title": "Seed - Botao 4 - Hardening",
         "button_type": "type-selector-radio-input",
@@ -108,7 +119,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "08-loop-prepare.md": {
+    "09-loop-prepare.md": {
         "slug": "loop-prepare",
         "title": "Seed - Botao 5 - Loop prepare",
         "button_type": "type-selector-radio-input",
@@ -118,7 +129,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "09-criar-task.md": {
+    "10-criar-task.md": {
         "slug": "criar-task",
         "title": "Seed - Botao 6 - Criar task",
         "button_type": "type-selector-radio-input",
@@ -128,7 +139,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "10-revisar-task.md": {
+    "11-revisar-task.md": {
         "slug": "revisar-task",
         "title": "Seed - Botao 7 - Revisar task",
         "button_type": "Claude",
@@ -138,7 +149,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "terminal-interactive-output",
     },
-    "11-executar-task.md": {
+    "12-executar-task.md": {
         "slug": "executar-task",
         "title": "Seed - Botao 8 - Executar task",
         "button_type": "type-selector-radio-input",
@@ -148,7 +159,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "12-revisar-execucao.md": {
+    "13-revisar-execucao.md": {
         "slug": "revisar-execucao",
         "title": "Seed - Botao 9 - Revisar execucao",
         "button_type": "Claude",
@@ -158,7 +169,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "terminal-interactive-output",
     },
-    "13-visual-design.md": {
+    "14-visual-design.md": {
         "slug": "repo-ruler",
         "title": "Seed - Botao 13 - Repo ruler",
         "button_type": "type-selector-radio-input",
@@ -168,7 +179,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "14-layout-architect.md": {
+    "15-layout-architect.md": {
         "slug": "layout-architect",
         "title": "Seed - Botao 12 - Layout",
         "button_type": "type-selector-radio-input",
@@ -178,7 +189,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "15-analise-complexidade.md": {
+    "16-analise-complexidade.md": {
         "slug": "analise-complexidade",
         "title": "Seed - Botao 13 - Analise de complexidade",
         "button_type": "type-selector-radio-input",
@@ -188,7 +199,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "16-billing.md": {
+    "17-billing.md": {
         "slug": "billing",
         "title": "Seed - Botao 16 - Billing",
         "button_type": "type-selector-radio-input",
@@ -198,7 +209,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "17-debugger.md": {
+    "18-debugger.md": {
         "slug": "debugger",
         "title": "Seed - Botao 17 - Debugger",
         "button_type": "type-selector-radio-input",
@@ -208,7 +219,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "18-delegador.md": {
+    "19-delegador.md": {
         "slug": "delegador",
         "title": "Seed - Botao 18 - Delegador",
         "button_type": "type-selector-radio-input",
@@ -218,7 +229,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "19-pdca.md": {
+    "20-pdca.md": {
         "slug": "pdca",
         "title": "Seed - Botao 19 - PDCA",
         "button_type": "type-selector-radio-input",
@@ -228,7 +239,7 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "20-soft-engen.md": {
+    "21-soft-engen.md": {
         "slug": "soft-engen",
         "title": "Seed - Botao 20 - soft Engen",
         "button_type": "type-selector-radio-input",
@@ -238,23 +249,13 @@ _SEED_TEMPLATES = {
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
-    "21-scaffolds-blueprints-updater.md": {
+    "22-scaffolds-blueprints-updater.md": {
         "slug": "scaffolds-blueprints-updater",
         "title": "Seed - Botao 21 - Scaffold Update",
         "button_type": "type-selector-radio-input",
         "agent_name": "scaffolds-blueprints-updater",
         "agent_path": "agents/scaffolds-blueprints-updater.md",
         "action": "Otimizar",
-        "target_path": "true",
-        "target_terminal": "depende-do-radio",
-    },
-    "22-questioner.md": {
-        "slug": "questioner",
-        "title": "Seed - Botao 22 - Questionador",
-        "button_type": "type-selector-radio-input",
-        "agent_name": "questioner",
-        "agent_path": "agents/questioner-rules.md",
-        "action": "Revisar",
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
@@ -356,6 +357,7 @@ def test_load_seeds_happy_path_24_valid(tmp_path):
         "search-forge",
         "deep-detailer",
         "controversial",
+        "questioner",
         "hardening",
         "loop-prepare",
         "criar-task",
@@ -371,7 +373,6 @@ def test_load_seeds_happy_path_24_valid(tmp_path):
         "pdca",
         "soft-engen",
         "scaffolds-blueprints-updater",
-        "questioner",
         "ux-ui",
         "performance-engineer",
     ]
@@ -437,7 +438,6 @@ def test_debounce_double_click_publishes_once(monkeypatch, tmp_path):
     """
 
     class _Stub:
-        _brainstorm_runtime_type = "Claude"
         _prompt_in_flight = False
         _brainstorm_md_path = "/repo/some.md"
 
@@ -447,6 +447,11 @@ def test_debounce_double_click_publishes_once(monkeypatch, tmp_path):
 
         def _systemforge_root(self) -> Path:
             return self._fake_root
+
+        def _current_llm_provider(self) -> str:
+            # I2.1: substitui o antigo `_brainstorm_runtime_type`; o provider
+            # runtime vem do Main LLM (queue-div-main-llm).
+            return "claude"
 
         def _rel_to_root(self, p: str) -> str:
             return "some.md"
@@ -497,7 +502,6 @@ def test_criar_md_ignores_selected_brainstorm_md(monkeypatch, tmp_path):
     """Botao 1 cria arquivo novo e nunca anexa o .md selecionado no picker."""
 
     class _Stub:
-        _brainstorm_runtime_type = "Claude"
         _prompt_in_flight = False
         _brainstorm_md_path = "/repo/blacksmith/brainstorm-mcp/anexado.md"
 
@@ -507,6 +511,11 @@ def test_criar_md_ignores_selected_brainstorm_md(monkeypatch, tmp_path):
 
         def _systemforge_root(self) -> Path:
             return self._fake_root
+
+        def _current_llm_provider(self) -> str:
+            # I2.1: substitui o antigo `_brainstorm_runtime_type`; o provider
+            # runtime vem do Main LLM (queue-div-main-llm).
+            return "claude"
 
         def _rel_to_root(self, p: str) -> str:
             return "blacksmith/brainstorm-mcp/anexado.md"
@@ -637,3 +646,166 @@ def test_widget_accepts_ptbr_actions(qtbot):
         )
         qtbot.addWidget(btn)
         assert btn.payload()["action"] == action
+
+
+# Cenario 7: recuperacao da grade apos falha do build inicial (E-02 do
+# REVIEW-EXECUTED-010, reaberto pelo REVIEW-EXECUTED-014).
+
+
+class _PageStub(QObject):
+    """Stub para exercitar `_build_brainstorm_page` real com falha injetavel.
+
+    Mesmo idioma do `_FakeMainWindow`/`_GridStub`: reusa o codigo de producao
+    via `MainWindow.<metodo>(self, ...)` em vez de instanciar a MainWindow
+    inteira, mantendo os caminhos de build/rebuild os MESMOS de producao.
+    QObject porque o build conecta o signal real `_brainstorm_grid_invalidated`.
+    """
+
+    _BRAINSTORM_GRID_COLUMNS = 4
+    _BRAINSTORM_SEED_COUNT = 24
+    _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
+
+    _brainstorm_grid_invalidated = Signal()
+
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__()
+        self._fake_root = repo_root
+        self._brainstorm_mcp_btns: list = []
+        self._brainstorm_agent_btns: list = []
+        # Falhas injetaveis nos dois early returns do build.
+        self.seed_error: str | None = None
+        self.builder_error: str | None = None
+
+    def _systemforge_root(self) -> Path:
+        return self._fake_root
+
+    def _codex_terminal_available(self) -> bool:
+        return False
+
+    def _current_llm_provider(self) -> str:
+        return "claude"
+
+    def _get_brainstorm_runtime_provider(self) -> str:
+        return "Claude"
+
+    def _on_mcp_prompt_requested(self, payload: dict) -> None:
+        pass
+
+    def _on_brainstorm_type_changed(self, *_a, **_k) -> None:
+        pass
+
+    def _open_brainstorm_md_reader_dialog(self) -> None:
+        pass
+
+    def _open_brainstorm_mcp_config_dialog(self) -> None:
+        pass
+
+    def _set_centered_svg_icon(self, *_a, **_k) -> None:
+        pass
+
+    def _load_brainstorm_seeds(self):
+        if self.seed_error is not None:
+            raise _BrainstormSeedError(self.seed_error)
+        return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
+
+    def _brainstorm_seeds_dir(self) -> Path:
+        return MainWindow._brainstorm_seeds_dir(self)  # type: ignore[arg-type]
+
+    def _collect_brainstorm_agent_specs(self, seed_slugs, existing_testids):
+        return MainWindow._collect_brainstorm_agent_specs(
+            self, seed_slugs, existing_testids
+        )
+
+    def _make_brainstorm_prompt_button(self, **kwargs):
+        return MainWindow._make_brainstorm_prompt_button(self, **kwargs)
+
+    def _build_brainstorm_grid_buttons(self, seeds):
+        if self.builder_error is not None:
+            raise RuntimeError(self.builder_error)
+        return MainWindow._build_brainstorm_grid_buttons(self, seeds)
+
+    def _place_brainstorm_buttons(self, layout, buttons) -> None:
+        MainWindow._place_brainstorm_buttons(self, layout, buttons)
+
+    def _rebuild_brainstorm_grid(self) -> None:
+        MainWindow._rebuild_brainstorm_grid(self)
+
+    def build_page(self):
+        from PySide6.QtWidgets import QFileDialog, QGridLayout
+
+        return MainWindow._build_brainstorm_page(  # type: ignore[arg-type]
+            self, QFileDialog, QGridLayout
+        )
+
+    def grid_count(self) -> int:
+        layout = self._brainstorm_grid_layout
+        return sum(
+            1
+            for i in range(layout.count())
+            if layout.itemAt(i).widget() is not None
+        )
+
+
+@pytest.mark.parametrize("failure", ["seed", "builder"])
+def test_grid_refs_cached_even_when_initial_build_fails(qapp, tmp_path, failure):
+    """E-02: as refs da grade sao cacheadas ANTES dos early returns de falha.
+
+    Sem isso, uma falha no build inicial deixa `_brainstorm_grid_layout`
+    ausente e `_rebuild_brainstorm_grid` vira no-op silencioso: corrigir os
+    seeds pelo gear nunca recupera a grade.
+    """
+    repo_root = _write_seeds(tmp_path)
+    stub = _PageStub(repo_root)
+    if failure == "seed":
+        stub.seed_error = "seed invalido injetado"
+    else:
+        stub.builder_error = "builder quebrado injetado"
+
+    stub.build_page()
+
+    assert getattr(stub, "_brainstorm_grid_layout", None) is not None
+    assert getattr(stub, "_brainstorm_grid_widget", None) is not None
+    assert stub.grid_count() == 0
+
+
+@pytest.mark.parametrize("failure", ["seed", "builder"])
+def test_gear_rebuild_recovers_grid_after_failed_initial_build(
+    qapp, tmp_path, failure
+):
+    """E-02 (fluxo completo): build falha -> causa corrigida -> gear recupera."""
+    repo_root = _write_seeds(tmp_path)
+    stub = _PageStub(repo_root)
+    if failure == "seed":
+        stub.seed_error = "seed invalido injetado"
+    else:
+        stub.builder_error = "builder quebrado injetado"
+
+    stub.build_page()
+    assert stub.grid_count() == 0
+
+    # Operador corrige a causa e salva o gear -> _brainstorm_grid_invalidated.
+    stub.seed_error = None
+    stub.builder_error = None
+    stub._rebuild_brainstorm_grid()
+
+    assert stub.grid_count() == 24
+
+
+def test_rebuild_without_layout_is_not_silent(qapp, tmp_path):
+    """E-02/Zero Silencio: rebuild sem layout avisa em vez de retornar mudo."""
+    from workflow_app.signal_bus import signal_bus
+
+    repo_root = _write_seeds(tmp_path)
+    stub = _PageStub(repo_root)  # nunca passou por build_page()
+    toasts: list[tuple[str, str]] = []
+    signal_bus.toast_requested.connect(
+        lambda msg, level: toasts.append((msg, level))
+    )
+    try:
+        stub._rebuild_brainstorm_grid()
+    finally:
+        signal_bus.toast_requested.disconnect()
+
+    assert len(toasts) == 1
+    assert toasts[0][1] == "error"
+    assert "layout indisponivel" in toasts[0][0]

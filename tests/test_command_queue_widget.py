@@ -1736,6 +1736,87 @@ class TestLoopActionHandlersUseLoopSlot:
         assert captured["loop_root"] == str((tmp_path / "loop.json").resolve().parent)
         assert captured["build_loop_specs"]["kind"] == "daily-loop"
 
+    def test_loop_expands_queue_even_with_divergent_project_attached(
+        self, widget, tmp_path
+    ):
+        """Regressao 2026-07-27 (queue-btn-loop): com um project.json anexado em
+        attachments-project-row cujo workspace_root diverge do loop, a expansao
+        levantava DailyLoopConfigError (workspace_drift_policy default `block`),
+        virava toast de erro e a queue-command-list ficava vazia. O anexo loop e
+        a autoridade: o project nunca bloqueia. Usa o build_loop_specs REAL, sem
+        stub, porque o bug morava exatamente na resolucao de workspace."""
+        import json
+        from types import SimpleNamespace
+
+        from workflow_app.config.app_state import app_state
+
+        loop_root = tmp_path / "blacksmith" / "loop-archives" / "07-27-drift"
+        (loop_root / "tasks").mkdir(parents=True)
+        (loop_root / "tasks" / "T-sonnet-medium.md").write_text("# T\n", encoding="utf-8")
+        (loop_root / "PROGRESS.md").write_text(
+            "| ID  | Status | Target | Bucket | Updated |\n"
+            "|-----|--------|--------|--------|---------|\n"
+            "| 001 | [ ] | tasks/T-sonnet-medium.md | T-sonnet-medium | - |\n",
+            encoding="utf-8",
+        )
+        raw = {
+            "name": "07-27-drift",
+            "kind": "daily-loop",
+            "basic_flow": {"workspace_root": str(tmp_path / "loop-workspace")},
+            "daily_loop": {
+                "version": "1.1.0",
+                "slug": "07-27-drift",
+                "loop_root": str(loop_root),
+                "tasks_dir": "tasks",
+                "log_path": "_LOOP-LOG.md",
+                "progress_path": "PROGRESS.md",
+                "total_items": 1,
+                "buckets": [
+                    {
+                        "id": "T-sonnet-medium",
+                        "model": "sonnet",
+                        "effort": "medium",
+                        "task_file": "tasks/T-sonnet-medium.md",
+                        "items": ["001"],
+                        "items_count": 1,
+                    }
+                ],
+                "do_command": "/daily-loop:do",
+            },
+        }
+        loop_json = loop_root / "_LOOP-CONFIG.json"
+        loop_json.write_text(json.dumps(raw), encoding="utf-8")
+
+        project_cfg = self._make_project_config(tmp_path)
+        project_cfg.workspace_root = str(tmp_path / "project-workspace")
+
+        app_state.clear_config()
+        app_state.set_project_config(project_cfg)
+        app_state.set_loop_config(
+            SimpleNamespace(
+                config_path=str(loop_json), raw=raw, project_name="07-27-drift"
+            )
+        )
+
+        pipelines: list[list[CommandSpec]] = []
+        toasts: list[tuple[str, str]] = []
+        on_pipeline = lambda specs: pipelines.append(list(specs))
+        on_toast = lambda message, level: toasts.append((message, level))
+        signal_bus.pipeline_ready.connect(on_pipeline)
+        signal_bus.toast_requested.connect(on_toast)
+        try:
+            widget._on_loop_clicked()
+        finally:
+            signal_bus.pipeline_ready.disconnect(on_pipeline)
+            signal_bus.toast_requested.disconnect(on_toast)
+            app_state.clear_all()
+
+        assert pipelines, (
+            "queue-command-list deveria carregar a partir do loop anexado; "
+            f"toasts={toasts}"
+        )
+        assert not [msg for msg, level in toasts if level == "error"], toasts
+
     def test_loop_handlers_fallback_to_legacy_config_alias(self, widget, monkeypatch, tmp_path):
         from workflow_app.config.app_state import app_state
 

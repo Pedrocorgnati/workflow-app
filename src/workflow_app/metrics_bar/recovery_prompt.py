@@ -30,6 +30,12 @@ RECOVERY_REASONS: frozenset[str] = frozenset(
         "TIMEOUT",
     }
 )
+# NAO adicionar "NO_VERDICT" aqui. NO_VERDICT (emitido por
+# .claude/hooks/stop-autocast-backstop.sh quando o turno acaba sem o bloco
+# "FASE FINAL - Autocast contract") e deliberadamente NAO-recuperavel: o defeito
+# e do proprio agente que esqueceu de sinalizar, e auto-recuperar remendaria em
+# silencio exatamente o que precisa ficar visivel ao operador. Vermelho persiste
+# ate clique humano. Ver ai-forge/rules/listener-vermelho.md.
 
 _VALID_CHANNELS: frozenset[str] = frozenset(
     {"interactive", "workspace", "workspace_xterm"}
