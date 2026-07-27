@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QRect
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from workflow_app.command_queue.command_queue_widget import (
     CommandQueueWidget,
@@ -71,10 +78,14 @@ def test_command_queue_has_autocast_buttons(app):
 def test_output_toolbar_left_splits_insertions_controls(app):
     """Refactor output-toolbar-left/center: as abas primarias (Workflow/LOOPs/
     Auxiliar) ficam no header output-toolbar-left; o bloco insertions-controls
-    migrou para output-toolbar-center, reparenteado por MainWindow._setup_ui
-    (command_queue_widget.py: "insertions_bar NAO entra no tab_row" +
-    main_window.py: _center_layout.addWidget(insertions_bar)). Em standalone o
-    insertions_bar fica sem parent; so a MainWindow completa o ancora no center.
+    saiu do header (command_queue_widget.py: "insertions_bar NAO entra no
+    tab_row").
+
+    2026-07-20 ele passou a ser anexado como ULTIMA secao do
+    queue-div-llm-routing; 2026-07-27 saiu tambem de la, porque o
+    insertions_bar esta vazio e a secao entregava um label sobre nada, mais um
+    divisor HLine orfao. Hoje o widget continua vivo como atributo publico,
+    SEM parent, tanto em standalone quanto com a MainWindow completa.
     A aba Inserchoes (queue-tab-terminal-insertions) deixou de ser botao de aba
     (conteudo sempre visivel no center), entao nao e mais procurada aqui.
     """
@@ -89,14 +100,155 @@ def test_output_toolbar_left_splits_insertions_controls(app):
     for tab in win._command_queue._sec_tabs[:3]:
         assert tab.parentWidget() is primary
 
-    # insertions-controls migrou para output-toolbar-center (fora do header).
+    # insertions-controls NAO vive mais dentro do queue-div-llm-routing.
     insertions = win._command_queue.insertions_bar
-    center = insertions.parentWidget()
     assert insertions is not None
-    assert center is not None
     assert insertions.property("testid") == "output-toolbar-left-insertions-controls"
+    assert insertions.parentWidget() is None, (
+        "insertions_bar voltou a ser anexado a algum container"
+    )
+    llm_box = win._command_queue._llm_box
+    assert llm_box.property("testid") == "queue-div-llm-routing"
+    assert _find_widget_by_testid(
+        llm_box, "output-toolbar-left-insertions-controls"
+    ) is None
+    # A coluna fecha nas tres secoes proprias: nada de divisor HLine orfao no
+    # fim, que era o rastro visual da secao removida.
+    layout = llm_box.layout()
+    last = layout.itemAt(layout.count() - 1).widget()
+    assert not isinstance(last, QFrame), "coluna termina em divisor orfao"
+    assert last.property("testid") == "queue-div-flag"
+
+    # output-toolbar-center guarda somente o conteudo da aba Inserchoes.
+    content = win._command_queue.insertions_content
+    center = content.parentWidget()
+    assert center is not None
     assert center.property("testid") == "output-toolbar-center"
-    assert insertions.parentWidget() is center
+    center_layout = center.layout()
+    assert center_layout.count() == 1
+    assert center_layout.itemAt(0).widget() is content
+
+
+def test_llm_routing_sections_are_vertical_label_over_controls(app):
+    """queue-div-llm-routing: TRES secoes, cada uma em coluna.
+
+    Layout 2026-07-27: label no indice 0, bloco de controles no indice 1, e os
+    controles seguem lado a lado ENTRE SI (QHBoxLayout interno). Falha se
+    qualquer uma das tres voltar ao layout horizontal (label a esquerda,
+    controles a direita), que e o estado anterior.
+    """
+    cq = CommandQueueWidget()
+    llm_box = cq._llm_box
+
+    sections = [
+        ("queue-div-main-llm", "Main LLM:"),
+        ("queue-div-parallel-worker", "Parallel Worker:"),
+        ("queue-div-flag", "MCP Flags:"),
+    ]
+
+    # Exatamente tres secoes na coluna, na ordem declarada, com HLine entre
+    # elas e nenhum divisor sobrando na ponta.
+    layout = llm_box.layout()
+    assert isinstance(layout, QVBoxLayout)
+    found = [
+        layout.itemAt(i).widget().property("testid")
+        for i in range(layout.count())
+        if not isinstance(layout.itemAt(i).widget(), QFrame)
+    ]
+    assert found == [testid for testid, _ in sections]
+
+    for testid, label_text in sections:
+        section = _find_widget_by_testid(llm_box, testid)
+        assert section is not None, f"secao {testid} sumiu"
+        section_layout = section.layout()
+        assert isinstance(section_layout, QVBoxLayout), (
+            f"{testid} voltou a layout horizontal"
+        )
+        assert section_layout.count() == 2, f"{testid} nao e label + controles"
+
+        label = section_layout.itemAt(0).widget()
+        assert isinstance(label, QLabel), f"{testid} nao tem label no indice 0"
+        assert label.text() == label_text
+
+        options = section_layout.itemAt(1).widget()
+        assert options is not None, f"{testid} nao tem bloco de controles"
+        assert isinstance(options.layout(), QHBoxLayout), (
+            f"controles de {testid} deixaram de ficar lado a lado"
+        )
+        assert options.layout().count() >= 2
+
+
+def test_output_toolbar_header_is_single_row_with_section_selector(app):
+    """I3.1/I3.2: o header virou UMA linha + um stack de secoes.
+
+    Linha unica: queue-div-llm-routing | output-toolbar-section-selector |
+    output-toolbar-datatest-queue-stack. As tres divs que antes disputavam
+    espaco em duas linhas viraram paginas de `output-toolbar-section-stack`,
+    e nenhuma delas troca de testid (D1). Em 2026-07-27 entrou a QUARTA
+    pagina (AGENTES), promovida de sub-aba do `queue-subtabs-insertions`.
+
+    O stack e filho do proprio seletor (logo abaixo da fileira de botoes), nao
+    um irmao full-width por baixo dos tres blocos da linha.
+    """
+    from workflow_app.main_window import MainWindow
+
+    win = MainWindow()
+
+    llm_box = win._command_queue._llm_box
+    top_row = llm_box.parentWidget()
+    assert top_row is not None
+    top_layout = top_row.layout()
+    assert top_layout.count() == 3, "a linha do header tem exatamente 3 blocos"
+    assert top_layout.itemAt(0).widget() is llm_box
+
+    selector = top_layout.itemAt(1).widget()
+    assert selector.property("testid") == "output-toolbar-section-selector"
+    assert (
+        top_layout.itemAt(2).widget().property("testid")
+        == "output-toolbar-datatest-queue-stack"
+    )
+
+    # Quatro botoes de select, na ordem e com os rotulos decididos (D14).
+    expected = [
+        ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
+        ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
+        ("output-toolbar-section-mcp-brainstorm", "MCP & BRAINSTORM"),
+        ("output-toolbar-section-agentes", "AGENTES"),
+    ]
+    btns = win._toolbar_section_btns
+    assert [(b.property("testid"), b.text()) for b in btns] == expected
+    for btn in btns:
+        assert _find_by_testid(selector, btn.property("testid")) is btn
+
+    stack = win._toolbar_section_stack
+    assert stack.property("testid") == "output-toolbar-section-stack"
+    # O stack mora DENTRO do seletor, imediatamente abaixo da fileira de
+    # botoes — nao pendurado no container da linha.
+    assert stack.parentWidget() is selector
+    selector_layout = selector.layout()
+    assert selector_layout.count() == 2, "fileira de botoes + stack"
+    assert selector_layout.itemAt(1).widget() is stack
+    assert stack.count() == 4
+    assert stack.widget(0) is win._command_queue.header_widget
+    assert stack.widget(0).property("testid") == "output-toolbar-left"
+    assert stack.widget(1).property("testid") == "output-toolbar-center"
+    assert stack.widget(2).property("testid") == "output-toolbar-mcp"
+    assert stack.widget(3).property("testid") == "output-toolbar-agentes"
+    # A pagina 3 hospeda a aba 'Agentes' com o testid original preservado (D1).
+    personas = win._command_queue.personas_content
+    assert personas.property("testid") == "queue-subtab-insertions-personas"
+    assert personas.parentWidget() is stack.widget(3)
+
+    # Boot fixo em COMMAND SEQUENCE (D14) e troca de pagina pelo clique.
+    assert stack.currentIndex() == 0
+    btns[1].click()
+    assert stack.currentIndex() == 1
+    btns[2].click()
+    assert stack.currentIndex() == 2
+    btns[3].click()
+    assert stack.currentIndex() == 3
+    btns[0].click()
+    assert stack.currentIndex() == 0
 
 
 def test_output_toolbar_left_subtabs_use_responsive_flow(app):
@@ -140,8 +292,18 @@ def test_output_toolbar_left_subtabs_use_responsive_flow(app):
     assert max_right < 180
 
 
-def test_personas_flow_keeps_34_agents_and_utilities_within_four_lines(app):
-    """34 personas + gear/update continuam acionaveis em quatro linhas."""
+def test_personas_flow_ajusta_botoes_por_linha_conforme_largura(app):
+    """34 personas: largura do label e quebra responsiva.
+
+    O contrato antigo era teto de 4 linhas com compactacao dos botoes. Agora o
+    flow roda sem teto: cada botao fica com a largura do proprio label e a
+    quantidade por linha acompanha a largura disponivel — janela maior, mais
+    botoes por linha.
+
+    Desde 2026-07-27 os tres utilitarios (`+`, gear, update) sairam do flow e
+    vivem na coluna `queue-subtab-insertions-personas-utils` no fim da aba, so
+    personas continuam aqui.
+    """
     from workflow_app.main_window import MainWindow
 
     win = MainWindow()
@@ -149,19 +311,41 @@ def test_personas_flow_keeps_34_agents_and_utilities_within_four_lines(app):
     win._command_queue._personas_filter_bar.setCurrentIndex(0)
     win._command_queue._apply_persona_filter()
 
-    assert layout.count() == 36
-    layout.setGeometry(QRect(0, 0, 640, 220))
+    # 34 personas (utilitarios ficam fora do flow)
+    assert layout.count() == 34
+    assert win._command_queue._subtab_personas_utils_layout.count() == 3
     widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
     assert all(widget is not None for widget in widgets)
-    assert len({widget.geometry().y() for widget in widgets}) <= 4
-    assert max(widget.geometry().right() for widget in widgets) < 640
+
+    def render(width: int) -> list[int]:
+        layout.setGeometry(QRect(0, 0, width, layout.heightForWidth(width)))
+        assert max(widget.geometry().right() for widget in widgets) < width
+        return sorted({widget.geometry().y() for widget in widgets})
+
+    narrow_lines = render(480)
+    medium_lines = render(640)
+    wide_lines = render(1200)
+
+    assert len(wide_lines) < len(medium_lines) < len(narrow_lines)
 
     persona_widgets = [
         widget for widget in widgets
         if str(widget.property("testid")).startswith("queue-btn-persona-")
+        and not str(widget.property("testid")).startswith("queue-btn-personas-")
     ]
     assert len(persona_widgets) == 34
     assert all(widget.accessibleName() for widget in persona_widgets)
+
+    # Largura congruente com o label: nenhum botao de texto e compactado.
+    assert all(
+        widget.geometry().width() == widget.sizeHint().width()
+        for widget in persona_widgets
+    )
+    assert len({widget.geometry().width() for widget in persona_widgets}) > 1
+
+    # Gap vertical de 1px entre linhas (altura da linha = maior botao dela).
+    line_height = max(widget.geometry().height() for widget in widgets)
+    assert wide_lines[1] - wide_lines[0] == line_height + 1
 
 
 def test_attachment_row_keeps_visible_controls_non_overlapping(app):

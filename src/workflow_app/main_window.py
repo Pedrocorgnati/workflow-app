@@ -28,7 +28,9 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, Qt, QTimer, Signal
@@ -61,6 +63,11 @@ from workflow_app.command_queue.command_queue_widget import (
     PROMPT_FILTER_CATEGORIES,
     PROMPT_FILTER_DEFAULT,
     CommandQueueWidget,
+    ResponsiveButtonFlowLayout,
+)
+from workflow_app.command_queue.command_queue_widget import (
+    _TAB_ACTIVE_STYLE,
+    _TAB_INACTIVE_STYLE,
 )
 from workflow_app.config.app_state import app_state
 from workflow_app.config.config_bar import ConfigBar
@@ -88,6 +95,67 @@ from workflow_app.widgets.mcp_prompt_button import (
 from workflow_app.widgets.toast_notifier import ToastNotifier
 from workflow_app.widgets.version_update_banner import VersionUpdateBanner
 
+if TYPE_CHECKING:  # import Qt-free: so entra na analise estatica de tipos
+    from workflow_app.agent_integration_specs import McpAgentSpec
+
+
+# ── Terminal route snapshot / publish report (AGENT-TASK-005) ───────────────
+# Fica DEPOIS do bloco de imports de proposito: definido acima dele, empurrava
+# os 22 imports de `workflow_app.*` para baixo de uma definicao de classe e o
+# ruff acusava E402 em todos eles (regressao de lint introduzida por esta
+# feature, fechada no AGENT-TASK-012).
+
+
+@dataclass(frozen=True)
+class TerminalRouteSnapshot:
+    """Immutable capture of terminal route checkboxes + Notes at a point in time.
+
+    Capture once (e.g. dialog open) and pass into ``_publish_to_terminal_report``
+    so dispatch never re-reads widgets mid-flight.
+
+    Os checkboxes de rota vivem no header de cada terminal desde
+    07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2); antes ficavam
+    juntos no bloco `terminal-route-toggles`, ja dissolvido. ``notes_t2`` foi
+    removido no mesmo trabalho (I1.3) porque o checkbox `terminal-notes-t2`
+    deixou de existir.
+    """
+
+    t1: bool = False
+    t2: bool = False
+    t3: bool = False
+    notes_t1: bool = False
+
+    def has_any_terminal_route(self) -> bool:
+        return bool(self.t1 or self.t2 or self.t3)
+
+    def requested_destinations(self) -> tuple[str, ...]:
+        """Deterministic order: T1, T2, T3 (Notes is an attribute of T1)."""
+        dests: list[str] = []
+        if self.t1:
+            dests.append("T1")
+        if self.t2:
+            dests.append("T2")
+        if self.t3:
+            dests.append("T3")
+        return tuple(dests)
+
+
+@dataclass(frozen=True)
+class TerminalPublishReport:
+    """Per-destination outcome of a snapshot-based publish.
+
+    ``accepted`` for T1/T2 means the Qt signal was emitted without exception
+    (fire-and-forget), not confirmation that the consumer process received it.
+    T3 is accepted only when the sink returns True. ``notes_copied`` lists
+    destinations diverted to clipboard instead of the terminal (hoje so T1).
+    """
+
+    requested: tuple[str, ...] = ()
+    accepted: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+    notes_copied: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
 
 class _BrainstormSeedError(ValueError):
     """Seed invalido em blacksmith/brainstorm-mcp/0[1-9]-*.md."""
@@ -106,6 +174,25 @@ _BRAINSTORM_PROVIDER_LABELS: dict[str, str] = {
 _BRAINSTORM_PROVIDER_SLUGS: frozenset[str] = frozenset(_BRAINSTORM_PROVIDER_LABELS)
 
 
+# QSS canonico dos checkboxes de rota de terminal (terminal-route-t1/t2/t3) e do
+# checkbox de Notes do T1 (terminal-notes-t1). Promovido de local de
+# `_build_output_toolbar` para module-level em
+# 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2): os checkboxes deixaram
+# de morar num bloco unico e passaram a ser montados por builders distintos
+# (header do T1, barra do T2, barra CODEX do T3, footer de notas do T1), que
+# precisam do MESMO estilo. Espelha queue-div-use-kimi.
+_TERMINAL_ROUTE_CHK_STYLE = (
+    "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
+    "  background: transparent; border: none; padding: 0; }"
+    "QCheckBox::indicator { width: 16px; height: 16px; }"
+    "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
+    "  border: 1px solid #52525B; border-radius: 3px; }"
+    "QCheckBox::indicator:checked { background-color: #3B82F6;"
+    "  border: 1px solid #3B82F6; border-radius: 3px; }"
+    "QCheckBox::indicator:hover { border-color: #93C5FD; }"
+)
+
+
 # QSS canonico do gear (reuso do toolbar-prompts-config-gear original em
 # main_window.py:1517-1537). Aplicado pelo `_GearButton` abaixo.
 _GEAR_QSS = (
@@ -115,6 +202,19 @@ _GEAR_QSS = (
     "QPushButton:pressed { background-color: #FBBF24; }"
     "QPushButton:pressed QLabel { color: #18181B; }"
 )
+
+
+def _enable_height_for_width(widget: QWidget) -> None:
+    """Faz um container de `ResponsiveButtonFlowLayout` reportar altura real.
+
+    `QWidgetItem.hasHeightForWidth()` consulta a size policy do widget, nao o
+    layout interno. Sem esta marca, um QVBoxLayout pai dimensiona o container
+    pelo `sizeHint()` do flow (calculado numa largura de referencia fixa) e as
+    ultimas linhas de botoes ficam cortadas quando a coluna e mais estreita.
+    """
+    policy = widget.sizePolicy()
+    policy.setHeightForWidth(True)
+    widget.setSizePolicy(policy)
 
 
 class _GearButton(QPushButton):
@@ -773,8 +873,13 @@ _DATATEST_FILTERED_IDS = frozenset({
     "queue-command-list",
     "output-toolbar-left",
     "output-toolbar-center",
-    "terminal-route-toggles",
+    # 07-27-workflow-app-header-toggles-llm-unico (I1.4 e I3.3): o bloco
+    # `terminal-route-toggles` foi dissolvido e o controle principal do header
+    # passou a ser o seletor de tres secoes da linha unica.
+    "output-toolbar-section-selector",
     "output-toolbar-mcp",
+    # 4a secao do seletor (2026-07-27): aba 'Agentes' promovida de sub-aba.
+    "output-toolbar-agentes",
     "output-toolbar-test-mode",
     "terminal-interactive",
     "terminal-workspace",
@@ -954,17 +1059,20 @@ class MainWindow(QMainWindow):
             "outside_repo": None,
         }
 
-        # T3 (loop 05-21-implantation-tasklist-aba-brainstorm):
-        # slug canonico lowercase do provider ativo para botoes
-        # button_type=type-selector-radio-input. Atualizado pelo radio
-        # instalado em _build_brainstorm_page (via _on_brainstorm_type_changed).
-        # Default canonico = "claude". Display string capitalizada via
+        # O slug canonico lowercase do provider ativo para botoes
+        # button_type=type-selector-radio-input NAO e mais estado do
+        # MainWindow (07-27-workflow-app-header-toggles-llm-unico, I2.1):
+        # e derivado sob demanda de `queue-div-main-llm` por
+        # `_current_llm_provider()`. Display string capitalizada via
         # _BRAINSTORM_PROVIDER_LABELS no consumer.
-        self._brainstorm_runtime_type: str = "claude"
         # Debounce do slot _on_mcp_prompt_requested (300ms via QTimer.singleShot).
         self._prompt_in_flight: bool = False
         # Lista de MCPPromptButton instanciados pela grade brainstorm seed-driven.
+        # Contem SOMENTE os 24 seeds canonicos: os botoes suplementares vindos de
+        # `agent_integration_specs` moram em `_brainstorm_agent_btns` para manter
+        # a cardinalidade dos seeds verificavel (AGENT-TASK-008).
         self._brainstorm_mcp_btns: list[MCPPromptButton] = []
+        self._brainstorm_agent_btns: list[MCPPromptButton] = []
 
         self._settings = QSettings("SystemForge", "WorkflowApp")
         self._setup_ui()
@@ -1163,30 +1271,99 @@ class MainWindow(QMainWindow):
         # (entre main-window-label e main-command-queue-pill-row).
         _toolbar_bar, _toolbar_left_top = self._build_output_toolbar()
 
-        # Layout em duas linhas:
-        # Linha 1: output-toolbar-left | output-toolbar-progress-boxes | output-toolbar-datatest-queue-stack
-        # Linha 2: output-toolbar-center | output-toolbar-mcp
+        # Layout em UMA linha (07-27-workflow-app-header-toggles-llm-unico, I3.1):
+        # Linha unica: queue-div-llm-routing | output-toolbar-section-selector |
+        #              output-toolbar-datatest-queue-stack
+        # O `output-toolbar-section-stack` com as tres secoes que antes
+        # disputavam espaco em duas linhas (pagina 0 = output-toolbar-left,
+        # pagina 1 = output-toolbar-center, pagina 2 = output-toolbar-mcp) vive
+        # DENTRO do seletor, imediatamente abaixo da fileira de botoes: o
+        # conteudo fica agachado no controle que o comanda, na coluna do meio,
+        # e nao numa faixa full-width por baixo dos tres blocos da linha.
         _toolbar_row = QWidget()
         _toolbar_row_layout = QVBoxLayout(_toolbar_row)
         _toolbar_row_layout.setContentsMargins(0, 10, 0, 0)
         _toolbar_row_layout.setSpacing(6)
 
-        # --- Linha 1 ---
+        # --- Stack das quatro secoes (uma visivel por vez) ---
+        # Construido ANTES do seletor porque e filho dele.
+        _section_stack = QStackedWidget()
+        _section_stack.setProperty("testid", "output-toolbar-section-stack")
+        self._toolbar_section_stack = _section_stack
+
+        # output-toolbar-center: conteúdo da aba Inserções.
+        _center_widget = QWidget()
+        _center_widget.setObjectName("OutputToolbarCenter")
+        _center_widget.setProperty("testid", "output-toolbar-center")
+        _center_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _center_widget.setStyleSheet(
+            "QWidget#OutputToolbarCenter { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _center_layout = QVBoxLayout(_center_widget)
+        _center_layout.setContentsMargins(4, 4, 4, 4)
+        _center_layout.setSpacing(0)
+        # insertions_bar (output-toolbar-left-insertions-controls) NAO vive mais
+        # aqui: 2026-07-20 foi movido para a ULTIMA posicao da coluna
+        # queue-div-llm-routing e em 2026-07-27 saiu tambem de la, por entregar
+        # uma secao vazia. Hoje e widget vivo sem parent. O conteudo da aba
+        # Inserções continua em output-toolbar-center.
+        _center_layout.addWidget(self._command_queue.insertions_content)
+
+        # Coluna MCP: acoes Main MCP/Parallel/Dual (os radios de provider foram
+        # eliminados em I2.1 — o provider vem do queue-div-main-llm).
+        _mcp_column = self._build_mcp_column(self._mcp_column_btns)
+        # O setMinimumWidth de 1.5x que existia aqui deixou de fazer sentido
+        # quando a coluna MCP virou pagina de largura total do stack (I3.1).
+
+        # output-toolbar-agentes: moldura da aba 'Agentes', promovida de sub-aba
+        # do `queue-subtabs-insertions` a secao propria do header (2026-07-27).
+        # Mesmo padrao de output-toolbar-center: o container e novo, o conteudo
+        # (`queue-subtab-insertions-personas`) mantem o testid original (D1).
+        _agentes_widget = QWidget()
+        _agentes_widget.setObjectName("OutputToolbarAgentes")
+        _agentes_widget.setProperty("testid", "output-toolbar-agentes")
+        _agentes_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _agentes_widget.setStyleSheet(
+            "QWidget#OutputToolbarAgentes { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _agentes_layout = QVBoxLayout(_agentes_widget)
+        _agentes_layout.setContentsMargins(4, 4, 4, 4)
+        _agentes_layout.setSpacing(0)
+        _agentes_layout.addWidget(self._command_queue.personas_content)
+
+        # Paginas do stack, na ordem do seletor (D1: nenhum dos quatro testids
+        # troca de widget, so muda quem e o pai).
+        _section_stack.addWidget(self._command_queue.header_widget)   # 0 = left
+        _section_stack.addWidget(_center_widget)                      # 1 = center
+        _section_stack.addWidget(_mcp_column)                         # 2 = mcp
+        _section_stack.addWidget(_agentes_widget)                     # 3 = agentes
+        # Boot fixo em COMMAND SEQUENCE (D14), sem persistencia entre sessoes
+        # (mesmo precedente do `_active_section = 0` do CommandQueueWidget).
+        _section_stack.setCurrentIndex(0)
+
+        # --- Linha unica ---
         _top_row = QWidget()
         _top_row_layout = QHBoxLayout(_top_row)
         _top_row_layout.setContentsMargins(0, 0, 0, 0)
         _top_row_layout.setSpacing(10)
 
-        # output-toolbar-left: abas primarias (Pipelines/Workflow/Auxiliar/Daily).
-        _top_row_layout.addWidget(self._command_queue.header_widget, stretch=1)   # left
+        # Primeira posicao: queue-div-llm-routing reparenteado da play bar do
+        # CommandQueueWidget. addWidget reparenteia o box (Main LLM | Parallel
+        # Worker | MCP Flags) para esta linha. Ancorado no topo: a coluna do
+        # meio agora cresce com o conteudo do stack e nao deve esticar os
+        # vizinhos junto.
+        _top_row_layout.addWidget(                                                 # llm-routing
+            self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
+        )
 
-        # Slot antes ocupado por output-toolbar-progress-boxes (removido: coluna
-        # decorativa sem side effects). Agora hospeda o queue-div-llm-routing
-        # reparenteado da play bar do CommandQueueWidget. addWidget reparenteia
-        # o box (Main LLM | Parallel Worker | MCP Flags) para esta linha; as
-        # secoes MCP + brainstorm sao dobradas nele mais abaixo, apos o
-        # _build_mcp_column construir os respectivos radios.
-        _top_row_layout.addWidget(self._command_queue._llm_box)                    # llm-routing
+        # Seletor das tres secoes do header (I3.2), ja carregando o stack como
+        # segundo item do proprio container.
+        _top_row_layout.addWidget(
+            self._build_toolbar_section_selector(_section_stack), stretch=1
+        )
+        self._select_toolbar_section(0)
 
         # Ultima coluna empilhada: test-mode em cima, queue-toggles embaixo.
         _queue_toggles_column = self._build_queue_toggles_column()
@@ -1204,54 +1381,20 @@ class MainWindow(QMainWindow):
         _last_column_layout.setSpacing(6)
         _last_column_layout.addWidget(_test_mode_column)
         _last_column_layout.addWidget(_queue_toggles_column)
-        _top_row_layout.addWidget(_last_column)                                    # test-mode + queue-toggles
+        _top_row_layout.addWidget(                                                 # test-mode + queue-toggles
+            _last_column, alignment=Qt.AlignmentFlag.AlignTop
+        )
 
         _toolbar_row_layout.addWidget(_top_row)
 
-        # --- Linha 2 ---
-        _bottom_row = QWidget()
-        _bottom_row_layout = QHBoxLayout(_bottom_row)
-        _bottom_row_layout.setContentsMargins(0, 0, 0, 0)
-        _bottom_row_layout.setSpacing(10)
-
-        # output-toolbar-center: controles de inserções (Inserções tab + route-toggles
-        # + gear) + conteúdo da aba Inserções.
-        _center_widget = QWidget()
-        _center_widget.setObjectName("OutputToolbarCenter")
-        _center_widget.setProperty("testid", "output-toolbar-center")
-        _center_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        _center_widget.setStyleSheet(
-            "QWidget#OutputToolbarCenter { background-color: #1E1E21;"
-            "  border: 1px solid #3F3F46; border-radius: 6px; }"
-        )
-        _center_layout = QVBoxLayout(_center_widget)
-        _center_layout.setContentsMargins(4, 4, 4, 4)
-        _center_layout.setSpacing(0)
-        _center_layout.addWidget(self._command_queue.insertions_bar)
-        _center_layout.addWidget(self._command_queue.insertions_content)
-        _bottom_row_layout.addWidget(_center_widget, stretch=1)                    # center
-
-        # Coluna MCP: radio Claude/Kimi/Codex + acoes Main MCP/Parallel/Dual.
-        _mcp_column = self._build_mcp_column(self._mcp_column_btns)
-        _mcp_column.setMinimumWidth(int(_mcp_column.sizeHint().width() * 1.25))
-        _bottom_row_layout.addWidget(_mcp_column)                                  # mcp
-
-        # Dobra os seletores de LLM MCP + brainstorm dentro do
-        # queue-div-llm-routing (linha 1). _build_mcp_column ja construiu ambos
-        # os radios (output-mcp-provider-radio-input e type-selector-radio-input)
-        # sem os anexar aos layouts de origem; aqui eles sao reparenteados para
-        # o box horizontal, com labels 'MCP' e 'brainstorm'. Funcionalidade
-        # preservada: os QButtonGroup e signals seguem intactos.
-        _provider_row = getattr(self, "_mcp_provider_radio_input", None)
-        if _provider_row is not None:
-            self._command_queue.append_llm_routing_section("MCP", _provider_row)
-        _brainstorm_row = getattr(self, "_brainstorm_type_selector_row", None)
-        if _brainstorm_row is not None:
-            self._command_queue.append_llm_routing_section(
-                "brainstorm", _brainstorm_row
-            )
-
-        _toolbar_row_layout.addWidget(_bottom_row)
+        # queue-div-llm-routing fecha em tres secoes proprias (Main LLM,
+        # Parallel Worker, MCP Flags), montadas pelo CommandQueueWidget. As
+        # secoes 'MCP' e 'brainstorm' sairam em
+        # 07-27-workflow-app-header-toggles-llm-unico (I2.1) e a secao
+        # 'inserções' saiu aqui: o label ficava sobre um
+        # output-toolbar-left-insertions-controls vazio, entregando uma linha
+        # em branco e um divisor orfao. O widget continua vivo como atributo
+        # publico (`insertions_bar`), apenas sem parent.
         output_layout.addWidget(_toolbar_row)
 
         # Ordem final de main-command-queue (refactor 2026-05-18):
@@ -1281,13 +1424,34 @@ class MainWindow(QMainWindow):
         interactive_layout = QVBoxLayout(self._interactive_wrapper)
         interactive_layout.setContentsMargins(0, 0, 0, 0)
         interactive_layout.setSpacing(0)
+        # Header do T1 (I1.1): o rotulo " INTERACTIVE" virou uma barra de 20px
+        # que hospeda, logo depois do texto, o checkbox de rota
+        # `terminal-route-t1` — antes preso ao bloco unico
+        # `terminal-route-toggles`, agora dissolvido.
+        self._interactive_label_bar = QWidget()
+        self._interactive_label_bar.setObjectName("TerminalInteractiveLabelBar")
+        self._interactive_label_bar.setProperty(
+            "testid", "terminal-interactive-label-bar"
+        )
+        self._interactive_label_bar.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True
+        )
+        self._interactive_label_bar.setFixedHeight(20)
+        self._interactive_label_bar.setStyleSheet(
+            "QWidget#TerminalInteractiveLabelBar { background-color: #1A2E05; }"
+        )
+        _interactive_bar_layout = QHBoxLayout(self._interactive_label_bar)
+        _interactive_bar_layout.setContentsMargins(0, 0, 8, 0)
+        _interactive_bar_layout.setSpacing(8)
         interactive_label = QLabel(" INTERACTIVE")
-        interactive_label.setFixedHeight(20)
         interactive_label.setStyleSheet(
             "QLabel { background-color: #1A2E05; color: #84CC16;"
             "  font-size: 10px; font-weight: 700; padding-left: 6px; }"
         )
-        interactive_layout.addWidget(interactive_label)
+        _interactive_bar_layout.addWidget(interactive_label)
+        _interactive_bar_layout.addWidget(self._chk_route_t1)
+        _interactive_bar_layout.addStretch(1)
+        interactive_layout.addWidget(self._interactive_label_bar)
         self._output_panel = OutputPanel(parent=self._interactive_wrapper)
         self._output_panel.setProperty("testid", "terminal-interactive")
         interactive_layout.addWidget(self._output_panel, stretch=1)
@@ -1309,7 +1473,9 @@ class MainWindow(QMainWindow):
         self._workspace_terminal_splitter = QSplitter(Qt.Vertical, parent=self._workspace_wrapper)
         self._workspace_terminal_splitter.setProperty("testid", "terminal-workspace-splitter")
 
-        # Child 0 = pyte (T2/Kimi, colapsavel). Child 1 = pyte (T3/Codex).
+        # Child 0 = pyte (T2/Kimi, colapsavel). Child 1 = wrapper do T3/Codex
+        # (barra CODEX + pyte). Os indices seguem os mesmos: `_apply_workspace_split`
+        # continua raciocinando em [T2, T3].
         # 2026-06-01: os tres terminais (T1/T2/T3) usam o mesmo engine pyte
         # (OutputPanel). T3 difere apenas no canal logico "workspace_xterm"
         # (channel_override) que preserva dot/notify/recovery do listener Codex.
@@ -1322,14 +1488,25 @@ class MainWindow(QMainWindow):
         # Fix T020 (BLOCKER 2): testid canonico `terminal-codex-output` e
         # contrato — `_codex_terminal_available()` e MCPPromptButton dependem
         # dele para detectar o T3 e habilitar os botoes Codex. Mantido byte-a-byte.
+        # I1.2: o child 1 do splitter passa a ser um wrapper vertical
+        # (barra CODEX + panel). O testid `terminal-codex-output` continua
+        # no OutputPanel, NUNCA no wrapper (R1), porque
+        # `_codex_terminal_available()` e o MCPPromptButton procuram por um
+        # OutputPanel com esse testid.
+        self._codex_wrapper = QWidget(self._workspace_terminal_splitter)
+        codex_layout = QVBoxLayout(self._codex_wrapper)
+        codex_layout.setContentsMargins(0, 0, 0, 0)
+        codex_layout.setSpacing(0)
+        codex_layout.addWidget(self._build_codex_label_bar())
         self._workspace_panel_xterm = OutputPanel(
-            parent=self._workspace_terminal_splitter,
+            parent=self._codex_wrapper,
             workspace_mode=True,
             channel_override="workspace_xterm",
         )
         self._workspace_panel_xterm.setProperty("testid", "terminal-codex-output")
         self._workspace_panel_xterm.setProperty("data-engine", "pyte")
-        self._workspace_terminal_splitter.addWidget(self._workspace_panel_xterm)
+        codex_layout.addWidget(self._workspace_panel_xterm, stretch=1)
+        self._workspace_terminal_splitter.addWidget(self._codex_wrapper)
         # Estado inicial fixo: T3 colapsado, T2 ocupa 100% (sem memoria entre
         # sessoes). child 0 = T2, child 1 = T3.
         self._t3_visible = False
@@ -1412,6 +1589,87 @@ class MainWindow(QMainWindow):
         self._modal_check_timer.timeout.connect(self._check_for_active_modal)
         self._modal_check_timer.start()
 
+    def _build_toolbar_section_selector(self, stack: QWidget) -> QWidget:
+        """Seletor das secoes do header (I3.2 de
+        07-27-workflow-app-header-toggles-llm-unico).
+
+        Sao QUATRO desde 2026-07-27: a aba 'Agentes' saiu do
+        `queue-subtabs-insertions` e virou a quarta pagina do stack.
+
+        Substitui a segunda linha da OutputToolbar: em vez de
+        `output-toolbar-center` e `output-toolbar-mcp` sempre visiveis abaixo do
+        `output-toolbar-left`, os tres viram paginas de um QStackedWidget e este
+        seletor escolhe qual aparece.
+
+        O `stack` recebido (`output-toolbar-section-stack`) e montado DENTRO
+        deste container, logo abaixo da fileira de botoes: o conteudo da secao
+        ativa fica colado no controle que o comanda, dentro da coluna do meio
+        da linha unica, em vez de virar uma faixa full-width por baixo dos tres
+        blocos do header.
+
+        Aparencia identica aos botoes de `output-toolbar-left-primary-tabs`
+        (mesmos `_TAB_ACTIVE_STYLE`/`_TAB_INACTIVE_STYLE`, mesma altura de
+        22px). A distincao entre os dois niveis de aba e feita pelo fundo do
+        container, nunca pela forma dos botoes (R4/G-07).
+        """
+        from PySide6.QtWidgets import QHBoxLayout
+
+        container = QWidget()
+        container.setObjectName("OutputToolbarSectionSelector")
+        container.setProperty("testid", "output-toolbar-section-selector")
+        container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        container.setStyleSheet(
+            "QWidget#OutputToolbarSectionSelector { background-color: #131316;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(6)
+
+        # Fileira dos tres botoes (sublayout, para nao criar um nivel de widget
+        # a mais entre o container e os testids dos botoes).
+        _tabs_row = QHBoxLayout()
+        _tabs_row.setContentsMargins(0, 0, 0, 0)
+        _tabs_row.setSpacing(3)
+
+        self._toolbar_section_btns: list[QPushButton] = []
+        _specs = (
+            ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
+            ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
+            ("output-toolbar-section-mcp-brainstorm", "MCP & BRAINSTORM"),
+            ("output-toolbar-section-agentes", "AGENTES"),
+        )
+        for idx, (testid, label) in enumerate(_specs):
+            btn = QPushButton(label)
+            btn.setFixedHeight(22)
+            btn.setProperty("testid", testid)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(_TAB_INACTIVE_STYLE)
+            btn.clicked.connect(
+                lambda _ch=False, i=idx: self._select_toolbar_section(i)
+            )
+            _tabs_row.addWidget(btn, stretch=1)
+            self._toolbar_section_btns.append(btn)
+
+        lay.addLayout(_tabs_row)
+        lay.addWidget(stack)
+
+        return container
+
+    def _select_toolbar_section(self, index: int) -> None:
+        """Troca a pagina do stack do header e o estilo do botao ativo.
+
+        Exatamente um botao em `_TAB_ACTIVE_STYLE` por vez. Idempotente:
+        chamado tambem no boot para fixar `COMMAND SEQUENCE` (D14).
+        """
+        stack = getattr(self, "_toolbar_section_stack", None)
+        if stack is not None and 0 <= index < stack.count():
+            stack.setCurrentIndex(index)
+        for i, btn in enumerate(getattr(self, "_toolbar_section_btns", [])):
+            btn.setStyleSheet(
+                _TAB_ACTIVE_STYLE if i == index else _TAB_INACTIVE_STYLE
+            )
+
     def _build_output_toolbar(self) -> tuple[QWidget, QWidget]:
         """Toolbar acima do dual-terminal splitter, agora reduzido a 2 widgets.
 
@@ -1424,6 +1682,10 @@ class MainWindow(QMainWindow):
           populate_prompts_tab() / populate_actions_tab().
         - terminal-route-toggles e toolbar-prompts-config-gear viraram extras
           do tab_bar (attach_tab_bar_extras), posicionados como abas extras.
+          Superseded em 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2):
+          o bloco `terminal-route-toggles` foi dissolvido e cada checkbox de
+          rota passou a viver no header do seu proprio terminal; so o gear
+          continua como extra do tab_bar.
 
         Refactor 2026-05-17 power-bi-section:
         - Renomeado `output-toolbar-col1-top` -> `power-bi-section`.
@@ -1483,19 +1745,15 @@ class MainWindow(QMainWindow):
         left_top_layout.setSpacing(0)
         left_top_layout.addWidget(self._metrics_bar._instance_group)
 
-        # terminal-route-toggles: roteamento T1/T2. Antes em controls_row;
-        # agora vira "aba extra" do tab_bar via attach_tab_bar_extras().
-        # Estilo espelha queue-div-use-kimi (background, border, radius, indicator).
-        _TERMINAL_ROUTE_CHK_STYLE = (
-            "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
-            "  background: transparent; border: none; padding: 0; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
-            "QCheckBox::indicator:unchecked { background-color: #3F3F46;"
-            "  border: 1px solid #52525B; border-radius: 3px; }"
-            "QCheckBox::indicator:checked { background-color: #3B82F6;"
-            "  border: 1px solid #3B82F6; border-radius: 3px; }"
-            "QCheckBox::indicator:hover { border-color: #93C5FD; }"
-        )
+        # Checkboxes de rota de terminal (T1/T2/T3) e de Notes do T1.
+        # 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2/I1.3/I1.4):
+        # o bloco unico `terminal-route-toggles` foi DISSOLVIDO. Os objetos
+        # continuam nascendo aqui (o toolbar e construido antes do splitter de
+        # terminais), mas cada um e reparenteado pelo builder do header do seu
+        # terminal: T1 no header " INTERACTIVE", T2 na barra do workspace, T3 na
+        # barra CODEX. `terminal-notes-t1` vai para o footer
+        # `terminal-interactive-notes`; `terminal-notes-t2` deixou de existir
+        # (D7). Os nomes dos atributos sao contrato (D4/R10): NAO renomear.
         self._chk_route_t1 = QCheckBox("T1")
         self._chk_route_t1.setProperty("testid", "terminal-route-t1")
         self._chk_route_t1.setChecked(True)
@@ -1530,56 +1788,19 @@ class MainWindow(QMainWindow):
         )
         self._chk_route_t3.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
-        _terminal_route_box = QWidget()
-        _terminal_route_box.setProperty("testid", "terminal-route-toggles")
-        _terminal_route_box.setFixedHeight(32)
-        _terminal_route_box.setStyleSheet(
-            "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
-            "  border-radius: 5px; }"
-        )
-        # Refactor 2026-05-24: T1/T2/T3 + Notes T1/T2 numa unica row horizontal
-        # (antes em duas linhas empilhadas).
-        _trbl = QHBoxLayout(_terminal_route_box)
-        _trbl.setContentsMargins(10, 2, 10, 2)
-        _trbl.setSpacing(8)
-        _trbl.addWidget(self._chk_route_t1)
-        _trbl.addWidget(self._chk_route_t2)
-        _trbl.addWidget(self._chk_route_t3)
-
-        # Linha 2: Notes T1/T2 — quando marcados, texto de prompt vai para o
-        # campo de notas (staging area abaixo) em vez do terminal, para edicao
-        # qualificada antes do envio.
+        # Notes T1: quando marcado, o texto do prompt vai para o campo de notas
+        # do T1 (staging area no footer terminal-interactive-notes) em vez do
+        # terminal, para edicao qualificada antes do envio. Eixo unico desde o
+        # D7: nao existe mais Notes T2.
         self._chk_notes_t1 = QCheckBox("T1")
         self._chk_notes_t1.setProperty("testid", "terminal-notes-t1")
         self._chk_notes_t1.setChecked(False)
         self._chk_notes_t1.setToolTip(
-            "Notes T1: envia texto para campo de notas T1 (abaixo) em vez do\n"
+            "Notes T1: envia texto para campo de notas T1 (ao lado) em vez do\n"
             "terminal interativo. Edite e use ↑ para enviar ao terminal quando pronto."
         )
         self._chk_notes_t1.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
-        self._chk_notes_t2 = QCheckBox("T2")
-        self._chk_notes_t2.setProperty("testid", "terminal-notes-t2")
-        self._chk_notes_t2.setChecked(False)
-        self._chk_notes_t2.setToolTip(
-            "Notes T2: envia texto para campo de notas T2 (abaixo) em vez do\n"
-            "terminal workspace. Edite e use ↑ para enviar ao terminal quando pronto."
-        )
-        self._chk_notes_t2.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
-
-        _notes_prefix_lbl = QLabel("Notes:")
-        _notes_prefix_lbl.setStyleSheet(
-            "color: #71717A; font-size: 10px; font-weight: 600; background: transparent;"
-            "border: none;"
-        )
-        _trbl.addWidget(_notes_prefix_lbl)
-        _trbl.addWidget(self._chk_notes_t1)
-        _trbl.addWidget(self._chk_notes_t2)
-        _trbl.addStretch()
-
-        # Inputs de notas removidos da UI — Notes T1/T2 sao apenas checkboxes de
-        # roteamento. Quando marcados, _publish_to_terminal copia o texto para o
-        # clipboard em vez de publicar diretamente no terminal correspondente.
 
         _MCP_TEST_PROMPT = (
             "/mcp:codex ping test — verificar se MCP Codex esta ativo. "
@@ -1922,7 +2143,10 @@ class MainWindow(QMainWindow):
         self._command_queue.populate_auto_improove_subtab(_auto_improove_btns)
         self._command_queue.populate_personal_subtab(_personal_btns)
         self._command_queue.populate_personas_subtab(_personas_btns)
-        self._command_queue.attach_tab_bar_extras(_terminal_route_box)
+        # `attach_tab_bar_extras` deixou de ter chamador aqui: o unico extra que
+        # existia era o bloco `terminal-route-toggles`, dissolvido em
+        # 07-27-workflow-app-header-toggles-llm-unico (I1.4). O metodo continua
+        # disponivel como API generica do CommandQueueWidget.
         # Refactor 2026-06-22: o gear de prompts NAO e mais cornerWidget (vivia
         # no canto compartilhado de todas as sub-abas). Agora entra como ultimo
         # widget do flow da sub-aba PROMPTS (ver _prompts_btns acima), so visivel
@@ -2145,6 +2369,209 @@ class MainWindow(QMainWindow):
         except ValueError:
             return abs_path
 
+    @staticmethod
+    def _warn_agent_registry_degraded(
+        surface: str, log_message: str, detail: object
+    ) -> None:
+        """Log + toast quando o registry suplementar e descartado.
+
+        Zero Silencio: o `logger.warning` sozinho e invisivel ao operador — a
+        superficie sobe sem os botoes suplementares e nada na tela explica a
+        ausencia. O toast e o unico sinal visivel, entao ele acompanha TODAS as
+        saidas degradadas dos coletores (falha de import e falha de contrato).
+
+        `log_message` fica por conta do chamador porque o texto de log de cada
+        superficie e contrato pinado pelos testes de integracao — o toast e que
+        e uniforme. Metodo estatico e chamado de forma qualificada pela classe
+        (`MainWindow._warn_agent_registry_degraded(...)`) para continuar
+        funcionando quando os coletores sao reusados unbound por stubs de teste.
+        """
+        logger.warning("%s: %s", log_message, detail)
+        signal_bus.toast_requested.emit(
+            f"Integracoes suplementares de agentes ignoradas em {surface}; "
+            "a superficie canonica segue ativa. Verifique o log.",
+            "warning",
+        )
+
+    # Registry de specs servido no momento: `(source, stamp, module)`.
+    # `stamp` e `(st_mtime_ns, st_size)` do arquivo que produziu `module`.
+    # Estado de CLASSE de proposito: os dois coletores tem que enxergar o mesmo
+    # objeto, senao as dataclasses de um nao passariam no `isinstance` do outro.
+    _agent_registry_served: ClassVar[tuple[str, tuple[int, int], Any] | None] = None
+
+    @staticmethod
+    def _load_agent_registry(surface: str):
+        """Devolve o registry de specs, relendo o arquivo QUANDO ELE MUDA (010 E-3).
+
+        `/mcp:create-agent` reescreve `agent_integration_specs.py` com o app
+        aberto. Um `from workflow_app.agent_integration_specs import ...`
+        devolveria o modulo ja em `sys.modules` e as tuplas do primeiro import:
+        a spec recem-criada so apareceria depois de reiniciar o app, enquanto o
+        doc de regras promete "fonte unica relida a cada materializacao". Este
+        metodo e quem cumpre a promessa.
+
+        O gatilho e `(st_mtime_ns, st_size)` do arquivo, nao "toda chamada".
+        Reler incondicionalmente a cada rebuild da coluna/grade custaria uma
+        re-execucao inteira do modulo por clique e — pior — devolveria dataclasses
+        NOVAS toda vez, de modo que dois objetos criados em builds diferentes
+        deixariam de casar em `isinstance`. Com o stamp, a identidade so muda
+        quando o conteudo em disco muda, que e exatamente quando ela DEVE mudar.
+
+        Quando recarrega, carrega num modulo PARALELO (`spec_from_file_location`
+        + `exec_module`), NAO com `importlib.reload`: reload re-executa o modulo
+        no namespace existente, entao um registry malformado deixaria o modulo
+        bom mutado pela metade. Aqui a falha nunca alcanca o objeto servido — o
+        ultimo registry valido continua de pe, e a degradacao e visivel (toast).
+
+        O modulo paralelo PRECISA estar em `sys.modules` durante o `exec_module`,
+        sob um nome proprio: `@dataclass` resolve as anotacoes (que sao strings,
+        por causa do `from __future__ import annotations` do registry) fazendo
+        `sys.modules[cls.__module__].__dict__`, e sem a entrada isso levanta
+        `AttributeError: 'NoneType' object has no attribute '__dict__'`. A
+        entrada e removida no `finally`, entao nada persiste entre builds e a
+        chave canonica `workflow_app.agent_integration_specs` jamais e tocada.
+
+        O objeto devolvido e sempre auto-consistente: specs, validadores e
+        builders saem do MESMO modulo — nunca metade de um, metade do outro.
+
+        A origem canonica sai de `__spec__.origin`, e a origem corrente de
+        `__file__`. Elas so divergem quando alguem redireciona `__file__`
+        (as suites de reload apontam para um registry sintetico em `tmp_path`);
+        nesse caso a divergencia por si so ja obriga a releitura, sem depender
+        de mtime.
+
+        Levanta se nem o modulo cacheado puder ser importado — os chamadores ja
+        rodam dentro do proprio guard e transformam isso em degradacao visivel.
+        """
+        import importlib
+        import importlib.util
+        import os
+        import sys
+
+        # `import_module`, e NAO `from workflow_app import agent_integration_specs`:
+        # a forma from-package resolve o submodulo pelo ATRIBUTO ja pendurado no
+        # pacote pai, entao um registry que explode ao executar (entrada malformada
+        # gravada por `/mcp:create-agent`) devolveria silenciosamente o modulo
+        # antigo em vez de levantar. `import_module` consulta `sys.modules` pelo
+        # nome completo e reexecuta o import de verdade quando a entrada sumiu —
+        # que e exatamente o caminho em que a falha PRECISA aparecer.
+        cached = importlib.import_module("workflow_app.agent_integration_specs")
+
+        origin = getattr(getattr(cached, "__spec__", None), "origin", None)
+        source = getattr(cached, "__file__", None) or origin
+        if not source:
+            # Namespace exotico (zipimport, modulo sintetico de teste): sem
+            # arquivo nao ha o que reler. Servir o cacheado e o unico caminho.
+            return cached
+
+        served = MainWindow._agent_registry_served
+        try:
+            info = os.stat(source)
+            stamp = (info.st_mtime_ns, info.st_size)
+        except OSError as exc:
+            # Arquivo sumiu/ilegivel: seguir com o ultimo registry valido em vez
+            # de esvaziar a superficie por um erro de filesystem.
+            MainWindow._warn_agent_registry_degraded(
+                surface,
+                "registry em disco ilegivel; servindo o ultimo registry valido",
+                f"falha ao inspecionar {source}: {exc}",
+            )
+            return served[2] if served is not None else cached
+
+        if served is not None and served[0] == source and served[1] == stamp:
+            return served[2]
+
+        if served is None and source == origin:
+            # Primeira materializacao do processo com o arquivo canonico: o
+            # modulo ja em `sys.modules` E o conteudo do disco, entao releitura
+            # seria trabalho puro. (Uma edicao na janela entre o import e esta
+            # chamada — milissegundos, durante a construcao da janela — passaria
+            # despercebida ate o proximo rebuild; e o unico furo, e ele fecha
+            # sozinho no clique seguinte.)
+            MainWindow._agent_registry_served = (source, stamp, cached)
+            return cached
+
+        live_name = "workflow_app._agent_integration_specs_live"
+        try:
+            spec = importlib.util.spec_from_file_location(live_name, source)
+            if spec is None or spec.loader is None:
+                return served[2] if served is not None else cached
+            live = importlib.util.module_from_spec(spec)
+            sys.modules[live_name] = live
+            try:
+                spec.loader.exec_module(live)
+            finally:
+                sys.modules.pop(live_name, None)
+        except Exception as exc:
+            # Zero Silencio: a spec que o operador acabou de criar NAO vai
+            # aparecer nesta materializacao, e ele precisa saber por que.
+            # O stamp NAO avanca: enquanto o arquivo continuar quebrado, todo
+            # rebuild volta a avisar, em vez de silenciar apos o primeiro.
+            MainWindow._warn_agent_registry_degraded(
+                surface,
+                "registry em disco invalido; servindo o ultimo registry valido",
+                f"falha ao reler {source}: {exc}",
+            )
+            return served[2] if served is not None else cached
+
+        MainWindow._agent_registry_served = (source, stamp, live)
+        return live
+
+    def _collect_mcp_agent_specs(
+        self, existing_testids: list[str]
+    ) -> tuple[McpAgentSpec, ...]:
+        """Le a fonte unica de specs MCP suplementares para o build da coluna.
+
+        Fonte unica: `workflow_app.agent_integration_specs` (registry literal em
+        codigo, editado por `/mcp:create-agent`). Nenhuma lista paralela aqui.
+
+        Fail-safe explicito: registry invalido (slug/testid/action fora do
+        contrato) ou colisao com um testid ja montado nesta coluna NAO derruba a
+        MainWindow. A coluna e montada sem suplementos e a causa vai para o log
+        com severidade warning (Zero Silencio). `existing_testids` recebe apenas
+        os testids desta coluna: os testids do build anterior nao contam, senao
+        um rebuild acusaria colisao consigo mesmo.
+
+        A carga fica DENTRO do guard porque `_MCP_AGENT_SPECS` e um literal de
+        modulo validado no `__post_init__` de `McpAgentSpec`: registry invalido
+        levanta na EXECUCAO do modulo. Captura larga aqui e obrigatoria — a
+        classe `AgentIntegrationSpecError` mora no modulo que falhou, entao nao
+        ha nome para um `except` estreito.
+
+        `_load_agent_registry` rele o arquivo quando ele muda em disco (finding
+        010 E-3), de modo que uma spec escrita por `/mcp:create-agent` aparece
+        no proximo rebuild da coluna, sem reiniciar o app.
+        """
+        try:
+            registry = MainWindow._load_agent_registry("output-toolbar-mcp")
+        except Exception as exc:
+            MainWindow._warn_agent_registry_degraded(
+                "output-toolbar-mcp",
+                "specs MCP suplementares ignoradas",
+                f"falha ao importar o registry: {exc}",
+            )
+            return ()
+
+        try:
+            specs = registry.mcp_agent_specs()
+            registry.assert_no_testid_collision(
+                existing_testids, mcp_specs=specs, brainstorm_specs=()
+            )
+        except registry.AgentIntegrationSpecError as exc:
+            MainWindow._warn_agent_registry_degraded(
+                "output-toolbar-mcp", "specs MCP suplementares ignoradas", exc
+            )
+            return ()
+        except AttributeError as exc:
+            # Registry recarregado sem a API esperada (edicao truncou o modulo).
+            MainWindow._warn_agent_registry_degraded(
+                "output-toolbar-mcp",
+                "specs MCP suplementares ignoradas",
+                f"registry sem a API esperada: {exc}",
+            )
+            return ()
+        return specs
+
     def _build_mcp_column(self, mcp_btns: list[QPushButton]) -> QWidget:
         """Coluna entre output-toolbar-left e output-toolbar-progress-boxes.
 
@@ -2165,11 +2592,9 @@ class MainWindow(QMainWindow):
                 f"recebeu {len(mcp_btns)}. Verifique _populate_header_actions."
             )
         from PySide6.QtWidgets import (
-            QButtonGroup,
             QFileDialog,
             QGridLayout,
             QHBoxLayout,
-            QRadioButton,
             QStackedWidget,
             QVBoxLayout,
         )
@@ -2241,85 +2666,19 @@ class MainWindow(QMainWindow):
             },
         }
         self._mcp_toolbar_commands = mcp_commands
-        self._mcp_toolbar_provider = getattr(self, "_mcp_toolbar_provider", "claude")
-        if self._mcp_toolbar_provider not in mcp_commands:
-            self._mcp_toolbar_provider = "claude"
 
-        existing_group = getattr(self, "_mcp_toolbar_provider_group", None)
-        if existing_group is not None:
-            try:
-                existing_group.buttonToggled.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-            existing_group.deleteLater()
-
-        provider_row = QWidget()
-        provider_row.setObjectName("McpProviderRow")
-        provider_row.setProperty("testid", "output-mcp-provider-radio-input")
-        provider_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        provider_row.setStyleSheet(
-            "QWidget#McpProviderRow { background-color: #27272A;"
-            "  border: 1px solid #3F3F46; border-radius: 5px; }"
-        )
-        provider_layout = QHBoxLayout(provider_row)
-        provider_layout.setContentsMargins(8, 0, 8, 0)
-        provider_layout.setSpacing(8)
-        provider_row.setFixedHeight(26)
-
-        self._mcp_toolbar_provider_group = QButtonGroup(self)
-        self._mcp_toolbar_provider_group.setExclusive(True)
-        radio_style = (
-            "QRadioButton { color: #FAFAFA; font-size: 11px;"
-            "  font-weight: 700; background: transparent; border: none; }"
-            "QRadioButton::indicator { width: 12px; height: 12px; }"
-            "QRadioButton::indicator:unchecked { background-color: #18181B;"
-            "  border: 1px solid #52525B; border-radius: 6px; }"
-            "QRadioButton::indicator:checked { background-color: #FBBF24;"
-            "  border: 1px solid #FBBF24; border-radius: 6px; }"
-            "QRadioButton::indicator:hover { border-color: #FDE68A; }"
-        )
-
-        for label, provider_id in (
-            ("Claude", "claude"),
-            ("Kimi", "kimi"),
-            ("Codex", "codex"),
-        ):
-            rb = QRadioButton(label)
-            rb.setProperty("provider_id", provider_id)
-            rb.setProperty("testid", f"output-mcp-provider-{provider_id}")
-            rb.setAccessibleName(f"Selecionar provider MCP {label}")
-            rb.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            rb.setStyleSheet(radio_style)
-            rb.setChecked(provider_id == self._mcp_toolbar_provider)
-            self._mcp_toolbar_provider_group.addButton(rb)
-            provider_layout.addWidget(rb)
-        provider_layout.addStretch(1)
-
-        def _on_mcp_provider_changed(button, checked: bool) -> None:
-            if not checked:
-                return
-            provider_id = button.property("provider_id")
-            provider = str(provider_id or "").strip().lower()
-            self._mcp_toolbar_provider = provider if provider in mcp_commands else "claude"
-
-        self._mcp_toolbar_provider_group.buttonToggled.connect(
-            _on_mcp_provider_changed
-        )
-        # provider_row NAO entra mais em mcps_layout: e reparenteado para o
-        # queue-div-llm-routing (linha 1 da OutputToolbar) via
-        # append_llm_routing_section, com label 'MCP'. Ref guardada para o
-        # MainWindow dobrar apos o build do bottom row.
-        self._mcp_provider_radio_input = provider_row
-
-        # Personas/agentes (output-mcp-persona-checkboxes*): grade de 4 por linha
-        # x 4 linhas (16 agentes). Os checkboxes marcados tem seus prompts
-        # anexados ao comando MCP via _compose_mcp_text na ORDEM da UI (row-major).
-        # A familia de pesquisa (search-in/search-out/search-forge) ocupa as 3
-        # primeiras posicoes da Linha 1. exec-slash foi removido desta grade de
-        # output para abrir espaco a search-forge na composicao original (continua
-        # disponivel em queue-subtab-insertions-personas, que auto-descobre).
+        # Personas/agentes (`output-mcp-persona-checkboxes`): container UNICO com
+        # flow responsivo — mesma linguagem visual da aba Brainstorm. Cada
+        # persona e um controle individual (fundo, borda e raio proprios) com a
+        # largura do proprio label; a quantidade por linha acompanha a largura
+        # da janela. Os marcados tem seus prompts anexados ao comando MCP via
+        # _compose_mcp_text na ORDEM da UI (a mesma ordem desta tupla).
+        # A familia de pesquisa (search-in/search-out/search-forge) abre a
+        # sequencia. exec-slash foi removido desta grade de output para abrir
+        # espaco a search-forge na composicao original (continua disponivel em
+        # queue-subtab-insertions-personas, que auto-descobre).
         persona_specs = (
-            # Linha 1 — pesquisa + analise
+            # Pesquisa + analise
             ("search-in", "output-mcp-persona-search-in",
              "no papel de search-in, conforme regras em "
              "ai-forge/MCP/agents/search-in-rules.md"),
@@ -2332,7 +2691,7 @@ class MainWindow(QMainWindow):
             ("controversial", "output-mcp-persona-controversial",
              "no papel de controversial, conforme regras em "
              "ai-forge/MCP/agents/controversial-devils-advocate-rules.md"),
-            # Linha 2 — robustez + ciclo de task
+            # Robustez + ciclo de task
             ("hardening", "output-mcp-persona-hardening",
              "no papel de engenheiro de hardening, conforme regras em "
              "ai-forge/MCP/agents/hardening-engineer-rules.md"),
@@ -2345,7 +2704,7 @@ class MainWindow(QMainWindow):
             ("executor", "output-mcp-persona-executor",
              "no papel de executor de tasks, conforme regras em "
              "ai-forge/MCP/agents/executar-task-rules.md"),
-            # Linha 3 — execucao + especializados
+            # Execucao + especializados
             ("rev-exec", "output-mcp-persona-rev-exec",
              "no papel de revisor de execucao, conforme regras em "
              "ai-forge/MCP/agents/revisar-execucao-rules.md"),
@@ -2358,7 +2717,7 @@ class MainWindow(QMainWindow):
             ("delegador", "output-mcp-persona-delegador",
              "no papel de analista-delegador, conforme regras em "
              "ai-forge/MCP/agents/analista-delegador-rules.md"),
-            # Linha 4 — novos agentes de catalogo, clareza, UX e performance
+            # Catalogo, clareza, UX e performance
             ("scaffold-update", "output-mcp-persona-scaffolds-blueprints-updater",
              "no papel de atualizador de scaffolds e blueprints, conforme regras em "
              "ai-forge/MCP/agents/scaffolds-blueprints-updater.md"),
@@ -2372,51 +2731,131 @@ class MainWindow(QMainWindow):
              "no papel de performance engineer, conforme regras em "
              "ai-forge/MCP/agents/performance-engineer.md"),
         )
+        # Cada persona e uma pilula individual (fundo/borda/raio proprios), no
+        # mesmo tamanho de fonte e no mesmo padrao cromatico dos botoes da aba
+        # Brainstorm: apagada quando inativa, verde quando ativa. O padding
+        # horizontal entra no sizeHint, entao o flow reserva a largura do label
+        # inteiro — nenhum texto e cortado.
         checkbox_style = (
-            "QCheckBox { color: #D4D4D8; font-size: 10px;"
-            "  font-weight: 700; background: transparent; border: none; }"
+            "QCheckBox { color: #D4D4D8; font-size: 10px; font-weight: 700;"
+            "  background-color: #27272A; border: 1px solid #3F3F46;"
+            "  border-radius: 4px; padding: 2px 7px; spacing: 4px; }"
+            "QCheckBox:hover { border-color: #52525B; }"
+            "QCheckBox:checked { background-color: #16A34A; color: #FAFAFA;"
+            "  border-color: #16A34A; }"
             "QCheckBox::indicator { width: 11px; height: 11px; }"
             "QCheckBox::indicator:unchecked { background-color: #18181B;"
             "  border: 1px solid #52525B; border-radius: 3px; }"
-            "QCheckBox::indicator:checked { background-color: #22C55E;"
-            "  border: 1px solid #22C55E; border-radius: 3px; }"
+            "QCheckBox::indicator:checked { background-color: #FBBF24;"
+            "  border: 1px solid #FBBF24; border-radius: 3px; }"
             "QCheckBox::indicator:hover { border-color: #86EFAC; }"
         )
         self._mcp_persona_checkboxes: list[QCheckBox] = []
-        # 4 checkboxes por linha (stretch igual); testids das linhas estaveis
-        # (output-mcp-persona-checkboxes, -2, -3, -4).
-        _persona_rows = [persona_specs[i:i + 4] for i in range(0, len(persona_specs), 4)]
-        for _row_idx, _row_specs in enumerate(_persona_rows):
-            _suffix = "" if _row_idx == 0 else f"-{_row_idx + 1}"
-            _obj = "McpPersonaRow" if _row_idx == 0 else f"McpPersonaRow{_row_idx + 1}"
+        # Refactor 07-27 (paridade com a aba Brainstorm): as 4 linhas fixas de 4
+        # checkboxes com largura igual (`output-mcp-persona-checkboxes`, -2, -3,
+        # -4) viraram UM container com flow responsivo. Cada controle tem a
+        # largura do proprio label e a quantidade por linha acompanha a largura
+        # da janela. O testid da primeira linha continua sendo o do container.
+        persona_row = QWidget()
+        persona_row.setObjectName("McpPersonaRow")
+        persona_row.setProperty("testid", "output-mcp-persona-checkboxes")
+        persona_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        persona_row.setStyleSheet(
+            "QWidget#McpPersonaRow { background-color: #202027;"
+            "  border: 1px solid #3F3F46; border-radius: 5px; }"
+        )
+        persona_layout = ResponsiveButtonFlowLayout(
+            persona_row, spacing=7, v_spacing=1, max_lines=None
+        )
+        persona_layout.setContentsMargins(8, 2, 8, 2)
+        _enable_height_for_width(persona_row)
+        for label, testid, prompt in persona_specs:
+            chk = QCheckBox(label)
+            chk.setProperty("testid", testid)
+            chk.setProperty("persona_prompt", prompt)
+            chk.setToolTip(prompt)
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            chk.setStyleSheet(checkbox_style)
+            persona_layout.addWidget(chk)
+            self._mcp_persona_checkboxes.append(chk)
+        mcps_layout.addWidget(persona_row)
+
+        # Integracoes suplementares de agentes (AGENT-TASK-007): as specs vivem
+        # na fonte unica `agent_integration_specs` (editada por
+        # /mcp:create-agent) e sao materializadas aqui como QPushButton REAL
+        # checkable (nunca QCheckBox) com testid `output-mcp-agent-{slug}`.
+        # Posicao deterministica: DEPOIS dos 16 personas, ANTES da action row —
+        # a composicao le personas primeiro e suplementos depois. Registry vazio
+        # nao cria nenhum widget (zero mudanca visual). A lista e RECRIADA a cada
+        # build, entao um rebuild nao acumula nem perde botoes.
+        self._mcp_agent_buttons: list[QPushButton] = []
+        agent_specs = self._collect_mcp_agent_specs(
+            [str(chk.property("testid")) for chk in self._mcp_persona_checkboxes]
+            + [str(btn.property("testid")) for btn in self._mcp_tab_buttons]
+            + [
+                "output-mcp-action-main",
+                "output-mcp-action-parallel",
+                "output-mcp-action-dual",
+            ]
+        )
+        agent_button_style = (
+            "QPushButton { color: #D4D4D8; font-size: 10px; font-weight: 700;"
+            "  background-color: #27272A; border: 1px solid #3F3F46;"
+            "  border-radius: 4px; padding: 1px 6px; }"
+            "QPushButton:hover { border-color: #52525B; }"
+            "QPushButton:checked { background-color: #16A34A; color: #FAFAFA;"
+            "  border-color: #16A34A; }"
+        )
+        # Refactor 07-27: as antigas linhas de 4 botoes com largura igual
+        # (output-mcp-agent-buttons, -2, -3...) viraram UM unico container com
+        # flow responsivo. Cada botao tem a largura do proprio label e a
+        # quantidade por linha acompanha a largura da janela.
+        if agent_specs:
             row = QWidget()
-            row.setObjectName(_obj)
-            row.setProperty("testid", f"output-mcp-persona-checkboxes{_suffix}")
+            row.setObjectName("McpAgentRow")
+            row.setProperty("testid", "output-mcp-agent-buttons")
             row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             row.setStyleSheet(
-                f"QWidget#{_obj} {{ background-color: #202027;"
+                "QWidget#McpAgentRow { background-color: #202027;"
                 "  border: 1px solid #3F3F46; border-radius: 5px; }"
             )
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(8, 0, 8, 0)
-            row_layout.setSpacing(7)
-            row.setFixedHeight(26)
-            for label, testid, prompt in _row_specs:
-                chk = QCheckBox(label)
-                chk.setProperty("testid", testid)
-                chk.setProperty("persona_prompt", prompt)
-                chk.setToolTip(prompt)
-                chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-                chk.setStyleSheet(checkbox_style)
-                row_layout.addWidget(chk, stretch=1)
-                self._mcp_persona_checkboxes.append(chk)
+            row_layout = ResponsiveButtonFlowLayout(
+                row, spacing=7, v_spacing=1, max_lines=None
+            )
+            row_layout.setContentsMargins(8, 2, 8, 2)
+            _enable_height_for_width(row)
+            for spec in agent_specs:
+                btn = QPushButton(spec.label)
+                btn.setCheckable(True)
+                btn.setChecked(False)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setProperty("testid", spec.testid)
+                btn.setProperty("agent_slug", spec.slug)
+                btn.setProperty("persona_prompt", spec.persona_prompt)
+                btn.setToolTip(spec.persona_prompt)
+                btn.setAccessibleName(
+                    f"Ativar integracao MCP do agente {spec.label}"
+                )
+                btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                btn.setStyleSheet(agent_button_style)
+                row_layout.addWidget(btn)
+                self._mcp_agent_buttons.append(btn)
             mcps_layout.addWidget(row)
 
         def _compose_mcp_text(base_text: str) -> str:
+            # Ordem deterministica da composicao: personas (row-major) e depois
+            # os agentes suplementares na ordem do registry. So entra o que
+            # estiver ATIVO; nenhum controle inativo altera o prompt.
             prompts = [
                 str(chk.property("persona_prompt"))
                 for chk in self._mcp_persona_checkboxes
                 if chk.isChecked()
+            ]
+            prompts += [
+                str(btn.property("persona_prompt"))
+                for btn in getattr(self, "_mcp_agent_buttons", [])
+                if btn.isChecked()
             ]
             if not prompts:
                 return base_text
@@ -2424,25 +2863,22 @@ class MainWindow(QMainWindow):
 
         action_row = QWidget()
         action_row.setProperty("testid", "output-mcp-action-row")
-        action_layout = QHBoxLayout(action_row)
+        action_layout = ResponsiveButtonFlowLayout(
+            action_row, spacing=4, v_spacing=1, max_lines=None
+        )
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(4)
+        _enable_height_for_width(action_row)
 
         def _make_mcp_action_btn(label: str, action_id: str) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", f"output-mcp-action-{action_id}")
-            btn.setFixedHeight(28)
-            btn.setMinimumWidth(76)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(
-                "Publica a acao MCP do provider selecionado nos terminais "
-                "marcados em terminal-route-toggles (T1/T2/T3). O radio de "
-                "provider escolhe APENAS o comando, nao o terminal."
-            )
+            btn.setProperty("action_id", action_id)
+            btn.setToolTip(self._mcp_action_tooltip(action_id))
             btn.setStyleSheet(
                 "QPushButton { background-color: #334155; color: #FAFAFA;"
                 "  border: 1px solid #475569; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 800; padding: 0 8px; }"
+                "  font-size: 10px; font-weight: 800; padding: 1px 8px; }"
                 "QPushButton:hover { background-color: #3F4F66; border-color: #64748B; }"
                 "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
                 "  border-color: #FBBF24; }"
@@ -2450,17 +2886,18 @@ class MainWindow(QMainWindow):
             return btn
 
         def _on_mcp_action(action_id: str) -> None:
-            # O radio de provider escolhe APENAS o comando (base_text). O terminal
-            # de destino e decidido por terminal-route-toggles (T1/T2/T3), via
-            # _publish_to_terminal (refactor 2026-05-24). O 2o elemento da tupla
-            # (terminal fixo legado) e ignorado de proposito.
-            provider = getattr(self, "_mcp_toolbar_provider", "claude")
+            # O Main LLM (queue-div-main-llm) escolhe APENAS o comando
+            # (base_text). O terminal de destino e decidido pelos checkboxes de
+            # rota nos headers T1/T2/T3, via _publish_to_terminal (refactor
+            # 2026-05-24). O 2o elemento da tupla (terminal fixo legado) e
+            # ignorado de proposito.
+            provider = self._current_llm_provider()
             if provider not in mcp_commands:
                 provider = "claude"
-                self._mcp_toolbar_provider = provider
             base_text, _legacy_terminal = mcp_commands[provider][action_id]
             self._publish_to_terminal(_compose_mcp_text(base_text))
 
+        self._mcp_action_buttons = []
         for label, action_id in (
             ("Main MCP", "main"),
             ("Parallel", "parallel"),
@@ -2470,7 +2907,8 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(
                 lambda _checked=False, aid=action_id: _on_mcp_action(aid)
             )
-            action_layout.addWidget(btn, stretch=1)
+            action_layout.addWidget(btn)
+            self._mcp_action_buttons.append(btn)
         mcps_layout.addWidget(action_row)
         mcps_layout.addStretch(1)
 
@@ -2526,35 +2964,275 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
-    def _get_brainstorm_runtime_provider(self) -> str:
-        """Getter canonico do provider runtime do radio brainstorm (T7).
+    def _current_llm_provider(self) -> str:
+        """Fonte de verdade UNICA do provider ativo (`claude|kimi|codex`).
 
-        Retorna nome capitalizado ("Claude"/"Kimi"/"Codex") que bate com
-        o contrato esperado por `MCPPromptButton._resolve_provider` para
-        botoes button_type=type-selector-radio-input. Default "Claude"
-        quando atributo ausente (defensive).
+        Le `queue-div-main-llm` via `CommandQueueWidget.current_main_llm()` e
+        normaliza para slug minusculo. Substitui os dois radios de provider
+        eliminados (`output-mcp-provider-radio-input` e
+        `type-selector-radio-input`) — ver
+        blacksmith/brainstorm-mcp/07-27-workflow-app-header-toggles-llm-unico.md
+        (I2.2). Nunca levanta excecao: qualquer valor fora do conjunto canonico
+        ou ausencia do `_command_queue` cai em "claude".
         """
-        slug = (getattr(self, "_brainstorm_runtime_type", None) or "claude")
-        slug_norm = str(slug).strip().lower()
+        cq = getattr(self, "_command_queue", None)
+        if cq is None:
+            return "claude"
+        try:
+            raw = cq.current_main_llm()
+        except Exception:  # noqa: BLE001 - defensive: helper nunca propaga
+            return "claude"
+        slug = str(raw or "").strip().lower()
+        if slug in _BRAINSTORM_PROVIDER_SLUGS:
+            return slug
+        return "claude"
+
+    def _mcp_action_tooltip(self, action_id: str) -> str:
+        """Tooltip de um botao `output-mcp-action-*` para o Main LLM vigente.
+
+        Zero Silencio: o operador tem que conseguir ver, sem clicar, qual
+        comando o Main LLM atual vai disparar. Recalculado a cada
+        `signal_bus.main_llm_changed` por `_on_main_llm_changed`.
+        """
+        provider = self._current_llm_provider()
+        commands = getattr(self, "_mcp_toolbar_commands", None) or {}
+        base_text = ""
+        try:
+            base_text = str(commands[provider][action_id][0])
+        except (KeyError, IndexError, TypeError):
+            base_text = ""
+        label = _BRAINSTORM_PROVIDER_LABELS.get(provider, "Claude")
+        suffix = f"\nComando atual: {base_text.strip()}" if base_text else ""
+        return (
+            "Publica a acao MCP do Main LLM selecionado em queue-div-main-llm "
+            "nos terminais marcados pelos checkboxes de rota dos headers "
+            "T1/T2/T3. O Main LLM escolhe APENAS o comando, nao o terminal."
+            f"\nMain LLM: {label}{suffix}"
+        )
+
+    def _on_main_llm_changed(self, provider: str) -> None:
+        """Slot de `signal_bus.main_llm_changed` (`claude|kimi|codex`).
+
+        Substitui a sincronizacao que antes vinha do `buttonToggled` dos dois
+        radios de provider eliminados. O estado em si nao precisa mais ser
+        espelhado — `_current_llm_provider()` le `queue-div-main-llm` sob
+        demanda —, entao o que sobra aqui e o refresh do que e cache visual:
+        os tooltips dos botoes `output-mcp-action-*`.
+        """
+        del provider  # o valor canonico e relido do widget, nunca do signal
+        for btn in getattr(self, "_mcp_action_buttons", []) or []:
+            try:
+                action_id = str(btn.property("action_id") or "")
+                btn.setToolTip(self._mcp_action_tooltip(action_id))
+            except RuntimeError:
+                # widget ja destruido em rebuild: nada a atualizar
+                continue
+
+    def _get_brainstorm_runtime_provider(self) -> str:
+        """Getter canonico do provider runtime dos botoes de brainstorm (T7).
+
+        Deriva de `_current_llm_provider()` (queue-div-main-llm) e devolve o
+        nome CAPITALIZADO ("Claude"/"Kimi"/"Codex") que bate com o contrato
+        esperado por `MCPPromptButton._resolve_provider` para botoes
+        button_type=type-selector-radio-input (I2.2b: a traducao slug ->
+        rotulo continua sendo responsabilidade de _BRAINSTORM_PROVIDER_LABELS).
+        Default "Claude" em qualquer caminho degradado.
+        """
+        slug_norm = self._current_llm_provider()
         if slug_norm in _BRAINSTORM_PROVIDER_LABELS:
             return _BRAINSTORM_PROVIDER_LABELS[slug_norm]
         return "Claude"
 
-    def _on_brainstorm_type_changed(self, button, checked: bool) -> None:
-        """Slot do `_brainstorm_type_group.buttonToggled`.
+    def _collect_brainstorm_agent_specs(
+        self, seed_slugs: list[str], existing_testids: list[str]
+    ) -> tuple:
+        """Le a fonte unica de specs Brainstorm suplementares para a grade.
 
-        Atualiza `self._brainstorm_runtime_type` com o slug canonico
-        lowercase do provider (lido via property `provider_id`, NUNCA
-        via `button.text()` - hardening §1 da task-004 do loop
-        05-21-implantation-tasklist-aba-brainstorm). Guard clause
-        ignora a metade `checked=False` que o `buttonToggled` dispara
-        em cada troca (hardening §4).
+        Fonte unica: `workflow_app.agent_integration_specs` (registry literal em
+        codigo, editado por `/mcp:create-agent`). Nenhuma lista paralela aqui —
+        build inicial e rebuild pos-gear chamam ESTE metodo, e e isso que faz o
+        botao suplementar sobreviver ao save do modal de configuracao.
+
+        Fail-safe explicito: registry invalido, colisao de slug com um dos 24
+        seeds canonicos ou colisao de testid com um botao ja montado NAO derruba
+        a grade nem os seeds. A grade sobe sem suplementos e a causa vai para o
+        log com severidade warning (Zero Silencio).
+
+        `seed_slugs` sao os slugs dos seeds recem-carregados (prova a nao-colisao
+        exigida por `assert_no_seed_slug_collision`); `existing_testids` sao os
+        testids desta grade — os testids do build anterior nao contam, senao um
+        rebuild acusaria colisao consigo mesmo.
+
+        A carga fica DENTRO do guard porque `_BRAINSTORM_AGENT_SPECS` e um
+        literal de modulo validado no `__post_init__` de `BrainstormAgentSpec`:
+        registry malformado levanta na EXECUCAO do modulo. Captura larga aqui e
+        obrigatoria — a classe `AgentIntegrationSpecError` mora no modulo que
+        falhou, entao nao ha nome para um `except` estreito.
+
+        `_load_agent_registry` rele o arquivo quando ele muda em disco (finding
+        010 E-3): a spec que `/mcp:create-agent` acabou de gravar entra na grade
+        no rebuild seguinte (o do gear), sem reiniciar o app. O modulo usado fica em
+        `self._brainstorm_agent_registry` para que `_build_brainstorm_grid_buttons`
+        construa os kwargs com o MESMO objeto de onde as specs sairam — as
+        dataclasses do modulo relido sao classes distintas das cacheadas, e
+        misturar as duas origens quebraria o `isinstance` de
+        `brainstorm_button_kwargs`.
         """
-        if not checked:
+        self._brainstorm_agent_registry = None
+        try:
+            registry = MainWindow._load_agent_registry("brainstorm-buttons-grid")
+        except Exception as exc:
+            MainWindow._warn_agent_registry_degraded(
+                "brainstorm-buttons-grid",
+                "integracoes suplementares da grade brainstorm ignoradas",
+                f"falha ao importar o registry: {exc}",
+            )
+            return ()
+
+        try:
+            specs = registry.brainstorm_agent_specs()
+            registry.assert_no_seed_slug_collision(seed_slugs, brainstorm_specs=specs)
+            registry.assert_no_testid_collision(
+                existing_testids, mcp_specs=(), brainstorm_specs=specs
+            )
+        except registry.AgentIntegrationSpecError as exc:
+            MainWindow._warn_agent_registry_degraded(
+                "brainstorm-buttons-grid",
+                "integracoes suplementares da grade brainstorm ignoradas",
+                exc,
+            )
+            return ()
+        except AttributeError as exc:
+            # Registry recarregado sem a API esperada (edicao truncou o modulo).
+            MainWindow._warn_agent_registry_degraded(
+                "brainstorm-buttons-grid",
+                "integracoes suplementares da grade brainstorm ignoradas",
+                f"registry sem a API esperada: {exc}",
+            )
+            return ()
+        self._brainstorm_agent_registry = registry
+        return specs
+
+    def _make_brainstorm_prompt_button(self, **kwargs) -> MCPPromptButton:
+        """Instancia UM botao da grade brainstorm com a decoracao canonica.
+
+        Altura, largura minima e conexao do `prompt_requested` sao identicas
+        para seed e suplemento: e o que garante que um botao suplementar se
+        comporte como qualquer outro botao da grade.
+        """
+        btn = MCPPromptButton(
+            radio_state_getter=self._get_brainstorm_runtime_provider, **kwargs
+        )
+        btn.prompt_requested.connect(self._on_mcp_prompt_requested)
+        return btn
+
+    def _build_brainstorm_grid_buttons(
+        self, seeds: list[dict]
+    ) -> tuple[list[MCPPromptButton], list[MCPPromptButton]]:
+        """Fonte unica dos widgets da grade: seeds canonicos e depois suplementos.
+
+        Consumido IDENTICAMENTE por `_build_brainstorm_page()` (build inicial) e
+        `_rebuild_brainstorm_grid()` (save do gear). Devolve DUAS listas
+        separadas de proposito: `_brainstorm_mcp_btns` continua sendo exatamente
+        os 24 seeds canonicos (invariante de cardinalidade verificavel), e os
+        suplementos vivem em `_brainstorm_agent_btns`.
+
+        Politicas distintas por origem:
+        - seeds: atomic all-or-nothing. Qualquer falha destroi o que ja subiu e
+          RE-RAISE para o caller aplicar a politica de grade vazia + toast erro.
+        - suplementos: fail-safe. Uma spec ruim degrada para zero suplementos e
+          emite warning; os 24 seeds continuam de pe. Um agente opcional
+          malformado nunca derruba a grade canonica.
+        """
+        seed_buttons: list[MCPPromptButton] = []
+        try:
+            for seed in seeds:
+                target_terminal = (
+                    seed["target_terminal"] or "terminal-interactive-output"
+                )
+                # Codex exige terminal-codex-output (regra do widget).
+                if seed["button_type"] == "Codex":
+                    target_terminal = "terminal-codex-output"
+                seed_buttons.append(
+                    self._make_brainstorm_prompt_button(
+                        label=seed["label"],
+                        button_type=seed["button_type"],
+                        prompt=seed["seed_path"],
+                        agent_name=seed["agent_name"],
+                        agent_path=seed["agent_path"],
+                        action=seed["action"],
+                        target_path=target_terminal,
+                        testid_slug=seed["slug"],
+                        target_path_edit_inplace=seed["target_path_edit_inplace"],
+                    )
+                )
+        except Exception:
+            for widget in seed_buttons:
+                widget.deleteLater()
+            raise
+
+        specs = self._collect_brainstorm_agent_specs(
+            [str(seed["slug"]) for seed in seeds],
+            [str(btn.property("testid")) for btn in seed_buttons],
+        )
+        if not specs:
+            return seed_buttons, []
+
+        # O builder tem que sair do MESMO modulo que produziu as specs (ver
+        # `_collect_brainstorm_agent_specs`). Ausencia aqui e degradacao, nao
+        # excecao: sem builder nao ha suplemento, e os 24 seeds seguem de pe
+        # (finding 010 W-1 — antes, um registry sem esse simbolo derrubava a
+        # grade inteira por ImportError fora de qualquer guard).
+        registry = getattr(self, "_brainstorm_agent_registry", None)
+        brainstorm_button_kwargs = getattr(registry, "brainstorm_button_kwargs", None)
+        if brainstorm_button_kwargs is None:
+            MainWindow._warn_agent_registry_degraded(
+                "brainstorm-buttons-grid",
+                "integracoes suplementares da grade brainstorm ignoradas",
+                "registry sem brainstorm_button_kwargs",
+            )
+            return seed_buttons, []
+
+        agent_buttons: list[MCPPromptButton] = []
+        try:
+            for spec in specs:
+                kwargs = brainstorm_button_kwargs(
+                    spec, repo_root=self._systemforge_root()
+                )
+                agent_buttons.append(self._make_brainstorm_prompt_button(**kwargs))
+        except Exception as exc:  # noqa: BLE001
+            for widget in agent_buttons:
+                widget.deleteLater()
+            logger.warning(
+                "integracoes suplementares da grade brainstorm ignoradas: %s", exc
+            )
+            signal_bus.toast_requested.emit(
+                "Integracoes suplementares de agentes ignoradas na grade "
+                "brainstorm; os seeds canonicos seguem ativos.",
+                "warning",
+            )
+            return seed_buttons, []
+
+        return seed_buttons, agent_buttons
+
+    def _place_brainstorm_buttons(self, layout, buttons: list) -> None:
+        """Materializa os botoes da grade brainstorm no layout ativo.
+
+        Producao usa `ResponsiveButtonFlowLayout` (quebra por largura). Stubs
+        de teste (e qualquer caller legado) podem injetar um `QGridLayout` de
+        N colunas — nesse caso o posicionamento row-major e preservado.
+        """
+        if isinstance(layout, ResponsiveButtonFlowLayout):
+            for btn in buttons:
+                layout.addWidget(btn)
             return
-        provider_id = button.property("provider_id")
-        if provider_id in _BRAINSTORM_PROVIDER_SLUGS:
-            self._brainstorm_runtime_type = provider_id
+        cols = getattr(
+            self,
+            "_BRAINSTORM_GRID_COLUMNS",
+            MainWindow._BRAINSTORM_GRID_COLUMNS,
+        )
+        for i, btn in enumerate(buttons):
+            layout.addWidget(btn, i // cols, i % cols)
 
     def _build_brainstorm_page(self, q_file_dialog, q_grid_layout) -> QWidget:
         """Page da aba `brainstorm` da coluna MCP.
@@ -2567,9 +3245,7 @@ class MainWindow(QMainWindow):
         botao monta o prompt da persona e publica no terminal selecionado.
         """
         from PySide6.QtWidgets import (
-            QButtonGroup,
             QPushButton,
-            QRadioButton,
             QVBoxLayout,
         )
 
@@ -2582,7 +3258,6 @@ class MainWindow(QMainWindow):
         self._brainstorm_md_path: str | None = None
         md_btn = QPushButton("Selecionar .md")
         md_btn.setProperty("testid", "brainstorm-md-picker")
-        md_btn.setFixedHeight(24)
         md_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         md_btn.setToolTip(
             "Abrir e selecionar um arquivo .md para os botoes de brainstorm"
@@ -2590,7 +3265,7 @@ class MainWindow(QMainWindow):
         md_btn.setStyleSheet(
             "QPushButton { background-color: #27272A; color: #FBBF24;"
             "  border: 1px solid #FBBF24; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; padding: 0 10px; }"
+            "  font-size: 11px; font-weight: 700; padding: 1px 10px; }"
             "QPushButton:hover { background-color: #3F3F46; border-color: #FDE68A; }"
             "QPushButton:pressed { background-color: #FBBF24; color: #18181B; }"
         )
@@ -2683,12 +3358,12 @@ class MainWindow(QMainWindow):
         copy_md_path_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_md_path_btn.setToolTip("Copiar path do arquivo .md selecionado")
         copy_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "copy.svg"
-        copy_icon = self._load_tinted_svg_icon(copy_icon_path, "#FAFAFA")
-        if copy_icon is not None:
-            copy_md_path_btn.setIcon(copy_icon)
-            copy_md_path_btn.setIconSize(QSize(12, 12))
-        else:
-            copy_md_path_btn.setText("⎘")
+        # Centralizacao do icone (2026-07-20): QPushButton icon-only sob QSS
+        # com border+padding desloca o icone alguns px. O icone vai num QLabel
+        # filho AlignCenter ocupando os 24x24 inteiros — mesmo padrao ja
+        # provado em `_GearButton` — com WA_TransparentForMouseEvents para
+        # preservar o click-target do botao.
+        self._set_centered_svg_icon(copy_md_path_btn, copy_icon_path, 12, "⎘")
         copy_md_path_btn.setStyleSheet(_GEAR_QSS)
         copy_md_path_btn.clicked.connect(_copy_selected_md_path)
         self._brainstorm_md_copy_path_btn = copy_md_path_btn
@@ -2699,12 +3374,7 @@ class MainWindow(QMainWindow):
         eye_md_reader_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         eye_md_reader_btn.setToolTip("Abrir leitor/editor do arquivo .md selecionado")
         eye_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "eye.svg"
-        eye_icon = self._load_tinted_svg_icon(eye_icon_path, "#FAFAFA")
-        if eye_icon is not None:
-            eye_md_reader_btn.setIcon(eye_icon)
-            eye_md_reader_btn.setIconSize(QSize(13, 13))
-        else:
-            eye_md_reader_btn.setText("1:1")
+        self._set_centered_svg_icon(eye_md_reader_btn, eye_icon_path, 13, "1:1")
         eye_md_reader_btn.setStyleSheet(_GEAR_QSS)
         eye_md_reader_btn.clicked.connect(_open_selected_md_reader)
         self._brainstorm_md_reader_btn = eye_md_reader_btn
@@ -2738,104 +3408,15 @@ class MainWindow(QMainWindow):
         except (RuntimeError, TypeError):
             pass  # ja conectado em rebuild anterior - idempotente.
 
-        # Radio row dedicada de provider runtime (T3 do loop
-        # 05-21-implantation-tasklist-aba-brainstorm). Consumida por
-        # _on_mcp_prompt_requested apenas quando o botao clicado tem
-        # button_type=type-selector-radio-input. Botoes button_type fixo
-        # (Claude/Kimi/Codex) IGNORAM o radio. Source-of-truth via
-        # property `provider_id` (slug lowercase), NUNCA via button.text().
-        # Cleanup explicito de QButtonGroup antigo evita signals
-        # duplicados em rebuild (hardening §6).
-        existing_group = getattr(self, "_brainstorm_type_group", None)
-        if existing_group is not None:
-            try:
-                existing_group.buttonToggled.disconnect()
-            except (RuntimeError, TypeError):
-                pass
-            existing_group.deleteLater()
-            self._brainstorm_type_group = None
-
-        radio_row = QWidget()
-        radio_row.setObjectName("BrainstormProviderRow")
-        radio_row.setProperty("testid", "type-selector-radio-input")
-        radio_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        radio_row.setStyleSheet(
-            "QWidget#BrainstormProviderRow { background-color: #27272A;"
-            "  border: 1px solid #3F3F46; border-radius: 5px; }"
-        )
-        radio_row_layout = QHBoxLayout(radio_row)
-        radio_row_layout.setContentsMargins(8, 0, 8, 0)
-        radio_row_layout.setSpacing(8)
-        radio_row.setFixedHeight(26)
-
-        rb_claude = QRadioButton("Claude")
-        rb_kimi = QRadioButton("Kimi")
-        rb_codex = QRadioButton("Codex")
-
-        codex_available = self._codex_terminal_available()
-        # Cache do estado de T3 para emit cross-widget apos a montagem do
-        # radio (T7 task-008): MCPPromptButton instancias antigas sincronizam
-        # via signal codex_availability_changed.
-        self._brainstorm_codex_available = codex_available
-        radio_specs = (
-            (rb_claude, "claude", "Selecionar provedor Claude", True),
-            (rb_kimi, "kimi", "Selecionar provedor Kimi", True),
-            # Codex sempre selecionavel no radio: fallback de runtime
-            # garante T3->T2 quando o xterm nao estiver disponivel.
-            (rb_codex, "codex", "Selecionar provedor Codex", True),
-        )
-
-        self._brainstorm_type_group = QButtonGroup(self)
-        self._brainstorm_type_group.setExclusive(True)
-
-        for rb, provider_id, accessible_name, enabled in radio_specs:
-            rb.setProperty("provider_id", provider_id)
-            rb.setProperty("testid", f"type-selector-radio-{provider_id}")
-            rb.setAccessibleName(accessible_name)
-            rb.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            rb.setStyleSheet(
-                "QRadioButton { color: #FAFAFA; font-size: 11px;"
-                "  font-weight: 600; background: transparent; border: none; }"
-                "QRadioButton::indicator { width: 12px; height: 12px; }"
-                "QRadioButton::indicator:unchecked { background-color: #18181B;"
-                "  border: 1px solid #52525B; border-radius: 6px; }"
-                "QRadioButton::indicator:checked { background-color: #FBBF24;"
-                "  border: 1px solid #FBBF24; border-radius: 6px; }"
-                "QRadioButton::indicator:hover { border-color: #FDE68A; }"
-                "QRadioButton:disabled { color: #52525B; }"
-                "QRadioButton::indicator:disabled { background-color: #27272A;"
-                "  border-color: #3F3F46; }"
-            )
-            rb.setEnabled(enabled)
-            self._brainstorm_type_group.addButton(rb)
-            radio_row_layout.addWidget(rb)
-
-        if not codex_available:
-            rb_codex.setToolTip(
-                "Terminal Codex (T3) indisponivel no momento: envios Codex "
-                "farao fallback automatico para T2."
-            )
-
-        radio_row_layout.addStretch(1)
-
-        # Ordem de sinais (hardening §5): conectar slot ANTES do setChecked
-        # inicial, mas com blockSignals para nao disparar callback espurio.
-        self._brainstorm_type_group.buttonToggled.connect(
-            self._on_brainstorm_type_changed
-        )
-        rb_claude.blockSignals(True)
-        rb_claude.setChecked(True)
-        rb_claude.blockSignals(False)
-        # Inicializacao deterministica do atributo runtime (hardening §3):
-        # garante valor canonico mesmo se buttonToggled nao disparar.
-        self._brainstorm_runtime_type = "claude"
-
-        # radio_row NAO entra mais em page_layout: e reparenteado para o
-        # queue-div-llm-routing (linha 1 da OutputToolbar) via
-        # append_llm_routing_section, com label 'brainstorm'. Ref guardada para
-        # o MainWindow dobrar apos o build do bottom row. O radio_state_getter
-        # (self._brainstorm_runtime_type) e os signals seguem intactos.
-        self._brainstorm_type_selector_row = radio_row
+        # Provider runtime dos botoes button_type=type-selector-radio-input
+        # deixou de ter radio proprio (07-27-workflow-app-header-toggles-llm-unico,
+        # I2.1): a fonte de verdade unica passou a ser `queue-div-main-llm`, lida
+        # sob demanda por `_current_llm_provider()`.
+        #
+        # Cache do estado de T3 para emit cross-widget apos a montagem da grade
+        # (T7 task-008): MCPPromptButton instancias antigas sincronizam via
+        # signal codex_availability_changed.
+        self._brainstorm_codex_available = self._codex_terminal_available()
 
         # Grade seed-driven (T2 loop 05-21-implantation-tasklist-aba-brainstorm).
         # 1 MCPPromptButton por seed em blacksmith/brainstorm-mcp/NN-*.md,
@@ -2848,12 +3429,26 @@ class MainWindow(QMainWindow):
             "QWidget#BrainstormGrid { background-color: #18181B;"
             "  border: 1px solid #3F3F46; border-radius: 5px; }"
         )
-        grid = q_grid_layout(grid_widget)
+        # Refactor 07-27: a grade de N colunas fixas virou flow responsivo —
+        # cada botao com a largura do proprio label, quebra por largura da
+        # janela e gap vertical de 1px. `q_grid_layout` continua no contrato
+        # do metodo (stubs de teste injetam QGridLayout e o rebuild aceita os
+        # dois tipos), mas a producao monta sempre o flow.
+        grid = ResponsiveButtonFlowLayout(
+            grid_widget, spacing=4, v_spacing=1, max_lines=None
+        )
         grid.setContentsMargins(6, 6, 6, 6)
-        grid.setHorizontalSpacing(4)
-        grid.setVerticalSpacing(4)
+        _enable_height_for_width(grid_widget)
+        # Cache refs para rebuild via _rebuild_brainstorm_grid (T4 hardening §9).
+        # Cacheado AQUI, antes dos dois early returns de falha abaixo: se o build
+        # inicial aborta (seed invalido ou builder quebrado), a grade sobe vazia
+        # mas o layout continua reconstruivel pelo gear. Cachear so no caminho
+        # feliz deixava `_rebuild_brainstorm_grid` sem layout e sem recuperacao.
+        self._brainstorm_grid_widget = grid_widget
+        self._brainstorm_grid_layout = grid
 
         self._brainstorm_mcp_btns = []
+        self._brainstorm_agent_btns = []
         try:
             seeds = self._load_brainstorm_seeds()
         except _BrainstormSeedError as exc:
@@ -2865,35 +3460,11 @@ class MainWindow(QMainWindow):
             page_layout.addStretch(1)
             return page
 
-        # Atomic widget construction: ou os 24 sobem, ou nenhum.
-        built: list[MCPPromptButton] = []
+        # Atomic widget construction: ou os 24 sobem, ou nenhum. Suplementos
+        # (AGENT-TASK-008) vem DEPOIS dos seeds, pelo mesmo builder do rebuild.
         try:
-            for seed in seeds:
-                target_terminal = (
-                    seed["target_terminal"] or "terminal-interactive-output"
-                )
-                # Codex exige terminal-codex-output (regra do widget).
-                if seed["button_type"] == "Codex":
-                    target_terminal = "terminal-codex-output"
-                btn = MCPPromptButton(
-                    label=seed["label"],
-                    button_type=seed["button_type"],
-                    prompt=seed["seed_path"],
-                    agent_name=seed["agent_name"],
-                    agent_path=seed["agent_path"],
-                    action=seed["action"],
-                    target_path=target_terminal,
-                    testid_slug=seed["slug"],
-                    target_path_edit_inplace=seed["target_path_edit_inplace"],
-                    radio_state_getter=self._get_brainstorm_runtime_provider,
-                )
-                btn.setFixedHeight(22)
-                btn.setMinimumWidth(60)
-                btn.prompt_requested.connect(self._on_mcp_prompt_requested)
-                built.append(btn)
+            built, agent_built = self._build_brainstorm_grid_buttons(seeds)
         except Exception as exc:  # noqa: BLE001
-            for w in built:
-                w.deleteLater()
             signal_bus.toast_requested.emit(
                 f"Grade brainstorm falhou: {exc}",
                 "error",
@@ -2902,17 +3473,9 @@ class MainWindow(QMainWindow):
             page_layout.addStretch(1)
             return page
 
-        cols = getattr(
-            self,
-            "_BRAINSTORM_GRID_COLUMNS",
-            MainWindow._BRAINSTORM_GRID_COLUMNS,
-        )
-        for i, btn in enumerate(built):
-            grid.addWidget(btn, i // cols, i % cols)
+        self._place_brainstorm_buttons(grid, built + agent_built)
         self._brainstorm_mcp_btns = built
-        # Cache refs para rebuild via _rebuild_brainstorm_grid (T4 hardening §9).
-        self._brainstorm_grid_widget = grid_widget
-        self._brainstorm_grid_layout = grid
+        self._brainstorm_agent_btns = agent_built
 
         page_layout.addWidget(grid_widget)
         page_layout.addStretch(1)
@@ -2991,23 +3554,54 @@ class MainWindow(QMainWindow):
         (mesma politica do build inicial em `_build_brainstorm_page`).
         Desconecta signals e chama `deleteLater()` em cada botao antigo
         para evitar slots disparando em widgets em destruicao.
+
+        Os suplementos de `agent_integration_specs` (AGENT-TASK-008) entram no
+        mesmo teardown e no mesmo builder do build inicial: salvar o gear nao
+        remove nem duplica um botao suplementar, porque ele nao depende de
+        estado de widget — e relido do registry a cada materializacao.
         """
         grid = getattr(self, "_brainstorm_grid_layout", None)
         if grid is None:
+            # Zero Silencio: sem layout cacheado nao ha o que reconstruir, e o
+            # operador precisa saber que salvar o gear nao teve efeito. Ocorre
+            # se a aba brainstorm nunca foi montada nesta sessao.
+            logger.error(
+                "brainstorm_grid_rebuild_no_layout: "
+                "_brainstorm_grid_layout ausente, rebuild abortado",
+            )
+            signal_bus.toast_requested.emit(
+                "Grade brainstorm nao pode ser reconstruida: layout indisponivel. "
+                "Reabra a aba Brainstorm e salve novamente.",
+                "error",
+            )
             return
 
-        # 1) Tear down dos botoes antigos.
-        for btn in list(getattr(self, "_brainstorm_mcp_btns", []) or []):
+        # 1) Tear down dos botoes antigos (seeds + suplementos: um suplemento
+        # sobrevivente viraria duplicata do recriado no passo 3).
+        for btn in list(getattr(self, "_brainstorm_mcp_btns", []) or []) + list(
+            getattr(self, "_brainstorm_agent_btns", []) or []
+        ):
             try:
                 btn.prompt_requested.disconnect(self._on_mcp_prompt_requested)
             except (RuntimeError, TypeError):
                 pass
             try:
                 grid.removeWidget(btn)
+            except RuntimeError:
+                # Widget ja destruido pelo Qt: teardown benigno, o deleteLater
+                # abaixo e no-op. Registrado para nao virar silencio total.
+                logger.debug(
+                    "brainstorm_grid_remove_widget_deleted",
+                    exc_info=True,
+                )
             except Exception:  # noqa: BLE001
-                pass
+                # Zero Silencio: qualquer outra falha aqui pode deixar a grade
+                # em estado divergente (botao orfao no layout). Preserva o
+                # diagnostico em vez de engolir.
+                logger.exception("brainstorm_grid_remove_widget_failed")
             btn.deleteLater()
         self._brainstorm_mcp_btns = []
+        self._brainstorm_agent_btns = []
 
         # 2) Reload seeds (fail-fast all-or-nothing).
         try:
@@ -3019,47 +3613,19 @@ class MainWindow(QMainWindow):
             )
             return
 
-        built: list[MCPPromptButton] = []
+        # 3) Mesmo builder do build inicial (fonte unica de widgets).
         try:
-            for seed in seeds:
-                target_terminal = (
-                    seed["target_terminal"] or "terminal-interactive-output"
-                )
-                if seed["button_type"] == "Codex":
-                    target_terminal = "terminal-codex-output"
-                btn = MCPPromptButton(
-                    label=seed["label"],
-                    button_type=seed["button_type"],
-                    prompt=seed["seed_path"],
-                    agent_name=seed["agent_name"],
-                    agent_path=seed["agent_path"],
-                    action=seed["action"],
-                    target_path=target_terminal,
-                    testid_slug=seed["slug"],
-                    target_path_edit_inplace=seed["target_path_edit_inplace"],
-                    radio_state_getter=self._get_brainstorm_runtime_provider,
-                )
-                btn.setFixedHeight(22)
-                btn.setMinimumWidth(60)
-                btn.prompt_requested.connect(self._on_mcp_prompt_requested)
-                built.append(btn)
+            built, agent_built = self._build_brainstorm_grid_buttons(seeds)
         except Exception as exc:  # noqa: BLE001
-            for w in built:
-                w.deleteLater()
             signal_bus.toast_requested.emit(
                 f"Grade brainstorm falhou apos save: {exc}",
                 "error",
             )
             return
 
-        cols = getattr(
-            self,
-            "_BRAINSTORM_GRID_COLUMNS",
-            MainWindow._BRAINSTORM_GRID_COLUMNS,
-        )
-        for i, btn in enumerate(built):
-            grid.addWidget(btn, i // cols, i % cols)
+        self._place_brainstorm_buttons(grid, built + agent_built)
         self._brainstorm_mcp_btns = built
+        self._brainstorm_agent_btns = agent_built
         # T7 (task-008): publica estado de T3 apos rebuild para resync de
         # cache em botoes Codex fixos recem-criados.
         signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
@@ -3101,15 +3667,12 @@ class MainWindow(QMainWindow):
             button_type = str(payload.get("button_type", "Claude"))
 
             # Runtime resolution: button_type=type-selector-radio-input
-            # consulta self._brainstorm_runtime_type instalado pelo radio
-            # de T3. Snapshot local imediato (hardening §9 da task-004 do
-            # loop 05-21-implantation-tasklist-aba-brainstorm) protege
-            # contra mutacao concorrente durante a montagem do prompt.
+            # consulta o Main LLM (queue-div-main-llm) via
+            # _current_llm_provider(). Snapshot local imediato (hardening §9
+            # da task-004 do loop 05-21-implantation-tasklist-aba-brainstorm)
+            # protege contra mutacao concorrente durante a montagem do prompt.
             if button_type == "type-selector-radio-input":
-                runtime_snapshot = getattr(
-                    self, "_brainstorm_runtime_type", "claude"
-                ) or "claude"
-                resolved_slug = str(runtime_snapshot).lower()
+                resolved_slug = self._current_llm_provider()
             else:
                 resolved_slug = str(button_type).lower()
 
@@ -3266,7 +3829,8 @@ class MainWindow(QMainWindow):
         incondicionalmente (semantica historica preservada).
 
         Espelha o mapping de `_publish_to_terminal` sem consultar os
-        checkboxes `terminal-route-toggles`:
+        checkboxes de rota (`terminal-route-t1/t2/t3`, hoje nos headers dos
+        proprios terminais):
         - 1 -> terminal-interactive (pyte) via paste_text_in_terminal.
         - 2 -> terminal-workspace (pyte) via paste_text_in_workspace_terminal.
         - 3 -> terminal-codex-output (pyte) via _xterm_inject_text (retorna bool).
@@ -3662,7 +4226,7 @@ class MainWindow(QMainWindow):
     def _send_testid_probe_to_selected_terminal(self, testid: str) -> None:
         """Envia `data-testid="..."` + backspace para o(s) terminal(is) roteado(s).
 
-        Reusa `_publish_to_terminal` para respeitar `terminal-route-toggles`
+        Reusa `_publish_to_terminal` para respeitar os checkboxes de rota
         e transferir foco para o terminal com prioridade configurada.
         """
         payload = f'data-testid="{testid}"\x08'
@@ -3809,12 +4373,112 @@ class MainWindow(QMainWindow):
             text = text[:217].rstrip() + "..."
         return text
 
+    # Prompts cujo .md depende de artefatos que so existem no estado do app no
+    # momento do clique (anexos/pickers). O terminal nao enxerga a UI, entao
+    # esses paths precisam viajar dentro do texto colado. Chave = basename do
+    # .md, nao o testid: o testid deriva do label, que o usuario pode renomear
+    # pela engrenagem; o basename e estavel.
+    _PROMPT_CONTEXT_RESOLVERS: dict[str, str] = {
+        "plan-vs-loop-coverage.md": "_prompt_context_plan_vs_loop_coverage",
+    }
+
+    def _prompt_context_plan_vs_loop_coverage(self) -> str | None:
+        """Contexto runtime de `plan-vs-loop-coverage.md`.
+
+        A FASE 0 desse prompt exige EXCLUSIVAMENTE dois artefatos da UI: o
+        `_LOOP-CONFIG.json` do anexo loop (attachments-loop-row /
+        metrics-loop-pill) e o `.md` do plano aberto em
+        `brainstorm-md-picker-row`. O proprio prompt PROIBE varrer
+        `blacksmith/loop-archives/` ou `blacksmith/brainstorm-mcp/` atras do
+        "mais recente" (pega arquivo de outra instancia), entao sem os paths
+        inline a auditoria so podia parar e perguntar. Aqui resolvemos os dois
+        no clique e devolvemos uma linha unica de contexto.
+
+        Retorna None (com toast, Zero Silencio) quando falta qualquer um dos
+        dois, em vez de colar um prompt que vai encalhar na FASE 0. Bloquear e
+        deliberado: a FASE 4 despacha agentes que ESCREVEM em `{loop_dir}/tasks/`
+        e a FASE 5 grava `_COVERAGE-AUDIT.md`; com um artefato ausente o risco
+        nao e parar tarde, e escrever no loop de outra instancia.
+
+        Injeta exatamente os DOIS valores irredutiveis. `loop_dir`, `loop_slug`
+        e `progress_path` sao derivacao pura do JSON apontado e ficam de fora de
+        proposito: duplicar o mesmo dado em duas fontes e a classe de defeito
+        que quebrou o botao Loop (duas bases resolvendo o mesmo path).
+
+        Paths absolutos, nunca repo-relativos: o mesmo payload pode ir para
+        T1/T2/T3 com texto identico e o cwd de cada terminal e mutavel pelos
+        botoes da label bar do workspace.
+        """
+        loop_cfg = self._command_queue._resolve_loop_attachment_config()
+        md_path = (getattr(self, "_brainstorm_md_path", None) or "").strip()
+
+        if loop_cfg is None and not md_path:
+            signal_bus.toast_requested.emit(
+                "Auditoria plano vs loop precisa dos dois anexos. Carregue o "
+                "_LOOP-CONFIG.json pelo botao Loop e selecione o .md do plano "
+                "no botao Selecionar .md.",
+                "warning",
+            )
+            return None
+        if loop_cfg is None:
+            signal_bus.toast_requested.emit(
+                "Carregue o _LOOP-CONFIG.json do loop pelo botao Loop, em "
+                "metrics-loop-pill, antes de auditar.",
+                "warning",
+            )
+            return None
+        if not md_path:
+            signal_bus.toast_requested.emit(
+                "Selecione o .md do plano no botao Selecionar .md, em "
+                "brainstorm-md-picker-row, antes de auditar.",
+                "warning",
+            )
+            return None
+
+        plan_md = Path(md_path).resolve(strict=False)
+        if not plan_md.is_file():
+            signal_bus.toast_requested.emit(
+                f"O .md do plano nao existe mais em disco: {plan_md}", "warning",
+            )
+            return None
+
+        loop_config_path = Path(loop_cfg.config_path).resolve(strict=False)
+        if not loop_config_path.is_file():
+            signal_bus.toast_requested.emit(
+                f"O _LOOP-CONFIG.json anexado nao existe mais em disco: "
+                f"{loop_config_path}",
+                "warning",
+            )
+            return None
+
+        # Confirmacao no caminho feliz: sem ela o operador so descobre que
+        # auditou o loop errado (anexo velho) depois de gastar a rodada.
+        signal_bus.toast_requested.emit(
+            f"Prompt publicado com contexto: loop {loop_config_path.parent.name}, "
+            f"plano {plan_md.name}.",
+            "info",
+        )
+
+        # Chaves espelham o vocabulario da FASE 0 do .md.
+        return (
+            "CONTEXTO RUNTIME (workflow-app, capturado no clique): resolucao "
+            "autoritativa da FASE 0, nao procure outros arquivos em disco. "
+            f"metrics_loop_pill_json={loop_config_path}; "
+            f"brainstorm_md_picker_row={plan_md}"
+        )
+
     def _on_prompt_btn_clicked(self, idx: int) -> None:
         """Handler dos botoes da sub-aba prompts.
 
         Constroi a mensagem como "<base_prompt> <path>" e publica no terminal
         alvo (T1/T2) via _publish_to_terminal. NAO le o conteudo do .md —
         o Claude na outra ponta e quem le.
+
+        Prompts registrados em `_PROMPT_CONTEXT_RESOLVERS` ganham um sufixo de
+        contexto runtime na MESMA linha (bracketed paste nao garante seguranca
+        de payload multi-linha em shell nu). Se o resolver nao conseguir montar
+        o contexto, ele avisa e o clique vira no-op: melhor nao colar do que
+        colar um prompt que trava na primeira fase.
         """
         if idx >= len(self._prompt_entries):
             return
@@ -3840,7 +4504,16 @@ class MainWindow(QMainWindow):
                 f"Arquivo de prompt nao encontrado: {path}", "warning",
             )
             return
-        msg = f"{self._prompt_base} {path}"
+
+        suffix = ""
+        resolver_name = self._PROMPT_CONTEXT_RESOLVERS.get(_os.path.basename(path))
+        if resolver_name:
+            context = getattr(self, resolver_name)()
+            if context is None:
+                return  # resolver ja emitiu o toast do que falta
+            suffix = f" {context}"
+
+        msg = f"{self._prompt_base} {path}{suffix}"
         self._publish_to_terminal(msg)
 
     def _resolve_repo_rules_dir(self) -> str | None:
@@ -3913,14 +4586,12 @@ class MainWindow(QMainWindow):
             b.setProperty("testid", testid)
             b.setProperty("prompt_category", category)
             b.setProperty("prompt_description", description)
-            b.setFixedHeight(32)
-            b.setMinimumWidth(70)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(description)
             b.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {hover}; }}"
             )
@@ -3970,15 +4641,13 @@ class MainWindow(QMainWindow):
         )
         _exec_tasks_btn.setProperty("prompt_category", "Build")
         _exec_tasks_btn.setProperty("prompt_description", _exec_tasks_desc)
-        _exec_tasks_btn.setFixedHeight(32)
-        _exec_tasks_btn.setMinimumWidth(90)
         _exec_tasks_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _exec_tasks_btn.setToolTip(_exec_tasks_desc)
         _PromptTooltipFilter(_exec_tasks_btn, _exec_tasks_desc, _exec_tasks_btn)
         _exec_tasks_btn.setStyleSheet(
             "QPushButton { background-color: #16A34A; color: #FAFAFA;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
             "QPushButton:hover { background-color: #15803D; }"
             "QPushButton:pressed { background-color: #166534; }"
         )
@@ -4000,15 +4669,13 @@ class MainWindow(QMainWindow):
         )
         _reviewer_btn.setProperty("prompt_category", "Review")
         _reviewer_btn.setProperty("prompt_description", _reviewer_desc)
-        _reviewer_btn.setFixedHeight(32)
-        _reviewer_btn.setMinimumWidth(90)
         _reviewer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _reviewer_btn.setToolTip(_reviewer_desc)
         _PromptTooltipFilter(_reviewer_btn, _reviewer_desc, _reviewer_btn)
         _reviewer_btn.setStyleSheet(
             "QPushButton { background-color: #7C3AED; color: #FAFAFA;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
             "QPushButton:hover { background-color: #6D28D9; }"
             "QPushButton:pressed { background-color: #5B21B6; }"
         )
@@ -4028,15 +4695,13 @@ class MainWindow(QMainWindow):
         )
         _create_rule_btn.setProperty("prompt_category", "Ops")
         _create_rule_btn.setProperty("prompt_description", _create_rule_desc)
-        _create_rule_btn.setFixedHeight(32)
-        _create_rule_btn.setMinimumWidth(90)
         _create_rule_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _create_rule_btn.setToolTip(_create_rule_desc)
         _PromptTooltipFilter(_create_rule_btn, _create_rule_desc, _create_rule_btn)
         _create_rule_btn.setStyleSheet(
             "QPushButton { background-color: #0891B2; color: #FAFAFA;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
             "QPushButton:hover { background-color: #0E7490; }"
             "QPushButton:pressed { background-color: #155E75; }"
         )
@@ -4046,8 +4711,6 @@ class MainWindow(QMainWindow):
         # Botao especial para criar novos prompts seguindo as regras
         _add_btn = QPushButton("+ Add prompt")
         _add_btn.setProperty("testid", "queue-btn-add-prompt")
-        _add_btn.setFixedHeight(32)
-        _add_btn.setMinimumWidth(90)
         _add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _add_prompt_desc = (
             "Envia meta-prompt ao terminal guiando a criacao de um novo prompt\n"
@@ -4060,7 +4723,7 @@ class MainWindow(QMainWindow):
         _add_btn.setStyleSheet(
             "QPushButton { background-color: #18181B; color: #A1A1AA;"
             "  border: 1px dashed #52525B; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; padding: 0 8px; }"
+            "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
             "QPushButton:hover { background-color: #27272A; border-color: #71717A;"
             "  color: #FAFAFA; }"
             "QPushButton:pressed { background-color: #3F3F46; }"
@@ -4273,51 +4936,184 @@ class MainWindow(QMainWindow):
         if getattr(self, "_t3_visible", False):
             self._xterm_inject_text(text, with_enter=with_enter)
 
+    def _paste_text_to_t1(self, text: str) -> None:
+        """Paste into interactive terminal (T1). Thin hook for report/tests."""
+        signal_bus.paste_text_in_terminal.emit(text)
+
+    def _paste_text_to_t2(self, text: str) -> None:
+        """Paste into workspace terminal (T2). Thin hook for report/tests."""
+        signal_bus.paste_text_in_workspace_terminal.emit(text)
+
+    def _capture_terminal_route_snapshot(self) -> TerminalRouteSnapshot:
+        """Read `terminal-route-t1/t2/t3` + Notes once into an immutable snapshot.
+
+        Defaults match historical `_publish_to_terminal` widget-fallback
+        semantics when a checkbox attribute is missing (T1=True, rest False).
+        """
+        t1 = (
+            bool(self._chk_route_t1.isChecked())
+            if hasattr(self, "_chk_route_t1")
+            else True
+        )
+        t2 = (
+            bool(self._chk_route_t2.isChecked())
+            if hasattr(self, "_chk_route_t2")
+            else False
+        )
+        t3 = (
+            bool(self._chk_route_t3.isChecked())
+            if hasattr(self, "_chk_route_t3")
+            else False
+        )
+        n1 = (
+            bool(self._chk_notes_t1.isChecked())
+            if hasattr(self, "_chk_notes_t1")
+            else False
+        )
+        return TerminalRouteSnapshot(t1=t1, t2=t2, t3=t3, notes_t1=n1)
+
+    def _publish_to_terminal_report(
+        self,
+        text: str,
+        snapshot: TerminalRouteSnapshot,
+    ) -> TerminalPublishReport:
+        """Publish `text` using an immutable route snapshot (never re-reads UI).
+
+        Returns a typed report. Does not send Enter. No silent cross-route
+        fallback: T3 failure does not redirect to T1/T2.
+
+        Legacy silent no-op when no T1/T2/T3 is requested (empty report).
+        Callers that need an explicit error (e.g. CreateAgentDialog) must
+        pre-check ``snapshot.has_any_terminal_route()``.
+        """
+        requested = snapshot.requested_destinations()
+        if not requested:
+            return TerminalPublishReport()
+
+        accepted: list[str] = []
+        failed: list[str] = []
+        notes_copied: list[str] = []
+        errors: list[str] = []
+
+        # Notes: single clipboard copy for all applicable Notes destinations.
+        notes_targets: list[str] = []
+        if snapshot.t1 and snapshot.notes_t1:
+            notes_targets.append("T1")
+        # T2 nao tem mais destino Notes (checkbox `terminal-notes-t2`
+        # eliminado em 07-27-workflow-app-header-toggles-llm-unico, I1.3).
+
+        if notes_targets:
+            try:
+                clip = QApplication.clipboard()
+                clip.setText(text)
+                if clip.text() == text:
+                    notes_copied.extend(notes_targets)
+                    for dest in notes_targets:
+                        if dest not in accepted:
+                            accepted.append(dest)
+                    _notes_label = " + ".join(notes_targets)
+                    signal_bus.toast_requested.emit(
+                        f"Notas ({_notes_label}): texto copiado para clipboard.",
+                        "info",
+                    )
+                else:
+                    for dest in notes_targets:
+                        if dest not in failed:
+                            failed.append(dest)
+                    errors.append("clipboard_verify_failed")
+            except Exception:
+                logger.exception("terminal_publish_notes_clipboard_failed")
+                for dest in notes_targets:
+                    if dest not in failed:
+                        failed.append(dest)
+                errors.append("clipboard_exception")
+
+        # Direct terminal routes (Notes destinations skip terminal paste).
+        # Paste/inject via thin helpers so tests can isolate exceptions without
+        # monkeypatching read-only SignalInstance.emit. Focus is applied once
+        # after all destinations (priority T1 > T2 > T3).
+        direct_t1 = bool(snapshot.t1 and not snapshot.notes_t1)
+        direct_t2 = bool(snapshot.t2)
+        direct_t3 = bool(snapshot.t3)
+
+        if direct_t1:
+            try:
+                self._paste_text_to_t1(text)
+                if "T1" not in accepted:
+                    accepted.append("T1")
+            except Exception:
+                logger.exception("terminal_publish_t1_failed")
+                if "T1" not in failed:
+                    failed.append("T1")
+                errors.append("t1_exception")
+
+        if direct_t2:
+            try:
+                self._paste_text_to_t2(text)
+                if "T2" not in accepted:
+                    accepted.append("T2")
+            except Exception:
+                logger.exception("terminal_publish_t2_failed")
+                if "T2" not in failed:
+                    failed.append("T2")
+                errors.append("t2_exception")
+
+        if direct_t3:
+            try:
+                ok = self._xterm_inject_text(text, with_enter=False)
+                if ok:
+                    if "T3" not in accepted:
+                        accepted.append("T3")
+                else:
+                    if "T3" not in failed:
+                        failed.append("T3")
+                    errors.append("t3_publish_failed")
+            except Exception:
+                logger.exception("terminal_publish_t3_failed")
+                if "T3" not in failed:
+                    failed.append("T3")
+                errors.append("t3_exception")
+
+        # Focus priority: T1 > T2 > T3 (direct routes only; Notes do not focus).
+        # Focus is a cosmetic effect that runs AFTER the paste already happened.
+        # It must never raise out of this method: the caller treats an exception
+        # as "nothing left the dispatcher" and releases the publish guard, which
+        # would allow a second publish of an already-pasted prompt.
+        try:
+            if direct_t1 and "T1" in accepted:
+                signal_bus.focus_interactive_terminal.emit()
+            elif direct_t2 and "T2" in accepted:
+                try:
+                    self._workspace_panel._terminal.setFocus()
+                except AttributeError:
+                    pass
+            elif direct_t3 and "T3" in accepted and hasattr(self, "_workspace_panel_xterm"):
+                try:
+                    self._workspace_panel_xterm._terminal.setFocus()
+                except AttributeError:
+                    pass
+        except Exception:
+            logger.exception("terminal_publish_focus_failed")
+            errors.append("focus_exception")
+
+        return TerminalPublishReport(
+            requested=requested,
+            accepted=tuple(accepted),
+            failed=tuple(failed),
+            notes_copied=tuple(notes_copied),
+            errors=tuple(errors),
+        )
+
     def _publish_to_terminal(self, text: str) -> None:
         """Roteia `text` conforme estado dos checkboxes T1/T2/T3 e Notes T1/T2.
 
-        Eixo terminal (linha 1): T1/T2/T3 publicam diretamente nos terminais.
-        Eixo notes   (linha 2): Notes T1/T2 desviam o texto para o clipboard
-        em vez de publicar no terminal, para edicao qualificada antes do envio.
-
-        Nenhum marcado = no-op silencioso (Zero Estados Indefinidos).
+        API legada (retorna None). Delega para ``_publish_to_terminal_report``
+        com um snapshot capturado no momento da chamada. Nenhum marcado =
+        no-op silencioso (Zero Estados Indefinidos) — chamadores do modal
+        de criacao de agente devem pré-checar e emitir warning explicitamente.
         """
-        t1 = bool(self._chk_route_t1.isChecked()) if hasattr(self, "_chk_route_t1") else True
-        t2 = bool(self._chk_route_t2.isChecked()) if hasattr(self, "_chk_route_t2") else False
-        t3 = bool(self._chk_route_t3.isChecked()) if hasattr(self, "_chk_route_t3") else False
-        n1 = bool(self._chk_notes_t1.isChecked()) if hasattr(self, "_chk_notes_t1") else False
-        n2 = bool(self._chk_notes_t2.isChecked()) if hasattr(self, "_chk_notes_t2") else False
-        if not (t1 or t2 or t3):
-            return
-        # Notes: copia para clipboard em vez de publicar no terminal.
-        if (t1 and n1) or (t2 and n2):
-            from PySide6.QtWidgets import QApplication as _QApp
-            _QApp.clipboard().setText(text)
-            _notes_label = " + ".join(
-                filter(None, ["T1" if (t1 and n1) else "", "T2" if (t2 and n2) else ""])
-            )
-            signal_bus.toast_requested.emit(
-                f"Notas ({_notes_label}): texto copiado para clipboard.", "info"
-            )
-        if t1 and not n1:
-            signal_bus.paste_text_in_terminal.emit(text)
-        if t2 and not n2:
-            signal_bus.paste_text_in_workspace_terminal.emit(text)
-        if t3:
-            self._xterm_inject_text(text, with_enter=False)
-        # Focus priority: T1 > T2 > T3 (apenas para roteamento direto ao terminal).
-        if t1 and not n1:
-            signal_bus.focus_interactive_terminal.emit()
-        elif t2 and not n2:
-            try:
-                self._workspace_panel._terminal.setFocus()
-            except AttributeError:
-                pass
-        elif t3 and hasattr(self, "_workspace_panel_xterm"):
-            try:
-                self._workspace_panel_xterm._terminal.setFocus()
-            except AttributeError:
-                pass
+        snapshot = self._capture_terminal_route_snapshot()
+        self._publish_to_terminal_report(text, snapshot)
 
     def _publish_insertion_llm_aware(self, text: str) -> bool:
         """Publica uma insercao LLM-aware: renderiza o payload para o LLM de
@@ -4351,18 +5147,14 @@ class MainWindow(QMainWindow):
         t2 = bool(self._chk_route_t2.isChecked()) if hasattr(self, "_chk_route_t2") else False
         t3 = bool(self._chk_route_t3.isChecked()) if hasattr(self, "_chk_route_t3") else False
         n1 = bool(self._chk_notes_t1.isChecked()) if hasattr(self, "_chk_notes_t1") else False
-        n2 = bool(self._chk_notes_t2.isChecked()) if hasattr(self, "_chk_notes_t2") else False
         if not (t1 or t2 or t3):
             return False  # nenhum destino -> no-op (igual _publish_to_terminal)
 
-        # Notes D6 (§10): Notes T1 + Notes T2 simultaneos para payload LLM-especifico
-        # -> abort com toast. (No corte Phase-1 isto tambem cai na guarda de fan-out
-        # abaixo, ja que exige T2 marcado; mantido explicito para a regra valer.)
-        if t1 and t2 and n1 and n2:
-            signal_bus.toast_requested.emit(
-                "Notes multiplo nao suportado para payload LLM-especifico.", "warning",
-            )
-            return False
+        # A guarda "Notes multiplo" (D6 do 06-15) foi removida em
+        # 07-27-workflow-app-header-toggles-llm-unico (I1.3): com o checkbox
+        # `terminal-notes-t2` eliminado, `t1 and t2 and n1 and n2` era
+        # inalcancavel. O caso T2 marcado continua barrado pela guarda de
+        # fan-out logo abaixo, com toast proprio (Zero Silencio preservado).
 
         # Guarda Phase-1 (§9.3): fan-out heterogeneo (T2/T3) ainda nao suportado.
         if t2 or t3:
@@ -4420,13 +5212,12 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -4544,9 +5335,8 @@ class MainWindow(QMainWindow):
         # Botoes da coluna MCP (output-toolbar-mcp): labels resumidos + cores
         # padronizadas por linha. Linha 1 (Anthropic laranja): MCPs Claude-side.
         # Linha 2 (azul): skills Kimi-side. Linha 3 (roxo): skills Codex-side.
-        # Largura fixa apos reducao de label.
-        _MCP_BTN_WIDTH = 58
-        _ACTIONS_ROW_MIN_WIDTH = 64
+        # Refactor 07-27: a largura fixa de 58px saiu — cada botao passa a ter a
+        # largura do proprio label e o flow das sub-abas cuida da quebra.
         _ANTHROPIC_ORANGE = ("#CC785C", "#B8674E", "#A55A42")
         _MCP_BLUE = ("#2563EB", "#1D4ED8", "#1E40AF")
         _MCP_PURPLE = ("#7C3AED", "#6D28D9", "#5B21B6")
@@ -4556,7 +5346,6 @@ class MainWindow(QMainWindow):
             *_ANTHROPIC_ORANGE,
             "/mcp:codex \u2014 Pair programming com Codex MCP",
         )
-        mcp_codex_btn.setFixedWidth(_MCP_BTN_WIDTH)
         mcp_codex_btn.clicked.connect(_paste_cmd("/mcp:codex"))
 
         mcp_kimi_btn = _make_action_btn(
@@ -4564,7 +5353,6 @@ class MainWindow(QMainWindow):
             *_ANTHROPIC_ORANGE,
             "/mcp:kimi \u2014 Persona-aware Kimi orchestrator",
         )
-        mcp_kimi_btn.setFixedWidth(_MCP_BTN_WIDTH)
         mcp_kimi_btn.clicked.connect(_paste_cmd("/mcp:kimi"))
 
         double_mcp_btn = _make_action_btn(
@@ -4572,7 +5360,6 @@ class MainWindow(QMainWindow):
             *_ANTHROPIC_ORANGE,
             "/mcp:dual \u2014 Co-execucao paralela Codex+Kimi",
         )
-        double_mcp_btn.setFixedWidth(_MCP_BTN_WIDTH)
         double_mcp_btn.clicked.connect(_paste_cmd("/mcp:dual"))
 
         skill_claude_btn = _make_action_btn(
@@ -4580,7 +5367,6 @@ class MainWindow(QMainWindow):
             *_MCP_PURPLE,
             "Codex: use skill-claude com saida JSON consultiva",
         )
-        skill_claude_btn.setFixedWidth(_MCP_BTN_WIDTH)
         skill_claude_btn.clicked.connect(
             _paste_cmd("Use skill-claude. Output JSON. Prompt: ")
         )
@@ -4590,7 +5376,6 @@ class MainWindow(QMainWindow):
             *_MCP_PURPLE,
             "Codex: use skill-kimi com saida JSON consultiva",
         )
-        skill_kimi_btn.setFixedWidth(_MCP_BTN_WIDTH)
         skill_kimi_btn.clicked.connect(
             _paste_cmd("Use skill-kimi. Output JSON. Prompt: ")
         )
@@ -4600,7 +5385,6 @@ class MainWindow(QMainWindow):
             *_MCP_PURPLE,
             "Codex: use skill-dual para consulta Claude+Kimi com divergencia",
         )
-        skill_dual_btn.setFixedWidth(_MCP_BTN_WIDTH)
         skill_dual_btn.clicked.connect(
             _paste_cmd("Use skill-dual. Output JSON. Mode: stereo. Prompt: ")
         )
@@ -4611,7 +5395,6 @@ class MainWindow(QMainWindow):
             *_MCP_BLUE,
             "Kimi: chama Claude como consultor externo via /skill:claude",
         )
-        kimi_claude_btn.setFixedWidth(_MCP_BTN_WIDTH)
         kimi_claude_btn.clicked.connect(_paste_cmd("/skill:claude"))
 
         kimi_codex_btn = _make_action_btn(
@@ -4619,7 +5402,6 @@ class MainWindow(QMainWindow):
             *_MCP_BLUE,
             "Kimi: chama Codex como consultor externo via /skill:codex",
         )
-        kimi_codex_btn.setFixedWidth(_MCP_BTN_WIDTH)
         kimi_codex_btn.clicked.connect(_paste_cmd("/skill:codex"))
 
         kimi_dual_btn = _make_action_btn(
@@ -4627,7 +5409,6 @@ class MainWindow(QMainWindow):
             *_MCP_BLUE,
             "Kimi: chama Claude+Codex em paralelo via /skill:dual",
         )
-        kimi_dual_btn.setFixedWidth(_MCP_BTN_WIDTH)
         kimi_dual_btn.clicked.connect(_paste_cmd("/skill:dual"))
 
         asq_user_btn = _make_action_btn(
@@ -4635,7 +5416,6 @@ class MainWindow(QMainWindow):
             "#F59E0B", "#D97706", "#B45309",
             "/tools:auq-interview \u2014 Entrevista AUQ guiada",
         )
-        asq_user_btn.setMinimumWidth(_ACTIONS_ROW_MIN_WIDTH)
         asq_user_btn.clicked.connect(
             lambda _c=False: self._publish_insertion_llm_aware("/tools:auq-interview")
         )
@@ -4664,7 +5444,7 @@ class MainWindow(QMainWindow):
         criacao de novos arquivos de regras (2026-05-17 follow-up).
 
         Cada botao cola um path/prompt literal no terminal via
-        _publish_to_terminal — respeita terminal-route-toggles (T1/T2) e
+        _publish_to_terminal — respeita `terminal-route-t1/t2` (headers) e
         transfere foco conforme ai-forge/rules/workflow-app-terminal.md.
         """
         def _make_btn(
@@ -4672,13 +5452,12 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -4688,7 +5467,7 @@ class MainWindow(QMainWindow):
         def _paste_path(path: str):
             def _h() -> None:
                 QApplication.clipboard().setText(path)
-                # _publish_to_terminal ja consulta terminal-route-toggles e
+                # _publish_to_terminal ja consulta `terminal-route-t1/t2` e
                 # transfere foco — ver ai-forge/rules/workflow-app-terminal.md.
                 self._publish_to_terminal(path)
                 signal_bus.toast_requested.emit(
@@ -4699,7 +5478,7 @@ class MainWindow(QMainWindow):
         workflow_app_btn = _make_btn(
             "Workflow App", "queue-btn-workflow-app-path",
             "#0EA5E9", "#0284C7", "#0369A1",
-            "Cola o path ai-forge/workflow-app no terminal\n(respeita terminal-route-toggles)",
+            "Cola o path ai-forge/workflow-app no terminal\n(respeita os checkboxes de rota dos headers)",
         )
         workflow_app_btn.clicked.connect(_paste_path("ai-forge/workflow-app"))
 
@@ -4742,7 +5521,7 @@ class MainWindow(QMainWindow):
             "Terminal-rules", "queue-btn-terminal-basic-rules-path",
             "#F97316", "#EA580C", "#C2410C",
             "Cola o path ai-forge/rules/workflow-app-terminal.md no terminal\n"
-            "(roteamento via terminal-route-toggles + focus transfer)",
+            "(roteamento via checkboxes de rota dos headers + focus transfer)",
         )
         terminal_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-terminal.md"))
 
@@ -4792,7 +5571,7 @@ class MainWindow(QMainWindow):
         # 2026-05-31: botoes para os arquivos de regras de ai-forge/rules/ que
         # ainda nao tinham atalho na sub-aba RULES (queue-subtab-insertions-rules).
         # Mesmo padrao _make_btn + _paste_path dos demais: copia o path literal e
-        # digita no terminal via _publish_to_terminal (respeita terminal-route-toggles).
+        # digita no terminal via _publish_to_terminal (respeita os checkboxes de rota).
         build_render_rules_btn = _make_btn(
             "Build-render-rules", "queue-btn-dcp-build-to-list-rendering-rules-path",
             "#06B6D4", "#0891B2", "#0E7490",
@@ -4946,7 +5725,7 @@ class MainWindow(QMainWindow):
 
         def _paste_add_rules() -> None:
             QApplication.clipboard().setText(add_rules_prompt)
-            # _publish_to_terminal ja consulta terminal-route-toggles e
+            # _publish_to_terminal ja consulta `terminal-route-t1/t2` e
             # transfere foco — ver ai-forge/rules/workflow-app-terminal.md.
             self._publish_to_terminal(add_rules_prompt)
             signal_bus.toast_requested.emit(
@@ -4958,7 +5737,7 @@ class MainWindow(QMainWindow):
             "#EAB308", "#CA8A04", "#A16207",
             "Cola um prompt curto pedindo ao Claude para criar um novo arquivo "
             "em ai-forge/rules/ a partir do contexto estudado agora\n"
-            "(respeita terminal-route-toggles)",
+            "(respeita os checkboxes de rota dos headers)",
         )
         add_rules_btn.clicked.connect(_paste_add_rules)
 
@@ -5236,7 +6015,7 @@ class MainWindow(QMainWindow):
 
         Pula slugs ja presentes em self._persona_rendered_slugs (idempotente) e
         registra os novos no set. Cada botao cola o path da persona no terminal
-        via _publish_to_terminal (respeita terminal-route-toggles T1/T2).
+        via _publish_to_terminal (respeita `terminal-route-t1/t2`).
         """
         out: list[QPushButton] = []
         for slug, rel_path in personas:
@@ -5250,7 +6029,6 @@ class MainWindow(QMainWindow):
             # (CommandQueueWidget._apply_persona_filter).
             btn.setProperty("persona_category", category)
             btn.setAccessibleName(f"{label} - persona {category}")
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(
                 f"{label}  ·  {category}\n"
@@ -5259,7 +6037,7 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(
                 "QPushButton { background-color: #8B5CF6; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 "QPushButton:hover { background-color: #7C3AED; }"
                 "QPushButton:pressed { background-color: #6D28D9; }"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -5280,12 +6058,20 @@ class MainWindow(QMainWindow):
         return _h
 
     def _populate_header_personas_subtab(self) -> list[QPushButton]:
-        """Constroi os botoes da sub-aba 'PERSONAS' a partir das personas reais
-        de ai-forge/MCP/agents/, seguido do botao 'update' 1:1 (verde).
+        """Constroi os botoes da aba 'Agentes' (secao AGENTES do header).
 
-        Cada botao de persona cola o path relativo no terminal. O botao update
-        (sempre o ultimo widget do flow) re-varre a pasta ao vivo e adiciona
-        botoes para personas novas, sem reiniciar o app.
+        Ordem estavel da lista devolvida:
+        1. botao verde 1:1 `+` (queue-btn-personas-create) — sempre primeiro;
+        2. personas descobertas em ai-forge/MCP/agents/;
+        3. gear de config (queue-btn-personas-config);
+        4. botao update (queue-btn-personas-update) — sempre ultimo.
+
+        Quem particiona e `CommandQueueWidget.populate_personas_subtab`: os
+        itens 2 vao para o flow filtravel e os utilitarios (1, 3 e 4) para a
+        div em coluna do fim da aba, preservando esta ordem relativa.
+
+        O create usa o prefixo plural `queue-btn-personas-*` (utilitario),
+        nunca o prefixo filtravel `queue-btn-persona-` (singular + slug).
         """
         # Rastreia slugs ja renderizados para o botao 'update' detectar novos.
         self._persona_rendered_slugs: set[str] = set()
@@ -5293,8 +6079,32 @@ class MainWindow(QMainWindow):
         # Carregados aqui para que _persona_button_label os consulte ao montar.
         self._persona_label_overrides = self._load_persona_label_overrides()
 
-        btns: list[QPushButton] = self._build_persona_buttons(
-            self._scan_persona_files()
+        # Botao 'create' 1:1 (34x34) verde com '+' centralizado — SEMPRE o
+        # primeiro widget do flow. Utilitario (testid plural) permanece visivel
+        # em todos os filtros de categoria e sobrevive a update ao vivo.
+        create_btn = QPushButton("+")
+        create_btn.setAccessibleName("Criar agente")
+        create_btn.setProperty("testid", "queue-btn-personas-create")
+        create_btn.setFixedSize(34, 34)
+        create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        create_btn.setToolTip(
+            "Criar agente\n"
+            "Abre o modal de criacao guiada. Permanece na primeira posicao\n"
+            "apos filtros, configuracao e atualizacao ao vivo."
+        )
+        create_btn.setStyleSheet(
+            "QPushButton { background-color: #16A34A; color: #FFFFFF;"
+            "  border: none; border-radius: 5px;"
+            "  font-size: 20px; font-weight: 700; padding: 0; }"
+            "QPushButton:hover { background-color: #15803D; }"
+            "QPushButton:pressed { background-color: #166534; }"
+        )
+        create_btn.clicked.connect(self._open_create_agent_dialog)
+        self._persona_create_btn = create_btn
+
+        btns: list[QPushButton] = [create_btn]
+        btns.extend(
+            self._build_persona_buttons(self._scan_persona_files())
         )
 
         # Gear de configuracao (34x34) — abre modal que lista os agentes atuais
@@ -5345,6 +6155,174 @@ class MainWindow(QMainWindow):
 
         btns.append(update_btn)
         return btns
+
+    def _open_create_agent_dialog(self) -> None:
+        """Abre o CreateAgentDialog (single-open) a partir do botao '+'.
+
+        Fluxo integrado do AGENT-TASK-009: botao -> dialog -> builder puro
+        (dentro do dialog) -> dispatcher de rota. Um clique abre no maximo uma
+        instancia; um submit publica no maximo uma vez.
+
+        Captura snapshot imutavel de T1/T2/T3 + Notes na ABERTURA do modal.
+        O submit publica o prompt exatamente nessa rota — nunca relê os
+        toggles (AGENT-TASK-005). Rota ausente/invalida: erro explicito e
+        modal permanece aberto (sem fallback silencioso).
+        """
+        from workflow_app.widgets.create_agent_dialog import (
+            CreateAgentDialog,
+            DispatchReport,
+        )
+
+        dlg = getattr(self, "_create_agent_dialog", None)
+        if dlg is not None:
+            # Finding 011 W-03: "oculto" e "destruido" sao estados DIFERENTES e
+            # a versao anterior colapsava os dois em "stale -> reabrir". Um
+            # dialog vivo porem oculto (hide() sem close(), ou minimizado pelo
+            # WM) ficava orfao: sem referencia, sem teardown, com o snapshot de
+            # rota antigo preso e uma segunda instancia por cima. So a morte do
+            # objeto C++ (RuntimeError) autoriza descartar a referencia.
+            try:
+                if not dlg.isVisible():
+                    dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+                dlg.focus_name()
+            except RuntimeError:
+                # Objeto C++ ja destruido: a referencia Python e um cadaver.
+                self._create_agent_dialog = None
+                self._create_agent_route_snapshot = None
+            else:
+                return
+
+        # Snapshot at open — immutable for the lifetime of this dialog instance.
+        route_snapshot = self._capture_terminal_route_snapshot()
+
+        dlg = CreateAgentDialog(self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        # Per-instance publish guard: one submit publishes exactly once, even
+        # if the signal is re-emitted before the dialog finishes closing.
+        published: list[bool] = [False]
+
+        def _on_finished(_result: int, _dlg=dlg) -> None:
+            self._teardown_create_agent_dialog(_dlg)
+
+        dlg.finished.connect(_on_finished)
+        # Finding 011 W-02: guardar o slot para que o teardown desconecte SO
+        # ele. `finished.disconnect()` sem argumento derruba TODAS as conexoes
+        # do sinal, inclusive as que o proprio dialog ou terceiros criaram.
+        self._create_agent_finished_slot = _on_finished
+
+        def _on_submit(request) -> None:
+            current = getattr(self, "_create_agent_dialog", None)
+            if current is None or current is not dlg:
+                return
+            if published[0]:
+                return
+            # Never re-read route toggles; use the open-time snapshot only.
+            if not route_snapshot.has_any_terminal_route():
+                current.report_builder_failure(
+                    "Nenhuma rota T1/T2/T3 marcada. Selecione ao menos um "
+                    "terminal, reabra o modal e tente novamente."
+                )
+                return
+            published[0] = True
+            try:
+                publish_report = self._publish_to_terminal_report(
+                    request.prompt,
+                    route_snapshot,
+                )
+            except Exception:
+                logger.exception("create_agent_publish_failed")
+                # Releasing the guard is only safe because every step of
+                # _publish_to_terminal_report that produces an observable
+                # effect (clipboard, T1/T2/T3 paste, focus) is individually
+                # guarded, so an escaping exception means nothing was pasted.
+                # Do NOT add unguarded post-dispatch work there: it would make
+                # this branch republish an already-published prompt.
+                published[0] = False
+                current.report_builder_failure(
+                    "Falha ao publicar o prompt de criacao."
+                )
+                return
+
+            if not publish_report.accepted and not publish_report.failed:
+                published[0] = False
+                current.report_builder_failure(
+                    "Nenhuma rota T1/T2/T3 valida para publicacao."
+                )
+                return
+
+            if not publish_report.accepted:
+                # Total failure: modal stays open, data preserved for retry.
+                published[0] = False
+
+            self._report_create_agent_publish(publish_report)
+            current.report_dispatch_result(
+                DispatchReport(
+                    accepted=tuple(publish_report.accepted),
+                    failed=tuple(publish_report.failed),
+                    notes_copied=tuple(publish_report.notes_copied),
+                    errors=tuple(publish_report.errors),
+                )
+            )
+
+        dlg.submit_requested.connect(_on_submit)
+        self._create_agent_dialog = dlg
+        # Keep snapshot attached for tests / diagnostics (not re-read on submit).
+        self._create_agent_route_snapshot = route_snapshot
+        dlg.open()
+        dlg.focus_name()
+
+    def _report_create_agent_publish(
+        self, report: TerminalPublishReport
+    ) -> None:
+        """Toast observavel do dispatch do modal de criacao de agente.
+
+        Necessario porque ACCEPTED e PARTIAL fecham o modal: sem toast o
+        resultado sumiria com o widget. A copy nunca afirma que o agente foi
+        criado/executado — apenas que o prompt foi publicado.
+        """
+        if not report.accepted:
+            # Total failure keeps the modal open with its own inline error.
+            return
+        accepted = ", ".join(report.accepted)
+        if report.failed:
+            failed = ", ".join(report.failed)
+            signal_bus.toast_requested.emit(
+                f"Prompt de criacao publicado parcialmente. Aceitos: "
+                f"{accepted}. Falhos: {failed}. Nenhum agente foi criado.",
+                "warning",
+            )
+            return
+        signal_bus.toast_requested.emit(
+            f"Prompt de criacao publicado em {accepted}. "
+            "Execute-o no terminal para criar o agente.",
+            "info",
+        )
+
+    def _teardown_create_agent_dialog(self, dlg: QDialog) -> None:
+        """Solta referencias e conexoes do modal fechado e devolve o foco.
+
+        Idempotente e identity-checked: um `finished` atrasado de uma instancia
+        antiga nunca derruba a referencia de um modal reaberto depois.
+        """
+        if getattr(self, "_create_agent_dialog", None) is not dlg:
+            return
+        self._create_agent_dialog = None
+        self._create_agent_route_snapshot = None
+        slot = getattr(self, "_create_agent_finished_slot", None)
+        self._create_agent_finished_slot = None
+        if slot is not None:
+            try:
+                dlg.finished.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        create_btn = getattr(self, "_persona_create_btn", None)
+        if create_btn is not None:
+            try:
+                create_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+            except RuntimeError:  # pragma: no cover - widget already gone
+                pass
 
     def _on_personas_update_clicked(self) -> None:
         """Slot do botao 'update' da sub-aba PERSONAS.
@@ -5414,7 +6392,7 @@ class MainWindow(QMainWindow):
         """Constroi os botoes da sub-aba 'CMD' (comandos avulsos).
 
         Cada botao cola um slash-command literal no terminal via
-        _publish_to_terminal — respeita terminal-route-toggles (T1/T2) e
+        _publish_to_terminal — respeita `terminal-route-t1/t2` (headers) e
         transfere foco conforme ai-forge/rules/workflow-app-terminal.md.
         Sub-aba destinada a comandos pontuais que nao pertencem a uma
         pipeline (DCP/loop/daily), disparados sob demanda pelo operador.
@@ -5424,13 +6402,12 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -5660,13 +6637,12 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -5719,13 +6695,12 @@ class MainWindow(QMainWindow):
         ) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -5786,13 +6761,12 @@ class MainWindow(QMainWindow):
         def _make_btn(label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str) -> QPushButton:
             btn = QPushButton(label)
             btn.setProperty("testid", testid)
-            btn.setFixedHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(
                 f"QPushButton {{ background-color: {bg}; color: #18181B;"
                 "  border: none; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
                 f"QPushButton:hover {{ background-color: {hover}; color: #FAFAFA; }}"
                 f"QPushButton:pressed {{ background-color: {pressed}; color: #FAFAFA; }}"
                 "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -5878,7 +6852,6 @@ class MainWindow(QMainWindow):
         """
         btn = QPushButton("repo rules")
         btn.setProperty("testid", "queue-btn-repo-rules-path")
-        btn.setFixedHeight(34)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip(
             "Cola no terminal o path {workspace_root}/rules do projeto ativo\n"
@@ -5887,7 +6860,7 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet(
             "QPushButton { background-color: #14B8A6; color: #18181B;"
             "  border: none; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 700; padding: 2px 8px; }"
+            "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
             "QPushButton:hover { background-color: #0D9488; color: #FAFAFA; }"
             "QPushButton:pressed { background-color: #0F766E; color: #FAFAFA; }"
             "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
@@ -5966,6 +6939,8 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(6)
 
+        is_workspace = testid == "terminal-workspace-notes"
+
         notes_input = QLineEdit()
         notes_input.setPlaceholderText("anotacoes")
         notes_input.setStyleSheet(
@@ -5980,6 +6955,13 @@ class MainWindow(QMainWindow):
             "QLineEdit:focus { border-color: #52525B; }"
         )
         lay.addWidget(notes_input, stretch=1)
+
+        # I1.3: o checkbox de Notes do T1 (`terminal-notes-t1`) mora aqui,
+        # dentro do proprio `terminal-interactive-notes`, depois do input (D5).
+        # O antigo par do T2 (`terminal-notes-t2`) foi eliminado — publicacao de
+        # notas para o T2 nao existe mais como toggle (ver task 11).
+        if not is_workspace:
+            lay.addWidget(self._chk_notes_t1)
 
         btn_style = (
             "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
@@ -6027,8 +7009,6 @@ class MainWindow(QMainWindow):
         paste_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         paste_btn.setToolTip("Colar anotacao no terminal")
         paste_btn.setStyleSheet(btn_style)
-
-        is_workspace = testid == "terminal-workspace-notes"
 
         def _paste_to_terminal() -> None:
             text = notes_input.text()
@@ -6122,6 +7102,65 @@ class MainWindow(QMainWindow):
             painter.end()
         return QIcon(pixmap)
 
+    def _set_centered_svg_icon(
+        self,
+        button: QPushButton,
+        svg_path: Path,
+        icon_px: int,
+        fallback_text: str,
+        color_hex: str = "#FAFAFA",
+    ) -> None:
+        """Pinta um SVG tintado perfeitamente centralizado dentro de `button`.
+
+        `QPushButton.setIcon` em botao icon-only sob QSS com border/padding
+        desloca o icone alguns pixels. Aqui o pixmap vai num QLabel filho
+        `AlignCenter` que cobre o botao inteiro (mesma tecnica de
+        `_GearButton`), com `WA_TransparentForMouseEvents` para nao roubar o
+        click. Se o SVG nao carregar, cai para `fallback_text` no proprio botao.
+        """
+        icon = self._load_tinted_svg_icon(svg_path, color_hex)
+        if icon is None:
+            button.setText(fallback_text)
+            return
+        size = button.size()
+        w = size.width() or 24
+        h = size.height() or 24
+        label = QLabel(button)
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("background: transparent; border: none; padding: 0;")
+        label.setPixmap(icon.pixmap(QSize(icon_px, icon_px)))
+        label.setGeometry(0, 0, w, h)
+
+    def _build_codex_label_bar(self) -> QWidget:
+        """Header de 20px do T3 (Codex), espelhando a barra do T2.
+
+        Criado em 07-27-workflow-app-header-toggles-llm-unico (I1.2): o T3 era
+        o unico dos tres terminais sem header proprio. Hospeda o checkbox de
+        rota `terminal-route-t3`. Rotulo " CODEX" em #A855F7 (D8) sobre o mesmo
+        fundo #1E1B4B da barra do T2 (D13), com o mesmo padrao tipografico dos
+        headers de T1 e T2 (10px, peso 700).
+
+        O `terminal-t3-toggle` NAO se muda para ca (I1.2b): com o T3 colapsado
+        em `sizes=[1, 0]` a barra some junto, e o arrow ficaria inalcancavel.
+        """
+        bar = QWidget()
+        bar.setProperty("testid", "terminal-codex-label-bar")
+        bar.setFixedHeight(20)
+        bar.setStyleSheet("background-color: #1E1B4B;")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(8)
+        label = QLabel(" CODEX")
+        label.setStyleSheet(
+            "QLabel { background: transparent; color: #A855F7;"
+            "  font-size: 10px; font-weight: 700; padding-left: 6px; }"
+        )
+        lay.addWidget(label)
+        lay.addWidget(self._chk_route_t3)
+        lay.addStretch(1)
+        return bar
+
     def _build_workspace_label_bar(self) -> QWidget:
         """20px label bar for the Workspace terminal with four shortcut buttons.
 
@@ -6133,6 +7172,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QHBoxLayout
 
         bar = QWidget()
+        bar.setProperty("testid", "terminal-workspace-label-bar")
         bar.setFixedHeight(20)
         bar.setStyleSheet("background-color: #1E1B4B;")
         lay = QHBoxLayout(bar)
@@ -6215,6 +7255,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(btn_wa)
         lay.addSpacing(6)
         lay.addWidget(btn_wa_mention)
+        lay.addSpacing(10)
+        # Checkbox de rota do T2 (I1.2): vive no header do proprio terminal
+        # desde que o bloco unico `terminal-route-toggles` foi dissolvido. E
+        # so um toggle de estado: nao dispara `_dispatch_workspace_text`, logo
+        # nao herda o toast "Nenhum projeto carregado." dos botoes acima.
+        lay.addWidget(self._chk_route_t2)
         lay.addSpacing(10)
         # space-between: stretch empurra o arrow T3 para a borda oposta dos
         # botoes de path/mention.
@@ -6422,6 +7468,10 @@ class MainWindow(QMainWindow):
         )
         signal_bus.toast_requested.connect(self._show_toast)
         signal_bus.pipeline_ready.connect(self._on_pipeline_ready)
+        # Main LLM unico (07-27-workflow-app-header-toggles-llm-unico, I2.2):
+        # herda o papel do `buttonToggled` dos dois radios de provider
+        # eliminados. Emitido por command_queue_widget nas tres transicoes.
+        signal_bus.main_llm_changed.connect(self._on_main_llm_changed)
         signal_bus.history_panel_toggled.connect(self._switch_to_history_tab)
         signal_bus.pipeline_started.connect(self._switch_to_output_tab)
         # Task 3 (loop 05-13-workflow-app-layout-2): migrado para signal granular

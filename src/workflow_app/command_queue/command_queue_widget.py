@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QTabBar,
     QTabWidget,
     QVBoxLayout,
@@ -132,9 +133,20 @@ PROMPT_FILTER_DEFAULT = "Ops"
 class ResponsiveButtonFlowLayout(QLayout):
     """Flow layout para botoes compactos das subtabs de insercoes.
 
-    Quebra widgets em linhas conforme a largura disponivel. Quando a linha 5
-    seria necessaria, reduz a largura alocada dos itens para manter no maximo
-    `max_lines` linhas renderizadas.
+    Quebra widgets em linhas conforme a largura disponivel.
+
+    Dois regimes, escolhidos por `max_lines`:
+
+    - `max_lines=int` (legado): quando a linha `max_lines + 1` seria
+      necessaria, reduz a largura alocada dos itens para manter no maximo
+      `max_lines` linhas renderizadas.
+    - `max_lines=None` (responsivo canonico): numero de linhas livre. Cada
+      botao fica com a largura natural do proprio label e a quantidade de
+      botoes por linha acompanha a largura da janela — janela maior, mais
+      botoes por linha; janela menor, menos.
+
+    `v_spacing` controla o gap vertical entre linhas de forma independente do
+    gap horizontal (`spacing`). Default: mesmo valor de `spacing`.
     """
 
     _BUTTON_FLOOR_WIDTH = 44
@@ -145,12 +157,14 @@ class ResponsiveButtonFlowLayout(QLayout):
         parent: QWidget | None = None,
         *,
         spacing: int = 4,
-        max_lines: int = 4,
+        v_spacing: int | None = None,
+        max_lines: int | None = 4,
     ) -> None:
         super().__init__(parent)
         self._items: list[QLayoutItem] = []
         self._spacing = spacing
-        self._max_lines = max(1, max_lines)
+        self._v_spacing = spacing if v_spacing is None else max(0, v_spacing)
+        self._max_lines = None if max_lines is None else max(1, max_lines)
         self.setContentsMargins(0, 0, 0, 0)
 
     def addItem(self, item: QLayoutItem) -> None:  # noqa: N802 - Qt API
@@ -204,10 +218,15 @@ class ResponsiveButtonFlowLayout(QLayout):
         return visible
 
     def _base_width(self, item: QLayoutItem) -> int:
-        return max(item.sizeHint().width(), item.minimumSize().width(), self._BUTTON_FLOOR_WIDTH)
+        natural = max(item.sizeHint().width(), item.minimumSize().width())
+        if self._max_lines is None:
+            # Regime responsivo: largura congruente com o proprio label, sem
+            # piso artificial (o piso so existe para o regime compactado).
+            return natural
+        return max(natural, self._BUTTON_FLOOR_WIDTH)
 
     def _target_floor_width(self, items: list[QLayoutItem], width: int) -> int:
-        if not items or width <= 0:
+        if self._max_lines is None or not items or width <= 0:
             return self._BUTTON_FLOOR_WIDTH
         items_per_line = max(1, (len(items) + self._max_lines - 1) // self._max_lines)
         fit_width = (width - self._spacing * (items_per_line - 1)) // items_per_line
@@ -227,6 +246,10 @@ class ResponsiveButtonFlowLayout(QLayout):
         return max(floor, int(round(base * scale)))
 
     def _apply_compact_min_width(self, item: QLayoutItem, width: int) -> None:
+        if self._max_lines is None:
+            # Sem compactacao no regime responsivo: o minimumWidth do botao
+            # nunca e mutado, entao o label permanece integro.
+            return
         widget = item.widget()
         if widget is None:
             return
@@ -263,6 +286,8 @@ class ResponsiveButtonFlowLayout(QLayout):
 
     def _scale_and_floor_for_width(self, items: list[QLayoutItem], width: int) -> tuple[float, int]:
         target_floor = self._target_floor_width(items, width)
+        if self._max_lines is None:
+            return 1.0, target_floor
         if self._line_count_for_scale(items, width, 1.0, target_floor) <= self._max_lines:
             return 1.0, target_floor
 
@@ -293,14 +318,19 @@ class ResponsiveButtonFlowLayout(QLayout):
 
         for item in items:
             item_width = self._width_for_scale(item, scale, target_floor)
+            if self._max_lines is None and width > 0:
+                # Botao mais largo que a area disponivel nunca vaza para fora
+                # do container — ele ocupa a linha inteira.
+                item_width = min(item_width, width)
             item_height = item.sizeHint().height()
             next_line_width = (
                 item_width if line_width == 0
                 else line_width + self._spacing + item_width
             )
 
-            if line_width > 0 and next_line_width > width and rendered_lines < self._max_lines:
-                y += line_height + self._spacing
+            can_break = self._max_lines is None or rendered_lines < self._max_lines
+            if line_width > 0 and next_line_width > width and can_break:
+                y += line_height + self._v_spacing
                 line_height = 0
                 line_width = 0
                 rendered_lines += 1
@@ -2108,37 +2138,39 @@ class CommandQueueWidget(QWidget):
 
         insertions_bar = QWidget()
         insertions_bar.setProperty("testid", "output-toolbar-left-insertions-controls")
-        insertions_bar.setStyleSheet("background-color: transparent;")
+        # `border: none` e obrigatorio desde 2026-07-20: a barra passou a viver
+        # dentro do queue-div-llm-routing, cujo QSS nao-escopado (`QWidget { ...
+        # border: 1px solid #3F3F46 }`) cascatearia uma borda espuria aqui.
+        insertions_bar.setStyleSheet("background: transparent; border: none;")
         insertions_bar_layout = QHBoxLayout(insertions_bar)
         insertions_bar_layout.setContentsMargins(0, 0, 0, 0)
         insertions_bar_layout.setSpacing(3)
 
         self._sec_tabs: list[QPushButton] = []
+        # A 4a aba (`queue-tab-terminal-insertions`) foi removida em
+        # 07-27-workflow-app-header-toggles-llm-unico (I3.3): nunca entrava em
+        # layout e passou a duplicar o botao "TERMINAL INSERTIONS" do
+        # `output-toolbar-section-selector`. `insertions_content` continua
+        # exposto como atributo publico (pagina 1 do stack do header).
         _tab_testids = (
             "queue-tab-workflow",
             "queue-tab-loops",
             "queue-tab-auxiliar",
-            "queue-tab-terminal-insertions",
         )
-        for i, label in enumerate(
-            ("Workflow", "LOOPs", "Auxiliar", "Inserções")
-        ):
+        for i, label in enumerate(("Workflow", "LOOPs", "Auxiliar")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
             btn.setProperty("testid", _tab_testids[i])
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
-            if _tab_testids[i] != "queue-tab-terminal-insertions":
-                tab_bar_layout.addWidget(btn, stretch=1)
-            # insertions_btn: kept in _sec_tabs for index alignment (index 3)
-            # but NOT added to any layout — content is always visible in
-            # output-toolbar-center (skipped by _apply_section_styles).
+            tab_bar_layout.addWidget(btn, stretch=1)
             self._sec_tabs.append(btn)
 
         tab_row_layout.addWidget(tab_bar, stretch=1)
         # insertions_bar NAO entra no tab_row — MainWindow coloca em output-toolbar-center.
 
         # Exposed so MainWindow can:
-        #   (a) append terminal-route-toggles + gear via attach_tab_bar_extras();
+        #   (a) append extras (ex-terminal-route-toggles, hoje sem chamador)
+        #       via attach_tab_bar_extras();
         #   (b) place insertions_bar + insertions_content in output-toolbar-center.
         self._tab_bar_layout = tab_bar_layout
         self._insertions_bar_layout = insertions_bar_layout
@@ -2625,17 +2657,17 @@ class CommandQueueWidget(QWidget):
         def _make_subtab(testid: str) -> tuple[QWidget, ResponsiveButtonFlowLayout]:
             w = QWidget()
             w.setProperty("testid", testid)
-            lay = ResponsiveButtonFlowLayout(w, spacing=4, max_lines=4)
+            lay = ResponsiveButtonFlowLayout(w, spacing=4, v_spacing=1, max_lines=None)
             lay.setContentsMargins(0, 2, 0, 2)
             return w, lay
 
         # paths & IDs agora usa o mesmo flow responsivo das demais subtabs.
-        # `repo rules` entra no mesmo fluxo para o limite de 4 linhas valer
-        # para a sub-aba inteira.
+        # `repo rules` entra no mesmo fluxo para a quebra por largura valer
+        # para a sub-aba inteira (linhas livres, gap vertical de 1px).
         _paths_tab = QWidget()
         _paths_tab.setProperty("testid", "queue-subtab-insertions-paths")
         self._subtab_paths_layout = ResponsiveButtonFlowLayout(
-            _paths_tab, spacing=4, max_lines=4
+            _paths_tab, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_paths_layout.setContentsMargins(0, 2, 0, 2)
         _prompts_tab = QWidget()
@@ -2666,7 +2698,7 @@ class CommandQueueWidget(QWidget):
 
         _prompts_flow_host = QWidget()
         self._subtab_prompts_layout = ResponsiveButtonFlowLayout(
-            _prompts_flow_host, spacing=4, max_lines=4
+            _prompts_flow_host, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_prompts_layout.setContentsMargins(0, 2, 0, 2)
         _prompts_outer.addWidget(_prompts_flow_host, stretch=1)
@@ -2684,12 +2716,19 @@ class CommandQueueWidget(QWidget):
         _auto_improove_tab, self._subtab_auto_improove_layout = _make_subtab("queue-subtab-insertions-auto-improove")
         _personal_tab, self._subtab_personal_layout = _make_subtab("queue-subtab-insertions-personal")
 
-        # Sub-aba 'Agentes' (personas): estrutura especial. Em vez de um flow
+        # Aba 'Agentes' (personas): estrutura especial. Em vez de um flow
         # nu, ela tem uma barra de filtros por categoria (QTabBar) acima de um
         # flow unico de botoes. A 1a aba ("All") mostra todos; as demais filtram
         # por `persona_category`. O flow continua sendo _subtab_personas_layout
-        # (contrato preservado: config gear + update permanecem os ultimos
-        # widgets e nunca sao filtrados). Ver _on_personas_filter_changed.
+        # e so hospeda botoes de persona; os tres utilitarios (+ / gear / update)
+        # vivem na div `queue-subtab-insertions-personas-utils` no fim da aba e
+        # nunca sao filtrados. Ver _on_personas_filter_changed.
+        #
+        # 2026-07-27: deixou de ser sub-aba do `queue-subtabs-insertions` e
+        # virou a QUARTA pagina do `output-toolbar-section-stack` (botao
+        # `output-toolbar-section-agentes` do seletor). O testid do widget nao
+        # muda com a promocao (regra D1) — so muda quem e o pai, e o MainWindow
+        # o consome via o atributo publico `personas_content`.
         _personas_tab = QWidget()
         _personas_tab.setProperty("testid", "queue-subtab-insertions-personas")
         _personas_outer = QVBoxLayout(_personas_tab)
@@ -2718,10 +2757,43 @@ class CommandQueueWidget(QWidget):
 
         _personas_flow_host = QWidget()
         self._subtab_personas_layout = ResponsiveButtonFlowLayout(
-            _personas_flow_host, spacing=4, max_lines=4
+            _personas_flow_host, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_personas_layout.setContentsMargins(0, 2, 0, 2)
         _personas_outer.addWidget(_personas_flow_host, stretch=1)
+
+        # Div dos utilitarios (2026-07-27): os tres botoes 1:1 que nao sao
+        # personas (`+` create, gear de config e update) saem do flow e passam a
+        # viver AQUI, no fim da aba, separados do grupo de botoes por uma linha
+        # divisoria. Coluna vertical com size policy Fixed nos dois eixos: a div
+        # ocupa exatamente a largura de um botao 34px (mais as margens) e a
+        # altura dos tres empilhados, nunca a faixa inteira da aba.
+        _personas_utils = QWidget()
+        _personas_utils.setObjectName("PersonasUtilsColumn")
+        _personas_utils.setProperty("testid", "queue-subtab-insertions-personas-utils")
+        _personas_utils.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _personas_utils.setStyleSheet(
+            "QWidget#PersonasUtilsColumn { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _personas_utils.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self._subtab_personas_utils_layout = QVBoxLayout(_personas_utils)
+        self._subtab_personas_utils_layout.setContentsMargins(4, 4, 4, 4)
+        self._subtab_personas_utils_layout.setSpacing(4)
+        self._subtab_personas_utils_layout.setSizeConstraint(
+            QLayout.SizeConstraint.SetFixedSize
+        )
+        _personas_utils_sep = QFrame()
+        _personas_utils_sep.setFrameShape(QFrame.Shape.HLine)
+        _personas_utils_sep.setFixedHeight(1)
+        _personas_utils_sep.setStyleSheet("background-color: #3F3F46; border: none;")
+        _personas_outer.addWidget(_personas_utils_sep)
+        _personas_outer.addWidget(
+            _personas_utils, alignment=Qt.AlignmentFlag.AlignLeft
+        )
+        self._personas_utils_div = _personas_utils
 
         # Restaura o filtro ativo da sessao anterior; persiste ao trocar. O
         # filtro real so tem efeito apos o MainWindow popular os botoes — por
@@ -2741,7 +2813,8 @@ class CommandQueueWidget(QWidget):
         self._insertions_subtabs.addTab(_cmd_tab, "CMD")
         self._insertions_subtabs.addTab(_auto_improove_tab, "AUTO IMPROOVE")
         self._insertions_subtabs.addTab(_personal_tab, "PERSONAL")
-        self._insertions_subtabs.addTab(_personas_tab, "Agentes")
+        # 'Agentes' NAO e mais sub-aba daqui: virou pagina 3 do
+        # `output-toolbar-section-stack` (ver personas_content abaixo).
 
         # Restaurar sub-aba ativa da sessão anterior; persistir ao mudar.
         # Refactor 2026-05-19: sub-aba "cmd & mcp" deletada (botoes migraram para
@@ -2751,9 +2824,12 @@ class CommandQueueWidget(QWidget):
         # clamp passa a [0,3].
         # 2026-06-03: 5a sub-aba "PERSONAS" adicionada apos CMD; clamp passa a [0,4].
         # 2026-06-03: 6a sub-aba "AUTO IMPROOVE" e 7a "PERSONAL" adicionadas; clamp [0,6].
+        # 2026-07-27: 'Agentes' promovida a secao do header; restam 6 sub-abas
+        # (PATHS..PERSONAL) e o clamp volta para [0,5]. Um indice 6 persistido
+        # por sessao antiga cai em PATHS.
         _stg = QSettings("systemForge", "workflow-app")
         _active_subtab = int(_stg.value("insertions/active_subtab", 0))
-        if not (0 <= _active_subtab < 7):
+        if not (0 <= _active_subtab < 6):
             _active_subtab = 0
         self._insertions_subtabs.setCurrentIndex(_active_subtab)
         self._insertions_subtabs.currentChanged.connect(
@@ -2765,10 +2841,17 @@ class CommandQueueWidget(QWidget):
         _ti_layout.addWidget(self._insertions_subtabs)
 
         # terminal_insertions_content NAO entra no header_layout — MainWindow
-        # coloca em output-toolbar-center. Permanece em _sec_contents para que
-        # _switch_section controle a visibilidade normalmente.
-        self._sec_contents.append(terminal_insertions_content)
+        # coloca em output-toolbar-center, hoje pagina 1 do stack do header.
+        # Fora de `_sec_contents` desde I3.3: o acordeao das tres secoes nao
+        # controla mais a visibilidade dele, quem controla e o
+        # `output-toolbar-section-selector`.
         self.insertions_content = terminal_insertions_content
+
+        # personas_content (2026-07-27): a aba 'Agentes' segue o mesmo contrato
+        # de insertions_content — construida aqui, posicionada pelo MainWindow
+        # como pagina 3 do `output-toolbar-section-stack`, fora de
+        # `_sec_contents` (quem controla a visibilidade e o seletor de secoes).
+        self.personas_content = _personas_tab
 
         # Default: Workflow active (index 0)
         self._active_section = 0
@@ -2983,9 +3066,10 @@ class CommandQueueWidget(QWidget):
         # LLM routing: one container with the main session selector and
         # optional worker preference toggles used by [Rodar proximo].
         # Reparenteado pelo MainWindow para a linha 1 da OutputToolbar; por isso
-        # e exposto como self._llm_box. Layout horizontal: cada secao (label em
-        # cima, inputs embaixo) fica lado a lado, separada por divisores VLine
-        # (mesma leitura de separacao clara do brainstorm-buttons-grid).
+        # e exposto como self._llm_box. Layout em coluna: as tres secoes (Main
+        # LLM | Parallel Worker | MCP Flags) ficam empilhadas uma sobre a
+        # outra, separadas por divisores HLine, e dentro de cada secao o label
+        # fica em cima dos inputs.
         _llm_box = QWidget()
         self._llm_box = _llm_box
         _llm_box.setProperty("testid", "queue-div-llm-routing")
@@ -2993,9 +3077,8 @@ class CommandQueueWidget(QWidget):
             "QWidget { background-color: #1C1C1F; border: 1px solid #3F3F46;"
             "  border-radius: 5px; }"
         )
-        # Layout em coluna: cada secao (Main LLM | Parallel Worker | MCP Flags |
-        # MCP | brainstorm) fica empilhada uma sobre a outra, separada por
-        # divisores HLine. Dentro de cada secao, label e inputs ficam em row.
+        # spacing 6 entre secoes (o de dentro de cada secao e 2), para o par
+        # label+controles ler como um bloco so.
         _llm_layout = QVBoxLayout(_llm_box)
         _llm_layout.setContentsMargins(8, 4, 8, 4)
         _llm_layout.setSpacing(6)
@@ -3023,12 +3106,16 @@ class CommandQueueWidget(QWidget):
             "QRadioButton::indicator:hover, QCheckBox::indicator:hover {"
             "  border-color: #FDE68A; }"
         )
+        # 11px iguala os controles (_control_qss): com o label em cima e os
+        # inputs embaixo, 9px lia como legenda solta. A distincao entre label e
+        # controle passa a ser so de cor (#A1A1AA vs #FAFAFA).
+        # `text-transform` saiu daqui: Qt Style Sheets nao implementa a
+        # propriedade, entao ela nunca teve efeito. Quem quiser caixa-alta tem
+        # de escrever a string do QLabel ja em caixa-alta.
         _section_label_qss = (
-            "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
-            "  text-transform: uppercase; background: transparent; border: none; }"
+            "QLabel { color: #A1A1AA; font-size: 11px; font-weight: 700;"
+            "  background: transparent; border: none; }"
         )
-        self._llm_section_label_qss = _section_label_qss
-
         def _make_llm_divider() -> QFrame:
             """Divisor horizontal fino entre secoes empilhadas do _llm_box."""
             line = QFrame()
@@ -3043,10 +3130,12 @@ class CommandQueueWidget(QWidget):
         _main_section = QWidget()
         _main_section.setProperty("testid", "queue-div-main-llm")
         _main_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em row: label a esquerda, inputs (radios) a direita.
-        _main_layout = QHBoxLayout(_main_section)
+        # Layout em coluna: label em cima, inputs (radios) embaixo. spacing 2
+        # deixa o gap label-controle menor que o gap entre secoes (_llm_layout
+        # usa 6), agrupando cada par visualmente.
+        _main_layout = QVBoxLayout(_main_section)
         _main_layout.setContentsMargins(0, 0, 0, 0)
-        _main_layout.setSpacing(8)
+        _main_layout.setSpacing(2)
         _main_label = QLabel("Main LLM:")
         _main_label.setStyleSheet(_section_label_qss)
         _main_options = QWidget()
@@ -3073,18 +3162,20 @@ class CommandQueueWidget(QWidget):
             _btn.setStyleSheet(_control_qss)
             self._main_llm_group.addButton(_btn)
             _main_options_layout.addWidget(_btn)
+        # O stretch vive no layout horizontal interno: em coluna ele so
+        # empurraria o conteudo para cima, sem alinhar nada.
+        _main_options_layout.addStretch(1)
         _main_layout.addWidget(_main_label)
         _main_layout.addWidget(_main_options)
-        _main_layout.addStretch(1)
         _llm_layout.addWidget(_main_section)
 
         _worker_section = QWidget()
         _worker_section.setProperty("testid", "queue-div-parallel-worker")
         _worker_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em row: label a esquerda, inputs (checkboxes) a direita.
-        _worker_layout = QHBoxLayout(_worker_section)
+        # Layout em coluna: label em cima, inputs (checkboxes) embaixo.
+        _worker_layout = QVBoxLayout(_worker_section)
         _worker_layout.setContentsMargins(0, 0, 0, 0)
-        _worker_layout.setSpacing(8)
+        _worker_layout.setSpacing(2)
         _worker_label = QLabel("Parallel Worker:")
         _worker_label.setStyleSheet(_section_label_qss)
         _worker_options = QWidget()
@@ -3106,9 +3197,9 @@ class CommandQueueWidget(QWidget):
         for _btn in (self._use_kimi_chk, self._use_codex_chk):
             _btn.setStyleSheet(_control_qss)
             _worker_options_layout.addWidget(_btn)
+        _worker_options_layout.addStretch(1)
         _worker_layout.addWidget(_worker_label)
         _worker_layout.addWidget(_worker_options)
-        _worker_layout.addStretch(1)
         _llm_layout.addWidget(_make_llm_divider())
         _llm_layout.addWidget(_worker_section)
 
@@ -3122,10 +3213,10 @@ class CommandQueueWidget(QWidget):
         _flag_section = QWidget()
         _flag_section.setProperty("testid", "queue-div-flag")
         _flag_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em row: label a esquerda, inputs (checkboxes) a direita.
-        _flag_layout = QHBoxLayout(_flag_section)
+        # Layout em coluna: label em cima, inputs (checkboxes) embaixo.
+        _flag_layout = QVBoxLayout(_flag_section)
         _flag_layout.setContentsMargins(0, 0, 0, 0)
-        _flag_layout.setSpacing(8)
+        _flag_layout.setSpacing(2)
         _flag_label = QLabel("MCP Flags:")
         _flag_label.setStyleSheet(_section_label_qss)
         _flag_options = QWidget()
@@ -3149,14 +3240,15 @@ class CommandQueueWidget(QWidget):
             _btn.setStyleSheet(_control_qss)
             _btn.toggled.connect(self._on_flag_toggled)
             _flag_options_layout.addWidget(_btn)
+        _flag_options_layout.addStretch(1)
         _flag_layout.addWidget(_flag_label)
         _flag_layout.addWidget(_flag_options)
-        _flag_layout.addStretch(1)
         _llm_layout.addWidget(_make_llm_divider())
         _llm_layout.addWidget(_flag_section)
         # _llm_box NAO entra na play bar: o MainWindow o reparenteia para a
-        # linha 1 da OutputToolbar. As secoes MCP/brainstorm sao anexadas la
-        # via append_llm_routing_section(). play_row_third guarda so o copy-btn.
+        # linha 1 da OutputToolbar. A coluna fecha aqui, nas tres secoes acima;
+        # o MainWindow nao anexa mais nada nela. play_row_third guarda so o
+        # copy-btn.
 
         # Botao de copiar todos os comandos renderizados em queue-command-list.
         # Posicionado em play_row_third apos --force Kimi.
@@ -3460,30 +3552,6 @@ class CommandQueueWidget(QWidget):
         self._add_bar = add_bar
         content_layout.addWidget(self._add_bar)
 
-    def append_llm_routing_section(
-        self, label_text: str, control_widget: QWidget
-    ) -> QWidget:
-        """Anexa uma secao (label a esquerda, control a direita) ao queue-div-llm-routing.
-
-        Usado pelo MainWindow para dobrar os seletores MCP
-        (output-mcp-provider-radio-input) e brainstorm (type-selector-radio-input)
-        dentro do mesmo box vertical, precedidos por um divisor HLine para
-        separacao visual clara. Reparenteia `control_widget` para a nova secao.
-        Retorna o QWidget da secao criada.
-        """
-        section = QWidget()
-        section.setStyleSheet("background: transparent; border: none;")
-        section_layout = QHBoxLayout(section)
-        section_layout.setContentsMargins(0, 0, 0, 0)
-        section_layout.setSpacing(8)
-        label = QLabel(label_text)
-        label.setStyleSheet(self._llm_section_label_qss)
-        section_layout.addWidget(label)
-        section_layout.addWidget(control_widget)
-        self._llm_layout.addWidget(self._make_llm_divider())
-        self._llm_layout.addWidget(section)
-        return section
-
     def _connect_signals(self) -> None:
         signal_bus.pipeline_ready.connect(self.load_pipeline)
         signal_bus.command_started.connect(self._on_command_started)
@@ -3545,15 +3613,23 @@ class CommandQueueWidget(QWidget):
     def _build_section_grid(
         self, buttons: list[tuple[str, str, object, str] | QWidget], cols: int = 3
     ) -> QWidget:
-        """Create a content widget with a 3-column grid of styled buttons."""
+        """Create a content widget with a responsive flow of styled buttons.
+
+        Refactor 07-27: o QGridLayout de `cols` colunas fixas foi substituido
+        pelo `ResponsiveButtonFlowLayout` em regime livre (`max_lines=None`).
+        Cada botao fica com a largura do proprio label e a quantidade por
+        linha acompanha a largura da janela. `cols` e mantido apenas por
+        compatibilidade de assinatura (ignorado).
+        """
         content = QWidget()
         content.setStyleSheet("background-color: #27272A;")
-        grid = QGridLayout(content)
-        grid.setContentsMargins(5, 4, 5, 5)
-        grid.setSpacing(3)
-        for i, item in enumerate(buttons):
+        flow = ResponsiveButtonFlowLayout(
+            content, spacing=3, v_spacing=1, max_lines=None
+        )
+        flow.setContentsMargins(5, 4, 5, 5)
+        for item in buttons:
             if isinstance(item, QWidget):
-                grid.addWidget(item, i // cols, i % cols)
+                flow.addWidget(item)
             else:
                 label, tooltip, callback, testid = item
                 btn = QPushButton(label)
@@ -3562,7 +3638,7 @@ class CommandQueueWidget(QWidget):
                 if testid:
                     btn.setProperty("testid", testid)
                 btn.clicked.connect(callback)
-                grid.addWidget(btn, i // cols, i % cols)
+                flow.addWidget(btn)
         return content
 
     def _switch_section(self, index: int) -> None:
@@ -3575,10 +3651,6 @@ class CommandQueueWidget(QWidget):
     def _apply_section_styles(self) -> None:
         """Update tab button styles and content visibility."""
         for i, (btn, content) in enumerate(zip(self._sec_tabs, self._sec_contents)):
-            if i == 3:
-                # insertions_content lives in output-toolbar-center — always visible.
-                # insertions_btn is not in any layout. Skip both to avoid toggling.
-                continue
             active = i == self._active_section
             btn.setStyleSheet(_TAB_ACTIVE_STYLE if active else _TAB_INACTIVE_STYLE)
             content.setVisible(active)
@@ -3674,14 +3746,53 @@ class CommandQueueWidget(QWidget):
         )
         self._apply_prompt_filter()
 
+    #: testids dos tres botoes utilitarios da aba 'Agentes'. Nao sao personas
+    #: (prefixo plural `personas`), nunca entram no flow filtravel e vivem na
+    #: div `queue-subtab-insertions-personas-utils`, em coluna, no fim da aba.
+    _PERSONAS_UTIL_TESTIDS = (
+        "queue-btn-personas-create",
+        "queue-btn-personas-config",
+        "queue-btn-personas-update",
+    )
+
     def populate_personas_subtab(self, widgets: list[QWidget]) -> None:
-        """Sub-aba 'Agentes': botoes que colam o path de arquivos .md de personas.
+        """Aba 'Agentes': botoes que colam o path de arquivos .md de personas.
+
+        `widgets` chega do MainWindow como uma lista unica (create + personas +
+        gear + update, nessa ordem). O particionamento acontece AQUI: os tres
+        utilitarios vao para a div em coluna do fim da aba e o resto para o
+        flow responsivo filtravel.
 
         Re-aplica o filtro de categoria ativo apos popular (os botoes recem
         criados respeitam a aba de filtro selecionada).
         """
-        self._populate_subtab(self._subtab_personas_layout, widgets)
+        personas = [w for w in widgets if not self._is_personas_util(w)]
+        utils = [w for w in widgets if self._is_personas_util(w)]
+        self._populate_subtab(self._subtab_personas_layout, personas)
+        self._populate_personas_utils(utils)
         self._apply_persona_filter()
+
+    def _is_personas_util(self, widget: QWidget) -> bool:
+        """True para os tres botoes utilitarios da aba 'Agentes'."""
+        tid = widget.property("testid")
+        return isinstance(tid, str) and tid in self._PERSONAS_UTIL_TESTIDS
+
+    def _populate_personas_utils(self, widgets: list[QWidget]) -> None:
+        """Reconstroi a coluna de utilitarios (+, gear, update) da aba 'Agentes'.
+
+        Idempotente: limpa a div antes de reanexar, entao repopular a aba (ex.
+        apos o modal de configuracao, que recria os botoes) nunca duplica
+        widget nem deixa orfao na coluna.
+        """
+        layout = self._subtab_personas_utils_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for w in widgets:
+            layout.addWidget(w)
+        layout.invalidate()
 
     # ── Filtro por categoria da sub-aba 'Agentes' ────────────────────────────── #
 
@@ -3698,10 +3809,13 @@ class CommandQueueWidget(QWidget):
     def _apply_persona_filter(self) -> None:
         """Mostra apenas os botoes de persona da categoria selecionada.
 
-        'All' (indice 0) mostra todos. Os botoes utilitarios (config gear e
-        update — testids `queue-btn-personas-*`, sem o sufixo de slug) NUNCA sao
-        filtrados: permanecem sempre visiveis. O flow responsivo ja ignora
-        widgets ocultos (_visible_items), entao a relayout acontece sozinha.
+        'All' (indice 0) mostra todos. Os botoes utilitarios (create, config
+        gear e update — testids `queue-btn-personas-*`, sem o sufixo de slug)
+        NUNCA sao filtrados: desde 2026-07-27 nem sequer moram neste flow, e
+        sim na div `queue-subtab-insertions-personas-utils`. O guard por testid
+        continua aqui como rede para qualquer utilitario que volte ao flow. O
+        flow responsivo ja ignora widgets ocultos (_visible_items), entao a
+        relayout acontece sozinha.
         """
         layout = getattr(self, "_subtab_personas_layout", None)
         if layout is None:
@@ -3715,8 +3829,8 @@ class CommandQueueWidget(QWidget):
                 continue
             tid = widget.property("testid")
             # So botoes de persona (queue-btn-persona-<slug>) sao filtraveis. Os
-            # utilitarios sao `queue-btn-personas-config/update` (char 18 == 's',
-            # nao casa o prefixo com hifen) e ficam sempre visiveis.
+            # utilitarios sao `queue-btn-personas-create/config/update`
+            # (char 18 == 's', nao casa o prefixo com hifen) e ficam sempre visiveis.
             is_persona = isinstance(tid, str) and tid.startswith("queue-btn-persona-")
             if not is_persona:
                 widget.setVisible(True)
@@ -3735,27 +3849,45 @@ class CommandQueueWidget(QWidget):
     def add_persona_buttons(
         self, new_btns: list[QWidget], keep_last: QWidget | None = None,
     ) -> None:
-        """Anexa botoes de persona ao flow da sub-aba PERSONAS ao vivo.
+        """Anexa botoes de persona ao flow da aba 'Agentes' ao vivo.
 
         Diferente de populate_personas_subtab (que limpa e repopula), este
         metodo PRESERVA os botoes existentes e apenas acrescenta os novos —
         usado pelo botao 'update' (queue-btn-personas-update).
 
-        Se `keep_last` (o botao 'update' 1:1) for fornecido, ele e destacado
-        da posicao atual e re-anexado ao final, garantindo que os novos botoes
-        de persona entrem ANTES dele (update permanece sempre o ultimo widget).
+        `keep_last` (o botao 'update' 1:1) e legado: desde 2026-07-27 os tres
+        utilitarios vivem fora do flow, na div
+        `queue-subtab-insertions-personas-utils`, entao nao ha o que destacar
+        e reanexar — as personas novas ja entram no fim do flow. O parametro
+        continua aceito (e o destaque continua defensivo) para o caso de um
+        utilitario reaparecer no flow.
         """
         layout = self._subtab_personas_layout
+        # Destaca config+update (utilitarios finais) para reanexar apos as
+        # personas novas, preservando ordem relativa config < update e o
+        # create no indice 0.
+        trailing: list[QWidget] = []
         if keep_last is not None:
-            for i in range(layout.count()):
+            # Coleta utilitarios finais (config gear, se presente, e update)
+            # de tras para frente ate o primeiro persona/create.
+            for i in range(layout.count() - 1, -1, -1):
                 item = layout.itemAt(i)
-                if item is not None and item.widget() is keep_last:
+                w = item.widget() if item is not None else None
+                if w is None:
+                    continue
+                tid = w.property("testid")
+                if w is keep_last or (
+                    isinstance(tid, str)
+                    and tid in {"queue-btn-personas-update", "queue-btn-personas-config"}
+                ):
                     layout.takeAt(i)
+                    trailing.insert(0, w)
+                else:
                     break
         for w in new_btns:
             layout.addWidget(w)
-        if keep_last is not None:
-            layout.addWidget(keep_last)
+        for w in trailing:
+            layout.addWidget(w)
         layout.invalidate()
         # Personas recem-adicionadas pelo botao 'update' respeitam o filtro ativo.
         self._apply_persona_filter()
@@ -3763,9 +3895,12 @@ class CommandQueueWidget(QWidget):
     def attach_tab_bar_extras(self, *extras: QWidget) -> None:
         """Anexa widgets ao bloco de inserções, apos a aba Inserções.
 
-        Usado para terminal-route-toggles, que fica agrupado com
-        queue-tab-terminal-insertions e nao disputa espaco com as abas
-        primarias.
+        API generica sem chamador ativo desde
+        07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2): o unico
+        consumidor era o bloco `terminal-route-toggles`, dissolvido quando
+        cada checkbox de rota migrou para o header do seu terminal
+        (`terminal-route-t1/t2/t3`). Mantida porque nao guarda estado e
+        continua sendo o ponto de extensao do `insertions_bar`.
         """
         for w in extras:
             self._insertions_bar_layout.addWidget(w)
@@ -3811,8 +3946,9 @@ class CommandQueueWidget(QWidget):
         que captura clicks em QPushButton e atualiza queue-template-label
         com o testid do botao clicado.
 
-        Chamado pelo main_window apos populate_* terminar. A tab
-        terminal-insertions (indice 3) NAO e rastreada (regra P4).
+        Chamado pelo main_window apos populate_* terminar. O conteudo de
+        inserções (`insertions_content`) NAO e rastreado (regra P4); desde
+        I3.3 ele nem faz parte de `_sec_contents`.
         """
         if not hasattr(self, "_sec_contents"):
             return
@@ -6317,6 +6453,11 @@ class CommandQueueWidget(QWidget):
                 sentinel.blocker_count,
             )
 
+        # Hint (nao autoridade): o workspace do project.json anexado so importa
+        # quando o proprio loop declara workspace_drift_policy. O default do
+        # loader e loop_wins — um project anexado NUNCA bloqueia a expansao da
+        # fila (regressao 2026-07-27: default `block` travava o botao Loop
+        # sempre que havia project em attachments-project-row).
         project_workspace_root: Path | None = None
         project_cfg = app_state.project_config
         if (
@@ -6470,6 +6611,11 @@ class CommandQueueWidget(QWidget):
                 sentinel.blocker_count,
             )
 
+        # Hint (nao autoridade): o workspace do project.json anexado so importa
+        # quando o proprio loop declara workspace_drift_policy. O default do
+        # loader e loop_wins — um project anexado NUNCA bloqueia a expansao da
+        # fila (regressao 2026-07-27: default `block` travava o botao Loop
+        # sempre que havia project em attachments-project-row).
         project_workspace_root: Path | None = None
         project_cfg = app_state.project_config
         if (
@@ -7870,8 +8016,10 @@ class CommandQueueWidget(QWidget):
         Classifica o provider efetivo do item via o modulo PURO
         provider_router.classify_provider, montando o RoutingState SOMENTE com
         estado de worker (checkboxes T2/T3) + Main LLM ativo (invariantes 2 e 5:
-        eixo Worker antes do Main-LLM, nunca os terminal-route-toggles). Reusa a
-        mesma construcao do step path (_on_step_btn_clicked)."""
+        eixo Worker antes do Main-LLM, nunca os checkboxes de rota de terminal
+        `terminal-route-t1/t2/t3`, que desde 07-27 vivem no header de cada
+        terminal). Reusa a mesma construcao do step path
+        (_on_step_btn_clicked)."""
         routing_state = RoutingState(
             kimi_worker_enabled=bool(
                 getattr(self, "_use_kimi_chk", None) is not None
@@ -9693,8 +9841,9 @@ class CommandQueueWidget(QWidget):
         # ja consumia o router). Decide o provider efetivo do item avaliando o
         # eixo Worker antes do Main-LLM (invariante 2) e a precedencia Kimi>Codex
         # (regra 6). RoutingState recebe SOMENTE estado da queue (checkboxes de
-        # worker T2/T3 + Main LLM do T1), NUNCA os terminal-route-toggles
-        # (invariante 5). Recovery do loop 06-02-seta-unica (decisao do operador:
+        # worker T2/T3 + Main LLM do T1), NUNCA os checkboxes de rota de
+        # terminal `terminal-route-t1/t2/t3` (invariante 5; desde 07-27 eles
+        # vivem no header de cada terminal, nao mais num bloco unico). Recovery do loop 06-02-seta-unica (decisao do operador:
         # modelo router/whitelist) + fix F-2 (06-02): step e clique agora
         # concordam para Kimi E Codex (antes so o Codex consumia o router; o gate
         # Kimi legado usava is_kimi_compatible isolado e divergia do clique para
