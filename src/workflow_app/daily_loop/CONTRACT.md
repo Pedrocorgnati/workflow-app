@@ -70,7 +70,15 @@ Producers (`/loop:create-structure`, `/loop:integration`) devem materializar `ki
 | `items_index[*].task_path`         | Relativo a `loop_root` (`tasks/items/...`)             | `"tasks/items/task-001-...md"`         | absoluto sem necessidade                                      |
 | `metadata.source_md`               | Filename-only relativo a `loop_root`                   | `"source.md"`                          | `"blacksmith/loop-archives/{slug}/source.md"`                 |
 
-**Excecao:** tokens em `buckets[*].items[*].commands` que apontam para arquivos (`--task <path>`, `/cmd:update <path>`) sao **workspace-relative** (porque `command_queue_widget` injeta com `cwd == workspace_root`). Esse caso e separado do contrato de path do `daily_loop.*` e e coberto pela validacao W4b do `/loop:workflow-app`.
+**Excecao:** tokens em `buckets[*].items[*].commands` que apontam para arquivos (`--task <path>`, `/cmd:update <path>`) NAO seguem a tabela acima. O cwd de execucao desses comandos e a **raiz do repo** (primeiro ancestral com `.claude/`), nao o `basic_flow.workspace_root`, e a resolucao testa as bases em ordem declarada: raiz do repo, depois `workspace_root`, depois `loop_root`. Esse caso e separado do contrato de path do `daily_loop.*` e e coberto pela validacao W4b do `/loop:workflow-app`.
+
+### 2.2b Base de resolucao de token `.md` (adicionado 2026-07-27)
+
+O `_LOOP-CONFIG.json` NAO declara a raiz contra a qual os tokens `.md` de `commands` sao resolvidos: ela e implicita. Este contrato a declara.
+
+**Base de resolucao:** a raiz do repo, isto e, o primeiro ancestral do `loop_root` que contem `.claude/`. E ela o cwd real de execucao dos comandos da fila. `basic_flow.workspace_root` **nao e** o cwd de execucao; e apenas a segunda base testada.
+
+**Fonte unica da regra:** `workflow_app.daily_loop.path_resolution.resolve_md_token`. Precedencia, conjunto de vereditos (`ok`, `rewrite`, `not_found`, `ambiguous`, `absolute`) e criterio de ambiguidade estao la, nao aqui, e nao sao reimplementados em prosa neste documento. Consumidores: o loader (`_rewrite_bare_relative_md_tokens`, em tempo de carga da fila) e o shim `ai-forge/scripts/loop-path-resolve.py`, invocado pela validacao W4b do `/loop:workflow-app`.
 
 **Detector canonico (referencia python):**
 
@@ -78,15 +86,21 @@ Producers (`/loop:create-structure`, `/loop:integration`) devem materializar `ki
 from workflow_app.daily_loop import (
     assert_loop_root_relative_path,
     diagnose_workspace_doubled_path,
+    resolve_md_token,
 )
 
 # Diagnostico (retorna sugestao de fix ou None):
 suggestion = diagnose_workspace_doubled_path(value, loop_root)
 # Enforce (raises DailyLoopConfigError):
 assert_loop_root_relative_path(value, loop_root, label="progress_path")
+
+# Token .md de commands (secao 2.2b) — base de resolucao, nao shape de campo:
+resolution = resolve_md_token(
+    token, loop_root=loop_root, workspace_root=workspace_root, repo_root=repo_root
+)
 ```
 
-Ambos exportados em `workflow_app.daily_loop.__init__`. Implementacao em `loader.py`. Testes em `tests/workflow_app/test_daily_loop_loader.py` (classes `TestDiagnoseWorkspaceDoubledPath`, `TestAssertLoopRootRelativePath`).
+Todos exportados em `workflow_app.daily_loop.__init__`. Implementacao dos dois primeiros em `loader.py`; do terceiro em `path_resolution.py`. Testes em `tests/workflow_app/test_daily_loop_loader.py` (classes `TestDiagnoseWorkspaceDoubledPath`, `TestAssertLoopRootRelativePath`, `TestRewriteBareRelativeMdTokens`) e em `tests/workflow_app/test_path_resolution.py`.
 
 **Gates que enforcam esta regra (numeros reconciliados 2026-05-22 — antes citavam C15/W10 por engano, que sao os gates do par Kimi):**
 

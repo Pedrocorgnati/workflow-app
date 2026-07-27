@@ -40,13 +40,22 @@ Design:
 
 from __future__ import annotations
 
-import os
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from workflow_app.daily_loop.path_resolution import (
+    canonical_path as _canonical_path,
+)
+from workflow_app.daily_loop.path_resolution import (
+    repo_root_anchor as _repo_root_anchor,
+)
+from workflow_app.daily_loop.path_resolution import (
+    resolve_md_token,
+)
 from workflow_app.domain import (
     CommandSpec,
     EffortLevel,
@@ -150,6 +159,17 @@ _EFFORT_MAP: dict[str, EffortLevel] = {
 }
 
 _WORKSPACE_DRIFT_ALLOW_PROJECT_OVERRIDE = "allow_project_override"
+_WORKSPACE_DRIFT_BLOCK = "block"
+# O anexo loop e a AUTORIDADE do botao Loop. Ate 2026-07-27 o default era
+# `block`: qualquer project.json anexado cujo workspace_root divergisse do
+# loop travava a expansao da fila inteira (DailyLoopConfigError -> toast ->
+# queue-command-list vazia). Na pratica isso era falso-positivo quase sempre,
+# porque o lado do loop resolvia workspace_root relativo contra o cwd do
+# processo (ai-forge/workflow-app) e o lado do project contra a raiz do repo:
+# duas declaracoes IDENTICAS comparavam diferentes. Default agora e loop_wins
+# (o loop manda, project nunca bloqueia); `block` continua disponivel como
+# opt-in explicito para quem quiser a guarda fail-closed.
+_WORKSPACE_DRIFT_LOOP_WINS = "loop_wins"
 
 # Match a PROGRESS.md item row, e.g.
 #   | 001 | [ ] | path/to/file.md | T-sonnet-medium | - |
@@ -272,8 +292,13 @@ def resolve_loop_path(
     return (loop_root / p).resolve()
 
 
-def _canonical_path(path: Path) -> Path:
-    return path.expanduser().resolve(strict=False)
+# `_repo_root_anchor` e `_canonical_path` sao aliases de import: a regra vive
+# em `daily_loop/path_resolution.py`, fonte unica compartilhada com o shim
+# `ai-forge/scripts/loop-path-resolve.py` e com o bloco W4b de
+# `/loop:workflow-app`. Os nomes privados sao preservados porque a base de
+# testes e os call sites deste modulo os referenciam. Contrato inalterado:
+# `_repo_root_anchor` retorna `None` fora de repo SystemForge e o caller
+# mantem o comportamento legado.
 
 
 def _workspace_drift_policy(raw_config: dict[str, Any]) -> str:
@@ -288,7 +313,7 @@ def _workspace_drift_policy(raw_config: dict[str, Any]) -> str:
         value = str(candidate or "").strip()
         if value:
             return value
-    return "block"
+    return _WORKSPACE_DRIFT_LOOP_WINS
 
 
 def resolve_effective_workspace_root(
@@ -299,19 +324,28 @@ def resolve_effective_workspace_root(
 ) -> Path:
     """Resolve the workspace used to rewrite loop command tokens.
 
-    Default policy is fail-closed: when the loop declares a workspace root that
-    differs from the active project workspace, do not silently switch bases.
-    Producers may opt in with `workspace_drift_policy: allow_project_override`.
-    Without an active project, preserve legacy behavior: loop workspace when
-    declared, otherwise loop_root.
+    O anexo loop e a autoridade: um project.json anexado NUNCA impede a
+    expansao da fila. Politicas (`workspace_drift_policy`, lido do root, de
+    `metadata` ou de `daily_loop`):
+
+      - default / `loop_wins`: vence o workspace declarado pelo loop; drift
+        contra o project so emite WARN em stderr.
+      - `allow_project_override`: vence o workspace do project ativo.
+      - `block`: opt-in fail-closed; drift levanta DailyLoopConfigError.
+
+    Paths relativos sao ancorados na raiz do repo dona do `loop_root` (1o
+    ancestral com `.claude/`), nunca no cwd do processo — ver
+    `_repo_root_anchor`. Sem project ativo, comportamento legado: workspace do
+    loop quando declarado, senao `loop_root`.
     """
     loop_root_path = _canonical_path(Path(loop_root))
+    anchor = _repo_root_anchor(loop_root_path)
     loop_workspace_raw = ""
     basic_flow = raw_config.get("basic_flow")
     if isinstance(basic_flow, dict):
         loop_workspace_raw = str(basic_flow.get("workspace_root", "") or "").strip()
     loop_workspace = (
-        _canonical_path(Path(loop_workspace_raw))
+        _canonical_path(Path(loop_workspace_raw), anchor=anchor)
         if loop_workspace_raw
         else loop_root_path
     )
@@ -319,7 +353,7 @@ def resolve_effective_workspace_root(
     if project_workspace_root is None or not str(project_workspace_root).strip():
         return loop_workspace
 
-    project_workspace = _canonical_path(Path(project_workspace_root))
+    project_workspace = _canonical_path(Path(project_workspace_root), anchor=anchor)
     if loop_workspace == project_workspace:
         return loop_workspace
 
@@ -327,15 +361,26 @@ def resolve_effective_workspace_root(
     if policy == _WORKSPACE_DRIFT_ALLOW_PROJECT_OVERRIDE:
         return project_workspace
 
-    raise DailyLoopConfigError(
-        "workspace_root divergente entre loop e project; sobrescrita silenciosa "
-        "bloqueada.\n"
+    if policy == _WORKSPACE_DRIFT_BLOCK:
+        raise DailyLoopConfigError(
+            "workspace_root divergente entre loop e project; sobrescrita "
+            "silenciosa bloqueada.\n"
+            f"  loop.basic_flow.workspace_root: {loop_workspace}\n"
+            f"  project.workspace_root:         {project_workspace}\n"
+            "  politica declarada: workspace_drift_policy: block (opt-in).\n"
+            "  para permitir override explicito, declare "
+            "workspace_drift_policy: allow_project_override no _LOOP-CONFIG.json;\n"
+            "  para deixar o loop mandar, remova workspace_drift_policy."
+        )
+
+    print(
+        "[loader] WARN: workspace_root divergente entre loop e project; "
+        "o loop manda (workspace_drift_policy default).\n"
         f"  loop.basic_flow.workspace_root: {loop_workspace}\n"
-        f"  project.workspace_root:         {project_workspace}\n"
-        "  politica default: bloquear.\n"
-        "  para permitir override explicito, declare "
-        "workspace_drift_policy: allow_project_override no _LOOP-CONFIG.json."
+        f"  project.workspace_root:         {project_workspace}",
+        file=sys.stderr,
     )
+    return loop_workspace
 
 
 def parse_progress_items(progress_md_text: str) -> list[ProgressItem]:
@@ -492,53 +537,71 @@ def _rewrite_bare_relative_md_tokens(
 
     Catches the catastrophic bug where /loop:integration emitted item.target
     cru (relative to loop_root) into items[*].commands instead of prefixing
-    with relpath(loop_root, workspace_root). The workflow-app queue runs
-    commands with cwd == workspace_root; a bare-relative token (`tasks/items/
-    task-NNN-*.md`) resolves to a non-existent path and breaks the queue
-    silently.
+    with relpath(loop_root, workspace_root). Os comandos da fila rodam com cwd
+    na RAIZ DO REPO, e a resolucao testa as bases em ordem declarada (raiz do
+    repo, `workspace_root`, `loop_root`); um token bare-relative
+    (`tasks/items/task-NNN-*.md`) so resolve pelo `loop_root` e por isso
+    quebraria a fila em silencio.
 
-    Strategy per token T ending in `.md`:
-      1. T absolute -> keep.
-      2. T resolves from workspace_root -> keep.
-      3. T resolves from loop_root (bare-relative bug) -> rewrite to
-         `relpath(loop_root, workspace_root) + "/" + T` and emit WARN.
-      4. Otherwise -> keep (W4b in /loop:workflow-app reports as blocker).
+    A regra em si NAO vive aqui: esta funcao e consumidora de
+    `daily_loop.path_resolution.resolve_md_token`, fonte unica compartilhada
+    com o shim `ai-forge/scripts/loop-path-resolve.py` e com o bloco W4b de
+    `/loop:workflow-app`. Mapeamento de veredito para acao:
+      - `absolute`, `ok`, `not_found` -> keep (W4b reporta `not_found` como
+        blocker; aqui preservar e o comportamento correto).
+      - `rewrite` -> troca pelo `rewrite_to` e emite WARN em stderr.
+      - `ambiguous` -> keep, com WARN citando as bases divergentes.
+    Nada e logado por token `ok`: ha loops com centenas de tokens.
+
+    Decisao sobre o curto-circuito `tok.startswith(rel_loop)` que existia
+    aqui: REMOVIDO. Ele era um atalho de disco, nao uma regra, e nao estava
+    descrito no W4b (uma das divergencias entre as duas copias). Medido sobre
+    os 53 `_LOOP-CONFIG.json` de `blacksmith/loop-archives/`: com e sem o
+    atalho o resultado observavel e identico (as mesmas 2 reescritas, item
+    019 de `05-19-gap-tasklist`). Custo assumido: os tokens dos 32 loops com
+    `workspace_root` na raiz do repo passam a bater disco, sem mudanca de
+    veredito.
 
     Fixed in 2026-05-15 after diagnosing the 3 broken _LOOP-CONFIG.json
     files in blacksmith/loop-archives/ (loop-rocksmash-flow,
-    study-flow-upgrade, dual-script-finalize-decisoes).
+    study-flow-upgrade, dual-script-finalize-decisoes). Refatorado em
+    2026-07-27 para consumir o resolver unico.
     """
-    import sys
-    try:
-        rel_loop = os.path.relpath(loop_root, workspace_root)
-    except ValueError:
-        return cmds
+    repo_root = _repo_root_anchor(loop_root)
 
     out: list[str] = []
     for cmd in cmds:
-        tokens = cmd.split()
         new_tokens: list[str] = []
         rewritten = False
-        for tok in tokens:
-            if not tok.endswith(".md") or tok.startswith("/") or tok.startswith(rel_loop):
+        for tok in cmd.split():
+            if not tok.endswith(".md"):
                 new_tokens.append(tok)
                 continue
-            ws_path = workspace_root / tok
-            if ws_path.exists():
-                new_tokens.append(tok)
-                continue
-            loop_path = loop_root / tok
-            if loop_path.exists():
-                fixed = f"{rel_loop}/{tok}"
+            resolution = resolve_md_token(
+                tok,
+                loop_root=loop_root,
+                workspace_root=workspace_root,
+                repo_root=repo_root,
+            )
+            if resolution.verdict == "rewrite" and resolution.rewrite_to:
                 print(
                     f"[loader] WARN: item {item_id}: bare-relative path rewritten "
-                    f"({tok} -> {fixed}). Run /loop:integration to persist.",
+                    f"({tok} -> {resolution.rewrite_to}). "
+                    f"Run /loop:integration to persist.",
                     file=sys.stderr,
                 )
-                new_tokens.append(fixed)
+                new_tokens.append(resolution.rewrite_to)
                 rewritten = True
-            else:
-                new_tokens.append(tok)
+                continue
+            if resolution.verdict == "ambiguous":
+                print(
+                    f"[loader] WARN: item {item_id}: token ambiguo ({tok}) resolve "
+                    f"para arquivos diferentes em "
+                    f"{', '.join(resolution.ambiguous_bases)}; mantido como esta "
+                    f"(base vencedora: {resolution.base}).",
+                    file=sys.stderr,
+                )
+            new_tokens.append(tok)
         out.append(" ".join(new_tokens) if rewritten else cmd)
     return out
 

@@ -16,6 +16,7 @@ Contract enforced here:
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from workflow_app.daily_loop import (
     resolve_effective_workspace_root,
     resolve_loop_path,
 )
+from workflow_app.daily_loop.loader import _rewrite_bare_relative_md_tokens
 
 # ────────────────────────────────────────────────────────────────────────────
 # Fixtures — minimal but representative loop structure on tmp_path
@@ -947,6 +949,110 @@ class TestParseProgressItems:
         assert items[0].target == "path/with spaces/file.py — note"
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Baseline do corpus real de `blacksmith/loop-archives/` (passo 1 de
+# blacksmith/brainstorm-mcp/07-27-md-token-resolution-repo-root.md).
+#
+# O oraculo abaixo e INDEPENDENTE do loader de proposito: ele materializa a
+# regra de contagem declarada no criterio 4 da nota, para que uma mudanca de
+# precedencia no loader nao possa ser confundida com regressao. Nao importar o
+# resolver aqui — este bloco e a rede, nao o objeto medido.
+# ────────────────────────────────────────────────────────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_LOOP_ARCHIVES = _REPO_ROOT / "blacksmith" / "loop-archives"
+
+_requires_corpus = pytest.mark.skipif(
+    not _LOOP_ARCHIVES.is_dir(),
+    reason="blacksmith/loop-archives/ ausente neste checkout",
+)
+
+
+def _corpus_repo_root(loop_root: Path) -> Path | None:
+    """Primeiro ancestral com `.claude/` (mesma regra de `_repo_root_anchor`)."""
+    for parent in (loop_root, *loop_root.parents):
+        if (parent / ".claude").is_dir():
+            return parent
+    return None
+
+
+def _corpus_workspace_root(raw: dict, repo_root: Path) -> Path:
+    basic_flow = raw.get("basic_flow")
+    declared = ""
+    if isinstance(basic_flow, dict):
+        declared = str(basic_flow.get("workspace_root") or "").strip()
+    if not declared:
+        return repo_root
+    path = Path(declared).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    return Path(os.path.normpath(str(path)))
+
+
+def _corpus_md_tokens(daily_loop: object) -> list[tuple[str, str]]:
+    """Todo token `.md` de `buckets[*].items[*].commands` e `items_index[*].commands`.
+
+    Conta OCORRENCIAS, nao pares distintos: as duas fontes espelham uma a outra
+    por forca da validacao W9, entao 40 dos 53 loops contam cada token duas
+    vezes. Guarda de tipo em `buckets[*].items[*]` (ha 10 entradas string no
+    corpus); `items_index` nao tem valor nao-dict e por isso nao ganha guarda
+    equivalente.
+    """
+    if not isinstance(daily_loop, dict):
+        return []
+    out: list[tuple[str, str]] = []
+
+    def _collect(item_id: str, commands: object) -> None:
+        if not isinstance(commands, list):
+            return
+        for cmd in commands:
+            if not isinstance(cmd, str):
+                continue
+            out.extend((item_id, tok) for tok in cmd.split() if tok.endswith(".md"))
+
+    buckets = daily_loop.get("buckets")
+    if isinstance(buckets, list):
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            for item in bucket.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                _collect(str(item.get("id", "?")), item.get("commands"))
+
+    items_index = daily_loop.get("items_index")
+    if isinstance(items_index, dict):
+        for item_id, entry in items_index.items():
+            if isinstance(entry, dict):
+                _collect(str(item_id), entry.get("commands"))
+    return out
+
+
+def _classify_corpus_token(
+    token: str, *, loop_root: Path, workspace_root: Path, repo_root: Path
+) -> str:
+    """Veredito do oraculo: precedencia raiz do repo, `workspace_root`, `loop_root`."""
+    if token.startswith("/"):
+        return "absolute"
+    hits: list[tuple[str, str]] = []
+    for name, base in (
+        ("repo_root", repo_root),
+        ("workspace_root", workspace_root),
+        ("loop_root", loop_root),
+    ):
+        candidate = base / token
+        if candidate.exists():
+            hits.append((name, os.path.realpath(str(candidate))))
+    if not hits:
+        return "not_found"
+    # Ambiguidade e por `realpath` divergente, nunca por pertencer a mais de
+    # uma base: sem essa distincao o veredito dispararia 3632 vezes no corpus.
+    if len({real for _, real in hits}) > 1:
+        return "ambiguous"
+    first = hits[0][0]
+    return "rewrite" if first == "loop_root" else f"ok:{first}"
+
+
 class TestWorkspaceDriftPolicy:
     def test_loop_without_project_uses_loop_workspace(self, loop_root: Path) -> None:
         loop_workspace = loop_root.parent / "loop-workspace"
@@ -969,11 +1075,56 @@ class TestWorkspaceDriftPolicy:
             == workspace.resolve()
         )
 
-    def test_divergent_project_workspace_blocks_silent_overwrite(
+    def test_divergent_project_workspace_does_not_block_the_loop(
         self, loop_root: Path, tmp_path: Path
+    ) -> None:
+        """Regressao 2026-07-27: com project.json anexado (attachments-project-
+        row) e workspace divergente, o default `block` levantava
+        DailyLoopConfigError e o botao Loop virava toast de erro com a
+        queue-command-list vazia. O anexo loop e a autoridade: o project nunca
+        bloqueia, so perde a disputa."""
+        loop_workspace = tmp_path / "loop-workspace"
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = str(loop_workspace)
+        _write_progress(loop_root, items=[("001", " ", "target/file.py", "T-sonnet-medium")])
+
+        assert (
+            resolve_effective_workspace_root(
+                cfg,
+                loop_root,
+                project_workspace_root=tmp_path / "project-workspace",
+            )
+            == loop_workspace.resolve()
+        )
+
+        specs = build_daily_loop_specs(
+            cfg,
+            loop_root,
+            project_workspace_root=tmp_path / "project-workspace",
+        )
+        assert specs, "fila deve expandir mesmo com project workspace divergente"
+
+    def test_divergent_project_workspace_warns_on_stderr(
+        self, loop_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         cfg = _base_config(loop_root)
         cfg["basic_flow"]["workspace_root"] = str(tmp_path / "loop-workspace")
+
+        resolve_effective_workspace_root(
+            cfg,
+            loop_root,
+            project_workspace_root=tmp_path / "project-workspace",
+        )
+
+        assert "workspace_root divergente" in capsys.readouterr().err
+
+    def test_explicit_block_policy_still_fails_closed(
+        self, loop_root: Path, tmp_path: Path
+    ) -> None:
+        """`block` continua disponivel, agora como opt-in explicito."""
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = str(tmp_path / "loop-workspace")
+        cfg["workspace_drift_policy"] = "block"
         _write_progress(loop_root, items=[("001", " ", "target/file.py", "T-sonnet-medium")])
 
         with pytest.raises(DailyLoopConfigError, match="workspace_root divergente"):
@@ -982,6 +1133,52 @@ class TestWorkspaceDriftPolicy:
                 loop_root,
                 project_workspace_root=tmp_path / "project-workspace",
             )
+
+    def test_relative_loop_workspace_anchors_on_repo_root_not_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`basic_flow.workspace_root` relativo ancora na raiz do repo dona do
+        loop (1o ancestral com `.claude/`), nunca no cwd do processo — o
+        workflow-app roda com cwd = ai-forge/workflow-app."""
+        repo = tmp_path / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        loop_root = repo / "blacksmith" / "loop-archives" / "07-24-slug"
+        loop_root.mkdir(parents=True)
+        elsewhere = tmp_path / "cwd-decoy"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = "output/workspace/app"
+
+        assert (
+            resolve_effective_workspace_root(cfg, loop_root)
+            == repo / "output" / "workspace" / "app"
+        )
+
+    def test_same_relative_declaration_on_both_sides_is_not_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Falso-positivo real: loop e project declaravam o MESMO
+        `output/workspace/tecum-app`, mas o loop resolvia contra o cwd e o
+        project contra a raiz do repo, e a comparacao acusava divergencia."""
+        repo = tmp_path / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        loop_root = repo / "blacksmith" / "loop-archives" / "07-23-slug"
+        loop_root.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        cfg = _base_config(loop_root)
+        cfg["basic_flow"]["workspace_root"] = "output/workspace/tecum-app"
+
+        assert (
+            resolve_effective_workspace_root(
+                cfg,
+                loop_root,
+                project_workspace_root=repo / "output" / "workspace" / "tecum-app",
+            )
+            == repo / "output" / "workspace" / "tecum-app"
+        )
 
     def test_explicit_project_override_uses_project_workspace_for_rewrite(
         self, loop_root: Path, tmp_path: Path
@@ -1007,6 +1204,182 @@ class TestWorkspaceDriftPolicy:
 
         expected = f"{os.path.relpath(loop_root, project_workspace)}/tasks/items/task-001.md"
         assert any(spec.name == f"/loop:test {expected}" for spec in specs)
+
+    # ── Baseline do corpus real (rede de regressao do resolver) ────────────
+
+    @_requires_corpus
+    def test_corpus_md_token_classification_baseline(self) -> None:
+        """Fotografia do corpus de `blacksmith/loop-archives/` em 2026-07-27.
+
+        Rede de seguranca para a centralizacao do resolver de paths: qualquer
+        mudanca de precedencia entre raiz do repo, `workspace_root` e
+        `loop_root` mexe nestes numeros. Divergencia aqui e SINAL, nao ruido —
+        rever a mudanca antes de atualizar a constante.
+        """
+        tally = {
+            "ok:repo_root": 0,
+            "ok:workspace_root": 0,
+            "rewrite": 0,
+            "absolute": 0,
+            "not_found": 0,
+            "ambiguous": 0,
+        }
+        configs = sorted(_LOOP_ARCHIVES.glob("*/_LOOP-CONFIG.json"))
+        for config_path in configs:
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            loop_root = config_path.parent
+            repo_root = _corpus_repo_root(loop_root)
+            assert repo_root is not None, f"{config_path} fora de um repo com .claude/"
+            workspace_root = _corpus_workspace_root(raw, repo_root)
+            for _item_id, token in _corpus_md_tokens(raw.get("daily_loop")):
+                verdict = _classify_corpus_token(
+                    token,
+                    loop_root=loop_root,
+                    workspace_root=workspace_root,
+                    repo_root=repo_root,
+                )
+                tally[verdict] += 1
+
+        assert len(configs) == 53
+        assert tally == {
+            "ok:repo_root": 5887,
+            "ok:workspace_root": 419,
+            "rewrite": 2,
+            "absolute": 68,
+            "not_found": 26,
+            "ambiguous": 0,
+        }
+        assert sum(tally.values()) == 6402
+
+    @_requires_corpus
+    def test_corpus_loader_rewrites_only_the_known_bare_relative_item(self) -> None:
+        """O loader, hoje, so reescreve o item 019 de `05-19-gap-tasklist`.
+
+        Espelha o veredito `rewrite` do oraculo acima (2 ocorrencias, uma em
+        `buckets[*]` e outra em `items_index`, por espelhamento W9). Esta e a
+        rede que impede a reescrita de `_rewrite_bare_relative_md_tokens` como
+        consumidor do resolver de mudar comportamento observavel.
+        """
+        rewritten: list[tuple[str, str, str, str]] = []
+        for config_path in sorted(_LOOP_ARCHIVES.glob("*/_LOOP-CONFIG.json")):
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            daily_loop = raw.get("daily_loop")
+            if not isinstance(daily_loop, dict):
+                continue
+            loop_root = config_path.parent
+            repo_root = _corpus_repo_root(loop_root)
+            assert repo_root is not None
+            workspace_root = _corpus_workspace_root(raw, repo_root)
+
+            def _check(item_id: str, commands: object, *, loop=loop_root, ws=workspace_root,
+                       name=config_path.parent.name) -> None:
+                if not isinstance(commands, list):
+                    return
+                cmds = [c for c in commands if isinstance(c, str)]
+                out = _rewrite_bare_relative_md_tokens(cmds, loop, ws, item_id)
+                rewritten.extend(
+                    (name, item_id, before, after)
+                    for before, after in zip(cmds, out)
+                    if before != after
+                )
+
+            for bucket in daily_loop.get("buckets") or []:
+                if isinstance(bucket, dict):
+                    for item in bucket.get("items") or []:
+                        if isinstance(item, dict):
+                            _check(str(item.get("id", "?")), item.get("commands"))
+            items_index = daily_loop.get("items_index")
+            if isinstance(items_index, dict):
+                for item_id, entry in items_index.items():
+                    if isinstance(entry, dict):
+                        _check(str(item_id), entry.get("commands"))
+
+        assert len(rewritten) == 2
+        assert {(loop, item) for loop, item, _, _ in rewritten} == {
+            ("05-19-gap-tasklist", "019")
+        }
+        for _loop, _item, _before, after in rewritten:
+            assert after.endswith(
+                "blacksmith/loop-archives/05-19-gap-tasklist/tasks/items/"
+                "task-019-finalizacao.md"
+            )
+
+
+class TestRewriteBareRelativeMdTokens:
+    """Cobertura direta de `_rewrite_bare_relative_md_tokens` (§12 criterio 6).
+
+    A funcao nao tinha nenhum teste proprio antes de virar consumidora do
+    resolver: era coberta so por tabela, atraves de `build_loop_specs`.
+    """
+
+    @pytest.fixture()
+    def repo(self, tmp_path: Path) -> Path:
+        root = tmp_path / "repo"
+        (root / ".claude").mkdir(parents=True)
+        return root
+
+    @pytest.fixture()
+    def loop(self, repo: Path) -> Path:
+        root = repo / "blacksmith" / "loop-archives" / "fake"
+        root.mkdir(parents=True)
+        return root
+
+    def test_non_md_tokens_pass_through_untouched(self, repo: Path, loop: Path) -> None:
+        cmds = ["/model sonnet", "/loop:iteraction:execute-task --task"]
+        assert _rewrite_bare_relative_md_tokens(cmds, loop, repo, "001") == cmds
+
+    def test_absolute_token_is_kept(self, repo: Path, loop: Path) -> None:
+        cmds = ["/loop:test /tmp/qualquer-coisa.md"]
+        assert _rewrite_bare_relative_md_tokens(cmds, loop, repo, "001") == cmds
+
+    def test_token_resolving_from_repo_root_is_kept_silently(
+        self, repo: Path, loop: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = repo / "docs" / "guide.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("# guide\n", encoding="utf-8")
+        workspace = repo / "output" / "workspace" / "app"
+        workspace.mkdir(parents=True)
+
+        cmds = ["/loop:test docs/guide.md"]
+        assert _rewrite_bare_relative_md_tokens(cmds, loop, workspace, "001") == cmds
+        assert capsys.readouterr().err == ""
+
+    def test_token_missing_everywhere_is_kept(self, repo: Path, loop: Path) -> None:
+        cmds = ["/loop:test tasks/items/fantasma.md"]
+        assert _rewrite_bare_relative_md_tokens(cmds, loop, repo, "001") == cmds
+
+    def test_loop_root_only_token_is_rewritten_with_warn(
+        self, repo: Path, loop: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = loop / "tasks" / "items" / "task-001.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("# task\n", encoding="utf-8")
+        workspace = repo / "output" / "workspace" / "app"
+        workspace.mkdir(parents=True)
+
+        out = _rewrite_bare_relative_md_tokens(
+            ["/loop:test tasks/items/task-001.md"], loop, workspace, "001"
+        )
+
+        rel = os.path.relpath(loop, workspace)
+        assert out == [f"/loop:test {rel}/tasks/items/task-001.md"]
+        assert "bare-relative path rewritten" in capsys.readouterr().err
+
+    def test_ambiguous_token_warns_and_keeps(
+        self, repo: Path, loop: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workspace = repo / "output" / "workspace" / "app"
+        (workspace / "docs").mkdir(parents=True)
+        (workspace / "docs" / "guide.md").write_text("# workspace\n", encoding="utf-8")
+        (repo / "docs").mkdir()
+        (repo / "docs" / "guide.md").write_text("# raiz\n", encoding="utf-8")
+
+        cmds = ["/loop:test docs/guide.md"]
+        assert _rewrite_bare_relative_md_tokens(cmds, loop, workspace, "001") == cmds
+        err = capsys.readouterr().err
+        assert "token ambiguo" in err
+        assert "repo_root" in err
 
 
 # ────────────────────────────────────────────────────────────────────────────
