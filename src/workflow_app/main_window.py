@@ -1428,7 +1428,11 @@ class MainWindow(QMainWindow):
         # --- Linha unica ---
         _top_row = QWidget()
         _top_row_layout = QHBoxLayout(_top_row)
-        _top_row_layout.setContentsMargins(0, 0, 0, 0)
+        # Margem esquerda de 3px: `queue-div-llm-routing` e o primeiro item da
+        # row, entao a margem da row E a margem esquerda da div (Qt nao tem
+        # margem externa por widget). Existe so para a borda da div nao encostar
+        # no canto do header.
+        _top_row_layout.setContentsMargins(3, 0, 0, 0)
         _top_row_layout.setSpacing(10)
 
         # Primeira posicao: queue-div-llm-routing reparenteado da play bar do
@@ -1440,10 +1444,18 @@ class MainWindow(QMainWindow):
             self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
         )
 
-        # Seletor das tres secoes do header (I3.2), ja carregando o stack como
+        # Seletor das secoes do header (I3.2), ja carregando o stack como
         # segundo item do proprio container.
+        #
+        # AlignTop (2026-07-27): desde que `_sync_flow_section_height` poe um
+        # teto de altura no selector, ele deixou de preencher a row e passou a
+        # sobrar espaco vertical — que o QHBoxLayout centralizava. Ancora no
+        # topo, como os dois vizinhos. Sem flag horizontal na mascara, o
+        # `stretch=1` continua valendo na largura.
         _top_row_layout.addWidget(
-            self._build_toolbar_section_selector(_section_stack), stretch=1
+            self._build_toolbar_section_selector(_section_stack),
+            stretch=1,
+            alignment=Qt.AlignmentFlag.AlignTop,
         )
         self._select_toolbar_section(0)
 
@@ -1459,8 +1471,13 @@ class MainWindow(QMainWindow):
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
         _last_column_layout = QVBoxLayout(_last_column)
-        _last_column_layout.setContentsMargins(6, 6, 6, 6)
-        _last_column_layout.setSpacing(6)
+        # 1px de padding e 1px de espaco entre as duas colunas (2026-07-27). O
+        # gap interno somava 18px entre o botao DataTest e os toggles: 6 da
+        # margem de baixo de `output-toolbar-test-mode`, 6 deste spacing e 6 da
+        # margem de cima de `output-toolbar-queue-toggles` — as duas margens
+        # filhas foram zeradas nos respectivos builders.
+        _last_column_layout.setContentsMargins(1, 1, 1, 1)
+        _last_column_layout.setSpacing(1)
         _last_column_layout.addWidget(_test_mode_column)
         _last_column_layout.addWidget(_queue_toggles_column)
         _top_row_layout.addWidget(                                                 # test-mode + queue-toggles
@@ -4116,7 +4133,9 @@ class MainWindow(QMainWindow):
             "  border: none; }"
         )
         col_layout = QVBoxLayout(column)
-        col_layout.setContentsMargins(6, 6, 6, 6)
+        # Sem margem propria: o unico padding da pilha e o 1px de
+        # `output-toolbar-datatest-queue-stack` (2026-07-27).
+        col_layout.setContentsMargins(0, 0, 0, 0)
         col_layout.setSpacing(0)
 
         self._build_datatest_floating_panel()
@@ -4368,7 +4387,9 @@ class MainWindow(QMainWindow):
             "  border: none; }"
         )
         col_layout = QVBoxLayout(column)
-        col_layout.setContentsMargins(6, 6, 6, 6)
+        # Idem `output-toolbar-test-mode`: zero margem propria, o padding da
+        # pilha e o 1px do `output-toolbar-datatest-queue-stack` (2026-07-27).
+        col_layout.setContentsMargins(0, 0, 0, 0)
         col_layout.setSpacing(6)
 
         # queue-count-toggles-row (reparent de metrics_bar — widget orfao)
@@ -7784,6 +7805,10 @@ class MainWindow(QMainWindow):
                     continue  # blog opera sobre o proprio SystemForge, sem project.json
                 if spec.name.startswith("/cmd:"):
                     continue  # /cmd:* sao META commands do SystemForge, nao dependem de project.json
+                if spec.name.startswith("/loop:iteraction:") or spec.name.startswith("/kimi-loop:iteraction:"):
+                    continue  # per-item commands ja carregam --task <path> explicito (build_loop_specs
+                    # seta config_path="" de proposito); anexar o project.json aqui mascara o argumento
+                    # canonico e faz o comando resolver o JSON errado como {json_path} (bug 2026-07-29)
                 spec.config_path = rel
 
         self._command_queue.load_pipeline(commands)

@@ -475,3 +475,51 @@ def test_tokens_importable():
     assert COLORS.primary == "#FBBF24"
     assert TYPOGRAPHY.font_ui == "Inter"
     assert SPACING.md == 12
+
+
+def test_pipeline_ready_preserves_config_path_for_loop_iteraction_specs(qapp, tmp_path):
+    """Regression (2026-07-29): /loop:iteraction:* and /kimi-loop:iteraction:*
+    specs already carry an explicit --task <path> argument and are built with
+    config_path="" on purpose (daily_loop/loader.py::build_loop_specs). Before
+    the fix, _on_pipeline_ready unconditionally overwrote config_path with the
+    active project.json path for any spec not matching a hardcoded prefix
+    blocklist, which made per-item loop commands silently resolve the wrong
+    {json_path} (e.g. a project.json instead of the canonical loop JSON).
+    """
+    from workflow_app.config.app_state import app_state
+    from workflow_app.config.config_parser import PipelineConfig
+    from workflow_app.db.database_manager import db_manager
+    from workflow_app.domain import CommandSpec
+    from workflow_app.main_window import MainWindow
+
+    db_manager.setup(db_path=str(tmp_path / "test_workflow.db"))
+
+    cfg_path = tmp_path / ".claude" / "projects" / "site-repo.json"
+    cfg = PipelineConfig(
+        config_path=str(cfg_path),
+        project_name="site-repo",
+        brief_root=str(tmp_path / "brief"),
+        docs_root=str(tmp_path / "docs"),
+        wbs_root=str(tmp_path / "wbs"),
+        workspace_root=str(tmp_path / "workspace"),
+    )
+    app_state.set_config(cfg)
+
+    window = MainWindow()
+    try:
+        specs = [
+            CommandSpec(name="/loop:iteraction:review-executed-task", config_path=""),
+            CommandSpec(name="/kimi-loop:iteraction:execute-task", config_path=""),
+            CommandSpec(name="/loop:create-structure", config_path=""),
+        ]
+        window._on_pipeline_ready(specs)
+
+        by_name = {s.name: s for s in specs}
+        assert by_name["/loop:iteraction:review-executed-task"].config_path == ""
+        assert by_name["/kimi-loop:iteraction:execute-task"].config_path == ""
+        # Sanity: legitimate /loop:* commands that DO need config_path are unaffected.
+        assert by_name["/loop:create-structure"].config_path != ""
+    finally:
+        window.deleteLater()
+        app_state.clear_config()
+        db_manager.close()

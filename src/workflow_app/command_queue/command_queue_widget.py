@@ -3117,9 +3117,9 @@ class CommandQueueWidget(QWidget):
         # optional worker preference toggles used by [Rodar proximo].
         # Reparenteado pelo MainWindow para a linha 1 da OutputToolbar; por isso
         # e exposto como self._llm_box. Layout em coluna: as tres secoes (Main
-        # LLM | Parallel Worker | MCP Flags) ficam empilhadas uma sobre a
-        # outra, separadas por divisores HLine, e dentro de cada secao o label
-        # fica em cima dos inputs.
+        # LLM | Parallel Worker | Flag) ficam empilhadas uma sobre a
+        # outra, separadas por divisores HLine. Nas duas primeiras o label fica
+        # em cima dos inputs; em Flag o label divide a linha com os checkboxes.
         _llm_box = QWidget()
         self._llm_box = _llm_box
         _llm_box.setProperty("testid", "queue-div-llm-routing")
@@ -3263,11 +3263,14 @@ class CommandQueueWidget(QWidget):
         _flag_section = QWidget()
         _flag_section.setProperty("testid", "queue-div-flag")
         _flag_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em coluna: label em cima, inputs (checkboxes) embaixo.
-        _flag_layout = QVBoxLayout(_flag_section)
+        # Layout em LINHA (2026-07-27): ao contrario das duas secoes acima, o
+        # label "Flag" fica a esquerda, na mesma linha dos checkboxes --kimi /
+        # --codex. Sao so dois controles curtos, entao a linha unica economiza
+        # altura da coluna sem apertar nada.
+        _flag_layout = QHBoxLayout(_flag_section)
         _flag_layout.setContentsMargins(0, 0, 0, 0)
-        _flag_layout.setSpacing(2)
-        _flag_label = QLabel("MCP Flags:")
+        _flag_layout.setSpacing(8)
+        _flag_label = QLabel("Flag")
         _flag_label.setStyleSheet(_section_label_qss)
         _flag_options = QWidget()
         _flag_options.setStyleSheet("background: transparent; border: none;")

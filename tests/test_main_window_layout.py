@@ -130,20 +130,23 @@ def test_output_toolbar_left_splits_insertions_controls(app):
 
 
 def test_llm_routing_sections_are_vertical_label_over_controls(app):
-    """queue-div-llm-routing: TRES secoes, cada uma em coluna.
+    """queue-div-llm-routing: TRES secoes, label sempre no indice 0.
 
     Layout 2026-07-27: label no indice 0, bloco de controles no indice 1, e os
-    controles seguem lado a lado ENTRE SI (QHBoxLayout interno). Falha se
-    qualquer uma das tres voltar ao layout horizontal (label a esquerda,
-    controles a direita), que e o estado anterior.
+    controles seguem lado a lado ENTRE SI (QHBoxLayout interno). As duas
+    primeiras secoes ficam em coluna (label EM CIMA dos controles); falha se
+    qualquer uma delas voltar ao layout horizontal, que e o estado anterior.
+    `queue-div-flag` e a excecao deliberada: label "Flag" na MESMA linha dos
+    checkboxes (QHBoxLayout na secao).
     """
     cq = CommandQueueWidget()
     llm_box = cq._llm_box
 
+    # (testid, texto do label, layout esperado da secao)
     sections = [
-        ("queue-div-main-llm", "Main LLM:"),
-        ("queue-div-parallel-worker", "Parallel Worker:"),
-        ("queue-div-flag", "MCP Flags:"),
+        ("queue-div-main-llm", "Main LLM:", QVBoxLayout),
+        ("queue-div-parallel-worker", "Parallel Worker:", QVBoxLayout),
+        ("queue-div-flag", "Flag", QHBoxLayout),
     ]
 
     # Exatamente tres secoes na coluna, na ordem declarada, com HLine entre
@@ -155,14 +158,14 @@ def test_llm_routing_sections_are_vertical_label_over_controls(app):
         for i in range(layout.count())
         if not isinstance(layout.itemAt(i).widget(), QFrame)
     ]
-    assert found == [testid for testid, _ in sections]
+    assert found == [testid for testid, _, _ in sections]
 
-    for testid, label_text in sections:
+    for testid, label_text, expected_layout in sections:
         section = _find_widget_by_testid(llm_box, testid)
         assert section is not None, f"secao {testid} sumiu"
         section_layout = section.layout()
-        assert isinstance(section_layout, QVBoxLayout), (
-            f"{testid} voltou a layout horizontal"
+        assert isinstance(section_layout, expected_layout), (
+            f"{testid} mudou de orientacao de layout"
         )
         assert section_layout.count() == 2, f"{testid} nao e label + controles"
 
