@@ -4520,3 +4520,97 @@ class TestMcpFlagsCommandContract:
         root = _repo_root()
         for w in _MCP_WRAPPER_TARGETS:
             assert (root / w).is_file(), w
+
+
+class TestAutoLoopRearm:
+    """Auto-loop (main-command-queue-auto-loop-btn): o verde autoritativo do T1
+    rearma as setas ambar da fila.
+
+    Regras: ai-forge/rules/single-arrow-multifunction.md §9. O gate de ciclo
+    completo (so rearma com zero pendentes) existe para evitar starvation: sem
+    ele, o rearme ao fim de CADA item faria `_find_next_pending` devolver
+    sempre o item 1 e o autocast repetiria o primeiro item para sempre.
+    """
+
+    def _send_all(self, widget) -> None:
+        for item in widget._items:
+            item._mark_as_sent()
+
+    def test_disabled_by_default(self, widget, specs):
+        widget.load_pipeline(specs)
+        assert widget.is_auto_loop_enabled() is False
+        self._send_all(widget)
+        signal_bus.listener_authoritative_idle.emit("interactive")
+        assert all(not i.is_pending_run() for i in widget._items)
+
+    def test_t1_green_rearms_every_sent_item(self, widget, specs):
+        widget.load_pipeline(specs)
+        widget.set_auto_loop_enabled(True)
+        self._send_all(widget)
+
+        signal_bus.listener_authoritative_idle.emit("interactive")
+
+        assert all(i.is_pending_run() for i in widget._items)
+        # A seta unica volta ao glifo de play (sai do ambar ●).
+        assert all(i._exec_btn.text() == "▶" for i in widget._items)
+        assert widget._find_next_pending() is widget._items[0]
+
+    def test_no_rearm_while_queue_still_has_pending(self, widget, specs):
+        """Ciclo incompleto: item 1 enviado, itens 2-3 pendentes -> no-op."""
+        widget.load_pipeline(specs)
+        widget.set_auto_loop_enabled(True)
+        widget._items[0]._mark_as_sent()
+
+        signal_bus.listener_authoritative_idle.emit("interactive")
+
+        assert widget._items[0].is_pending_run() is False
+        assert widget._find_next_pending() is widget._items[1]
+
+    def test_worker_channels_do_not_rearm(self, widget, specs):
+        widget.load_pipeline(specs)
+        widget.set_auto_loop_enabled(True)
+        self._send_all(widget)
+
+        signal_bus.listener_authoritative_idle.emit("workspace")
+        signal_bus.listener_authoritative_idle.emit("workspace_xterm")
+
+        assert all(not i.is_pending_run() for i in widget._items)
+
+    def test_empty_queue_is_noop(self, widget):
+        widget.set_auto_loop_enabled(True)
+        assert widget.rearm_sent_items() is False
+
+    def test_rearm_emits_metrics_once(self, widget, specs):
+        widget.load_pipeline(specs)
+        widget.set_auto_loop_enabled(True)
+        self._send_all(widget)
+
+        seen: list[tuple[int, int]] = []
+        signal_bus.metrics_updated.connect(lambda d, t: seen.append((d, t)))
+        try:
+            assert widget.rearm_sent_items() is True
+        finally:
+            signal_bus.metrics_updated.disconnect()
+
+        assert seen == [(0, 3)], seen
+
+    def test_idempotent_second_green(self, widget, specs):
+        widget.load_pipeline(specs)
+        widget.set_auto_loop_enabled(True)
+        self._send_all(widget)
+
+        signal_bus.listener_authoritative_idle.emit("interactive")
+        # Segundo verde sem novo dispatch: fila ja toda pendente -> no-op.
+        signal_bus.listener_authoritative_idle.emit("interactive")
+
+        assert all(i.is_pending_run() for i in widget._items)
+
+    def test_toggle_off_stops_rearming(self, widget, specs):
+        widget.load_pipeline(specs)
+        widget.set_auto_loop_enabled(True)
+        widget.set_auto_loop_enabled(False)
+        self._send_all(widget)
+
+        signal_bus.listener_authoritative_idle.emit("interactive")
+
+        assert all(not i.is_pending_run() for i in widget._items)

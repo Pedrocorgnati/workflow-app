@@ -2502,6 +2502,12 @@ class MetricsBar(QWidget):
                     self._autocast_kickoff_on_enable = False
         if dot:
             dot.set_busy(False)
+            # Broadcast do verde AUTORITATIVO (pos-fence). Emitido aqui, e nao
+            # em `busy_changed`, porque este e o unico chokepoint em que as
+            # guardas ja passaram: `_awaiting_notify` baixo (nenhum comando real
+            # em voo) e dot fora de failed/awaiting_user. Consumidor atual: o
+            # auto-loop da fila (rearma as setas ambar quando o T1 fica verde).
+            self._signal_bus.listener_authoritative_idle.emit(channel)
         self._update_overall_listener()
 
     def _release_idle_lock(self, channel: str) -> None:

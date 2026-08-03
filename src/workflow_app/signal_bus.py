@@ -228,6 +228,16 @@ class SignalBus(QObject):
     # Claude. channel values: "interactive" | "workspace" | "workspace_xterm".
     listener_helper_pulse = Signal(str)  # channel
 
+    # Emitted by MetricsBar._enter_authoritative_idle() — the SINGLE chokepoint
+    # every green/idle path funnels through (notify-armed soft timer, hardcap,
+    # PTY-silence heuristic). Fires only AFTER the fences already applied there:
+    # `_awaiting_notify[channel]` down (no real command in flight) and the dot
+    # not in a priority state (failed/awaiting_user). Consumers can treat it as
+    # "channel really reached green now". channel values:
+    # "interactive" | "workspace" | "workspace_xterm".
+    # Consumer: CommandQueueWidget auto-loop (main-command-queue-auto-loop-btn).
+    listener_authoritative_idle = Signal(str)  # channel
+
     # --- Listener failed/awaiting_user (ai-forge/rules/workflow-app-listeners.md) ---
     # Canonical signals for the 4-state dot (idle/busy/awaiting_user/failed).
     # Emitted by:

@@ -63,6 +63,38 @@ def test_clear_button_in_actions_row_empties_queue(qapp):
     assert window._command_queue.get_queue_snapshot() == []
 
 
+def test_auto_loop_button_in_actions_row_mirrors_queue_state(qapp):
+    """O botao auto-loop vive ao lado do Clear e espelha o estado na fila.
+
+    Regras: ai-forge/rules/single-arrow-multifunction.md §9.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+
+    btn = next(
+        b for b in window.findChildren(QPushButton)
+        if b.property("testid") == "main-command-queue-auto-loop-btn"
+    )
+    assert btn.text() == "auto-loop"
+    assert btn.isCheckable()
+    assert not btn.isChecked(), "auto-loop nasce desligado (opt-in explicito)"
+
+    # Mesma linha de acoes do Clear (parentWidget walk — nunca findChildren).
+    ancestor = btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "main-command-queue-actions-row":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None, "auto-loop nao esta dentro do main-command-queue-actions-row"
+
+    assert window._command_queue.is_auto_loop_enabled() is False
+    btn.setChecked(True)
+    assert window._command_queue.is_auto_loop_enabled() is True
+    btn.setChecked(False)
+    assert window._command_queue.is_auto_loop_enabled() is False
+
+
 def test_attachment_pills_have_distinct_semantic_slots(qapp):
     """Project, loop and brainstorm surfaces keep distinct testids."""
     from workflow_app.config.app_state import app_state

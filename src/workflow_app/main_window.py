@@ -1187,6 +1187,34 @@ class MainWindow(QMainWindow):
         )
         self._clear_queue_btn.clicked.connect(self._on_clear_queue_clicked)
 
+        # Botao auto-loop — toggle que rearma a fila quando o listener do T1
+        # (interactive) atinge o verde autoritativo. Ligado: ao terminar o
+        # ULTIMO item, toda seta unica ambar volta a verde/pendente e a fila
+        # pode rodar de novo do item 1 (com o autocast ligado, roda sozinha em
+        # loop). Estado vive aqui (botao = fonte da verdade) e e espelhado no
+        # CommandQueueWidget via set_auto_loop_enabled.
+        # Aparencia espelha o autocast-btn da play bar (azul; vermelho quando
+        # ligado), com a altura 28 da linha de acoes.
+        # Regras: ai-forge/rules/single-arrow-multifunction.md §9.
+        self._auto_loop_btn = QPushButton("auto-loop")
+        self._auto_loop_btn.setProperty("testid", "main-command-queue-auto-loop-btn")
+        self._auto_loop_btn.setCheckable(True)
+        self._auto_loop_btn.setToolTip(
+            "Auto-loop: quando o listener do T1 (interactive) fica verde e a fila "
+            "acabou, toda seta ambar volta a verde e a fila pode rodar de novo"
+        )
+        self._auto_loop_btn.setFixedHeight(28)
+        self._auto_loop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._auto_loop_btn.setStyleSheet(
+            "QPushButton { background-color: #1E3A8A; color: #FAFAFA;"
+            "  border: 1px solid #3B82F6; border-radius: 5px;"
+            "  font-size: 11px; font-weight: 700; padding: 0 12px; }"
+            "QPushButton:hover { background-color: #1D4ED8; }"
+            "QPushButton:checked { background-color: #DC2626; border-color: #EF4444; }"
+            "QPushButton:checked:hover { background-color: #B91C1C; }"
+        )
+        self._auto_loop_btn.toggled.connect(self._on_auto_loop_toggled)
+
         # Bloco semantico de anexos como first div inside command queue.
         # Widgets are reparented from MetricsBar (state machine stays in MetricsBar).
         _pill_row = QWidget()
@@ -1253,6 +1281,7 @@ class MainWindow(QMainWindow):
         _actions_row_layout.setContentsMargins(8, 0, 8, 6)
         _actions_row_layout.setSpacing(5)
         _actions_row_layout.addWidget(self._clear_queue_btn)
+        _actions_row_layout.addWidget(self._auto_loop_btn)
         # Park hidden nav buttons here so MetricsBar is fully decoupled
         for _btn in (self._metrics_bar._btn_workflow, self._metrics_bar._btn_comandos):
             _actions_row_layout.addWidget(_btn)
@@ -8564,6 +8593,22 @@ class MainWindow(QMainWindow):
             return
         self._command_queue.clear_queue()
         self._show_toast(f"Fila esvaziada: {count} comandos removidos.", "success")
+
+    def _on_auto_loop_toggled(self, checked: bool) -> None:
+        """Espelha o toggle do botao auto-loop no CommandQueueWidget.
+
+        O botao e a fonte da verdade do estado; a fila so guarda o espelho que
+        o slot `_on_listener_authoritative_idle` consulta. Feedback explicito
+        via toast (Zero Silencio): o rearme das setas acontece depois, no verde
+        do T1, entao sem toast o clique nao teria efeito visivel imediato."""
+        self._command_queue.set_auto_loop_enabled(bool(checked))
+        if checked:
+            self._show_toast(
+                "Auto-loop ligado: ao terminar a fila, as setas voltam a verde.",
+                "info",
+            )
+        else:
+            self._show_toast("Auto-loop desligado.", "info")
 
     def _restore_queue_from_storage(self, config_path: str) -> None:
         """Restaura fila do storage dedicado queue_root, se existir."""

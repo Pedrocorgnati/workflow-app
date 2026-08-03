@@ -803,6 +803,19 @@ class CommandQueueWidget(QWidget):
         )
 
         self._items: list[CommandItemWidget] = []
+
+        # Auto-loop (main-command-queue-auto-loop-btn, main_window): quando
+        # ligado, o verde autoritativo do T1 rearma a fila — toda seta unica
+        # ambar (item enviado) volta a verde/pendente. Só dispara com a fila
+        # ESGOTADA (zero pendentes): rearmar no meio faria `_find_next_pending`
+        # devolver sempre o item 1 e o autocast repetiria o primeiro item para
+        # sempre, sem nunca alcançar o item 2 (starvation).
+        self._auto_loop_enabled: bool = False
+        # Batching do queue-progress-ring durante o rearme em massa: cada
+        # `reset_to_pending()` emitiria um metrics_updated via
+        # `_on_item_sent_state_changed`. Suprime durante o loop e emite UMA vez.
+        self._suspend_progress_metrics: bool = False
+
         self._pipeline_manager = None
         self._cli_binary = "clauded"  # Active CLI instance (updated via instance_selected)
 
@@ -3623,7 +3636,64 @@ class CommandQueueWidget(QWidget):
         )
         signal_bus.config_loaded.connect(self._on_config_loaded_for_governance)
         signal_bus.config_unloaded.connect(self._on_config_unloaded_for_governance)
+        signal_bus.listener_authoritative_idle.connect(
+            self._on_listener_authoritative_idle
+        )
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
+
+    # ─────────────────────────────────────────────── Auto-loop (fila) ── #
+
+    #: Canal do listener que rearma o auto-loop (T1 = terminal interactive).
+    _AUTO_LOOP_CHANNEL: str = "interactive"
+
+    def set_auto_loop_enabled(self, enabled: bool) -> None:
+        """Liga/desliga o auto-loop da fila (dono do estado: o botao do
+        main_window, que chama este setter no `toggled`)."""
+        self._auto_loop_enabled = bool(enabled)
+
+    def is_auto_loop_enabled(self) -> bool:
+        return self._auto_loop_enabled
+
+    def _on_listener_authoritative_idle(self, channel: str) -> None:
+        """T1 chegou ao verde autoritativo — rearma a fila se o auto-loop
+        estiver ligado.
+
+        Só o canal `interactive` conta: os workers (T2/T3) ficam verdes em
+        cadencia propria e rearmar por eles reabriria a fila no meio de um
+        dispatch Claude ainda em voo."""
+        if not self._auto_loop_enabled:
+            return
+        if channel != self._AUTO_LOOP_CHANNEL:
+            return
+        self.rearm_sent_items()
+
+    def rearm_sent_items(self) -> bool:
+        """Volta TODA seta unica ambar (item enviado) para verde/pendente.
+
+        Gate de ciclo completo: no-op enquanto existir qualquer item pendente.
+        Sem esse gate, o rearme dispararia ao fim de CADA item e o
+        `_find_next_pending` do autocast voltaria eternamente ao item 1
+        (starvation do resto da fila). Com ele, a fila roda 1..N e so recomeca
+        do 1 quando o ultimo item termina.
+
+        Retorna True quando rearmou de fato (usado pelos testes)."""
+        if not self._items:
+            return False
+        if any(item.is_pending_run() for item in self._items):
+            return False
+        self._suspend_progress_metrics = True
+        try:
+            for item in self._items:
+                # is_pending_run() == `not _is_sent`: aqui todos estao enviados.
+                item.reset_to_pending()
+        finally:
+            self._suspend_progress_metrics = False
+        self._emit_progress_metrics()
+        signal_bus.toast_requested.emit(
+            f"auto-loop: fila rearmada ({len(self._items)} itens de volta a pendente).",
+            "info",
+        )
+        return True
 
     def _on_config_loaded_for_governance(self, _path: str) -> None:
         self._refresh_governance_button_state()
@@ -8119,6 +8189,10 @@ class CommandQueueWidget(QWidget):
         are no longer pending — the ring represents finished/total, not
         success/total.
         """
+        if self._suspend_progress_metrics:
+            # Rearme em massa do auto-loop em curso: o emit final sai uma unica
+            # vez em `rearm_sent_items` (evita N ticks intermediarios do ring).
+            return
         total = len(self._items)
         done = sum(
             1

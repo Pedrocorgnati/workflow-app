@@ -639,6 +639,31 @@ class TestMetricsBarAuthoritativeIdle:
         assert bar._idle_locked["workspace"] is True
         assert bar._dot_workspace.is_busy is False
 
+    def test_enter_authoritative_idle_broadcasts_listener_signal(self, bar):
+        """O verde autoritativo emite listener_authoritative_idle(channel).
+
+        Consumidor: o auto-loop da fila. Emitir aqui (e nao em busy_changed)
+        garante que as fences ja passaram — `_awaiting_notify` baixo e dot fora
+        de failed/awaiting_user."""
+        emit = bar._signal_bus.listener_authoritative_idle.emit
+
+        bar._enter_authoritative_idle("interactive")
+        assert emit.call_args_list == [(("interactive",), {})]
+
+        # Fence up (comando real em voo) -> nao greena, nao emite.
+        emit.reset_mock()
+        bar._awaiting_notify["interactive"] = True
+        bar._enter_authoritative_idle("interactive")
+        assert emit.call_args_list == []
+        bar._awaiting_notify["interactive"] = False
+
+        # Dot em estado prioritario -> nao greena, nao emite.
+        emit.reset_mock()
+        bar._dot_workspace.set_state("failed")
+        bar._enter_authoritative_idle("workspace")
+        assert emit.call_args_list == []
+        assert bar._dot_workspace.state == "failed"
+
     def test_enter_authoritative_idle_stops_hardening_timer(self, bar):
         bar._idle_timer_workspace.start()
         assert bar._idle_timer_workspace.isActive()
