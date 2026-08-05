@@ -87,14 +87,25 @@ class TestWhitelist:
 
     def test_known_incompatible_commands(self):
         # Deterministicos puros -> destino Kimi/Claude, nunca Codex.
+        #
+        # A negativa sozinha e falso verde: um comando inexistente (por rename
+        # ou remocao) tambem nao e Codex-compatible, e a assercao passaria por
+        # tautologia. Por isso cada nome e provado EXISTENTE em disco antes de
+        # ser provado fora da whitelist Codex.
+        repo = _repo_root()
         for cmd in (
-            "/env-creation",
+            "/credentials:env-creation",
             "/secrets-scan",
             "/create-overview",
             "/seed-data-create",
             "/c4-diagram-create",
             "/execute-task",
         ):
+            md = _command_md_path(repo, cmd)
+            assert md.is_file(), (
+                f"{cmd} nao resolve para um comando existente ({md}); a negativa "
+                "abaixo passaria por tautologia, nao por comportamento."
+            )
             assert not is_codex_compatible(cmd), f"{cmd} should NOT be Codex-compatible"
 
 

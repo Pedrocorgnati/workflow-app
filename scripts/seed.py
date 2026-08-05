@@ -199,7 +199,7 @@ def _seed_template_commands(session, templates: dict[str, Template]) -> None:
         ),
         dict(
             position=6,
-            command_name="/env-creation",
+            command_name="/credentials:env-creation",
             model_type="sonnet",
             interaction_type="com_interacao",
             estimated_seconds=60,
@@ -489,7 +489,7 @@ def _seed_command_executions(
         dict(
             pipeline_id=pipe_completo.id,
             position=6,
-            command_name="/env-creation",
+            command_name="/credentials:env-creation",
             model="sonnet",
             interaction_type="com_interacao",
             status="pulado",
@@ -681,7 +681,7 @@ def _seed_execution_logs(
             pipeline_id=pipe_completo.id,
             command_execution_id=None,
             level="warning",
-            message="Comando /env-creation (opcional) foi pulado pelo usuário.",
+            message="Comando /credentials:env-creation (opcional) foi pulado pelo usuário.",
             summary_content=None,
             export_path=None,
             created_at=_dt(2),

@@ -121,7 +121,7 @@ _INTERACTIVE_CMDS = frozenset({
     # F7 — Execução
     "/create-mocks",
     # F8 — Complemento
-    "/env-creation",
+    "/credentials:env-creation",
     # F9 — QA (genuine interviews)
     "/qa:prep", "/qa-remediate", "/load-test-create",
     # F10 — Validação

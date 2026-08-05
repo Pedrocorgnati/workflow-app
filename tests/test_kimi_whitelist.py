@@ -83,7 +83,7 @@ class TestWhitelist:
         assert len(KIMI_COMPATIBLE_COMMANDS) == 128
 
     def test_known_compatible_commands(self):
-        for cmd in ("/secrets-scan", "/qa:prep", "/env-creation", "/sync:github"):
+        for cmd in ("/secrets-scan", "/qa:prep", "/credentials:env-creation", "/sync:github"):
             assert is_kimi_compatible(cmd), f"{cmd} should be Kimi-compatible"
 
     def test_known_incompatible_commands(self):

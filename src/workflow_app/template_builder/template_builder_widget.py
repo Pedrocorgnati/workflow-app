@@ -91,7 +91,7 @@ COMMAND_CATALOG_DCP: list[tuple[str, list[tuple[str, ModelName, InteractionType]
     ("D - F8 micro", [
         ("/clear",                      _S, _A),
         ("/model sonnet",               _H, _A),
-        ("/env-creation",               _H, _I),
+        ("/credentials:env-creation",   _H, _I),
         ("/create-test-user",           _H, _I),
         ("/seed-data-create",           _S, _I),
         ("/dev-bootstrap-create",       _H, _I),
@@ -240,7 +240,7 @@ COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] 
         ("/github-linking",         _H, _A),
     ]),
     ("F8 — Complemento", [
-        ("/env-creation",           _H, _I),
+        ("/credentials:env-creation", _H, _I),
         ("/docker-create",          _S, _A),
         ("/seed-data-create",       _S, _A),
         ("/create-test-user",       _H, _A),

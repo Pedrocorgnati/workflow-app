@@ -64,5 +64,5 @@ Os seguintes métodos são stubs aguardando implementação via `/auto-flow exec
 3. `/auto-flow execute module-4` — validar OutputThrottle end-to-end
 4. `/auto-flow execute module-5` — UI feedback no PC (toggle button, ícone verde)
 5. `/auto-flow execute module-6,7,8,9` — Android: WebSocketClient → ViewModel → UI
-6. `/env-creation` — configurar variáveis de ambiente se necessário
+6. `/credentials:env-creation` — configurar variáveis de ambiente se necessário
 7. `/integration-test-create` — testes de contrato WebSocket (module-11)

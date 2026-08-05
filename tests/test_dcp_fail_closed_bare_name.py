@@ -249,7 +249,7 @@ def test_canonically_bare_commands_pass_with_empty_config(
 
     offenders_reported = [
         "/create-task-layout", "/gate:frontend-runtime", "/data-test-id",
-        "/db-migration-create", "/assets:create", "/env-creation",
+        "/db-migration-create", "/assets:create", "/credentials:env-creation",
         "/nextjs:configuration", "/nextjs:security", "/secrets-scan",
         "/build-verify",
     ]
