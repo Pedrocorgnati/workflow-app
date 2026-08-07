@@ -44,6 +44,7 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/sync:github",                 # 84
     # D-f8
     "/credentials:env-creation",    # 88
+    "/credentials:update-base",     # 71
     "/create-test-user",            # 84
     "/seed-data-create",            # 79
     "/integration-test-create",     # 80

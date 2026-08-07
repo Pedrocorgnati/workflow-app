@@ -13,6 +13,30 @@ SchemaVer (internal):
 Runtime validation is done via `DcpCommandMatrix.model_validate(raw)`, NOT via
 the `jsonschema` library. The emitted `.schema.json` exists only for external
 consumers; the active validator is Pydantic v2.12.5.
+
+Historico de ADDITIONs
+----------------------
+2026-08-05 — `generated_at` (opcional) e `artifacts` (`MatrixArtifactsState`)
+no nivel raiz. Ambos ja eram gravados canonicamente por `/dcp:matrix-init`
+(matrix-init.md Passo 5.1) e `/dcp:matrix-refine` (matrix-refine.md L221-227),
+e ambos os comandos **leem** o sha256 correspondente como ancora de
+idempotencia. Com `extra="forbid"` e sem os campos no modelo, 6 das 11
+matrizes em disco falhavam `model_validate` e travavam
+`/build-module-pipeline`. Regra aplicada (CLAUDE.md): campo consumido sem
+schema entra no schema, nunca sai do produtor.
+
+`schema_version` permanece em `"1.0.1"` deliberadamente. A adicao e
+compativel nos dois sentidos (campos opcionais com default; nenhum arquivo em
+disco precisa mudar) e um bump para `"1.0.2"` exigiria atualizar em conjunto
+`command_queue_widget.py::supported_schemas`, `dcp_matrix_migrate.py` e os
+produtores markdown — trabalho fora do escopo deste unblock e sem ganho
+operacional, ja que validacao 1.0.1 e 1.0.2 seriam indistinguiveis. O
+`.schema.json` gerado ja publica os campos novos para consumidores externos.
+
+NAO adicionados de proposito: `slug`, `generator`, `version` e `trail` no
+nivel raiz. Eles pertencem ao shape legado v1.0.0 que
+`ai-forge/scripts/migrate-matrix-to-v1-0-1.py` existe para aposentar, nao sao
+ancoras de idempotencia, e aceita-los relegitimaria a forma antiga.
 """
 
 from __future__ import annotations
@@ -40,6 +64,8 @@ __all__ = [
     "DirectiveBoundary",
     "ArtifactsState",
     "ModuleEntry",
+    "MatrixRefineRun",
+    "MatrixArtifactsState",
     "FoldInRules",
     "DcpCommandMatrix",
     "WithDialect",
@@ -248,6 +274,48 @@ class ModuleEntry(BaseModel):
     artifacts: ArtifactsState = Field(default_factory=ArtifactsState)
 
 
+class MatrixRefineRun(BaseModel):
+    """Uma execucao registrada de `/dcp:matrix-refine` (append-only)."""
+
+    model_config = _BASE_CONFIG
+
+    at: datetime
+    source: str
+    flips_count: int = 0
+    reversals_count: int = 0
+
+
+class MatrixArtifactsState(BaseModel):
+    """Estado de artefatos MATRIX-GLOBAL (nao confundir com `ArtifactsState`,
+    que e per-modulo e vive em `ModuleEntry.artifacts`).
+
+    Uniao dos dois shapes canonicamente produzidos hoje:
+
+    - `/dcp:matrix-init` grava `matrix_init_input_sha256`, `global_filter_seed`
+      e `heuristics_applied` (matrix-init.md Passo 5.1) e **le**
+      `matrix_init_input_sha256` como ancora de idempotencia (Passo 1.5 / L61).
+    - `/dcp:matrix-refine` grava `matrix_refine_last_sha256` e faz append em
+      `matrix_refine_runs[]` (matrix-refine.md L221-222) e **le**
+      `matrix_refine_last_sha256` como ancora de idempotencia (L74 / L180).
+
+    Todos os campos sao opcionais: uma matrix escrita por apenas um dos dois
+    produtores carrega so metade das chaves, e isso e valido.
+
+    `heuristics_applied` fica em `List[Any]` de proposito: matrix-init.md nao
+    documenta o tipo do elemento e todas as matrizes em disco tem a lista
+    vazia. Tipar como `List[str]` seria adivinhar e poderia rejeitar um
+    produtor futuro legitimo.
+    """
+
+    model_config = _BASE_CONFIG
+
+    matrix_init_input_sha256: Optional[str] = None
+    global_filter_seed: Optional[str] = None
+    heuristics_applied: List[Any] = Field(default_factory=list)
+    matrix_refine_last_sha256: Optional[str] = None
+    matrix_refine_runs: List[MatrixRefineRun] = Field(default_factory=list)
+
+
 class FoldInRules(BaseModel):
     model_config = _BASE_CONFIG
 
@@ -284,6 +352,22 @@ class DcpCommandMatrix(BaseModel):
     created_at: datetime
     created_by: str
     last_mutated_at: datetime
+    generated_at: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "Momento da materializacao pelo produtor (`/dcp:matrix-init` "
+            "Passo 5.1, `/dcp:matrix-refine` L227). Distinto de `created_at` "
+            "(criacao logica da matrix) e de `last_mutated_at` (ultima "
+            "mutacao de filtro/trail)."
+        ),
+    )
+    artifacts: MatrixArtifactsState = Field(
+        default_factory=MatrixArtifactsState,
+        description=(
+            "Ancoras de idempotencia matrix-global lidas e escritas por "
+            "`/dcp:matrix-init` e `/dcp:matrix-refine`."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_invariants(self) -> "DcpCommandMatrix":

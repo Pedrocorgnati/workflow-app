@@ -29,6 +29,16 @@ def _repo_root() -> Path:
     raise RuntimeError(f"Could not locate {KIMI_PROGRESS_PATH} above {cur}")
 
 
+def _command_md_path(repo: Path, command_name: str) -> Path:
+    """Map a slash-command head to its .claude/commands/{path}.md file.
+
+    Same resolution the Kimi skill wrapper uses: strip the leading '/', turn ':'
+    namespaces into '/', append '.md'.
+    """
+    slug = command_name.lstrip("/").replace(":", "/")
+    return repo / ".claude" / "commands" / f"{slug}.md"
+
+
 def _load_progress_scores() -> dict[str, int]:
     """Parse `% Kimi` scores from progress.md. Returns {command_name: score}."""
     path = _repo_root() / KIMI_PROGRESS_PATH
@@ -80,14 +90,19 @@ class TestWhitelist:
         # + 1 (/usabilidade:detect, score 88, SC84 reconciliado do loop 06-23) = 123
         # + 1 (/loop:friendly-resume, score 82, SC85) = 124
         # + 1 (/loop:iteraction:review-executed-loop, score 54, SC89; --approved override) = 128
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 128
+        # + 1 (/credentials:update-base, score 71, SC91) = 129
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 129
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/credentials:env-creation", "/sync:github"):
             assert is_kimi_compatible(cmd), f"{cmd} should be Kimi-compatible"
 
     def test_known_incompatible_commands(self):
-        # Comandos KEEP_CLAUDE de progress.md
+        # Comandos KEEP_CLAUDE de progress.md.
+        # Prova de existencia ANTES da negativa: sem ela, um comando renomeado ou
+        # removido satisfaria `not is_kimi_compatible` por tautologia e o teste
+        # ficaria verde medindo nada (mesmo falso verde corrigido no lado codex).
+        repo = _repo_root()
         for cmd in (
             "/review-executed-module",
             "/qa:trace",
@@ -100,6 +115,12 @@ class TestWhitelist:
             "/gate:frontend-runtime",
             "/commit:simple",
         ):
+            md = _command_md_path(repo, cmd)
+            assert md.is_file(), (
+                f"{cmd} no longer exists at {md}; the negative assertion below "
+                "would pass vacuously. Update this list to the command's current "
+                "name/namespace."
+            )
             assert not is_kimi_compatible(cmd), f"{cmd} should NOT be Kimi-compatible"
 
     def test_dropped_below_threshold_commands_are_excluded(self):
@@ -236,11 +257,24 @@ class TestSkillFilesExist:
         assert skills_dir.is_dir(), f"missing skills dir: {skills_dir}"
 
         missing = []
+        dangling = []
         for cmd in KIMI_COMPATIBLE_COMMANDS:
             skill_name = cmd.lstrip("/")
             skill_file = skills_dir / f"{skill_name}.md"
             if not skill_file.is_file():
                 missing.append(str(skill_file))
+            # O wrapper existir nao basta: se o comando-alvo foi renomeado ou
+            # movido de namespace, o skill aponta para um path morto e a
+            # assercao acima passaria por tautologia.
+            if not _command_md_path(repo, cmd).is_file():
+                dangling.append(f"{cmd} -> {_command_md_path(repo, cmd)}")
+
+        assert not dangling, (
+            "Whitelisted Kimi commands whose target .claude/commands/*.md does "
+            f"not exist ({len(dangling)}): {dangling}. Rename/move the entry in "
+            "KIMI_COMPATIBLE_COMMANDS (and its .agents/skills/ wrapper) to match "
+            "the command's current namespace."
+        )
 
         assert not missing, (
             "Whitelisted Kimi commands without matching .agents/skills/*.md "
