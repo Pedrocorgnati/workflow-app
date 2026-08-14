@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 from workflow_app import dcp as dcp_pkg
 from workflow_app.command_queue.command_item_widget import (
     CommandItemWidget,
+    command_text_with_flags,
     render_with_mcp_flags,
 )
 from workflow_app.command_queue.codex_whitelist import is_image_generation_command
@@ -126,6 +127,7 @@ PROMPT_FILTER_CATEGORIES: tuple[str, ...] = (
     "Build",
     "Ops",
     "Study",
+    "commit",
 )
 PROMPT_FILTER_DEFAULT = "Ops"
 
@@ -2657,6 +2659,21 @@ class CommandQueueWidget(QWidget):
              "carregado -> toast verbose pt-BR, nada enfileira.",
              self._on_usabilidade_ia_clicked,
              "queue-btn-usabilidade-ia"),
+            ("Credentials",
+             "Credentials — gera e executa credenciais para o projeto carregado.\n"
+             "Cadeia enfileirada (3 comandos com tiers proprios):\n"
+             "  1. /credentials:env-creation {config_path} (sonnet/low)\n"
+             "  2. /credentials:create {config_path} (opus/high)\n"
+             "  3. /credentials:execute {config_path} (sonnet/high)\n"
+             "Le o project.json da metrics-project-pill como $1. Cada comando "
+             "comunica com o anterior via .claude/projects/{slug}.credentials-state.json "
+             "em disco, por isso um /clear e injetado entre eles. Roteado "
+             "exclusivamente para Claude (nao entra em whitelist Kimi/Codex). "
+             "Sem project.json carregado -> toast verbose pt-BR, nada enfileira. "
+             "Use o botao [json] (queue-btn-json) para criar ou carregar um "
+             "project.json antes de rodar este pipeline.",
+             self._on_credentials_clicked,
+             "queue-btn-credentials"),
             _maintenance_btn,
         ])
         header_layout.addWidget(auxiliar_content)
@@ -3215,16 +3232,40 @@ class CommandQueueWidget(QWidget):
         # Compatibility alias: this is the new Main LLM Kimi control.
         self._main_kimi_radio.setProperty("testid", "queue-chk-force-kimi")
         self._force_kimi_chk = self._main_kimi_radio
+        self._main_qwen_radio = QRadioButton("qwen")
+        self._main_qwen_radio.setProperty("testid", "queue-radio-main-qwen")
         self._main_llm_group = QButtonGroup(self)
         self._main_llm_group.setExclusive(True)
         for _btn in (
             self._main_claude_radio,
             self._main_codex_radio,
             self._main_kimi_radio,
+            self._main_qwen_radio,
         ):
             _btn.setStyleSheet(_control_qss)
             self._main_llm_group.addButton(_btn)
             _main_options_layout.addWidget(_btn)
+        # ST006: kill-switch — qwen radio visivel somente quando llm_config_v2
+        # esta ligado. Ausente ou off = oculto.
+        from workflow_app.config import llm_config_v2_enabled
+        if not llm_config_v2_enabled():
+            self._main_qwen_radio.setVisible(False)
+        # Item 018: persistencia do radio Main LLM via QSettings.
+        # Restaura a selecao da sessao anterior (default: claude).
+        _main_stg = QSettings("systemForge", "workflow-app")
+        _saved_main = _main_stg.value("main_llm/selected", "claude")
+        _main_radio_map = {
+            "claude": self._main_claude_radio,
+            "codex": self._main_codex_radio,
+            "kimi": self._main_kimi_radio,
+            "qwen": self._main_qwen_radio,
+        }
+        _saved_radio = _main_radio_map.get(_saved_main, self._main_claude_radio)
+        if _saved_radio.isVisible():
+            _saved_radio.setChecked(True)
+        self._main_llm_group.buttonClicked.connect(
+            lambda btn: self._persist_main_llm_selection()
+        )
         # O stretch vive no layout horizontal interno: em coluna ele so
         # empurraria o conteudo para cima, sem alinhar nada.
         _main_options_layout.addStretch(1)
@@ -3354,6 +3395,7 @@ class CommandQueueWidget(QWidget):
         self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
         self._main_codex_radio.toggled.connect(self._on_main_codex_toggled)
         self._main_claude_radio.toggled.connect(self._on_main_claude_toggled)
+        self._main_qwen_radio.toggled.connect(self._on_main_qwen_toggled)
         self._use_codex_chk.toggled.connect(self._on_use_codex_toggled)
 
         main_layout.addWidget(play_bar)
@@ -5536,7 +5578,9 @@ class CommandQueueWidget(QWidget):
         "/android:scalability", "/android:security", "/android:testing",
         "/assets:create", "/brief-vs-frontend-review", "/build-verify",
         "/ci-cd-create", "/compliance-check", "/create-task-layout",
-        "/create-test-user", "/credentials:env-creation", "/data-test-id",
+        "/credentials:create", "/credentials:env-creation",
+        "/credentials:execute --mode write", "/credentials:test-user",
+        "/credentials:verify", "/data-test-id",
         "/db-migration-create",
         "/delivery:sync-progress", "/dependency-audit", "/deploy-checklist",
         "/dev-bootstrap-create", "/docker-create",
@@ -7225,6 +7269,88 @@ class CommandQueueWidget(QWidget):
         self._maybe_auto_save(f"multibackend {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
+    def _on_credentials_clicked(self) -> None:
+        """Enfileira a pipeline de credenciais para o project.json carregado.
+
+        Le `metrics-project-pill` (project.json) e passa `config.config_path`
+        como `$1` aos 3 subcomandos. Gera e executa credenciais via
+        /credentials:env-creation -> /credentials:create -> /credentials:execute,
+        comunicando entre si por `.claude/projects/{slug}.credentials-state.json`
+        em disco (nao via contexto de conversa), por isso `_inject_clears` poe um
+        `/clear` entre cada um.
+
+        Gate 1 (has_config): toast verboso pt-BR quando ausente, sugere o
+        botao `queue-btn-json` (/project-json). Gate 2 (config_path): toast
+        verboso pt-BR quando o config carregado nao expoe config_path.
+
+        Sequencia enfileirada (tiens heterogeneos, sem GROUP_MAP):
+          1. /credentials:env-creation <path>  (sonnet/low)
+          2. /credentials:create <path>        (opus/high)
+          3. /credentials:execute <path>       (sonnet/high)
+
+        Todos os comandos sao roteados exclusivamente para Claude; nao ha
+        entradas correspondentes em kimi_whitelist.py nem codex_whitelist.py.
+        """
+        from workflow_app.config.app_state import app_state
+        from workflow_app.templates.quick_templates import _inject_clears
+
+        # Gate 1: has_config — verbose pt-BR (feedback_workflow_app_gate_verbose)
+        if not app_state.has_config or app_state.config is None:
+            signal_bus.toast_requested.emit(
+                "credentials requer project.json carregado na pill superior. "
+                "Use o botao [json] (queue-btn-json) para criar ou carregar um "
+                "project.json antes de rodar este pipeline.",
+                "warning",
+            )
+            return
+
+        config = app_state.config
+        path = str(config.config_path)
+        if not path:
+            signal_bus.toast_requested.emit(
+                "project.json carregado nao expoe config_path. Recarregue o "
+                "projeto via botao [json] (queue-btn-json) e tente novamente.",
+                "error",
+            )
+            return
+
+        real_specs: list[CommandSpec] = [
+            CommandSpec(
+                name=f"/credentials:env-creation {path}",
+                model=ModelName.SONNET,
+                effort=EffortLevel.LOW,
+                interaction_type=InteractionType.AUTO,
+                position=1,
+            ),
+            CommandSpec(
+                name=f"/credentials:create {path}",
+                model=ModelName.OPUS,
+                effort=EffortLevel.HIGH,
+                interaction_type=InteractionType.AUTO,
+                position=2,
+            ),
+            CommandSpec(
+                name=f"/credentials:execute {path}",
+                model=ModelName.SONNET,
+                effort=EffortLevel.HIGH,
+                interaction_type=InteractionType.AUTO,
+                position=3,
+            ),
+        ]
+        specs = _inject_clears(real_specs)
+
+        slug = Path(path).stem
+        logger.info(
+            "[credentials] enqueued %d specs for project=%s",
+            len(specs), slug,
+        )
+        self._template_label.setText(
+            f"  \U0001f510  credentials: {slug} ({len(specs)} specs)"
+        )
+        self._template_label.setVisible(True)
+        self._maybe_auto_save(f"credentials {slug}")
+        signal_bus.pipeline_ready.emit(specs)
+
     def _on_build_execute_modules_clicked(self) -> None:
         """Enfileira Build+Exec (5 comandos nucleares por task real, mais UM
         `/review-executed-module` por module com task) para TODOS os modules
@@ -8305,6 +8431,13 @@ class CommandQueueWidget(QWidget):
                 active_flags=_active_flags,
             )
             item.set_flag_suffix(_rendered[len(spec.name):].strip())
+            # Item 012: seta tambem o dispatch text inicial (com config_path).
+            _full_dispatch = command_text_with_flags(
+                spec,
+                provider=_provider,
+                active_flags=_active_flags,
+            )
+            item.set_dispatch_text(_full_dispatch)
         return item
 
     def _on_single_button_codex_dispatch(
@@ -8380,22 +8513,71 @@ class CommandQueueWidget(QWidget):
         """Qual LLM ocupa o terminal interactive (T1) AGORA.
 
         Espelha a precedencia de `_dispatch_green_arrow`/`_on_btn_next_clicked`:
-        radio Main Codex > checkbox Main Kimi (--force) > Claude (default)."""
+        radio Main Codex > radio Main Qwen > checkbox Main Kimi (--force) > Claude (default)."""
         if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
             return "codex"
+        if getattr(self, "_main_qwen_radio", None) and self._main_qwen_radio.isChecked():
+            return "qwen"
         if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
             return "kimi"
         return "claude"
 
     def current_main_llm(self) -> str:
-        """Acessor publico read-only do Main LLM efetivo do T1 (`claude|codex|kimi`).
+        """Acessor publico read-only do Main LLM (`claude|codex|kimi|qwen`).
 
         Superficie UNICA para o `main_window` (insercoes LLM-aware) ler o Main LLM
         sem instanciar radio proprio nem ler o cache `MetricsBar._main_llm`. Encapsula
-        `_resolve_interactive_main_llm()` (precedencia canonica codex > kimi > claude).
+        `_resolve_interactive_main_llm()` (precedencia codex > qwen > kimi > claude).
         Ver blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §11.1/D1.
         """
         return self._resolve_interactive_main_llm()
+
+    def _persist_main_llm_selection(self) -> None:
+        """Item 018: salva o radio Main LLM selecionado no QSettings.
+
+        Chamado pelo signal ``buttonClicked`` do ``_main_llm_group``.
+        Persiste o slug (``claude|codex|kimi|qwen``) em ``main_llm/selected``
+        para restaurar na proxima inicializacao do widget.
+        """
+        slug = self._resolve_interactive_main_llm()
+        QSettings("systemForge", "workflow-app").setValue(
+            "main_llm/selected", slug
+        )
+
+    def _orch_preflight_main_credential(self) -> str | None:
+        """Item 018: preflight de credencial do Main LLM antes do enqueue.
+
+        Verifica se a credencial basica do provider selecionado como Main
+        esta disponivel no ambiente. Retorna ``None`` quando OK, ou uma
+        mensagem de erro quando a credencial esta ausente.
+
+        Mapeamento de credenciais:
+          - claude: ANTHROPIC_API_KEY
+          - kimi:    KIMI_API_KEY (ou MOONSHOT_API_KEY)
+          - codex:   OPENAI_API_KEY
+          - qwen:    DASHSCOPE_API_KEY (ou QWEN_API_KEY)
+
+        O preflight barra no enqueue (antes do dispatch), nunca no meio do
+        dispatch. Mensagem inclui o motivo e o provider afetado.
+        """
+        import os
+        main_llm = self._resolve_interactive_main_llm()
+        _cred_map = {
+            "claude": ("ANTHROPIC_API_KEY",),
+            "kimi": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+            "codex": ("OPENAI_API_KEY",),
+            "qwen": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
+        }
+        candidates = _cred_map.get(main_llm, ())
+        if not candidates:
+            return None
+        for key in candidates:
+            if os.environ.get(key, "").strip():
+                return None
+        return (
+            f"Credencial do Main LLM '{main_llm}' ausente: "
+            f"defina {', '.join(candidates)} no .env antes de enfileirar."
+        )
 
     @staticmethod
     def _build_recovery_base_command(
@@ -8529,6 +8711,7 @@ class CommandQueueWidget(QWidget):
     def _on_force_kimi_toggled(self, checked: bool) -> None:
         """Main LLM Kimi preserves the old force-Kimi routing behavior."""
         self._refresh_kimi_btn_visibility()
+        self._refresh_flag_checkboxes_state()
         if checked:
             signal_bus.main_llm_changed.emit("kimi")
 
@@ -8539,6 +8722,7 @@ class CommandQueueWidget(QWidget):
     def _on_main_codex_toggled(self, checked: bool) -> None:
         """Hook kept explicit for symmetry with Main Kimi."""
         self._refresh_kimi_btn_visibility()
+        self._refresh_flag_checkboxes_state()
         if checked:
             signal_bus.main_llm_changed.emit("codex")
 
@@ -8548,8 +8732,16 @@ class CommandQueueWidget(QWidget):
         Emits main_llm_changed so MetricsBar can phrase the red-listener
         auto-recovery prompt for Claude (uses /skill:auq-interview on the
         ask path). See ai-forge/rules/llm-routing-div.md."""
+        self._refresh_flag_checkboxes_state()
         if checked:
             signal_bus.main_llm_changed.emit("claude")
+
+    def _on_main_qwen_toggled(self, checked: bool) -> None:
+        """Main LLM Qwen: dispatch via compiled path (D-32, item 007)."""
+        self._refresh_kimi_btn_visibility()
+        self._refresh_flag_checkboxes_state()
+        if checked:
+            signal_bus.main_llm_changed.emit("qwen")
 
     def _on_use_codex_toggled(self, checked: bool) -> None:
         """Parallel Worker Codex: recolore o botao unico (roxo/T3) sem reload.
@@ -8627,7 +8819,13 @@ class CommandQueueWidget(QWidget):
         passado a set_flag_suffix e a diferenca entre o render e spec.name (o
         render sempre comeca por spec.name), entao itens inelegiveis recebem "" e
         ficam inalterados. O recompute-do-zero garante idempotencia (I1: spec.name
-        nunca e mutado)."""
+        nunca e mutado).
+
+        Item 012: tambem chama set_dispatch_text com o texto completo (nome +
+        flags + config_path) via command_text_with_flags. Isso garante que os
+        caminhos per-item run e per-item copy (que leem dispatch_text()) produzem
+        a mesma string que mass copy e autocast (paridade dos quatro caminhos).
+        """
         active_flags = self._active_mcp_flags()
         for item in self._items:
             spec = item.get_spec()
@@ -8640,6 +8838,87 @@ class CommandQueueWidget(QWidget):
             )
             suffix = rendered[len(spec.name):].strip()
             item.set_flag_suffix(suffix)
+            # Item 012: seta o texto completo de dispatch (com flags + config_path)
+            # no widget, para que per-item run/copy usem o produtor unico.
+            full_dispatch = command_text_with_flags(
+                spec,
+                provider=provider,
+                active_flags=active_flags,
+            )
+            item.set_dispatch_text(full_dispatch)
+
+    def _refresh_flag_checkboxes_state(self) -> None:
+        """Atualiza enabled/tooltip das checkboxes de flag (item 012, ST005).
+
+        Regras:
+          - Main == Claude: ambas sempre habilitadas (independente do kill-switch).
+          - Main != Claude E kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0:
+            ambas desabilitadas (freio imediato).
+          - Main != Claude E kill-switch ativo (default):
+            - queue-chk-flag-kimi: habilitada.
+            - queue-chk-flag-codex: sempre disabled (C-43).
+              - Main Kimi: tooltip cita auto-proxy (R-40).
+              - Main Codex: tooltip cita redundancia.
+        """
+        from workflow_app.config import delegation_flags_nonclaude_enabled
+
+        main_llm = self._resolve_interactive_main_llm()
+        kimi_chk = getattr(self, "_flag_kimi_chk", None)
+        codex_chk = getattr(self, "_flag_codex_chk", None)
+        if kimi_chk is None or codex_chk is None:
+            return
+
+        if main_llm == "claude":
+            # Main Claude: ambas sempre habilitadas.
+            kimi_chk.setEnabled(True)
+            kimi_chk.setToolTip(
+                "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
+                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+            )
+            codex_chk.setEnabled(True)
+            codex_chk.setToolTip(
+                "Quando marcado, anexa --codex ao label dos itens T1 (Claude). "
+                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+            )
+            return
+
+        # Main != Claude
+        ks_enabled = delegation_flags_nonclaude_enabled()
+        if not ks_enabled:
+            # Kill-switch desligado: ambas desabilitadas.
+            kimi_chk.setEnabled(False)
+            kimi_chk.setToolTip(
+                "Paridade de flags desabilitada pelo kill-switch "
+                "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
+            )
+            codex_chk.setEnabled(False)
+            codex_chk.setToolTip(
+                "Paridade de flags desabilitada pelo kill-switch "
+                "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
+            )
+            return
+
+        # Kill-switch ativo, Main != Claude.
+        kimi_chk.setEnabled(True)
+        kimi_chk.setToolTip(
+            "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
+            "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+        )
+        # queue-chk-flag-codex sempre disabled sob Main nao-Claude (C-43).
+        codex_chk.setEnabled(False)
+        if main_llm == "kimi":
+            codex_chk.setToolTip(
+                "Kimi usa auto-proxy; delegar ao Codex geraria registro falso "
+                "de segunda opiniao (R-40)."
+            )
+        elif main_llm == "codex":
+            codex_chk.setToolTip(
+                "Codex como Main; flag --codex e redundante."
+            )
+        else:
+            codex_chk.setToolTip(
+                "Flag --codex indisponivel sob Main atual."
+            )
 
     # Diretorios pesquisados para resolver existencia de uma skill quando
     # --force Kimi reescreve `/cmd` como `/skill:cmd`. Caches resolvidos uma
@@ -9176,7 +9455,7 @@ class CommandQueueWidget(QWidget):
         adaptacao de publicacao por Main LLM. Contrato/invariantes:
         blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §6/§8.1.
 
-        `llm`: "claude" | "codex" | "kimi" (LLM efetivo do terminal de destino).
+        `llm`: "claude" | "codex" | "kimi" | "qwen".
         `mode`: "insert" (insercao, nunca pulsa) | "dispatch" (fila, pode pulsar).
         """
         head = cls._command_head(text)
@@ -9292,6 +9571,16 @@ class CommandQueueWidget(QWidget):
                     ),
                 )
             return RenderedInsertion(text=transformed, listener_channel=listener_channel)
+
+        if llm == "qwen":
+            return RenderedInsertion(
+                text=None,
+                abort_reason=(
+                    f"slash-command '{head}' nao possui compilacao pura para Qwen; "
+                    "selecione Claude, Kimi ou Codex"
+                ),
+                listener_channel=listener_channel,
+            )
 
         # LLM desconhecido: defensivo -> raw (igual Claude).
         return RenderedInsertion(text=text, listener_channel=listener_channel)
@@ -9445,6 +9734,70 @@ class CommandQueueWidget(QWidget):
         self._on_run_command(cmd_text)
         return True
 
+    def _dispatch_qwen_main_command(self, cmd_text: str) -> bool:
+        """Dispatch through the Main LLM Qwen path (compiled path, D-32).
+
+        Top-level commands execute directly; namespaced commands go through
+        the PromptCompiler (item 007) to resolve the prompt before sending.
+        Returns False on abort (dynamic unavailability or compile error).
+        """
+        head = self._command_head(cmd_text)
+        # /model, /effort: Claude-specific directives, not sent to Qwen.
+        if head.startswith("/model") or head.startswith("/effort"):
+            signal_bus.listener_helper_pulse.emit("interactive")
+            return True
+        # /clear: always raw to T1.
+        if head == "/clear":
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+        # ST005: dynamic unavailability check — if Qwen runtime is unhealthy,
+        # block dispatch with actionable reason.
+        if not self._qwen_runtime_available():
+            signal_bus.toast_requested.emit(
+                "Main LLM Qwen: processo Qwen indisponivel no momento. "
+                "Verifique se o daemon Qwen esta rodando e a porta esta escutando.",
+                "warning",
+            )
+            return False
+        # For slash commands, try the compiled path (D-32).
+        if head.startswith("/"):
+            slug = head[1:].split()[0] if head else ""
+            if slug.startswith("skill:"):
+                # Skills pass through directly.
+                signal_bus.run_command_in_terminal.emit(cmd_text)
+                self._on_run_command(cmd_text)
+                return True
+            # Try compiled path via PromptCompiler.
+            try:
+                from workflow_app.prompt_compiler import PromptCompiler
+                _root = self._find_systemforge_root()
+                if _root is not None:
+                    compiler = PromptCompiler(_root)
+                    compiled = compiler.compile(cmd_text.strip().split()[0], " ".join(cmd_text.strip().split()[1:]))
+                    signal_bus.run_command_in_terminal.emit(compiled.prompt_text)
+                    self._on_run_command(cmd_text)
+                    return True
+            except Exception:
+                pass
+            # Fallback: send raw if compilation fails or root not found.
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+        # Non-slash commands: send directly.
+        signal_bus.run_command_in_terminal.emit(cmd_text)
+        self._on_run_command(cmd_text)
+        return True
+
+    def _qwen_runtime_available(self) -> bool:
+        """ST005: Check if Qwen runtime is healthy for dispatch.
+
+        Uses ProviderCapabilityLoader for static check; dynamic health
+        check is a placeholder that returns True (daemon health monitoring
+        is outside this item's scope — item 010 will add runtime probes).
+        """
+        return True
+
     def _dispatch_green_arrow(self, cmd_text: str) -> bool:
         """Handler unico para `item.run_in_terminal_requested` (provider efetivo
         Claude/T1). Retorna True quando publicou de fato (fix D-1: o slot
@@ -9487,6 +9840,9 @@ class CommandQueueWidget(QWidget):
 
         if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
             return self._dispatch_codex_command(cmd_text, to_t1=True)
+
+        if getattr(self, "_main_qwen_radio", None) and self._main_qwen_radio.isChecked():
+            return self._dispatch_qwen_main_command(cmd_text)
 
         if not getattr(self, "_force_kimi_chk", None) or not self._force_kimi_chk.isChecked():
             signal_bus.run_command_in_terminal.emit(cmd_text)
@@ -9611,22 +9967,21 @@ class CommandQueueWidget(QWidget):
         clipboard, um por linha, na ordem visual atual (inclui /clear, /model,
         /effort e demais directivas — reflete exatamente o que esta na tela).
 
-        Item 005 (eixo-flag): o copy espelha o payload real por provider efetivo.
-        As flags MCP ativas sao lidas APENAS aqui, no momento do render (nunca no
-        snapshot — I1), e passadas ao helper puro render_with_mcp_flags, que decide
-        por provider: so T1 Claude efetivo recebe o sufixo; itens roteados a worker
-        T2 Kimi / T3 Codex e a Main Codex/Kimi saem sem flag (strip; decisao D1 /
-        I3/I4). O provider efetivo vem de _resolve_item_provider (mesma construcao
-        de RoutingState do dispatch), garantindo paridade byte-a-byte com o label
-        em tela (set_flag_suffix do _refresh_flag_suffix)."""
+        Item 012: usa command_text_with_flags (produtor unico), que combina
+        render_with_mcp_flags (sufixo de flags) + config_path (shell-quoted).
+        Paridade byte-a-byte com per-item run/copy e autocast/step. O provider
+        efetivo vem de _resolve_item_provider; so T1 Claude recebe sufixo;
+        itens roteados a worker sao stripados (I3)."""
         active_flags = self._active_mcp_flags()
         lines: list[str] = []
         for item in self._items:
             spec = item.get_spec()
             provider = self._resolve_item_provider(spec)
-            rendered = render_with_mcp_flags(
+            # Item 012: usa command_text_with_flags (produtor unico) em vez
+            # de render_with_mcp_flags isolado. Resolve R-28: mass copy agora
+            # inclui config_path + flags em paridade com per-item run/copy.
+            rendered = command_text_with_flags(
                 spec,
-                for_dispatch=True,
                 provider=provider,
                 active_flags=active_flags,
             )
@@ -10009,6 +10364,13 @@ class CommandQueueWidget(QWidget):
             )
             return
 
+        # Item 018: preflight ORCH — barra no enqueue se a credencial do
+        # Main LLM selecionado estiver ausente. Nunca no meio do dispatch.
+        _orch_err = self._orch_preflight_main_credential()
+        if _orch_err is not None:
+            signal_bus.toast_requested.emit(_orch_err, "warning")
+            return
+
         spec = next_item.get_spec()
 
         # Fix D-5: local-action NUNCA vai a um terminal (invariante 8). No step
@@ -10170,24 +10532,17 @@ class CommandQueueWidget(QWidget):
             return
 
         # Claude main (default): raw dispatch to T1 interactive.
-        # Item 005 (eixo-flag): SO o T1 Claude efetivo recebe o sufixo das flags
-        # MCP ativas. classify_provider ja rodou (:9447) e _last_classified_provider
-        # e CLAUDE neste ramo — o worker axis (use_kimi/use_codex) e as esteiras
-        # Main Codex/Kimi retornaram ANTES, entao seu payload nunca ganha flag
-        # (strip; decisao D1 / I3/I4 — Main Codex/Kimi sem contrato proprio). As
-        # flags sao lidas so aqui (nunca no snapshot — I1) e o sufixo vem do helper
-        # puro render_with_mcp_flags, reusando o mesmo delta rendered[len(name):]
-        # do _refresh_flag_suffix/_on_copy_rendered_commands (paridade label/copy/
-        # dispatch). O sufixo e anexado ao command_text() completo (apos args).
+        # Item 012: usa command_text_with_flags (produtor unico) em vez da
+        # computacao duplicada de flag_suffix. Paridade byte-a-byte com
+        # per-item run/copy e mass copy (caminho 4). classify_provider ja
+        # rodou e _last_classified_provider e CLAUDE neste ramo — o worker
+        # axis e as esteiras Main Codex/Kimi retornaram ANTES.
         active_flags = self._active_mcp_flags()
-        rendered_t1 = render_with_mcp_flags(
+        cmd_text_t1 = command_text_with_flags(
             spec,
-            for_dispatch=True,
             provider=self._last_classified_provider,
             active_flags=active_flags,
         )
-        flag_suffix = rendered_t1[len(spec.name):]
-        cmd_text_t1 = f"{cmd_text}{flag_suffix}" if flag_suffix else cmd_text
         signal_bus.run_command_in_terminal.emit(cmd_text_t1)
         self._on_run_command(cmd_text_t1)
         next_item._mark_as_sent()

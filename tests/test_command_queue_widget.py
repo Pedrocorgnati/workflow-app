@@ -13,8 +13,12 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -23,7 +27,8 @@ from workflow_app.command_queue.command_item_widget import (
     render_with_mcp_flags,
 )
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
-from workflow_app.command_queue.provider_router import Provider
+from workflow_app.command_queue.provider_router import Provider, _PROVIDER_FAMILIES
+from workflow_app.config.feature_flags import llm_config_v2_flag_name
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -4614,3 +4619,682 @@ class TestAutoLoopRearm:
         signal_bus.listener_authoritative_idle.emit("interactive")
 
         assert all(not i.is_pending_run() for i in widget._items)
+
+
+# =========================================================================== #
+# Loop 08-11-llm-config-multillm-expansion, item 002                          #
+#                                                                             #
+# Kill-switch SF_LLM_CONFIG_V2 (ponto unico, resolvido no boot) e             #
+# nao-regressao do caminho legado contra fixture versionada.                  #
+#                                                                             #
+# G2 do loop: a flag e lida no BOOT do processo. Trocar os.environ no meio do  #
+# processo do pytest e reusar objeto ja construido NAO prova o contrato. Por   #
+# isso cada estado da flag roda em subprocesso proprio, com env montado        #
+# explicitamente. Precedente do mesmo padrao no repo:                          #
+# tests/test_provider_router.py::test_module_is_pure_no_qt_import.            #
+# =========================================================================== #
+
+_WORKFLOW_APP_ROOT = Path(__file__).resolve().parents[1]
+_LEGACY_SNAPSHOT_FIXTURE = (
+    _WORKFLOW_APP_ROOT / "tests" / "fixtures" / "llm_config_legacy_snapshot.json"
+)
+
+# Literal normativo do nome da env var. NAO derivar de llm_config_v2_flag_name():
+# o teste ficaria autorreferente e um rename incorreto do lado do helper passaria
+# verde. O helper e comparado contra este literal em
+# test_llm_config_kill_switch_flag_name_is_the_normative_literal.
+_FLAG_NAME = "SF_LLM_CONFIG_V2"
+
+_FLAG_STATE_PROBE = """import json
+
+from workflow_app.config.feature_flags import (
+    llm_config_v2_enabled,
+    llm_config_v2_flag_name,
+    llm_config_v2_state,
+)
+
+print(
+    json.dumps(
+        {
+            "flag_name": llm_config_v2_flag_name(),
+            "state": llm_config_v2_state(),
+            "enabled": llm_config_v2_enabled(),
+        }
+    )
+)
+"""
+
+# Probe de congelamento no boot: importa o helper, muta a env var no processo ja
+# iniciado e reconsulta. O contrato diz que a resposta NAO muda. Escrito com o
+# literal da env var de proposito, para nao depender do simbolo sob teste.
+_BOOT_FREEZE_PROBE = """import json
+import os
+
+from workflow_app.config.feature_flags import llm_config_v2_enabled, llm_config_v2_state
+
+
+def observe():
+    return {"state": llm_config_v2_state(), "enabled": llm_config_v2_enabled()}
+
+
+before = observe()
+
+os.environ["SF_LLM_CONFIG_V2"] = "1"
+after_set = observe()
+
+os.environ.pop("SF_LLM_CONFIG_V2", None)
+after_unset = observe()
+
+print(json.dumps({"before": before, "after_set": after_set, "after_unset": after_unset}))
+"""
+
+# Texto de programa que produziu tests/fixtures/llm_config_legacy_snapshot.json.
+# A fixture e a saida deste mesmo texto rodando com a flag ausente; manter os
+# dois em paridade e o que torna a comparacao de ST007 honesta.
+_LEGACY_SNAPSHOT_PROBE = """import importlib
+import json
+import os
+
+mod = importlib.import_module("workflow_app.command_queue.provider_router")
+from workflow_app.command_queue.codex_whitelist import is_codex_compatible
+from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
+from workflow_app.domain import CommandSpec
+
+KIMI_CMD = "/dcp:matrix-init"
+CODEX_CMD = "/cmd:review"
+OTHER_CMD = "/prd-create"
+
+CASES = [
+    ("r1-kimi", KIMI_CMD, "slash", False, False, False, "claude"),
+    ("r1-codex", CODEX_CMD, "slash", False, False, False, "claude"),
+    ("r1-other", OTHER_CMD, "slash", False, False, False, "claude"),
+    ("r2-kimi", KIMI_CMD, "slash", False, True, False, "claude"),
+    ("r2-codex", CODEX_CMD, "slash", False, True, False, "claude"),
+    ("r2-other", OTHER_CMD, "slash", False, True, False, "claude"),
+    ("r3-kimi", KIMI_CMD, "slash", False, False, True, "claude"),
+    ("r3-codex", CODEX_CMD, "slash", False, False, True, "claude"),
+    ("r3-other", OTHER_CMD, "slash", False, False, True, "claude"),
+    ("r4-kimi", KIMI_CMD, "slash", False, True, True, "claude"),
+    ("r4-codex", CODEX_CMD, "slash", False, True, True, "claude"),
+    ("r4-other", OTHER_CMD, "slash", False, True, True, "claude"),
+    ("r5-kimi", KIMI_CMD, "slash", False, False, True, "kimi"),
+    ("r5-codex", CODEX_CMD, "slash", False, False, True, "kimi"),
+    ("r5-other", OTHER_CMD, "slash", False, False, True, "kimi"),
+    ("r6-kimi", KIMI_CMD, "slash", False, True, False, "codex"),
+    ("r6-codex", CODEX_CMD, "slash", False, True, False, "codex"),
+    ("r6-other", OTHER_CMD, "slash", False, True, False, "codex"),
+    ("rule1-local-action", KIMI_CMD, "local-action", True, True, True, "claude"),
+    ("rule2-clear", "/clear", "slash", False, True, True, "claude"),
+    ("rule2-model", "/model", "slash", False, True, True, "claude"),
+    ("rule2-effort", "/effort", "slash", False, True, True, "claude"),
+    ("rule2-model-args", "/model opus", "slash", False, True, True, "claude"),
+    ("rule4-eligible-flag", OTHER_CMD, "slash", True, True, False, "claude"),
+    ("rule4-eligible-worker-off", OTHER_CMD, "slash", True, False, False, "claude"),
+    ("rule6-kimi-wins", CODEX_CMD, "slash", True, True, True, "claude"),
+    ("rule6-codex-when-kimi-not", CODEX_CMD, "slash", False, True, True, "claude"),
+    ("trailing-args", KIMI_CMD + " --module 3", "slash", False, True, False, "claude"),
+]
+
+
+def _frozen() -> bool:
+    state = mod.RoutingState(kimi_worker_enabled=True, codex_worker_enabled=False, main_llm="claude")
+    try:
+        state.kimi_worker_enabled = False
+    except Exception:
+        return True
+    return False
+
+
+classify = {}
+for label, name, kind, eligible, kimi_on, codex_on, main_llm in CASES:
+    spec = CommandSpec(name=name, kind=kind, kimi_eligible=eligible)
+    state = mod.RoutingState(
+        kimi_worker_enabled=kimi_on,
+        codex_worker_enabled=codex_on,
+        main_llm=main_llm,
+    )
+    classify[label] = mod.classify_provider(spec, state).value
+
+snapshot = {
+    "module": mod.__name__,
+    "flag_env_present": "SF_LLM_CONFIG_V2" in os.environ,
+    "public_symbols": sorted(n for n in dir(mod) if not n.startswith("_")),
+    "provider_enum_members": {m.name: m.value for m in mod.Provider},
+    "provider_is_str_enum": all(isinstance(m, str) for m in mod.Provider),
+    "routing_state_frozen": _frozen(),
+    "whitelist_verdicts": {
+        cmd: {"kimi": is_kimi_compatible(cmd), "codex": is_codex_compatible(cmd)}
+        for cmd in (KIMI_CMD, CODEX_CMD, OTHER_CMD)
+    },
+    "normalize_command_name": {
+        inp: mod.normalize_command_name(inp) for inp in ("  /model opus  ", "/clear", "", "   ")
+    },
+    "classify_provider": classify,
+}
+
+print(json.dumps(snapshot, sort_keys=True, indent=2))
+"""
+
+
+def _run_probe(probe: str, flag_value: str | None) -> dict:
+    """Roda um probe em processo NOVO com a flag no estado pedido.
+
+    `flag_value is None` remove a variavel do ambiente do filho (estado ausente).
+    """
+    env = os.environ.copy()
+    if flag_value is None:
+        env.pop(_FLAG_NAME, None)
+    else:
+        env[_FLAG_NAME] = flag_value
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(_WORKFLOW_APP_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"probe falhou (flag={flag_value!r}) rc={result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def test_llm_config_kill_switch_absent_is_legacy():
+    """Flag ausente: estado `absent`, caminho legado."""
+    got = _run_probe(_FLAG_STATE_PROBE, None)
+    assert got["state"] == "absent", got
+    assert got["enabled"] is False, got
+
+
+def test_llm_config_kill_switch_zero_is_legacy():
+    """Flag `0`: kill-switch explicitamente desligado, caminho legado."""
+    got = _run_probe(_FLAG_STATE_PROBE, "0")
+    assert got["state"] == "off", got
+    assert got["enabled"] is False, got
+
+
+def test_llm_config_kill_switch_one_enables_v2():
+    """Flag `1`: unico estado que liga o caminho novo."""
+    got = _run_probe(_FLAG_STATE_PROBE, "1")
+    assert got["state"] == "on", got
+    assert got["enabled"] is True, got
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    [
+        "yes",
+        "true",
+        "TRUE",
+        "2",
+        "01",
+        "",
+        " 1 ",
+        "1 ",
+        " 1",
+        "1\n",
+        " 0 ",
+    ],
+)
+def test_llm_config_kill_switch_unrecognized_value_fails_closed(raw_value):
+    """Valor fora de {"0","1"} EXATOS: fail-closed no legado, nunca no novo.
+
+    Os casos com espaco e quebra de linha sao o coracao do contrato: a
+    comparacao no helper e literal, sem `strip()`. Normalizar a entrada
+    alargaria o conjunto de valores capazes de LIGAR o caminho novo, que e o
+    oposto de fail-closed. `" 0 "` tambem entra aqui: nao e o `"0"` exato, logo
+    e `unrecognized` - continua no legado, so que por classificacao honesta.
+    """
+    got = _run_probe(_FLAG_STATE_PROBE, raw_value)
+    assert got["state"] == "unrecognized", (raw_value, got)
+    assert got["enabled"] is False, (raw_value, got)
+
+
+def test_llm_config_kill_switch_flag_name_is_the_normative_literal():
+    """O helper expoe exatamente o nome normativo da env var.
+
+    Fecha o buraco do teste autorreferente: os demais testes usam o literal
+    `_FLAG_NAME`, e este e o unico ponto que confronta o helper com ele. Um
+    rename acidental do lado do `src/` quebra aqui, em vez de passar despercebido
+    porque teste e implementacao concordariam entre si.
+    """
+    assert llm_config_v2_flag_name() == _FLAG_NAME
+
+
+def test_llm_config_kill_switch_state_is_frozen_at_boot_absent():
+    """Mutar o ambiente DEPOIS do import nao muda a resposta (flag ausente).
+
+    G2 do loop: a leitura acontece no boot. Sem este probe, uma implementacao
+    futura que voltasse a `os.environ` a cada chamada continuaria verde em todos
+    os outros testes, porque nenhum deles muta a variavel dentro do processo.
+    """
+    got = _run_probe(_BOOT_FREEZE_PROBE, None)
+    assert got["before"] == {"state": "absent", "enabled": False}, got
+    assert got["after_set"] == got["before"], got
+    assert got["after_unset"] == got["before"], got
+
+
+def test_llm_config_kill_switch_state_is_frozen_at_boot_off():
+    """Idem partindo de `"0"`: setar `"1"` pos-import nao promove para o novo."""
+    got = _run_probe(_BOOT_FREEZE_PROBE, "0")
+    assert got["before"] == {"state": "off", "enabled": False}, got
+    assert got["after_set"] == got["before"], got
+    assert got["after_unset"] == got["before"], got
+
+
+def test_llm_config_kill_switch_has_single_env_read_point_in_src():
+    """Criterio A1: a env var aparece uma unica vez em `src/`, no helper."""
+    flag = _FLAG_NAME
+    hits = []
+    for path in sorted((_WORKFLOW_APP_ROOT / "src").rglob("*.py")):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if flag in line:
+                hits.append(
+                    (path.relative_to(_WORKFLOW_APP_ROOT).as_posix(), lineno, line.strip())
+                )
+    assert len(hits) == 1, f"ponto unico de leitura violado: {hits}"
+    assert hits[0][0] == "src/workflow_app/config/feature_flags.py", hits
+
+
+def test_legacy_snapshot_matches_fixture_with_flag_absent():
+    """C-24 / Bloco 3 do BASELINE: com a flag ausente, o observavel e o de hoje.
+
+    A fixture versionada e o oraculo. `git stash` e o working tree nao sao (o
+    aceite do item 002 proibe explicitamente). Divergencia aqui e regressao no
+    caminho legado: corrigir o codigo, nunca a fixture.
+    """
+    fixture = json.loads(_LEGACY_SNAPSHOT_FIXTURE.read_text(encoding="utf-8"))
+    expected = fixture["snapshot"]
+    live = _run_probe(_LEGACY_SNAPSHOT_PROBE, None)
+
+    assert live["flag_env_present"] is False, live
+    assert expected["flag_env_present"] is False, expected
+    assert live == expected, (
+        "caminho legado divergiu da fixture: "
+        f"{sorted(k for k in set(live) | set(expected) if live.get(k) != expected.get(k))}"
+    )
+
+
+# ======================================================================
+# Item 009 — Lane Qwen como Main capability-limited (C-54..C-57, C-60)
+# ======================================================================
+
+class TestQwenMainLane:
+    """ST002/ST003/ST006/ST007/ST008: Qwen as Main LLM."""
+
+    def test_qwen_radio_exists_with_testid(self, widget):
+        """A6: testid queue-radio-main-qwen localizable in src/."""
+        radio = widget._main_qwen_radio
+        assert radio is not None
+        assert radio.property("testid") == "queue-radio-main-qwen"
+        assert radio.text() == "qwen"
+
+    def test_qwen_radio_in_button_group(self, widget):
+        """ST002: qwen radio is part of the Main LLM button group."""
+        buttons = widget._main_llm_group.buttons()
+        assert widget._main_qwen_radio in buttons
+
+    def test_qwen_radio_emits_main_llm_changed(self, widget):
+        """ST008: selecting qwen radio emits main_llm_changed('qwen')."""
+        received = []
+        signal_bus.main_llm_changed.connect(received.append)
+        try:
+            widget._main_qwen_radio.setChecked(True)
+            assert "qwen" in received
+        finally:
+            signal_bus.main_llm_changed.disconnect(received.append)
+
+    def test_resolve_interactive_main_llm_returns_qwen(self, widget):
+        """ST003: _resolve_interactive_main_llm returns 'qwen' when selected."""
+        widget._main_qwen_radio.setChecked(True)
+        assert widget._resolve_interactive_main_llm() == "qwen"
+
+    def test_current_main_llm_returns_qwen(self, widget):
+        """ST003: public accessor current_main_llm() returns 'qwen'."""
+        widget._main_qwen_radio.setChecked(True)
+        assert widget.current_main_llm() == "qwen"
+
+    def test_qwen_radio_hidden_when_kill_switch_off(self):
+        """ST006: SF_LLM_CONFIG_V2='0' hides qwen radio."""
+        import os
+        env = os.environ.copy()
+        env["SF_LLM_CONFIG_V2"] = "0"
+        probe = (
+            "import os;"
+            "os.environ['SF_LLM_CONFIG_V2']='0';"
+            "from PySide6.QtWidgets import QApplication;"
+            "app = QApplication.instance() or QApplication([]);"
+            "from workflow_app.command_queue.command_queue_widget import CommandQueueWidget;"
+            "w = CommandQueueWidget.__new__(CommandQueueWidget);"
+            "from workflow_app.config import llm_config_v2_enabled;"
+            "import sys;"
+            "sys.exit(0 if not llm_config_v2_enabled() else 1)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0, f"kill-switch off should disable v2: {result.stderr}"
+
+    def test_qwen_radio_visible_when_kill_switch_on(self):
+        """ST006: SF_LLM_CONFIG_V2='1' makes qwen radio visible."""
+        env = os.environ.copy()
+        env["SF_LLM_CONFIG_V2"] = "1"
+        probe = (
+            "import os;"
+            "os.environ['SF_LLM_CONFIG_V2']='1';"
+            "from workflow_app.config import llm_config_v2_enabled;"
+            "import sys;"
+            "sys.exit(0 if llm_config_v2_enabled() else 1)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0, f"kill-switch on should enable v2: {result.stderr}"
+
+    def test_recovery_prompt_accepts_qwen(self):
+        """ST008: llm_for_channel('interactive', 'qwen') returns 'qwen'."""
+        from workflow_app.metrics_bar.recovery_prompt import llm_for_channel
+        assert llm_for_channel("interactive", "qwen") == "qwen"
+
+    def test_dispatch_qwen_main_command_sends_to_terminal(self, widget):
+        """ST003: top-level command under Main Qwen dispatches to terminal."""
+        emitted = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            widget._main_qwen_radio.setChecked(True)
+            result = widget._dispatch_qwen_main_command("/help")
+            assert result is True
+            assert len(emitted) >= 1
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+
+    def test_dispatch_qwen_model_directive_pulses(self, widget):
+        """ST003: /model under Main Qwen pulses listener without sending."""
+        emitted = []
+        pulsed = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        signal_bus.listener_helper_pulse.connect(pulsed.append)
+        try:
+            widget._main_qwen_radio.setChecked(True)
+            result = widget._dispatch_qwen_main_command("/model opus")
+            assert result is True
+            assert len(emitted) == 0
+            assert "interactive" in pulsed
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+            signal_bus.listener_helper_pulse.disconnect(pulsed.append)
+
+
+# ──────────────── delegation_flags_nonclaude kill-switch (item 012) ── #
+
+
+class TestDelegationFlagsNonclaudeKillSwitch:
+    """Kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE (item 012, ST001)."""
+
+    def test_absent_is_enabled(self):
+        """Env ausente -> paridade ativa (default ligado)."""
+        from workflow_app.config.feature_flags import _resolve_delegation_flags_nonclaude
+        assert _resolve_delegation_flags_nonclaude({}) is True
+
+    def test_zero_is_disabled(self):
+        """SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0 -> desabilitado."""
+        from workflow_app.config.feature_flags import _resolve_delegation_flags_nonclaude
+        assert _resolve_delegation_flags_nonclaude(
+            {"SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE": "0"}
+        ) is False
+
+    def test_one_is_enabled(self):
+        """SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=1 -> habilitado."""
+        from workflow_app.config.feature_flags import _resolve_delegation_flags_nonclaude
+        assert _resolve_delegation_flags_nonclaude(
+            {"SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE": "1"}
+        ) is True
+
+    def test_unrecognized_is_enabled(self):
+        """Valor nao reconhecido -> paridade ativa (fail-closed para o lado seguro)."""
+        from workflow_app.config.feature_flags import _resolve_delegation_flags_nonclaude
+        assert _resolve_delegation_flags_nonclaude(
+            {"SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE": " 1 "}
+        ) is True
+
+    def test_flag_name_is_normative_literal(self):
+        """Nome da env var e o literal canonico."""
+        from workflow_app.config.feature_flags import delegation_flags_nonclaude_flag_name
+        assert delegation_flags_nonclaude_flag_name() == "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE"
+
+
+# ─────────────────── flag checkboxes state (item 012, ST005) ───────── #
+
+
+class TestFlagCheckboxesState:
+    """Kill-switch UI: checkboxes desabilitadas sob Main nao-Claude (ST005)."""
+
+    def test_codex_flag_disabled_under_kimi_main_with_tooltip(self, qapp, qtbot):
+        """Main Kimi -> queue-chk-flag-codex disabled com tooltip auto-proxy."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        # Simular Main Kimi
+        if hasattr(w, "_force_kimi_chk"):
+            w._force_kimi_chk.setChecked(True)
+        w._refresh_flag_checkboxes_state()
+        codex_chk = w._flag_codex_chk
+        assert not codex_chk.isEnabled(), "codex flag must be disabled under Main Kimi"
+        assert "auto-proxy" in codex_chk.toolTip().lower() or "segunda opiniao" in codex_chk.toolTip().lower()
+
+    def test_flag_checkboxes_enabled_under_claude(self, qapp, qtbot):
+        """Main Claude -> checkboxes enabled."""
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        w._refresh_flag_checkboxes_state()
+        assert w._flag_kimi_chk.isEnabled()
+        assert w._flag_codex_chk.isEnabled()
+
+
+# --------------------------------------------------------------------------- #
+# Item 018 — main_radio: radios de Main com persistencia                       #
+# --------------------------------------------------------------------------- #
+
+class TestMainRadio:
+    """Radios de Main para Claude, Kimi, Codex e Qwen existem com testids."""
+
+    def test_main_radio_has_four_radios(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        radios = [
+            w._main_claude_radio,
+            w._main_codex_radio,
+            w._main_kimi_radio,
+            w._main_qwen_radio,
+        ]
+        assert len(radios) == 4
+
+    def test_main_radio_testids(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        assert w._main_claude_radio.property("testid") == "queue-radio-main-claude"
+        assert w._main_codex_radio.property("testid") == "queue-radio-main-codex"
+        assert w._main_kimi_radio.property("testid") == "queue-chk-force-kimi"
+        assert w._main_qwen_radio.property("testid") == "queue-radio-main-qwen"
+
+    def test_main_radio_group_exclusive(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        assert w._main_llm_group.exclusive()
+
+    def test_main_radio_claude_default(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        assert w._main_claude_radio.isChecked()
+
+    def test_main_radio_reflects_selection(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        assert w.current_main_llm() == "claude"
+        w._main_codex_radio.setChecked(True)
+        assert w.current_main_llm() == "codex"
+        w._main_kimi_radio.setChecked(True)
+        assert w.current_main_llm() == "kimi"
+        w._main_qwen_radio.setChecked(True)
+        assert w.current_main_llm() == "qwen"
+
+
+class TestMainRadioPersistence:
+    """Estado do radio Main LLM persistido via QSettings."""
+
+    def test_main_radio_persist_codex(self, qtbot):
+        from PySide6.QtCore import QSettings
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        QSettings("systemForge", "workflow-app").remove("main_llm/selected")
+
+        w._main_codex_radio.setChecked(True)
+        w._persist_main_llm_selection()
+        saved = QSettings("systemForge", "workflow-app").value(
+            "main_llm/selected"
+        )
+        assert saved == "codex"
+
+    def test_main_radio_persist_kimi(self, qtbot):
+        from PySide6.QtCore import QSettings
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_kimi_radio.setChecked(True)
+        w._persist_main_llm_selection()
+        saved = QSettings("systemForge", "workflow-app").value(
+            "main_llm/selected"
+        )
+        assert saved == "kimi"
+
+    def test_main_radio_persist_qwen(self, qtbot):
+        from PySide6.QtCore import QSettings
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_qwen_radio.setChecked(True)
+        w._persist_main_llm_selection()
+        saved = QSettings("systemForge", "workflow-app").value(
+            "main_llm/selected"
+        )
+        assert saved == "qwen"
+
+
+# --------------------------------------------------------------------------- #
+# Item 018 — orch_preflight: preflight de credencial ORCH antes do enqueue     #
+# --------------------------------------------------------------------------- #
+
+class TestOrchPreflight:
+    """Preflight de credencial do Main LLM antes do enqueue."""
+
+    def test_orch_preflight_passes_claude(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_claude_radio.setChecked(True)
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}):
+            assert w._orch_preflight_main_credential() is None
+
+    def test_orch_preflight_blocks_claude(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_claude_radio.setChecked(True)
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            result = w._orch_preflight_main_credential()
+            assert result is not None
+            assert "claude" in result
+            assert "ANTHROPIC_API_KEY" in result
+
+    def test_orch_preflight_passes_kimi(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_kimi_radio.setChecked(True)
+        with patch.dict(os.environ, {"KIMI_API_KEY": "test-key"}):
+            assert w._orch_preflight_main_credential() is None
+
+    def test_orch_preflight_blocks_codex(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_codex_radio.setChecked(True)
+        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            result = w._orch_preflight_main_credential()
+            assert result is not None
+            assert "codex" in result
+
+    def test_orch_preflight_blocks_qwen(self, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_qwen_radio.setChecked(True)
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("DASHSCOPE_API_KEY", "QWEN_API_KEY")
+        }
+        with patch.dict(os.environ, env, clear=True):
+            result = w._orch_preflight_main_credential()
+            assert result is not None
+            assert "qwen" in result
+
+
+# --------------------------------------------------------------------------- #
+# Item 018 — map_parity: paridade dos quatro mapas de configuracao             #
+# --------------------------------------------------------------------------- #
+
+class TestMapParity:
+    """Paridade entre os quatro mapas: Provider enum, _PROVIDER_FAMILIES,
+    _PROVIDER_BTN_STYLE, _PROVIDER_LABEL e _PROVIDER_DEST.
+    """
+
+    def _enum_members(self) -> set[str]:
+        return {p.value for p in Provider}
+
+    def _families_keys(self) -> set[str]:
+        return set(_PROVIDER_FAMILIES.keys())
+
+    def _btn_style_keys(self) -> set[str]:
+        from workflow_app.command_queue.command_item_widget import _PROVIDER_BTN_STYLE
+        return {p.value for p in _PROVIDER_BTN_STYLE}
+
+    def _label_keys(self) -> set[str]:
+        from workflow_app.command_queue.command_item_widget import _PROVIDER_LABEL
+        return {p.value for p in _PROVIDER_LABEL}
+
+    def _dest_keys(self) -> set[str]:
+        from workflow_app.command_queue.command_item_widget import _PROVIDER_DEST
+        return {p.value for p in _PROVIDER_DEST}
+
+    def test_map_parity_enum_families(self):
+        assert self._enum_members() == self._families_keys()
+
+    def test_map_parity_enum_btn_style(self):
+        assert self._enum_members() == self._btn_style_keys()
+
+    def test_map_parity_enum_label(self):
+        assert self._enum_members() == self._label_keys()
+
+    def test_map_parity_enum_dest(self):
+        assert self._enum_members() == self._dest_keys()
+
+    def test_map_parity_all_consistent(self):
+        enum_set = self._enum_members()
+        assert (
+            enum_set
+            == self._families_keys()
+            == self._btn_style_keys()
+            == self._label_keys()
+            == self._dest_keys()
+        )
+
+    def test_map_parity_four_providers(self):
+        expected = {"claude", "kimi", "codex", "qwen"}
+        assert self._enum_members() == expected
+
+    def test_map_parity_no_grok(self):
+        assert "grok" not in self._enum_members()
+        assert "grok" not in self._families_keys()
+        assert "grok" not in self._btn_style_keys()

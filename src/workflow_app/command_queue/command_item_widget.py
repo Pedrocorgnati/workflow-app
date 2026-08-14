@@ -56,16 +56,19 @@ _PROVIDER_BTN_STYLE: dict[Provider, tuple[str, str]] = {
     Provider.CLAUDE: ("#22C55E", "#86EFAC"),  # verde  -> T1
     Provider.KIMI:   ("#3B82F6", "#93C5FD"),  # azul   -> T2
     Provider.CODEX:  ("#A855F7", "#D8B4FE"),  # roxo   -> T3
+    Provider.QWEN:   ("#F59E0B", "#FCD34D"),  # ambar  -> T1-qwen
 }
 _PROVIDER_LABEL: dict[Provider, str] = {
     Provider.CLAUDE: "Claude",
     Provider.KIMI:   "Kimi worker",
     Provider.CODEX:  "Codex worker",
+    Provider.QWEN:   "Qwen",
 }
 _PROVIDER_DEST: dict[Provider, str] = {
     Provider.CLAUDE: "T1 terminal-interactive",
     Provider.KIMI:   "T2 terminal-workspace",
     Provider.CODEX:  "T3 terminal-codex-output",
+    Provider.QWEN:   "T1 terminal-interactive (qwen)",
 }
 # Cinza do estado Desabilitado (item nao executavel / recalculo falhou).
 _PROVIDER_DISABLED_COLOR = "#52525B"
@@ -202,6 +205,34 @@ def render_with_mcp_flags(
     return f"{base} {' '.join(suffix_flags)}"
 
 
+def command_text_with_flags(
+    spec: CommandSpec,
+    *,
+    provider: Provider | None,
+    active_flags: Sequence[str],
+) -> str:
+    """Produtor UNICO de texto de comando com sufixo de flag (item 012).
+
+    Combina ``render_with_mcp_flags`` (nome + sufixo) com ``config_path``
+    (shell-quoted quando necessario). Consumido pelos quatro caminhos que
+    produzem texto de comando: per-item run, per-item copy, mass copy e
+    autocast/green-arrow.
+
+    Funcao PURA: sem I/O, sem mutacao de spec. As regras de exclusao (I2:
+    local-action, /clear, /model, /effort) e strip a worker (I3) vivem em
+    ``render_with_mcp_flags``; esta funcao apenas acrescenta o config_path.
+    """
+    rendered_name = render_with_mcp_flags(
+        spec,
+        for_dispatch=True,
+        provider=provider,
+        active_flags=active_flags,
+    )
+    if not spec.config_path:
+        return rendered_name
+    return f"{rendered_name} {shlex.quote(spec.config_path)}"
+
+
 class CommandItemWidget(QWidget):
     """One command row in the queue list."""
 
@@ -245,6 +276,10 @@ class CommandItemWidget(QWidget):
             provider_resolver
         )
         self._current_provider: Provider | None = Provider.CLAUDE
+        # Dispatch text com flags (item 012): setado pelo queue widget via
+        # set_dispatch_text. Quando presente, _on_run_clicked e _on_copy_clicked
+        # usam este texto em vez de command_text() (que nao carrega sufixo).
+        self._dispatch_text: str | None = None
         self.setMinimumHeight(53)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -481,6 +516,20 @@ class CommandItemWidget(QWidget):
             return self._spec.name
         return f"{self._spec.name} {shlex.quote(self._spec.config_path)}"
 
+    def set_dispatch_text(self, text: str) -> None:
+        """Set the full dispatch text with flag suffix (item 012).
+
+        Chamado pelo queue widget sempre que as flags ou o provider mudam.
+        Quando setado, ``_on_run_clicked`` e ``_on_copy_clicked`` usam este
+        texto em vez de ``command_text()`` (que nao carrega sufixo). Texto
+        vazio/None restaura o fallback para ``command_text()``.
+        """
+        self._dispatch_text = text if text else None
+
+    def dispatch_text(self) -> str:
+        """Return the dispatch text (with flags) or fallback to command_text()."""
+        return self._dispatch_text if self._dispatch_text is not None else self.command_text()
+
     def set_highlighted(self, highlighted: bool) -> None:
         """Mark this item as the 'current' command (matches queue-last-command)."""
         if self._highlighted == highlighted:
@@ -503,8 +552,13 @@ class CommandItemWidget(QWidget):
         self._model_badge.setVisible(False)
 
     def _on_copy_clicked(self) -> None:
-        """Copy the full command line to the clipboard."""
-        text = self.command_text()
+        """Copy the full command line to the clipboard.
+
+        Item 012: usa dispatch_text() (com sufixo de flag) quando disponivel,
+        garantindo paridade com mass copy e autocast. Fallback para
+        command_text() quando set_dispatch_text nao foi chamado.
+        """
+        text = self.dispatch_text()
         clipboard = QApplication.clipboard()
         if clipboard:
             clipboard.setText(text)
@@ -521,7 +575,9 @@ class CommandItemWidget(QWidget):
         if self._is_sent:
             self.reset_to_pending()
             return
-        self.run_in_terminal_requested.emit(self.command_text())
+        # Item 012: usa dispatch_text() (com sufixo de flag) quando disponivel,
+        # garantindo paridade com mass copy e autocast (caminho 1).
+        self.run_in_terminal_requested.emit(self.dispatch_text())
 
     def _on_kimi_clicked(self) -> None:
         """Send Kimi-adapted prompt to the workspace terminal and mark as sent.
