@@ -157,6 +157,10 @@ class SignalBus(QObject):
     run_command_in_terminal = Signal(str)           # sends text + Enter — interactive terminal only
     run_command_in_workspace_terminal = Signal(str) # sends text + Enter — workspace terminal only
     run_command_in_workspace_xterm = Signal(str)    # sends text + Enter — workspace xterm terminal
+    # Item 024: route-aware variant — command + TerminalRouteSnapshot.
+    # Emitted by MetricsBar when instance-group is clicked under
+    # SF_INSTANCE_GROUP_ROUTE_AWARE="1". Connected in MainWindow.
+    run_command_route_aware = Signal(str, object)   # command, TerminalRouteSnapshot
     paste_text_in_terminal = Signal(str)            # text only (no Enter — inserts inline)
     paste_text_in_workspace_terminal = Signal(str)  # text only (no Enter) — workspace terminal
     submit_enter_to_terminal = Signal()             # bare Enter (\r) to interactive terminal
@@ -179,14 +183,19 @@ class SignalBus(QObject):
     # Emitted when user selects a CLI instance (e.g. "clauded", "kimid")
     instance_selected = Signal(str)          # binary_name
 
+    # Item 024: emitted by MainWindow whenever terminal-route checkboxes
+    # change (T1/T2/T3 toggled). MetricsBar connects to cache the current
+    # snapshot for route-aware instance-group dispatch.
+    terminal_route_updated = Signal(object)  # TerminalRouteSnapshot
+
     # --- Main LLM routing (CommandQueueWidget → MetricsBar) ---
     # Emitted whenever the Main LLM radio (queue-div-main-llm) changes.
     # Lets MetricsBar know which CLI occupies T1 (interactive) so the
     # red-listener auto-recovery prompt is phrased for the right agent.
-    # Values: "claude" | "codex" | "kimi". Workers are fixed by channel
+    # Values: "claude" | "codex" | "kimi" | "qwen". Workers are fixed by channel
     # (T2/workspace=kimi, T3/workspace_xterm=codex) so only T1 needs a signal.
     # See ai-forge/rules/llm-routing-div.md.
-    main_llm_changed = Signal(str)           # "claude" | "codex" | "kimi"
+    main_llm_changed = Signal(str)           # "claude" | "codex" | "kimi" | "qwen"
 
     # --- Remote Server (workflow-mobile feature) ---
     # Emitted when user toggles the remote mode button (True=start, False=stop)

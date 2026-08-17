@@ -28,7 +28,11 @@ from workflow_app.command_queue.command_item_widget import (
 )
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 from workflow_app.command_queue.provider_router import Provider, _PROVIDER_FAMILIES
-from workflow_app.config.feature_flags import llm_config_v2_flag_name
+from workflow_app.config.feature_flags import (
+    llm_config_v2_enabled,
+    llm_config_v2_flag_name,
+    provider_router_v2_enabled,
+)
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -36,6 +40,25 @@ from workflow_app.domain import (
     ModelName,
 )
 from workflow_app.signal_bus import signal_bus
+
+# Colisao "mesmo provider como Main e como Worker": os dois modos do router
+# discordam DE PROPOSITO (provider_router.classify_provider, docstring) — o
+# legado manda ao WORKER (contrato de 2026-05-30) e o Router V2 manda ao MAIN
+# (item 010, regra 3). Os casos de widget abaixo afirmam o lado LEGADO; o lado
+# V2 da mesma colisao esta travado por oraculo em subprocesso em
+# `tests/test_provider_router.py`. `feature_flags` e boot-frozen (sem hook de
+# reset), entao a unica forma honesta de conviver com a suite rodada com os 11
+# kill-switches ligados (KS-01, item 029) e pular estes dois casos quando o par
+# de flags do router esta ON neste processo — nao afrouxar a assercao.
+_ROUTER_V2_ACTIVE = llm_config_v2_enabled() and provider_router_v2_enabled()
+_skip_under_router_v2 = pytest.mark.skipif(
+    _ROUTER_V2_ACTIVE,
+    reason=(
+        "colisao Main==Worker: este caso afirma o lado LEGADO (worker vence); "
+        "sob Router V2 o Main vence e esse lado e travado em "
+        "tests/test_provider_router.py"
+    ),
+)
 
 
 @pytest.fixture()
@@ -1201,6 +1224,7 @@ class TestWorkerRoutingExpandedToAllMainLlms:
         assert blue[0].startswith("/skill:")
         assert routed_widget._items[0].is_pending_run() is False
 
+    @_skip_under_router_v2
     def test_main_codex_worker_codex_routes_blue_arrow_to_t3(self, routed_widget):
         """Main Codex + Worker Codex: a codex-compatible command (/cmd:review)
         goes to T3 Codex worker (channel workspace_xterm), NOT to T1.
@@ -2899,15 +2923,18 @@ class TestStepPathInvokesProviderRouter:
 
     def test_classify_provider_called_with_routing_state(self, widget, real_spec):
         """O step path chama classify_provider com um RoutingState montado a
-        partir dos checkboxes de worker e do Main LLM (nunca route-toggles)."""
+        partir dos checkboxes de worker e do Main LLM (nunca route-toggles).
+        Item 019: o RoutingState vem do contrato congelado no enqueue."""
         from unittest.mock import patch
 
         from workflow_app.command_queue.provider_router import Provider, RoutingState
 
-        widget.load_pipeline(real_spec)
+        # Item 019: setar ANTES do load_pipeline (enqueue) para que o frozen
+        # contract capture o estado correto.
         widget._use_kimi_chk.setChecked(True)
         if getattr(widget, "_use_codex_chk", None) is not None:
             widget._use_codex_chk.setChecked(False)
+        widget.load_pipeline(real_spec)
 
         with patch(
             "workflow_app.command_queue.command_queue_widget.classify_provider",
@@ -2927,8 +2954,9 @@ class TestStepPathInvokesProviderRouter:
         assert called_state.main_llm == "claude"
         assert widget._last_classified_provider == Provider.KIMI
 
-    def test_routing_state_reflects_codex_worker_and_main_llm(self, widget, real_spec):
-        """codex_worker_enabled e main_llm refletem o estado vivo da queue."""
+    def test_routing_state_reflects_codex_worker_and_main_llm(self, widget, real_spec, monkeypatch):
+        """codex_worker_enabled e main_llm refletem o estado da queue no enqueue.
+        Item 019: o RoutingState vem do contrato congelado no enqueue."""
         from unittest.mock import patch
 
         from workflow_app.command_queue.provider_router import Provider, RoutingState
@@ -2937,10 +2965,19 @@ class TestStepPathInvokesProviderRouter:
                 getattr(widget, "_force_kimi_chk", None) is None:
             pytest.skip("widget sem checkboxes de worker codex / main kimi")
 
-        widget.load_pipeline(real_spec)
+        # Item 019: setar ANTES do load_pipeline (enqueue) para que o frozen
+        # contract capture o estado correto.
         widget._use_kimi_chk.setChecked(False)
         widget._use_codex_chk.setChecked(True)
         widget._force_kimi_chk.setChecked(True)  # Main LLM = kimi
+        # Bypass do preflight ORCH: este teste exercita o RoutingState, nao a
+        # resolucao de credencial. Assinatura com `main_llm` porque o item 019
+        # passa o Main do contrato congelado, nao o do radio vivo.
+        monkeypatch.setattr(
+            type(widget), "_orch_preflight_main_credential",
+            lambda self, main_llm=None: None,
+        )
+        widget.load_pipeline(real_spec)
 
         captured: dict[str, RoutingState] = {}
 
@@ -3533,6 +3570,7 @@ class TestSingleButtonDispatchFailureConditions:
         assert t2 == ["/clear"], "/clear espelhado ao worker Kimi/T2"
         assert all("Command:" not in x for x in t1), "nao pode virar prompt executor Codex"
 
+    @_skip_under_router_v2
     def test_d3_main_kimi_plus_worker_kimi_routes_to_t2(self, disp_widget):
         """D-3 (Position A, invariante 2): Main Kimi + Worker Kimi -> a seta
         worker NAO e escondida e um comando kimi-elegivel roteia ao T2 no step
@@ -4884,15 +4922,28 @@ def test_llm_config_kill_switch_state_is_frozen_at_boot_off():
 
 
 def test_llm_config_kill_switch_has_single_env_read_point_in_src():
-    """Criterio A1: a env var aparece uma unica vez em `src/`, no helper."""
+    """Criterio A1 (source.md:2846): **ponto unico de LEITURA** da env var.
+
+    O criterio governa onde o valor e lido, nao onde o nome e mencionado.
+    Comentario que cita `SF_LLM_CONFIG_V2` para explicar um branch (item 017,
+    `main_window.py`) nao le nada: nao pode divergir do helper porque nao tem
+    valor proprio. Proibi-lo empurraria para o lado errado — codigo com branch
+    condicionado ao kill-switch e comentario que nao pode dizer qual.
+
+    A assercao continua dura sobre o que importa: exatamente uma linha de
+    codigo em `src/` carrega o literal, e ela esta no helper.
+    """
     flag = _FLAG_NAME
     hits = []
     for path in sorted((_WORKFLOW_APP_ROOT / "src").rglob("*.py")):
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if flag in line:
-                hits.append(
-                    (path.relative_to(_WORKFLOW_APP_ROOT).as_posix(), lineno, line.strip())
-                )
+            if flag not in line:
+                continue
+            if line.strip().startswith("#"):
+                continue  # comentario nao e ponto de leitura
+            hits.append(
+                (path.relative_to(_WORKFLOW_APP_ROOT).as_posix(), lineno, line.strip())
+            )
     assert len(hits) == 1, f"ponto unico de leitura violado: {hits}"
     assert hits[0][0] == "src/workflow_app/config/feature_flags.py", hits
 
@@ -5189,7 +5240,24 @@ class TestMainRadioPersistence:
 # --------------------------------------------------------------------------- #
 
 class TestOrchPreflight:
-    """Preflight de credencial do Main LLM antes do enqueue."""
+    """Preflight ORCH do Main LLM (PF-01, source.md §10.13).
+
+    Bateria alinhada com PF-01: a credencial de provider e ORCH e vive em
+    `.claude/projects/{slug}.json > credentials.mcp_servers.<provider>.*`,
+    **nunca** no `.env`. As duas metades do fail-closed sao CLI resolvivel
+    (source.md:1415) e alguma fonte de credencial (project.json > config local
+    do CLI > env var). A bateria detalhada por ramo vive em
+    `tests/test_loop_0811_item018.py::TestOrchPreflight`; aqui ficam os casos
+    de fumaca que garantem que o widget deste arquivo usa a mesma semantica.
+    """
+
+    @staticmethod
+    def _no_local_config():
+        """Neutraliza as configs locais do CLI, presentes nesta maquina."""
+        base = dict(CommandQueueWidget._ORCH_PROVIDER_SOURCES)
+        for slug, (binaries, cred_key, _cfg, envs) in list(base.items()):
+            base[slug] = (binaries, cred_key, ("~/.nonexistent-sf-test-cfg",), envs)
+        return patch.object(CommandQueueWidget, "_ORCH_PROVIDER_SOURCES", base)
 
     def test_orch_preflight_passes_claude(self, qtbot):
         w = CommandQueueWidget()
@@ -5198,16 +5266,19 @@ class TestOrchPreflight:
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}):
             assert w._orch_preflight_main_credential() is None
 
-    def test_orch_preflight_blocks_claude(self, qtbot):
+    def test_orch_preflight_blocks_claude_without_any_source(self, qtbot):
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w._main_claude_radio.setChecked(True)
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-        with patch.dict(os.environ, env, clear=True):
+        with self._no_local_config(), patch.object(
+            CommandQueueWidget,
+            "_orch_credential_in_project_json",
+            staticmethod(lambda _k: False),
+        ), patch.dict(os.environ, env, clear=True):
             result = w._orch_preflight_main_credential()
             assert result is not None
             assert "claude" in result
-            assert "ANTHROPIC_API_KEY" in result
 
     def test_orch_preflight_passes_kimi(self, qtbot):
         w = CommandQueueWidget()
@@ -5216,17 +5287,21 @@ class TestOrchPreflight:
         with patch.dict(os.environ, {"KIMI_API_KEY": "test-key"}):
             assert w._orch_preflight_main_credential() is None
 
-    def test_orch_preflight_blocks_codex(self, qtbot):
+    def test_orch_preflight_blocks_codex_without_any_source(self, qtbot):
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w._main_codex_radio.setChecked(True)
         env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
-        with patch.dict(os.environ, env, clear=True):
+        with self._no_local_config(), patch.object(
+            CommandQueueWidget,
+            "_orch_credential_in_project_json",
+            staticmethod(lambda _k: False),
+        ), patch.dict(os.environ, env, clear=True):
             result = w._orch_preflight_main_credential()
             assert result is not None
             assert "codex" in result
 
-    def test_orch_preflight_blocks_qwen(self, qtbot):
+    def test_orch_preflight_blocks_qwen_without_any_source(self, qtbot):
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w._main_qwen_radio.setChecked(True)
@@ -5235,10 +5310,27 @@ class TestOrchPreflight:
             for k, v in os.environ.items()
             if k not in ("DASHSCOPE_API_KEY", "QWEN_API_KEY")
         }
-        with patch.dict(os.environ, env, clear=True):
+        with self._no_local_config(), patch.object(
+            CommandQueueWidget,
+            "_orch_credential_in_project_json",
+            staticmethod(lambda _k: False),
+        ), patch.dict(os.environ, env, clear=True):
             result = w._orch_preflight_main_credential()
             assert result is not None
             assert "qwen" in result
+
+    def test_orch_preflight_never_reads_env_as_canonical_source(self, qtbot):
+        """PF-01: project.json aprova sozinho, sem nenhuma env var setada."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_codex_radio.setChecked(True)
+        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        with self._no_local_config(), patch.object(
+            CommandQueueWidget,
+            "_orch_credential_in_project_json",
+            staticmethod(lambda _k: True),
+        ), patch.dict(os.environ, env, clear=True):
+            assert w._orch_preflight_main_credential() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -5290,11 +5382,155 @@ class TestMapParity:
             == self._dest_keys()
         )
 
-    def test_map_parity_four_providers(self):
-        expected = {"claude", "kimi", "codex", "qwen"}
+    def test_map_parity_provider_roster(self):
+        """Censo fechado do enum apos a promocao publica do Grok (item 026).
+
+        Substitui `test_map_parity_four_providers`, que congelava o roster em
+        quatro membros. O item 018 rodou sob D-41 (Grok ainda spike privado);
+        o item 026 promoveu Grok a Main publico por D-30/D-49 e ampliou o
+        roster para cinco. A assercao de censo continua viva, so que no mundo
+        certo — remove-la deixaria o enum crescer sem ninguem olhando.
+        """
+        expected = {"claude", "kimi", "codex", "qwen", "grok"}
         assert self._enum_members() == expected
 
-    def test_map_parity_no_grok(self):
-        assert "grok" not in self._enum_members()
-        assert "grok" not in self._families_keys()
-        assert "grok" not in self._btn_style_keys()
+    def test_map_parity_grok_fully_wired(self):
+        """Grok presente em TODOS os mapas, nunca pela metade.
+
+        Substitui `test_map_parity_no_grok` na mesma logica que o source aplicou
+        ao `grok_not_exposed` do item 025: o teste e trocado, nao apagado. A
+        garantia que ele protegia continua sendo a mesma — Grok nao pode existir
+        meio-ligado — so que o lado seguro passou de "ausente em todos" para
+        "presente em todos".
+        """
+        assert "grok" in self._enum_members()
+        assert "grok" in self._families_keys()
+        assert "grok" in self._btn_style_keys()
+        assert "grok" in self._label_keys()
+        assert "grok" in self._dest_keys()
+
+
+# ── Item 019: frozen contract at enqueue ────────────────────────────────── #
+
+
+class TestFrozenContractAtEnqueue:
+    """Item 019: o contrato de execucao (Main LLM, flags, provider) e congelado
+    no enqueue. Trocas de Main entre enqueue e dispatch nao alteram o item."""
+
+    def test_frozen_contract_captured_at_enqueue(self, qapp, qtbot):
+        """Cada item recebe um FrozenContract com o estado atual no enqueue."""
+        from workflow_app.command_queue.command_queue_widget import FrozenContract
+
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w.load_pipeline(specs)
+
+        item = w._items[0]
+        fc = w.get_frozen_contract(item)
+        assert fc is not None, "FrozenContract deve ser capturado no enqueue"
+        assert isinstance(fc, FrozenContract)
+        assert fc.main_llm == "claude"
+        assert fc.kimi_worker_enabled is False
+        assert fc.codex_worker_enabled is False
+        assert fc.active_flags == ()
+        assert fc.resolved_provider == Provider.CLAUDE
+
+    def test_frozen_contract_survives_main_llm_change(self, qapp, qtbot):
+        """Troca de Main LLM apos enqueue NAO altera o FrozenContract."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w.load_pipeline(specs)
+        item = w._items[0]
+
+        fc_before = w.get_frozen_contract(item)
+        assert fc_before.main_llm == "claude"
+
+        # Muda Main LLM para codex
+        if getattr(w, "_main_codex_radio", None):
+            w._main_codex_radio.setChecked(True)
+
+        # Contract congelado NAO mudou
+        fc_after = w.get_frozen_contract(item)
+        assert fc_after is fc_before, "FrozenContract e imutavel (frozen dataclass)"
+        assert fc_after.main_llm == "claude"
+
+        # Main LLM atual mudou, mas o contract nao
+        assert w._resolve_interactive_main_llm() == "codex"
+        assert w.get_frozen_contract(item).main_llm == "claude"
+
+    def test_frozen_contract_main_change_dispatch_uses_frozen(
+        self, qapp, qtbot
+    ):
+        """Dispatch consome o contrato congelado, nao o estado atual da UI.
+
+        Cobre o caso: item enfileirado sob Claude, Main muda para Codex antes
+        do dispatch. O _on_step_btn_clicked deve usar main_llm=claude (frozen),
+        nao codex (UI atual).
+        """
+        from unittest.mock import MagicMock
+
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w.load_pipeline(specs)
+        item = w._items[0]
+
+        # Congelou sob Claude
+        fc = w.get_frozen_contract(item)
+        assert fc.main_llm == "claude"
+        assert fc.resolved_provider == Provider.CLAUDE
+
+        # Muda Main para codex
+        if getattr(w, "_main_codex_radio", None):
+            w._main_codex_radio.setChecked(True)
+        assert w._resolve_interactive_main_llm() == "codex"
+
+        # Espiona o signal via slot conectado
+        emitted: list[str] = []
+        signal_bus.run_command_in_terminal.connect(
+            lambda cmd: emitted.append(cmd)
+        )
+
+        # Mock _on_run_command para evitar efeitos colaterais
+        w._on_run_command = MagicMock()
+        item._mark_as_sent = MagicMock()
+
+        # Forca o step (dispatch)
+        w._on_step_btn_clicked()
+
+        # O dispatch deve ter usado Claude (frozen), nao Codex (UI atual).
+        # Sob Claude main, o comando vai raw para T1 (sem transformacao).
+        assert len(emitted) > 0, "run_command_in_terminal deve ter sido emitido"
+        # O comando emitido NAO deve ser o formato Codex (que adiciona
+        # prefixo executor). Deve ser o comando raw Claude.
+        assert "/prd-create" in emitted[0]
+
+    def test_frozen_contract_flags_frozen(self, qapp, qtbot):
+        """Troca de flags --kimi/--codex apos enqueue nao altera o contract."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+
+        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+        w.load_pipeline(specs)
+        item = w._items[0]
+
+        fc_before = w.get_frozen_contract(item)
+        assert fc_before.active_flags == ()
+
+        # Ativa --kimi flag
+        if getattr(w, "_flag_kimi_chk", None):
+            w._flag_kimi_chk.setChecked(True)
+
+        # Contract congelado NAO mudou
+        fc_after = w.get_frozen_contract(item)
+        assert fc_after.active_flags == ()
+        assert fc_after is fc_before

@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.app_instance import APP_SESSION_ID
+from workflow_app.config.feature_flags import instance_group_route_aware_enabled
 from workflow_app.metrics_bar.recovery_context import (
     RecoveryContext,
     RecoveryContextBlocked,
@@ -61,6 +62,8 @@ from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 # sob `_INSTANCE_ORDER_SETTINGS_KEY` e e restaurada na proxima abertura do app.
 _CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "codex"]
 _INSTANCE_ORDER_SETTINGS_KEY = "MetricsBar/instanceOrder"
+_INSTANCE_SCHEMA_VERSION_KEY = "MetricsBar/instanceGroupSchemaVersion"
+_INSTANCE_SCHEMA_VERSION_CURRENT = 2
 _INSTANCE_DRAG_MIME = "application/x-workflow-instance-button"
 _INSTANCE_DRAG_THRESHOLD = 6
 
@@ -655,7 +658,11 @@ class MetricsBar(QWidget):
             _ig_layout.addWidget(btn)
 
         self._apply_instance_styles()
-        # _instance_group NOT added here — reparented to output-toolbar-center by MainWindow.
+        # Item 024: cached TerminalRouteSnapshot, updated via terminal_route_updated
+        # signal from MainWindow. None until first snapshot arrives (fallback: legacy).
+        self._current_route_snapshot = None
+        # _instance_group NOT added here — reparented to output-toolbar-center by MainWindow
+        # (legacy) or queue-div-main-llm (under SF_INSTANCE_GROUP_ROUTE_AWARE="1").
 
         layout.addWidget(self._project_pill)
         layout.addWidget(self._loop_pill)
@@ -1160,11 +1167,24 @@ class MetricsBar(QWidget):
     # ─────────────────────────────────── Instance buttons (Clauded etc.) ── #
 
     def _on_instance_clicked(self, index: int, name: str) -> None:
-        """Type the instance name in the terminal (with Enter) and mark as selected."""
+        """Type the instance name in the terminal (with Enter) and mark as selected.
+
+        Item 024: under SF_INSTANCE_GROUP_ROUTE_AWARE="1" the dispatch is
+        route-aware — emits ``run_command_route_aware`` with the cached
+        TerminalRouteSnapshot instead of the 3 fixed signals. The text
+        matches the button label (fix R-22: ``codex`` emits ``"codex"``,
+        not ``"codex-high"``). Legacy path (flag absent/``"0"``) preserves
+        the historical fixed routing byte-for-byte.
+        """
         self._selected_instance = index
         self._apply_instance_styles()
         self._signal_bus.instance_selected.emit(name)
-        if name == "codex":
+        if instance_group_route_aware_enabled() and self._current_route_snapshot is not None:
+            # Route-aware path (KS-01 ligado): texto bate com o rotulo (R-22).
+            self._signal_bus.run_command_route_aware.emit(
+                name, self._current_route_snapshot
+            )
+        elif name == "codex":
             self._signal_bus.run_command_in_workspace_xterm.emit("codex-high")
         elif name == "kimid":
             self._signal_bus.run_command_in_workspace_terminal.emit(name)
@@ -1182,33 +1202,98 @@ class MetricsBar(QWidget):
     def _load_instance_order(self) -> list[str]:
         """Le a ordem persistida e a reconcilia com o set canonico.
 
+        Item 024: QSettings schema v2 com migracao idempotente.
+        - Schema v1 (legacy): JSON list pura (``["clauded", "kimid", "codex"]``).
+        - Schema v2: ``{"schema_version": 2, "order": [...], "route_overrides": {}}``.
+        - Migracao v1→v2: preserva a ordem do usuario, grava schema_version=2.
+        - Migracao v2→v2: no-op (idempotente).
+        - Fallback: ordem canonica quando JSON invalido ou schema > 2.
+
         Mantem apenas nomes canonicos preservando a ordem do usuario; nomes
         canonicos ausentes na persistencia (ex: depois de um upgrade que
         adicionou um botao novo) sao anexados ao final.
         """
         canonical = list(_CANONICAL_INSTANCE_NAMES)
+        schema_version = self._instance_order_settings.value(
+            _INSTANCE_SCHEMA_VERSION_KEY, None
+        )
         raw = self._instance_order_settings.value(_INSTANCE_ORDER_SETTINGS_KEY, None)
         persisted: list[str] = []
-        if isinstance(raw, str) and raw:
-            try:
-                decoded = json.loads(raw)
-                if isinstance(decoded, list):
-                    persisted = [str(x) for x in decoded]
-            except json.JSONDecodeError:
+
+        if schema_version is not None and int(str(schema_version)) >= 2:
+            # Schema v2+: ler formato estruturado.
+            if isinstance(raw, str) and raw:
+                try:
+                    decoded = json.loads(raw)
+                    if isinstance(decoded, dict) and decoded.get("schema_version") == 2:
+                        order_list = decoded.get("order", [])
+                        if isinstance(order_list, list):
+                            persisted = [str(x) for x in order_list]
+                    else:
+                        # v2 key presente mas formato invalido → fallback canonico.
+                        persisted = []
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    persisted = []
+            elif int(str(schema_version)) > 2:
+                # Schema futuro: fallback canonico.
                 persisted = []
-        elif isinstance(raw, list):
-            persisted = [str(x) for x in raw]
+        else:
+            # Schema v1 (legacy) ou sem versao: ler JSON list pura.
+            if isinstance(raw, str) and raw:
+                try:
+                    decoded = json.loads(raw)
+                    if isinstance(decoded, list):
+                        persisted = [str(x) for x in decoded]
+                    elif isinstance(decoded, dict) and "order" in decoded:
+                        # Ja e formato v2 mas sem schema_version key → extrair order.
+                        order_list = decoded.get("order", [])
+                        if isinstance(order_list, list):
+                            persisted = [str(x) for x in order_list]
+                except json.JSONDecodeError:
+                    persisted = []
+            elif isinstance(raw, list):
+                persisted = [str(x) for x in raw]
 
         result = [n for n in persisted if n in canonical]
         for n in canonical:
             if n not in result:
                 result.append(n)
+
+        # Migracao v1→v2: se o schema ainda nao e v2, gravar agora (idempotente).
+        # Nao chamar _save_instance_order() aqui — _instance_btns pode nao
+        # existir ainda (chamado de _setup_ui antes do loop de botoes).
+        # Escrever os valores QSettings diretamente com a ordem reconciliada.
+        current_sv = self._instance_order_settings.value(
+            _INSTANCE_SCHEMA_VERSION_KEY, None
+        )
+        if current_sv is None or int(str(current_sv)) < _INSTANCE_SCHEMA_VERSION_CURRENT:
+            payload = {
+                "schema_version": _INSTANCE_SCHEMA_VERSION_CURRENT,
+                "order": result,
+                "route_overrides": {},
+            }
+            self._instance_order_settings.setValue(
+                _INSTANCE_ORDER_SETTINGS_KEY, json.dumps(payload)
+            )
+            self._instance_order_settings.setValue(
+                _INSTANCE_SCHEMA_VERSION_KEY, _INSTANCE_SCHEMA_VERSION_CURRENT
+            )
+
         return result
 
     def _save_instance_order(self) -> None:
+        """Persiste a ordem no formato v2 e grava schema_version=2."""
         order = [b._instance_name for b in self._instance_btns]
+        payload = {
+            "schema_version": _INSTANCE_SCHEMA_VERSION_CURRENT,
+            "order": order,
+            "route_overrides": {},
+        }
         self._instance_order_settings.setValue(
-            _INSTANCE_ORDER_SETTINGS_KEY, json.dumps(order)
+            _INSTANCE_ORDER_SETTINGS_KEY, json.dumps(payload)
+        )
+        self._instance_order_settings.setValue(
+            _INSTANCE_SCHEMA_VERSION_KEY, _INSTANCE_SCHEMA_VERSION_CURRENT
         )
 
     def _on_instance_button_dropped(self, name: str, drop_x: int) -> None:
@@ -1505,6 +1590,12 @@ class MetricsBar(QWidget):
         bus.run_command_in_terminal.connect(self._on_command_dispatched_interactive)
         bus.run_command_in_workspace_terminal.connect(self._on_command_dispatched_workspace)
         bus.run_command_in_workspace_xterm.connect(self._on_command_dispatched_workspace_xterm)
+        # Item 024: cache the latest route snapshot so _on_instance_clicked
+        # can emit run_command_route_aware with the current T1/T2/T3 state.
+        bus.terminal_route_updated.connect(self._on_terminal_route_updated)
+        # Item 024: route-aware dispatch also counts as a command dispatch
+        # for the listener dot (epoch advance + idle lock release).
+        bus.run_command_route_aware.connect(self._on_command_dispatched_route_aware)
         # Blue-arrow Kimi dispatch uses a different signal (paste + 500ms +
         # Enter), but it IS still a command dispatch from the dot's POV —
         # without listening here the workspace epoch never advances and
@@ -2586,6 +2677,55 @@ class MetricsBar(QWidget):
         self._awaiting_notify["workspace_xterm"] = not self._is_helper_command(cmd)
         self._dot_workspace_xterm.set_busy(True)
         self._maybe_schedule_helper_auto_idle("workspace_xterm", cmd)
+        self._update_overall_listener()
+
+    def _on_terminal_route_updated(self, snapshot: object) -> None:
+        """Cache the latest TerminalRouteSnapshot from MainWindow.
+
+        Item 024: called whenever terminal-route checkboxes (T1/T2/T3) change.
+        The cached snapshot is used by ``_on_instance_clicked`` to emit
+        ``run_command_route_aware`` with the current route state.
+        """
+        self._current_route_snapshot = snapshot
+
+    def _on_command_dispatched_route_aware(self, cmd: str, snapshot: object) -> None:
+        """Listener-dot bookkeeping for route-aware instance-group dispatch.
+
+        Item 024: the actual terminal injection happens in MainWindow
+        (``_on_command_dispatched_route_aware``). Here we only need to
+        bump the epoch / release the idle lock for the channels that the
+        snapshot targets, so the listener dots reflect the dispatch.
+        """
+        snap = snapshot
+        t1 = getattr(snap, "t1", True)
+        t2 = getattr(snap, "t2", False)
+        t3 = getattr(snap, "t3", False)
+        is_helper = self._is_helper_command(cmd)
+        if t1:
+            self._bump_command_epoch("interactive")
+            self._release_idle_lock("interactive")
+            self._awaiting_notify["interactive"] = not is_helper
+            self._dot_interactive.set_busy(True)
+            self._maybe_schedule_helper_auto_idle("interactive", cmd)
+        if t2:
+            self._bump_command_epoch("workspace")
+            self._release_idle_lock("workspace")
+            self._awaiting_notify["workspace"] = not is_helper
+            self._dot_workspace.set_busy(True)
+            self._maybe_schedule_helper_auto_idle("workspace", cmd)
+        if t3:
+            self._bump_command_epoch("workspace_xterm")
+            self._release_idle_lock("workspace_xterm")
+            self._awaiting_notify["workspace_xterm"] = not is_helper
+            self._dot_workspace_xterm.set_busy(True)
+            self._maybe_schedule_helper_auto_idle("workspace_xterm", cmd)
+        # Fallback: no route checkbox marked → interactive (historical default).
+        if not (t1 or t2 or t3):
+            self._bump_command_epoch("interactive")
+            self._release_idle_lock("interactive")
+            self._awaiting_notify["interactive"] = not is_helper
+            self._dot_interactive.set_busy(True)
+            self._maybe_schedule_helper_auto_idle("interactive", cmd)
         self._update_overall_listener()
 
     def _on_listener_helper_pulse(self, channel: str) -> None:

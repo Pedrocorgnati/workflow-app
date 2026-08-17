@@ -30,6 +30,11 @@ from workflow_app.main_window import MainWindow
 
 _MODULE_NAME = "workflow_app.agent_integration_specs"
 
+# Snapshot do registry REAL no import do modulo de teste (antes de qualquer
+# monkeypatch): e o baseline de "o modulo cacheado nao foi mutado", que nao pode
+# depender de quantas specs `/mcp:create-agent` ja registrou.
+_CANONICAL_BRAINSTORM = specs_mod.brainstorm_agent_specs()
+
 _BRAINSTORM_ENTRY = """_BRAINSTORM_AGENT_SPECS: Final[tuple[BrainstormAgentSpec, ...]] = (
     BrainstormAgentSpec(
         slug="hardening-engineer",
@@ -53,26 +58,75 @@ _MCP_ENTRY = """_MCP_AGENT_SPECS: Final[tuple[McpAgentSpec, ...]] = (
     ),
 )"""
 
+_DEFAULT_MCP_ENTRY = """_MCP_AGENT_SPECS: Final[tuple[McpAgentSpec, ...]] = (
+    McpAgentSpec(
+        slug="writer",
+        label="Writer",
+        directive=(
+            "no papel de Writer, seguindo as regras em "
+            "ai-forge/MCP/agents/writer.md"
+        ),
+    ),
+    McpAgentSpec(
+        slug="tester",
+        label="Tester",
+        directive=(
+            "no papel de Tester, seguindo as regras em "
+            "ai-forge/MCP/agents/tester.md"
+        ),
+    ),
+    McpAgentSpec(
+        slug="art-creator",
+        label="Art Creator",
+        directive=(
+            "no papel de Art Creator, seguindo as regras em "
+            "ai-forge/MCP/agents/art-creator.md"
+        ),
+    ),
+    McpAgentSpec(
+        slug="search-prod",
+        label="Search-prod",
+        directive=(
+            "no papel de Investigador de Ambiente de Producao, seguindo as "
+            "regras em ai-forge/MCP/agents/search-prod.md"
+        ),
+    ),
+)"""
+
+_DEFAULT_BRAINSTORM_ENTRY = """_BRAINSTORM_AGENT_SPECS: Final[tuple[BrainstormAgentSpec, ...]] = (
+    BrainstormAgentSpec(
+        slug="search-prod",
+        label="Search-prod",
+        button_type="type-selector-radio-input",
+        action="Otimizar",
+        agent_name="investigador de ambiente de producao",
+        agent_path="ai-forge/MCP/agents/search-prod.md",
+        prompt_path="blacksmith/brainstorm-mcp/search-prod.md",
+        target_terminal=None,
+        target_path_edit_inplace=True,
+    ),
+)"""
+
 
 def _write_registry(tmp_path: Path, *, mcp: str = "", brainstorm: str = "") -> Path:
     """Materializa em disco uma copia do registry real com specs registradas.
 
     Reusa o codigo-fonte de producao de proposito: e exatamente o que
-    `/mcp:create-agent` faz (substituir o literal vazio pelo literal populado),
-    entao o teste exercita a forma real do arquivo, nao uma miniatura.
+    `/mcp:create-agent` faz (reescrever o literal do registry), entao o teste
+    exercita a forma real do arquivo, nao uma miniatura. Os literais default
+    (`_DEFAULT_MCP_ENTRY`, `_DEFAULT_BRAINSTORM_ENTRY`) sao copias exatas do
+    registry corrente e precisam ser atualizados quando ele ganha uma spec.
     """
     # `__spec__.origin`, nao `__file__`: `_point_registry_at` redireciona
     # `__file__`, e um segundo `_write_registry` no mesmo teste passaria a ler
     # o registry ja populado em vez do original.
     source = Path(specs_mod.__spec__.origin).read_text(encoding="utf-8")
     if mcp:
-        old = "_MCP_AGENT_SPECS: Final[tuple[McpAgentSpec, ...]] = ()"
-        assert old in source
-        source = source.replace(old, mcp)
+        assert _DEFAULT_MCP_ENTRY in source
+        source = source.replace(_DEFAULT_MCP_ENTRY, mcp)
     if brainstorm:
-        old = "_BRAINSTORM_AGENT_SPECS: Final[tuple[BrainstormAgentSpec, ...]] = ()"
-        assert old in source
-        source = source.replace(old, brainstorm)
+        assert _DEFAULT_BRAINSTORM_ENTRY in source
+        source = source.replace(_DEFAULT_BRAINSTORM_ENTRY, brainstorm)
     target = tmp_path / "agent_integration_specs.py"
     target.write_text(source, encoding="utf-8")
     return target
@@ -160,7 +214,10 @@ def test_modulo_cacheado_permanece_intacto(tmp_path, monkeypatch, toasts):
 
     assert registry is not specs_mod
     assert sys.modules[_MODULE_NAME] is specs_mod
-    assert specs_mod.brainstorm_agent_specs() == ()
+    assert specs_mod.brainstorm_agent_specs() == _CANONICAL_BRAINSTORM
+    assert "hardening-engineer" not in [
+        spec.slug for spec in specs_mod.brainstorm_agent_specs()
+    ]
     assert len(registry.brainstorm_agent_specs()) == 1
 
 
@@ -174,7 +231,7 @@ def test_registry_quebrado_cai_no_ultimo_valido_com_aviso(tmp_path, monkeypatch,
 
     # Ultimo registry valido continua servivel.
     assert registry is specs_mod
-    assert registry.brainstorm_agent_specs() == ()
+    assert registry.brainstorm_agent_specs() == _CANONICAL_BRAINSTORM
     # Zero Silencio: o operador precisa saber que a spec nova nao entrou.
     assert len(toasts) == 1
     assert toasts[0][1] == "warning"

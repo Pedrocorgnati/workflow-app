@@ -47,13 +47,13 @@ def llm_for_channel(channel: str, main_llm: str) -> str:
 
     workspace      -> kimi  (Parallel Worker Kimi, T2)
     workspace_xterm-> codex (Parallel Worker Codex, T3)
-    interactive    -> Main LLM (radio queue-div-main-llm): claude|codex|kimi
+    interactive    -> Main LLM (radio queue-div-main-llm): claude|codex|kimi|qwen
     """
     if channel == "workspace":
         return "kimi"
     if channel == "workspace_xterm":
         return "codex"
-    return main_llm if main_llm in ("claude", "codex", "kimi") else "claude"
+    return main_llm if main_llm in ("claude", "codex", "kimi", "qwen") else "claude"
 
 
 def _blue_signal_block(channel: str) -> str:

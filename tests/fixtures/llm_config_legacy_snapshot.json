@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-12T02:26:00Z",
+  "captured_with_flag": "absent",
+  "captured_at_repo_head": "e8b3fca42e014e6926cde6d2262be2997fdab2e9",
+  "produced_by": "tests/test_command_queue_widget.py::_LEGACY_SNAPSHOT_PROBE (mesmo texto de programa, executado em subprocesso)",
+  "purpose": "Oraculo versionado do comportamento observavel do caminho legado (SF_LLM_CONFIG_V2 ausente) exigido pelo item 002 do loop 08-11-llm-config-multillm-expansion. Cumpre C-24 e a clausula do Bloco 3 do BASELINE.md. O working tree e git stash NAO sao oraculo; este arquivo e.",
+  "provenance_notes": [
+    "O Bloco 3 do BASELINE.md transcreve 8 simbolos publicos de provider_router ('Enum','Provider','RoutingState','TYPE_CHECKING','annotations','classify_provider','dataclass','is_codex_compatible'). A observacao real no mesmo HEAD retorna 10: os dois ausentes na transcricao sao 'is_kimi_compatible' e 'normalize_command_name', que sao exatamente os dois ultimos da lista ordenada. Ambos existem no arquivo desde antes deste loop (import na linha de is_kimi_compatible e def de normalize_command_name) e provider_router.py nao aparece em git status. A transcricao do Bloco 3 esta truncada em 8 de 10; ela nao descreve um estado anterior diferente.",
+    "Consequencia: esta fixture registra o conjunto COMPLETO observado, nao a transcricao truncada. Reduzi-la a 8 tornaria o teste de nao-regressao falso-vermelho contra codigo intocado. A divergencia esta declarada aqui e no _ITERACTION-LOG.md do loop, nunca em silencio.",
+    "Divergencia futura entre esta fixture e a observacao ao vivo com a flag ausente e regressao no caminho legado: corrigir o codigo, nunca a fixture (Stop condition do item 002)."
+  ],
+  "amendments": [
+    {
+      "date": "2026-08-17",
+      "field": "snapshot.provider_enum_members",
+      "change": "GROK='grok' adicionado ao censo do enum Provider.",
+      "cause": "Item 026 do mesmo loop promoveu o Grok de spike privado (D-41) a provider publico (D-30/D-49). O membro novo nasce no enum, que e observavel pelo probe.",
+      "why_this_is_not_a_regression": "A clausula 'corrigir o codigo, nunca a fixture' protege o COMPORTAMENTO do caminho legado, e ele nao mudou: as 26 saidas de classify_provider, provider_is_str_enum, routing_state_frozen, normalize_command_name, public_symbols e whitelist_verdicts continuam identicas byte a byte. O unico delta e um membro ADITIVO de enum, decidido em D-30/D-49 e implementado no item 026 — mudanca intencional posterior a captura, nao deriva silenciosa. Congelar o censo aqui obrigaria a reverter uma decisao do proprio loop para satisfazer um oraculo capturado antes dela.",
+      "guard_kept": "Qualquer divergencia em campo que NAO seja este censo permanece regressao e reprova o teste."
+    }
+  ],
+  "snapshot": {
+    "classify_provider": {
+      "r1-codex": "claude",
+      "r1-kimi": "claude",
+      "r1-other": "claude",
+      "r2-codex": "claude",
+      "r2-kimi": "kimi",
+      "r2-other": "claude",
+      "r3-codex": "codex",
+      "r3-kimi": "claude",
+      "r3-other": "claude",
+      "r4-codex": "codex",
+      "r4-kimi": "kimi",
+      "r4-other": "claude",
+      "r5-codex": "codex",
+      "r5-kimi": "claude",
+      "r5-other": "claude",
+      "r6-codex": "claude",
+      "r6-kimi": "kimi",
+      "r6-other": "claude",
+      "rule1-local-action": "claude",
+      "rule2-clear": "claude",
+      "rule2-effort": "claude",
+      "rule2-model": "claude",
+      "rule2-model-args": "claude",
+      "rule4-eligible-flag": "kimi",
+      "rule4-eligible-worker-off": "claude",
+      "rule6-codex-when-kimi-not": "codex",
+      "rule6-kimi-wins": "kimi",
+      "trailing-args": "kimi"
+    },
+    "flag_env_present": false,
+    "module": "workflow_app.command_queue.provider_router",
+    "normalize_command_name": {
+      "": "",
+      "   ": "",
+      "  /model opus  ": "/model",
+      "/clear": "/clear"
+    },
+    "provider_enum_members": {
+      "CLAUDE": "claude",
+      "CODEX": "codex",
+      "GROK": "grok",
+      "KIMI": "kimi",
+      "QWEN": "qwen"
+    },
+    "provider_is_str_enum": true,
+    "public_symbols": [
+      "Enum",
+      "Provider",
+      "RoutingState",
+      "TYPE_CHECKING",
+      "annotations",
+      "classify_provider",
+      "dataclass",
+      "is_codex_compatible",
+      "is_kimi_compatible",
+      "normalize_command_name"
+    ],
+    "routing_state_frozen": true,
+    "whitelist_verdicts": {
+      "/cmd:review": {
+        "codex": true,
+        "kimi": false
+      },
+      "/dcp:matrix-init": {
+        "codex": false,
+        "kimi": true
+      },
+      "/prd-create": {
+        "codex": false,
+        "kimi": false
+      }
+    }
+  }
+}

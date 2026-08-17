@@ -91,10 +91,13 @@ class TestWhitelist:
         # + 1 (/loop:friendly-resume, score 82, SC85) = 124
         # + 1 (/loop:iteraction:review-executed-loop, score 54, SC89; --approved override) = 128
         # + 1 (/credentials:update-base, score 71, SC91) = 129
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 129
+        # - 3 (familia /credentials:* removida em 2026-08-12: env-creation,
+        #      update-base, test-user — TTY real + mutacao de provider + CAS,
+        #      ver nota em kimi_whitelist.py) = 126
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 127
 
     def test_known_compatible_commands(self):
-        for cmd in ("/secrets-scan", "/qa:prep", "/credentials:env-creation", "/sync:github"):
+        for cmd in ("/secrets-scan", "/qa:prep", "/dev-bootstrap-create", "/sync:github"):
             assert is_kimi_compatible(cmd), f"{cmd} should be Kimi-compatible"
 
     def test_known_incompatible_commands(self):

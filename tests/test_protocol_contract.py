@@ -254,3 +254,82 @@ def test_payload_as_null_rejected():
     env = {**VALID_ENVELOPES["sync_request"], "payload": None}
     with pytest.raises((TypeError, ValueError)):
         WsEnvelope.from_dict(env)
+
+
+# ── Delegação semântica — congruência entre 3 documentos (item 011) ─────────
+#
+# Os três documentos de roteamento multi-LLM devem declarar o mesmo
+# vocabulário normativo de delegação. Este teste lê os três e falha se
+# qualquer termo normativo estiver ausente em algum deles.
+#
+# Documentos:
+#   1. ai-forge/rules/llm-routing-div.md
+#   2. ai-forge/MCP/agents/executor-de-slash-commands-rules.md
+#   3. .agents/skills/slash-executor.md
+
+import pathlib
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+_DELEGATION_DOCS = [
+    _REPO_ROOT / "ai-forge" / "rules" / "llm-routing-div.md",
+    _REPO_ROOT / "ai-forge" / "MCP" / "agents" / "executor-de-slash-commands-rules.md",
+    _REPO_ROOT / ".agents" / "skills" / "slash-executor.md",
+]
+
+# Termos normativos que TODOS os três documentos devem conter.
+# Cada termo é uma tuple (label, pattern) onde pattern é buscado como substring
+# case-insensitive no conteúdo do documento.
+_DELEGATION_NORMATIVE_TERMS = [
+    ("delegate mode", "delegate"),
+    ("inline mode", "inline"),
+    ("fallback-inline mode", "fallback-inline"),
+    ("provider claude", "claude"),
+    ("provider kimi", "kimi"),
+    ("provider codex", "codex"),
+    ("multi-llm-routing block", "multi-llm-routing"),
+    ("fallback para Claude", "fallback inline para claude"),
+    ("flag --kimi", "--kimi"),
+    ("flag --codex", "--codex"),
+]
+
+
+def _read_doc(path: pathlib.Path) -> str:
+    """Lê o conteúdo de um documento de delegação."""
+    assert path.exists(), f"Documento ausente: {path}"
+    return path.read_text(encoding="utf-8")
+
+
+def test_delegation_docs_all_exist():
+    """Os três documentos de delegação devem existir no repo."""
+    for doc_path in _DELEGATION_DOCS:
+        assert doc_path.exists(), f"Documento ausente: {doc_path}"
+
+
+def test_delegation_congruence_all_docs_share_normative_terms():
+    """Cada documento de delegação deve conter todos os termos normativos.
+
+    Falha se qualquer termo normativo estiver ausente em qualquer documento.
+    Este teste prova que os três contratos continuam alinhados.
+    """
+    failures = []
+    for doc_path in _DELEGATION_DOCS:
+        content = _read_doc(doc_path).lower()
+        for label, pattern in _DELEGATION_NORMATIVE_TERMS:
+            if pattern.lower() not in content:
+                failures.append(f"{doc_path.name}: missing '{label}' ('{pattern}')")
+    assert not failures, "Divergência de termos normativos de delegação:\n" + "\n".join(
+        f"  - {f}" for f in failures
+    )
+
+
+def test_delegation_executor_codex_has_passo_2_5():
+    """O executor Codex deve declarar Passo 2.5 (contrato de delegação)."""
+    content = _read_doc(_DELEGATION_DOCS[1])
+    assert "Passo 2.5" in content, "executor-de-slash-commands-rules.md missing Passo 2.5"
+
+
+def test_delegation_executor_kimi_has_delegation_mode_clause():
+    """O executor Kimi deve declarar a cláusula <DELEGATION_MODE>."""
+    content = _read_doc(_DELEGATION_DOCS[2])
+    assert "DELEGATION_MODE" in content, "slash-executor.md missing <DELEGATION_MODE>"

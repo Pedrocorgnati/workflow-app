@@ -1209,12 +1209,24 @@ class TestWorkspaceDriftPolicy:
 
     @_requires_corpus
     def test_corpus_md_token_classification_baseline(self) -> None:
-        """Fotografia do corpus de `blacksmith/loop-archives/` em 2026-07-27.
+        """Invariantes do resolver de paths sobre `blacksmith/loop-archives/`.
 
-        Rede de seguranca para a centralizacao do resolver de paths: qualquer
-        mudanca de precedencia entre raiz do repo, `workspace_root` e
-        `loop_root` mexe nestes numeros. Divergencia aqui e SINAL, nao ruido —
-        rever a mudanca antes de atualizar a constante.
+        Rede de seguranca para a centralizacao do resolver: qualquer mudanca de
+        precedencia entre raiz do repo, `workspace_root` e `loop_root` mexe nas
+        proporcoes abaixo. Divergencia aqui e SINAL, nao ruido — rever a
+        mudanca antes de relaxar um limite.
+
+        Historico: ate 2026-08-11 este teste travava contagens absolutas
+        (`len(configs) == 53`, tally exato, `sum == 6402`) medidas em
+        2026-07-27. `blacksmith/loop-archives/` e estado local gitignored que
+        cresce a cada loop criado; as constantes quebravam por crescimento do
+        corpus, nao por regressao do resolver — ruido puro, e num clone limpo o
+        teste nem roda (`_requires_corpus` faz skip). As contagens absolutas
+        foram trocadas por invariantes estruturais que continuam falhando
+        quando a precedencia muda, mas nao quando o operador cria mais um loop.
+        Fotografia informativa em 2026-08-11 (59 configs, 7290 tokens):
+        ok:repo_root 92.9%, ok:workspace_root 5.7%, absolute 0.9%,
+        not_found 0.4%, rewrite 2, ambiguous 0.
         """
         tally = {
             "ok:repo_root": 0,
@@ -1224,6 +1236,7 @@ class TestWorkspaceDriftPolicy:
             "not_found": 0,
             "ambiguous": 0,
         }
+        seen_tokens = 0
         configs = sorted(_LOOP_ARCHIVES.glob("*/_LOOP-CONFIG.json"))
         for config_path in configs:
             raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1238,18 +1251,52 @@ class TestWorkspaceDriftPolicy:
                     workspace_root=workspace_root,
                     repo_root=repo_root,
                 )
+                assert verdict in tally, (
+                    f"veredito fora do conjunto fechado: {verdict!r} para {token!r}"
+                )
                 tally[verdict] += 1
+                seen_tokens += 1
 
-        assert len(configs) == 53
-        assert tally == {
-            "ok:repo_root": 5887,
-            "ok:workspace_root": 419,
-            "rewrite": 2,
-            "absolute": 68,
-            "not_found": 26,
-            "ambiguous": 0,
-        }
-        assert sum(tally.values()) == 6402
+        total = sum(tally.values())
+
+        # Corpus presente e representativo. Abaixo deste piso as proporcoes
+        # viram ruido estatistico e o teste nao teria poder de deteccao.
+        assert configs, "corpus presente mas sem nenhum _LOOP-CONFIG.json"
+        if total < 500:
+            pytest.skip(
+                f"corpus local pequeno demais para invariantes proporcionais "
+                f"({total} tokens em {len(configs)} configs; piso 500)"
+            )
+
+        # Cada token recebe exatamente uma classificacao.
+        assert total == seen_tokens
+
+        # Invariante duro: ambiguidade e sempre bug do resolver, nunca estado
+        # local. Este e o assert de maior sinal do teste.
+        assert tally["ambiguous"] == 0
+
+        # `rewrite` e identidade, nao volume: apenas o item bare-relative
+        # conhecido pode disparar reescrita. A identidade exata dos dois casos
+        # esta fixada em
+        # test_corpus_loader_rewrites_only_the_known_bare_relative_item.
+        assert tally["rewrite"] <= 2
+
+        # Limites proporcionais calibrados em 2026-08-11 com folga deliberada:
+        # cada um esta a mais de 2x da medicao real, entao crescimento normal
+        # do corpus nao dispara, mas uma inversao de precedencia sim.
+        assert tally["not_found"] / total <= 0.01  # medido 0.44%
+        assert tally["absolute"] / total <= 0.02  # medido 0.93%
+
+        # Precedencia: a esmagadora maioria resolve pela raiz do repo, e o
+        # ramo `workspace_root` continua exercitado. Inverter a ordem de
+        # precedencia move estes dois numeros em direcoes opostas e quebra
+        # pelo menos um dos limites.
+        assert tally["ok:repo_root"] / total >= 0.85  # medido 92.9%
+        assert 0 < tally["ok:workspace_root"] / total <= 0.15  # medido 5.7%
+
+        # Saude geral: quase todo token resolve para um path real.
+        ok_total = tally["ok:repo_root"] + tally["ok:workspace_root"]
+        assert ok_total / total >= 0.95  # medido 98.6%
 
     @_requires_corpus
     def test_corpus_loader_rewrites_only_the_known_bare_relative_item(self) -> None:

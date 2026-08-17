@@ -8,13 +8,15 @@ play bar do CommandQueueWidget.
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
 )
 
@@ -22,14 +24,46 @@ from workflow_app.command_queue.command_queue_widget import (
     CommandQueueWidget,
     ResponsiveButtonFlowLayout,
 )
+from workflow_app.config.feature_flags import llm_config_v2_enabled
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 from workflow_app.signal_bus import signal_bus
 from workflow_app.widgets.queue_progress_ring import QueueProgressRing
+
+# Os itens 017 e 023 do loop 08-11 mudam a moldura da toolbar SOMENTE atras de
+# `SF_LLM_CONFIG_V2`: a linha do header ganha o quarto bloco (aba LLM Config) e
+# os tres botoes legados `output-mcp-action-{main,parallel,dual}` dao lugar aos
+# grupos Thinking/Execution. Os casos marcados abaixo afirmam a moldura LEGADA
+# (flag ausente), que continua sendo o caminho de producao; o lado com a flag
+# LIGADA e travado em `tests/test_llm_config_tab.py`, que roda os dois estados
+# em subprocesso porque `feature_flags` e boot-frozen. Sem esta marca, a suite
+# rodada com os 11 kill-switches ligados (KS-01, item 029) reprovaria por
+# comparar a moldura nova contra a assercao da antiga.
+_skip_under_llm_config_v2 = pytest.mark.skipif(
+    llm_config_v2_enabled(),
+    reason=(
+        "afirma a moldura legada da toolbar; sob SF_LLM_CONFIG_V2 a moldura e "
+        "outra (itens 017/023) e esse lado e travado em test_llm_config_tab.py"
+    ),
+)
 
 
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def owned_main_window(qapp):
+    """Destroy MainWindow after pytest-qt processes pending zero-delay timers."""
+    import shiboken6
+
+    from workflow_app.main_window import MainWindow
+
+    win = MainWindow()
+    yield win
+    if shiboken6.isValid(win):
+        win.close()
+        shiboken6.delete(win)
 
 
 def _find_by_testid(parent, testid: str):
@@ -181,6 +215,7 @@ def test_llm_routing_sections_are_vertical_label_over_controls(app):
         assert options.layout().count() >= 2
 
 
+@_skip_under_llm_config_v2
 def test_output_toolbar_header_is_single_row_with_section_selector(app):
     """I3.1/I3.2: o header virou UMA linha + um stack de secoes.
 
@@ -191,7 +226,7 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
     pagina (AGENTES), promovida de sub-aba do `queue-subtabs-insertions`, e
     logo depois a secao unica `MCP & BRAINSTORM` foi dissolvida: suas duas
     sub-abas internas subiram para as duas ULTIMAS posicoes do seletor (MCPs
-    e BRAINSTORM), totalizando CINCO secoes.
+    e BRAINSTORM), e a feature Corgly acrescenta a sexta secao.
 
     O stack e filho do proprio seletor (logo abaixo da fileira de botoes), nao
     um irmao full-width por baixo dos tres blocos da linha.
@@ -214,13 +249,14 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
         == "output-toolbar-datatest-queue-stack"
     )
 
-    # Cinco botoes de select, na ordem e com os rotulos decididos (D14).
+    # Seis botoes de select, na ordem e com os rotulos decididos.
     expected = [
         ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
         ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
         ("output-toolbar-section-agentes", "AGENTES"),
         ("output-toolbar-section-mcps", "MCPs"),
         ("output-toolbar-section-brainstorm", "BRAINSTORM"),
+        ("output-toolbar-section-corgly", "CORGLY"),
     ]
     btns = win._toolbar_section_btns
     assert [(b.property("testid"), b.text()) for b in btns] == expected
@@ -235,13 +271,14 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
     selector_layout = selector.layout()
     assert selector_layout.count() == 2, "fileira de botoes + stack"
     assert selector_layout.itemAt(1).widget() is stack
-    assert stack.count() == 5
+    assert stack.count() == 6
     assert stack.widget(0) is win._command_queue.header_widget
     assert stack.widget(0).property("testid") == "output-toolbar-left"
     assert stack.widget(1).property("testid") == "output-toolbar-center"
     assert stack.widget(2).property("testid") == "output-toolbar-agentes"
     assert stack.widget(3).property("testid") == "output-toolbar-mcp"
     assert stack.widget(4).property("testid") == "output-toolbar-brainstorm"
+    assert stack.widget(5).property("testid") == "output-toolbar-corgly"
     # A pagina 2 hospeda a aba 'Agentes' com o testid original preservado (D1).
     personas = win._command_queue.personas_content
     assert personas.property("testid") == "queue-subtab-insertions-personas"
@@ -249,13 +286,147 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
 
     # Boot fixo em COMMAND SEQUENCE (D14) e troca de pagina pelo clique.
     assert stack.currentIndex() == 0
-    for i in range(1, 5):
+    for i in range(1, 6):
         btns[i].click()
         assert stack.currentIndex() == i
     btns[0].click()
     assert stack.currentIndex() == 0
 
 
+def test_corgly_catalog_has_exact_buttons_and_observable_states(
+    owned_main_window, tmp_path, monkeypatch
+):
+    win = owned_main_window
+    expected = {
+        "output-btn-corgly-class-create",
+        "output-btn-corgly-class-generate",
+        "output-btn-corgly-class-review",
+        "output-btn-corgly-class-update",
+        "output-btn-corgly-dual-update",
+        "output-btn-corgly-funny-rebase",
+        "output-btn-corgly-grammar-adjust",
+        "output-btn-corgly-questions-rebase",
+    }
+    assert {str(btn.property("testid")) for btn in win._corgly_buttons} == expected
+    tabs = _find_widget_by_testid(win, "output-toolbar-corgly-subtabs")
+    assert isinstance(tabs, QTabWidget)
+    assert [tabs.tabText(index) for index in range(tabs.count())] == [
+        "classes",
+        "strategy",
+        "rules",
+    ]
+    assert tabs.widget(0).property("testid") == (
+        "output-toolbar-corgly-subtab-classes"
+    )
+    assert tabs.widget(1).property("testid") == (
+        "output-toolbar-corgly-subtab-strategy"
+    )
+    assert tabs.widget(2).property("testid") == (
+        "output-toolbar-corgly-subtab-rules"
+    )
+    assert _find_widget_by_testid(win, "output-toolbar-corgly-flow") is not None
+    assert _find_widget_by_testid(win, "output-toolbar-corgly-empty") is not None
+    assert _find_widget_by_testid(win, "output-toolbar-corgly-error") is not None
+    selector_host = _find_widget_by_testid(
+        win, "output-toolbar-corgly-class-selector"
+    )
+    class_select = _find_widget_by_testid(win, "output-select-corgly-class")
+    assert selector_host is not None
+    assert isinstance(class_select, QComboBox)
+    assert class_select.parentWidget() is selector_host
+    assert tabs.cornerWidget(Qt.Corner.TopRightCorner) is selector_host
+    assert selector_host.layout().count() == 1
+    assert selector_host.layout().itemAt(0).widget() is class_select
+    assert class_select.accessibleName() == "Selecionar aula DOCX"
+    assert class_select.width() == 220
+    assert class_select.itemText(0) == ""
+    corgly_root = win._corgly_commands_root().parents[2] / "corgly-classes"
+    rendered_classes = [
+        class_select.itemText(index) for index in range(1, class_select.count())
+    ]
+    assert set(rendered_classes) == {
+        path.name for path in corgly_root.iterdir()
+        if path.is_file() and path.suffix.casefold() == ".docx"
+    }
+    assert rendered_classes == sorted(
+        rendered_classes, key=win._corgly_class_sort_key
+    )
+    assert class_select.view().minimumWidth() > class_select.width()
+
+    expected_strategy_paths = {
+        "corgly-classes/CLAUDE.md",
+        "corgly-classes/README-criar-aulas.md",
+        "corgly-classes/MANIFESTO-CURSO-100.json",
+        "corgly-classes/template-aula.json",
+        "corgly-classes/glossario-aulas.md",
+        "corgly-classes/Corgly-2.0/README.md",
+        "corgly-classes/Corgly-2.0/PLANO-ESTRATEGIA-VERBAL-300-AULAS.md",
+        "corgly-classes/Corgly-2.0/ESTRUTURA-300-HISTORIAS-ENGRACADAS.md",
+    }
+    assert {
+        str(btn.property("corgly_path"))
+        for btn in win._corgly_strategy_buttons
+    } == expected_strategy_paths
+    for btn in win._corgly_strategy_buttons:
+        assert str(btn.property("corgly_path")) in btn.toolTip()
+        assert "Cola no terminal:" in btn.toolTip()
+
+    rules_root = corgly_root / "rules"
+    assert {
+        str(btn.property("corgly_path")) for btn in win._corgly_rule_buttons
+    } == {
+        f"corgly-classes/rules/{path.name}"
+        for path in rules_root.iterdir()
+        if path.is_file()
+    }
+    principles_btn = next(
+        btn
+        for btn in win._corgly_rule_buttons
+        if str(btn.property("corgly_path")).endswith("00-principios-gerais.md")
+    )
+    assert "Regras que valem para toda peça da aula" in principles_btn.toolTip()
+    assert not win._corgly_empty_label.isVisible()
+    assert not win._corgly_error_label.isVisible()
+    for btn in win._corgly_buttons:
+        assert str(btn.property("corgly_slash")).startswith("/corgly:")
+        assert "Raiz operacional:" in btn.toolTip()
+
+    class_commands = {
+        "output-btn-corgly-class-generate",
+        "output-btn-corgly-class-review",
+        "output-btn-corgly-class-update",
+        "output-btn-corgly-dual-update",
+        "output-btn-corgly-funny-rebase",
+        "output-btn-corgly-grammar-adjust",
+        "output-btn-corgly-questions-rebase",
+    }
+    assert {
+        str(btn.property("testid"))
+        for btn in win._corgly_buttons
+        if btn.property("corgly_accepts_class") is True
+    } == class_commands
+
+    valid = tmp_path / "valid.md"
+    valid.write_text("---\ndescription: valido\n---\n# Valido\n", encoding="utf-8")
+    (tmp_path / "invalid.md").write_text("# sem frontmatter\n", encoding="utf-8")
+    monkeypatch.setattr(win, "_corgly_commands_root", lambda: tmp_path)
+    partial = win._build_corgly_column()
+    assert len(win._corgly_buttons) == 1
+    assert win._corgly_empty_label.isHidden()
+    assert not win._corgly_error_label.isHidden()
+    assert "invalid.md" in win._corgly_error_label.text()
+    partial.setParent(win)
+
+    missing_root = tmp_path / "missing"
+    monkeypatch.setattr(win, "_corgly_commands_root", lambda: missing_root)
+    missing = win._build_corgly_column()
+    assert win._corgly_empty_label.isHidden() is False
+    assert win._corgly_error_label.isHidden() is False
+    assert "raiz ausente" in win._corgly_error_label.text()
+    missing.setParent(win)
+
+
+@_skip_under_llm_config_v2
 def test_mcps_e_brainstorm_sao_secoes_de_primeiro_nivel(app):
     """A secao unica `MCP & BRAINSTORM` foi dissolvida (2026-07-27).
 
@@ -339,7 +510,7 @@ def test_output_toolbar_left_subtabs_use_responsive_flow(app):
 
 
 def test_personas_flow_ajusta_botoes_por_linha_conforme_largura(app):
-    """34 personas: largura do label e quebra responsiva.
+    """38 personas: largura do label e quebra responsiva.
 
     O contrato antigo era teto de 4 linhas com compactacao dos botoes. Agora o
     flow roda sem teto: cada botao fica com a largura do proprio label e a
@@ -349,6 +520,9 @@ def test_personas_flow_ajusta_botoes_por_linha_conforme_largura(app):
     Desde 2026-07-27 os tres utilitarios (`+`, gear, update) sairam do flow e
     vivem na coluna `queue-subtab-insertions-personas-utils` no fim da aba, so
     personas continuam aqui.
+
+    A contagem acompanha `ai-forge/MCP/agents/` (auto-discovery por
+    `_scan_persona_files`): 37 -> 38 em 2026-08-13 com a persona `search-prod`.
     """
     from workflow_app.main_window import MainWindow
 
@@ -357,8 +531,8 @@ def test_personas_flow_ajusta_botoes_por_linha_conforme_largura(app):
     win._command_queue._personas_filter_bar.setCurrentIndex(0)
     win._command_queue._apply_persona_filter()
 
-    # 34 personas (utilitarios ficam fora do flow)
-    assert layout.count() == 34
+    # 38 personas (utilitarios ficam fora do flow)
+    assert layout.count() == 38
     assert win._command_queue._subtab_personas_utils_layout.count() == 3
     widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
     assert all(widget is not None for widget in widgets)
@@ -379,7 +553,7 @@ def test_personas_flow_ajusta_botoes_por_linha_conforme_largura(app):
         if str(widget.property("testid")).startswith("queue-btn-persona-")
         and not str(widget.property("testid")).startswith("queue-btn-personas-")
     ]
-    assert len(persona_widgets) == 34
+    assert len(persona_widgets) == 38
     assert all(widget.accessibleName() for widget in persona_widgets)
 
     # 2026-07-27: a largura deixou de acompanhar o label e passou a ser

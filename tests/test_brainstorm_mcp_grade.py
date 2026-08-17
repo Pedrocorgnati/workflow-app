@@ -746,6 +746,20 @@ class _PageStub(QObject):
         )
 
 
+@pytest.fixture
+def sem_specs_suplementares(monkeypatch):
+    """Isola a grade dos 24 seeds do registry Brainstorm real.
+
+    Desde 2026-08-13 `_BRAINSTORM_AGENT_SPECS` deixou de ser vazio (primeira
+    spec: `search-prod`) e cada spec materializa um botao DEPOIS dos seeds.
+    Este arquivo prova o contrato dos seeds; os suplementos sao provados em
+    `test_brainstorm_agent_specs_integration.py`.
+    """
+    import workflow_app.agent_integration_specs as specs_mod
+
+    monkeypatch.setattr(specs_mod, "brainstorm_agent_specs", tuple)
+
+
 @pytest.mark.parametrize("failure", ["seed", "builder"])
 def test_grid_refs_cached_even_when_initial_build_fails(qapp, tmp_path, failure):
     """E-02: as refs da grade sao cacheadas ANTES dos early returns de falha.
@@ -770,7 +784,7 @@ def test_grid_refs_cached_even_when_initial_build_fails(qapp, tmp_path, failure)
 
 @pytest.mark.parametrize("failure", ["seed", "builder"])
 def test_gear_rebuild_recovers_grid_after_failed_initial_build(
-    qapp, tmp_path, failure
+    qapp, tmp_path, failure, sem_specs_suplementares
 ):
     """E-02 (fluxo completo): build falha -> causa corrigida -> gear recupera."""
     repo_root = _write_seeds(tmp_path)

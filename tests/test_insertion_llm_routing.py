@@ -99,7 +99,7 @@ class TestRenderForLlm:
         r = R("/skill:dual", "claude")
         assert r.text == "/skill:dual"
 
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen"])
     def test_clear_raw_all_llms(self, llm):
         r = R("/clear", llm)
         assert r.text == "/clear"
@@ -123,13 +123,13 @@ class TestRenderForLlm:
         assert r.helper_pulse is True
         assert r.abort_reason is None
 
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen"])
     def test_path_passthrough(self, llm):
         r = R("ai-forge/MCP/agents/x.md", llm)
         assert r.text == "ai-forge/MCP/agents/x.md"
         assert r.abort_reason is None
 
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen"])
     def test_free_text_passthrough(self, llm):
         r = R("Leia o arquivo e implemente", llm)
         assert r.text == "Leia o arquivo e implemente"
@@ -138,6 +138,11 @@ class TestRenderForLlm:
     def test_idempotent_same_inputs(self):
         # frozen dataclass -> value equality
         assert R(REAL_CMD, "kimi") == R(REAL_CMD, "kimi")
+
+    def test_qwen_slash_aborts_instead_of_raw_fallback(self):
+        rendered = R("/corgly:class-review", "qwen", mode="insert")
+        assert rendered.text is None
+        assert rendered.abort_reason and "Qwen" in rendered.abort_reason
 
     @pytest.mark.parametrize("cmd", [REAL_CMD, GOAL])
     @pytest.mark.parametrize("llm", ["kimi", "codex"])
@@ -268,16 +273,58 @@ class TestPublishInsertionLlmAware:
         assert ok is True
         assert pastes[-1][0] != REAL_CMD and "whitelist" in pastes[-1][0].lower()
 
-    def test_fanout_guard_aborts_with_toast(self, qapp, qtbot):
+    def test_fanout_renders_one_variant_per_destination(self, qapp, qtbot, monkeypatch):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=True, t3=True)
+        win._command_queue._main_claude_radio.setChecked(True)
+        sent_t1 = _capture(signal_bus.paste_text_in_terminal)
+        sent_t2 = _capture(signal_bus.paste_text_in_workspace_terminal)
+        sent_t3: list[tuple[str, bool]] = []
+        monkeypatch.setattr(
+            win,
+            "_xterm_inject_text",
+            lambda payload, with_enter=False: sent_t3.append(
+                (payload, with_enter)
+            ) or True,
+        )
+        report = win._publish_insertion_llm_aware_report("/corgly:class-review")
+        assert report.accepted == ("T1", "T2", "T3")
+        assert sent_t1 == [("/corgly:class-review",)]
+        assert sent_t2[0][0].startswith(
+            "/skill:slash-executor /corgly:class-review"
+        )
+        assert "Command: /corgly:class-review" in sent_t3[0][0]
+        assert sent_t3[0][1] is False
+
+    def test_qwen_render_abort_is_atomic_across_routes(self, qapp, qtbot):
         win = _new_window(qtbot)
         _set_route(win, t1=True, t2=True, t3=False)
-        win._command_queue._main_claude_radio.setChecked(True)
-        pastes = _capture(signal_bus.paste_text_in_terminal)
+        win._command_queue._main_qwen_radio.setVisible(True)
+        win._command_queue._main_qwen_radio.setChecked(True)
+        sent_t1 = _capture(signal_bus.paste_text_in_terminal)
+        sent_t2 = _capture(signal_bus.paste_text_in_workspace_terminal)
         toasts = _capture(signal_bus.toast_requested)
-        ok = win._publish_insertion_llm_aware(REAL_CMD)
+        ok = win._publish_insertion_llm_aware("/corgly:class-review")
         assert ok is False
-        assert not pastes
-        assert toasts and "Fan-out" in toasts[-1][0]
+        assert sent_t1 == []
+        assert sent_t2 == []
+        assert len(toasts) == 1
+        assert "T1" in toasts[0][0] and "Qwen" in toasts[0][0]
+
+    def test_sink_failure_isolated_after_successful_render(self, qapp, qtbot, monkeypatch):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=True, t3=True)
+        win._command_queue._main_claude_radio.setChecked(True)
+        sent_t1 = _capture(signal_bus.paste_text_in_terminal)
+        sent_t2 = _capture(signal_bus.paste_text_in_workspace_terminal)
+        monkeypatch.setattr(win, "_xterm_inject_text", lambda *_a, **_kw: False)
+
+        report = win._publish_insertion_llm_aware_report("/corgly:class-review")
+
+        assert sent_t1 and sent_t2
+        assert report.accepted == ("T1", "T2")
+        assert report.failed == ("T3",)
+        assert report.errors == ("T3: sink_unavailable",)
 
     def test_missing_command_under_codex_aborts_with_toast(self, qapp, qtbot):
         win = _new_window(qtbot)
@@ -319,6 +366,73 @@ class TestPublishInsertionLlmAware:
         runs = _capture(signal_bus.run_command_in_terminal)
         win._publish_insertion_llm_aware(REAL_CMD)
         assert not runs
+
+    def test_corgly_button_is_insertion_only(self, qapp, qtbot):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_claude_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        runs = _capture(signal_bus.run_command_in_terminal)
+
+        _button_by_testid(win, "output-btn-corgly-class-review").click()
+
+        assert pastes == [("/corgly:class-review",)]
+        assert runs == []
+
+    def test_corgly_class_select_is_used_only_by_compatible_commands(
+        self, qapp, qtbot
+    ):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_claude_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+
+        filename = "5 - Eu, minha família e minha rotina.docx"
+        index = win._corgly_class_select.findText(filename)
+        assert index > 0
+        win._corgly_class_select.setCurrentIndex(index)
+
+        _button_by_testid(win, "output-btn-corgly-class-review").click()
+        _button_by_testid(win, "output-btn-corgly-class-create").click()
+
+        assert pastes == [
+            (f'/corgly:class-review "{filename}"',),
+            ("/corgly:class-create",),
+        ]
+
+    def test_empty_corgly_class_selection_keeps_command_without_argument(
+        self, qapp, qtbot
+    ):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_claude_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+
+        assert win._corgly_class_select.currentIndex() == 0
+        assert win._corgly_class_select.currentText() == ""
+        _button_by_testid(win, "output-btn-corgly-class-update").click()
+
+        assert pastes == [("/corgly:class-update",)]
+
+    def test_corgly_strategy_and_rule_buttons_insert_paths_without_enter(
+        self, qapp, qtbot
+    ):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        runs = _capture(signal_bus.run_command_in_terminal)
+
+        strategy = win._corgly_strategy_buttons[0]
+        rule = win._corgly_rule_buttons[0]
+        strategy.click()
+        rule.click()
+
+        assert pastes == [
+            (str(strategy.property("corgly_path")),),
+            (str(rule.property("corgly_path")),),
+        ]
+        assert qapp.clipboard().text() == str(rule.property("corgly_path"))
+        assert runs == []
 
     def test_cmd_subtab_listener_debug_button_uses_codex_renderer(self, qapp, qtbot):
         """CMD subtab buttons must not paste raw Claude slash under Main Codex."""

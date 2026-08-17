@@ -1618,3 +1618,256 @@ class TestAutocastPassiveModeOnEnable:
         assert fires == [1], "o autocast agendado dispara o primeiro play"
         # E o flag de kickoff volta a False (so vale para o disparo agendado).
         assert mb._autocast_kickoff_on_enable is False
+
+
+# ── Item 024: instance_group route-aware (C-18) ─────────────────────────── #
+
+
+class Test_instance_group_route_aware:
+    """Instance-group ciente da rota (SF_INSTANCE_GROUP_ROUTE_AWARE)."""
+
+    @patch(
+        "workflow_app.metrics_bar.metrics_bar.instance_group_route_aware_enabled",
+        return_value=True,
+    )
+    def test_route_aware_emits_run_command_route_aware(self, _mock_flag, bar):
+        """Sob kill-switch ligado, clique emite run_command_route_aware."""
+        from workflow_app.main_window import TerminalRouteSnapshot
+
+        snapshot = TerminalRouteSnapshot(t1=True, t2=False, t3=False)
+        bar._current_route_snapshot = snapshot
+
+        bar._on_instance_clicked(0, "clauded")
+
+        bar._signal_bus.run_command_route_aware.emit.assert_called_once_with(
+            "clauded", snapshot
+        )
+        # Nao emite os sinais fixos legados.
+        bar._signal_bus.run_command_in_terminal.emit.assert_not_called()
+        bar._signal_bus.run_command_in_workspace_terminal.emit.assert_not_called()
+        bar._signal_bus.run_command_in_workspace_xterm.emit.assert_not_called()
+
+    @patch(
+        "workflow_app.metrics_bar.metrics_bar.instance_group_route_aware_enabled",
+        return_value=True,
+    )
+    def test_route_aware_label_matches_text_codex(self, _mock_flag, bar):
+        """Fix R-22: sob kill-switch, codex emite 'codex' (nao 'codex-high')."""
+        from workflow_app.main_window import TerminalRouteSnapshot
+
+        snapshot = TerminalRouteSnapshot(t1=True, t2=False, t3=False)
+        bar._current_route_snapshot = snapshot
+
+        bar._on_instance_clicked(2, "codex")
+
+        bar._signal_bus.run_command_route_aware.emit.assert_called_once_with(
+            "codex", snapshot
+        )
+
+    @patch(
+        "workflow_app.metrics_bar.metrics_bar.instance_group_route_aware_enabled",
+        return_value=True,
+    )
+    def test_route_aware_fallback_when_no_snapshot(self, _mock_flag, bar):
+        """Sob kill-switch mas sem snapshot, cai no legado."""
+        bar._current_route_snapshot = None
+
+        bar._on_instance_clicked(0, "codex")
+
+        bar._signal_bus.run_command_in_workspace_xterm.emit.assert_called_with(
+            "codex-high"
+        )
+        bar._signal_bus.run_command_route_aware.emit.assert_not_called()
+
+    def test_legacy_codex_emits_codex_high(self, bar):
+        """Sem kill-switch: codex emite 'codex-high' no xterm (legado)."""
+        bar._on_instance_clicked(2, "codex")
+
+        bar._signal_bus.run_command_in_workspace_xterm.emit.assert_called_with(
+            "codex-high"
+        )
+        bar._signal_bus.run_command_route_aware.emit.assert_not_called()
+
+    def test_legacy_kimid_emits_workspace(self, bar):
+        """Sem kill-switch: kimid emite no workspace terminal."""
+        bar._on_instance_clicked(1, "kimid")
+
+        bar._signal_bus.run_command_in_workspace_terminal.emit.assert_called_with(
+            "kimid"
+        )
+
+    def test_legacy_clauded_emits_interactive(self, bar):
+        """Sem kill-switch: clauded emite no terminal interactive."""
+        bar._on_instance_clicked(0, "clauded")
+
+        bar._signal_bus.run_command_in_terminal.emit.assert_called_with("clauded")
+
+    @patch(
+        "workflow_app.metrics_bar.metrics_bar.instance_group_route_aware_enabled",
+        return_value=True,
+    )
+    def test_route_aware_t2_route(self, _mock_flag, bar):
+        """Rota T2: emite run_command_route_aware com snapshot T2."""
+        from workflow_app.main_window import TerminalRouteSnapshot
+
+        snapshot = TerminalRouteSnapshot(t1=False, t2=True, t3=False)
+        bar._current_route_snapshot = snapshot
+
+        bar._on_instance_clicked(1, "kimid")
+
+        bar._signal_bus.run_command_route_aware.emit.assert_called_once_with(
+            "kimid", snapshot
+        )
+
+    @patch(
+        "workflow_app.metrics_bar.metrics_bar.instance_group_route_aware_enabled",
+        return_value=True,
+    )
+    def test_route_aware_t3_route(self, _mock_flag, bar):
+        """Rota T3: emite run_command_route_aware com snapshot T3."""
+        from workflow_app.main_window import TerminalRouteSnapshot
+
+        snapshot = TerminalRouteSnapshot(t1=False, t2=False, t3=True)
+        bar._current_route_snapshot = snapshot
+
+        bar._on_instance_clicked(2, "codex")
+
+        bar._signal_bus.run_command_route_aware.emit.assert_called_once_with(
+            "codex", snapshot
+        )
+
+
+# ── Item 024: QSettings migration (C-19) ────────────────────────────────── #
+
+
+class Test_qsettings_migration:
+    """Migracao idempotente de QSettings para schema v2."""
+
+    def test_v1_to_v2_migration_preserves_order(self, qapp):
+        """v1 (JSON list pura) migra para v2 preservando a ordem."""
+        import json
+        import tempfile
+        from PySide6.QtCore import QSettings
+        from workflow_app.signal_bus import SignalBus
+        from workflow_app.metrics_bar.metrics_bar import (
+            _CANONICAL_INSTANCE_NAMES,
+            _INSTANCE_ORDER_SETTINGS_KEY,
+            _INSTANCE_SCHEMA_VERSION_KEY,
+            _INSTANCE_SCHEMA_VERSION_CURRENT,
+        )
+
+        # Setup: QSettings temporario com formato v1.
+        tmp = tempfile.NamedTemporaryFile(suffix=".ini", delete=False)
+        tmp.close()
+        settings = QSettings(tmp.name, QSettings.Format.IniFormat)
+        custom_order = ["codex", "clauded", "kimid"]
+        settings.setValue(_INSTANCE_ORDER_SETTINGS_KEY, json.dumps(custom_order))
+        settings.sync()
+
+        # Criar MetricsBar com esse QSettings.
+        bus = SignalBus()
+        bar = MetricsBar(bus)
+        bar._instance_order_settings = settings
+
+        # Chamar _load_instance_order triggera a migracao.
+        result = bar._load_instance_order()
+
+        # Ordem preservada (reconciliada com canonico).
+        assert result == custom_order
+
+        # Schema version gravado como 2.
+        sv = settings.value(_INSTANCE_SCHEMA_VERSION_KEY, None)
+        assert sv is not None
+        assert int(str(sv)) == _INSTANCE_SCHEMA_VERSION_CURRENT
+
+        # Formato v2 gravado.
+        raw = settings.value(_INSTANCE_ORDER_SETTINGS_KEY, None)
+        decoded = json.loads(raw)
+        assert isinstance(decoded, dict)
+        assert decoded["schema_version"] == 2
+        assert decoded["order"] == custom_order
+
+    def test_v2_to_v2_idempotent(self, qapp):
+        """v2→v2 e no-op: nenhuma mudanca na ordem nem re-escrita."""
+        import json
+        import tempfile
+        from PySide6.QtCore import QSettings
+        from workflow_app.signal_bus import SignalBus
+        from workflow_app.metrics_bar.metrics_bar import (
+            _INSTANCE_ORDER_SETTINGS_KEY,
+            _INSTANCE_SCHEMA_VERSION_KEY,
+            _INSTANCE_SCHEMA_VERSION_CURRENT,
+        )
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".ini", delete=False)
+        tmp.close()
+        settings = QSettings(tmp.name, QSettings.Format.IniFormat)
+        v2_payload = {
+            "schema_version": 2,
+            "order": ["kimid", "codex", "clauded"],
+            "route_overrides": {},
+        }
+        settings.setValue(_INSTANCE_ORDER_SETTINGS_KEY, json.dumps(v2_payload))
+        settings.setValue(_INSTANCE_SCHEMA_VERSION_KEY, _INSTANCE_SCHEMA_VERSION_CURRENT)
+        settings.sync()
+
+        bus = SignalBus()
+        bar = MetricsBar(bus)
+        bar._instance_order_settings = settings
+
+        result = bar._load_instance_order()
+        assert result == ["kimid", "codex", "clauded"]
+
+        # Verificar que o payload nao mudou (idempotencia).
+        raw = settings.value(_INSTANCE_ORDER_SETTINGS_KEY, None)
+        decoded = json.loads(raw)
+        assert decoded == v2_payload
+
+    def test_invalid_json_fallback_canonical(self, qapp):
+        """JSON invalido resulta em ordem canonica."""
+        import tempfile
+        from PySide6.QtCore import QSettings
+        from workflow_app.signal_bus import SignalBus
+        from workflow_app.metrics_bar.metrics_bar import (
+            _CANONICAL_INSTANCE_NAMES,
+            _INSTANCE_ORDER_SETTINGS_KEY,
+        )
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".ini", delete=False)
+        tmp.close()
+        settings = QSettings(tmp.name, QSettings.Format.IniFormat)
+        settings.setValue(_INSTANCE_ORDER_SETTINGS_KEY, "not-valid-json{{{")
+        settings.sync()
+
+        bus = SignalBus()
+        bar = MetricsBar(bus)
+        bar._instance_order_settings = settings
+
+        result = bar._load_instance_order()
+        assert result == list(_CANONICAL_INSTANCE_NAMES)
+
+    def test_future_schema_fallback_canonical(self, qapp):
+        """Schema version > 2 resulta em ordem canonica."""
+        import json
+        import tempfile
+        from PySide6.QtCore import QSettings
+        from workflow_app.signal_bus import SignalBus
+        from workflow_app.metrics_bar.metrics_bar import (
+            _CANONICAL_INSTANCE_NAMES,
+            _INSTANCE_ORDER_SETTINGS_KEY,
+            _INSTANCE_SCHEMA_VERSION_KEY,
+        )
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".ini", delete=False)
+        tmp.close()
+        settings = QSettings(tmp.name, QSettings.Format.IniFormat)
+        settings.setValue(_INSTANCE_ORDER_SETTINGS_KEY, json.dumps({"schema_version": 99}))
+        settings.setValue(_INSTANCE_SCHEMA_VERSION_KEY, 99)
+        settings.sync()
+
+        bus = SignalBus()
+        bar = MetricsBar(bus)
+        bar._instance_order_settings = settings
+
+        result = bar._load_instance_order()
+        assert result == list(_CANONICAL_INSTANCE_NAMES)

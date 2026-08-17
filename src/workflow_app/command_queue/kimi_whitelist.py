@@ -43,9 +43,14 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/github-linking",              # 84
     "/sync:github",                 # 84
     # D-f8
-    "/credentials:env-creation",    # 88
-    "/credentials:update-base",     # 71
-    "/create-test-user",            # 84
+    # NOTA (2026-08-12): a familia /credentials:* saiu inteira da whitelist.
+    # Motivo: apos o refactor do trio canonico (env-creation -> create ->
+    # execute -> verify) os quatro comandos passaram a (a) coletar segredo em
+    # TTY real, (b) mutar providers remotos via probe/apply/verify e (c)
+    # escrever o artefato de estado sob CAS. Nenhuma das tres capacidades
+    # existe na lane Kimi, e um "quase" ali corrompe credencial de producao.
+    # Scores antigos, para historico: env-creation 88, update-base 71,
+    # test-user 84.
     "/seed-data-create",            # 79
     "/integration-test-create",     # 80
     "/dev-bootstrap-create",        # 88
@@ -189,6 +194,8 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/usabilidade:detect",                           # 88
     # Auto-improove — eixo-flag multi-LLM (whitelist via --approved override; rubrica KEEP_CLAUDE score 64 < 70, >= threshold 54)
     "/auto-improove:mcp-flags",                      # 64
+    # MCP wrappers (provider commands)
+    "/mcp:kimi-k3",                                  # 76
 })
 
 

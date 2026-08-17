@@ -16,14 +16,25 @@ Reusa instancia existente quando ja criado (idempotente).
 Hardening T9 §13 (criterio 4): apos cada teste, deleta TODOS os widgets
 remanescentes em duas passadas:
 
-1. Fecha + destroi sincronamente (`shiboken6.delete`) todos os
-   `app.topLevelWidgets()` — previne QComboBox popup leak.
+1. Fecha + agenda `deleteLater()` para todos os `app.topLevelWidgets()`.
 2. Para cada widget em `app.allWidgets()` (filhos reparented que
    sobreviveram a passada 1), valida via `shiboken6.isValid` e chama
    `deleteLater()`.
+3. Drena explicitamente eventos `DeferredDelete` antes e depois do GC. Isso
+   mantem a destruicao sincronizada entre testes sem o SIGSEGV provocado por
+   `shiboken6.delete(parent)` quando wrappers Python dos filhos foram
+   materializados.
 
 Cross-cutting: afeta toda a suite (105+ arquivos). Validar em PR isolado
 ao mudar comportamento.
+
+### Isolamento do registry de agentes
+
+Suites que monkeypatcham `workflow_app.agent_integration_specs` devem zerar
+`MainWindow._agent_registry_served` antes de construir a janela. O cache e
+estado de classe e pode conter um modulo paralelo produzido por testes de
+live-reload; sem o reset, o resultado passa a depender da ordem global de
+coleta e o monkeypatch do modulo canonico fica invisivel ao builder.
 
 ### `qsettings_isolated` (autouse, function-scoped)
 

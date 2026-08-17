@@ -23,10 +23,11 @@ Invariantes provadas aqui:
 Os testes NAO instanciam a MainWindow inteira: exercitam os metodos reais
 (`_build_brainstorm_grid_buttons`, `_collect_brainstorm_agent_specs`,
 `_rebuild_brainstorm_grid`) via `_GridStub`, no mesmo idioma de
-`_FakeMainWindow` em test_brainstorm_mcp_grade.py. O registry canonico e vazio
-por design (as specs sao acrescentadas por `/mcp:create-agent`), entao cada
-teste injeta as suas via monkeypatch de
-`workflow_app.agent_integration_specs.brainstorm_agent_specs`.
+`_FakeMainWindow` em test_brainstorm_mcp_grade.py. O registry real e populado por
+`/mcp:create-agent` (primeira spec: `search-prod`, 2026-08-13), entao cada teste
+injeta as suas specs — inclusive o conjunto vazio — via monkeypatch de
+`workflow_app.agent_integration_specs.brainstorm_agent_specs`, para nao depender
+da cardinalidade corrente do registry.
 """
 
 from __future__ import annotations
@@ -178,7 +179,7 @@ def stub(qapp, tmp_path):
 
 @pytest.fixture
 def registry(monkeypatch):
-    """Injeta specs Brainstorm no registry (canonicamente vazio)."""
+    """Injeta specs Brainstorm no registry (substitui as specs reais)."""
 
     def _set(*specs: BrainstormAgentSpec) -> None:
         monkeypatch.setattr(
@@ -191,8 +192,14 @@ def registry(monkeypatch):
 # ── Cardinalidade: os 24 seeds continuam sendo 24 ────────────────────────────
 
 
-def test_registry_vazio_nao_muda_a_grade(stub):
-    """Contrato de zero-impacto: sem specs, nada de novo aparece."""
+def test_registry_vazio_nao_muda_a_grade(stub, registry):
+    """Contrato de zero-impacto: sem specs, nada de novo aparece.
+
+    O registry real deixou de ser vazio em 2026-08-13 (spec `search-prod`), por
+    isso o vazio e injetado explicitamente em vez de herdado do modulo.
+    """
+    registry()
+
     seed_btns, agent_btns = stub._build_brainstorm_grid_buttons(stub._seeds)
 
     assert len(seed_btns) == SEED_COUNT
@@ -442,6 +449,7 @@ def test_spec_registrada_depois_do_build_aparece_no_rebuild(
     stub, registry, qapp
 ):
     """Gear salvo apos `/mcp:create-agent` materializa o botao novo."""
+    registry()
     _materialize(stub)
     assert stub._brainstorm_agent_btns == []
 

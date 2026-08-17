@@ -148,8 +148,14 @@ def build_wbs_execute_template(wbs_root: str, project_dir: str) -> list[CommandS
     specs.append(_spec("/reforge:fix", _O, 0))
 
     # ── F8: Complemento ─────────────────────────────────────────────────────
+    # Cadeia canonica de credenciais (nao reordenar): env-creation produz o
+    # artefato de estado, create coleta os itens pendentes, execute aplica as
+    # acoes por provider e verify e o gate de CONVERGED.
     specs.append(_spec("/credentials:env-creation", _H, 0))
-    specs.append(_spec("/create-test-user", _H, 0))
+    specs.append(_spec("/credentials:create", _H, 0))
+    specs.append(_spec("/credentials:execute --mode write", _H, 0))
+    specs.append(_spec("/credentials:verify", _H, 0))
+    specs.append(_spec("/credentials:test-user", _H, 0))
     specs.append(_spec("/seed-data-create", _S, 0))
     specs.append(_spec("/docker-create", _S, 0))
     specs.append(_spec("/integration-test-create", _S, 0))
@@ -176,7 +182,7 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     4. /assets:create, /create-mocks, github-linking
     5. Per-module: auto-flow execute + review-executed-module
     6. milestone-checklist-review, reforge:prepare, reforge:fix
-    7. F8: credentials:env-creation, create-test-user, seed-data-create, docker-create, integration-test-create
+    7. F8: credentials:env-creation, credentials:test-user, seed-data-create, docker-create, integration-test-create
     Args:
         wbs_root: relative path to wbs root (e.g. "output/wbs/my-project")
         project_dir: absolute path to project directory
@@ -238,8 +244,14 @@ def build_wbs_template(wbs_root: str, project_dir: str) -> list[CommandSpec]:
     specs.append(_spec("/reforge:fix", _O, 0))
 
     # ── F8: Complemento ─────────────────────────────────────────────────────
+    # Cadeia canonica de credenciais (nao reordenar): env-creation produz o
+    # artefato de estado, create coleta os itens pendentes, execute aplica as
+    # acoes por provider e verify e o gate de CONVERGED.
     specs.append(_spec("/credentials:env-creation", _H, 0))
-    specs.append(_spec("/create-test-user", _H, 0))
+    specs.append(_spec("/credentials:create", _H, 0))
+    specs.append(_spec("/credentials:execute --mode write", _H, 0))
+    specs.append(_spec("/credentials:verify", _H, 0))
+    specs.append(_spec("/credentials:test-user", _H, 0))
     specs.append(_spec("/seed-data-create", _S, 0))
     specs.append(_spec("/docker-create", _S, 0))
     specs.append(_spec("/integration-test-create", _S, 0))

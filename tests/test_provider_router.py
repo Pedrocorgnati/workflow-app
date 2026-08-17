@@ -16,16 +16,30 @@ exercitada via `kimi_eligible=True` sobre um comando Codex-compativel.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
+from workflow_app.command_queue import provider_router as provider_router_module
 from workflow_app.command_queue.codex_whitelist import is_codex_compatible
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
-from workflow_app.command_queue.provider_router import (
+
+# `_classify_family_variant` e deliberadamente privado: o snapshot legado
+# (`tests/fixtures/llm_config_legacy_snapshot.json`) compara `dir(provider_router)`
+# e qualquer binding publico novo neste modulo e regressao de superficie. O teste
+# consome o nome privado; producao nao expoe a tabela familia/variante.
+from workflow_app.command_queue.provider_router import (  # noqa: PLC2701
     Provider,
     RoutingState,
+    _classify_family_variant,
     classify_provider,
     normalize_command_name,
 )
+from workflow_app.config import feature_flags
 from workflow_app.domain import CommandSpec
 
 KIMI_CMD = "/dcp:matrix-init"
@@ -218,3 +232,339 @@ def test_module_is_pure_no_qt_import():
     )
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert result.returncode == 0, f"provider_router pulled Qt transitively: {result.stdout}"
+
+
+def test_provider_enum_has_qwen():
+    """ST001 (item 009): Provider.QWEN exists with value 'qwen'."""
+    assert hasattr(Provider, "QWEN")
+    assert Provider.QWEN.value == "qwen"
+    assert Provider.QWEN == "qwen"  # str-Enum comparison
+
+
+# --------------------------------------------------------------------------- #
+# Classificacao por familia e variante (item 010)                              #
+# --------------------------------------------------------------------------- #
+
+
+class TestClassifyFamilyVariant:
+    """Tabela de classificacao familia/variante (item 010)."""
+
+    @pytest.mark.parametrize(
+        "provider,expected_family,expected_variant",
+        [
+            ("claude", "claude", "claude"),
+            ("kimi", "kimi", "kimi"),
+            ("codex", "codex", "codex"),
+            ("qwen", "qwen", "qwen"),
+        ],
+        ids=["claude", "kimi", "codex", "qwen"],
+    )
+    def test_known_providers(self, provider, expected_family, expected_variant):
+        family, variant = _classify_family_variant(provider)
+        assert family == expected_family
+        assert variant == expected_variant
+
+    def test_unknown_provider_returns_unknown_tuple(self):
+        assert _classify_family_variant("grok") == ("grok", "grok")  # item 020: grok now known
+        assert _classify_family_variant("") == ("unknown", "unknown")
+
+    def test_case_insensitive(self):
+        assert _classify_family_variant("KIMI") == ("kimi", "kimi")
+        assert _classify_family_variant("Codex") == ("codex", "codex")
+
+
+# --------------------------------------------------------------------------- #
+# Main LLM participa da decisao (item 010) — SOMENTE em modo Router V2         #
+# --------------------------------------------------------------------------- #
+# A regra "familia do comando == familia do Main -> CLAUDE" vive atras de DOIS
+# kill-switches em conjuncao: `SF_LLM_CONFIG_V2` (global, item 002) e
+# `SF_PROVIDER_ROUTER_V2` (especifico, item 010). Ambos sao boot-frozen, entao
+# todo teste de estado de flag exige PROCESSO NOVO (contrato do feature_flags:
+# nao existe hook de reset). Por isso estes casos rodam em subprocesso.
+#
+# Divergencia deliberada, registrada aqui como oraculo executavel: enquanto o
+# mesmo provider puder estar simultaneamente como Main e como Worker, o legado
+# manda ao WORKER (contrato de 2026-05-30) e o V2 manda ao MAIN. Os dois lados
+# da colisao estao travados por teste abaixo.
+
+_ROUTE_PROBE = """
+import json
+import sys
+
+from workflow_app.command_queue import provider_router as mod
+from workflow_app.command_queue.provider_router import (
+    RoutingState,
+    classify_provider,
+)
+from workflow_app.config import feature_flags
+from workflow_app.domain import CommandSpec
+
+cases = json.loads(sys.argv[1])
+out = []
+for case in cases:
+    spec = CommandSpec(
+        name=case["name"],
+        kind=case.get("kind", "slash"),
+        kimi_eligible=case.get("kimi_eligible", False),
+    )
+    state = RoutingState(
+        kimi_worker_enabled=case["kimi"],
+        codex_worker_enabled=case["codex"],
+        main_llm=case["main_llm"],
+    )
+    out.append(classify_provider(spec, state).value)
+
+sys.stdout.write(
+    json.dumps(
+        {
+            "providers": out,
+            # Hermeticidade: prova que o filho importou ESTE checkout e que o
+            # ambiente pedido chegou de fato ao processo novo. Sem isso, um
+            # probe que rodasse contra outro `workflow_app` (ou com a flag
+            # perdida no caminho) poderia passar verde por coincidencia.
+            "module_file": mod.__file__,
+            "flags": {
+                "global": feature_flags.llm_config_v2_state(),
+                "router": feature_flags.provider_router_v2_state(),
+            },
+        }
+    )
+)
+"""
+
+# Raiz do workflow-app: o probe roda com este cwd (mesma hermeticidade do
+# `_run_probe` de tests/test_command_queue_widget.py).
+_WORKFLOW_APP_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _probe_env(*, global_flag: str | None, router_flag: str | None) -> dict[str, str]:
+    """Ambiente do filho: `None` REMOVE a variavel (estado `absent`)."""
+    env = dict(os.environ)
+    for var, value in (
+        (feature_flags.llm_config_v2_flag_name(), global_flag),
+        (feature_flags.provider_router_v2_flag_name(), router_flag),
+    ):
+        if value is None:
+            env.pop(var, None)
+        else:
+            env[var] = value
+    return env
+
+
+def _run_route_probe(
+    cases: list[dict],
+    *,
+    global_flag: str | None,
+    router_flag: str | None,
+) -> dict:
+    """Classifica `cases` num processo NOVO com as flags no estado pedido."""
+    result = subprocess.run(
+        [sys.executable, "-c", _ROUTE_PROBE, json.dumps(cases)],
+        capture_output=True,
+        text=True,
+        env=_probe_env(global_flag=global_flag, router_flag=router_flag),
+        cwd=str(_WORKFLOW_APP_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"probe falhou rc={result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    got = json.loads(result.stdout)
+    # O filho tem de ser o mesmo checkout que este teste esta exercitando.
+    assert Path(got["module_file"]).resolve() == Path(provider_router_module.__file__).resolve(), (
+        f"probe importou outro provider_router: {got['module_file']}"
+    )
+    return got
+
+
+def _route(cases: list[dict], *, router_v2: bool) -> list[str]:
+    """Atalho dos dois modos canonicos: V2 ligado (conjuncao) ou legado (ausente).
+
+    O modo legado REMOVE as duas variaveis em vez de setar `"0"`, para exercitar
+    o caminho default real de producao.
+    """
+    flag = "1" if router_v2 else None
+    got = _run_route_probe(cases, global_flag=flag, router_flag=flag)
+    expected_state = "on" if router_v2 else "absent"
+    # Prova que o estado pedido chegou ao filho: sem esta assercao, uma flag
+    # perdida no caminho degradaria silenciosamente para o legado e os testes
+    # "V2" passariam a medir o legado.
+    assert got["flags"] == {"global": expected_state, "router": expected_state}, got["flags"]
+    return got["providers"]
+
+
+def test_main_kimi_with_kimi_worker_and_kimi_command_routes_to_main():
+    """V2: main=kimi, kimi worker ON, comando kimi -> CLAUDE (T1 roda o Main)."""
+    case = {"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"}
+    assert _route([case], router_v2=True) == ["claude"]
+
+
+def test_main_kimi_with_kimi_worker_and_kimi_eligible_flag_routes_to_main():
+    """V2 (via flag): main=kimi, kimi_eligible=True, kimi worker ON -> CLAUDE."""
+    case = {
+        "name": OTHER_CMD,
+        "kimi_eligible": True,
+        "kimi": True,
+        "codex": False,
+        "main_llm": "kimi",
+    }
+    assert _route([case], router_v2=True) == ["claude"]
+
+
+def test_main_codex_with_codex_worker_and_codex_command_routes_to_main():
+    """V2: main=codex, codex worker ON, comando codex -> CLAUDE (T1 roda o Main)."""
+    case = {"name": CODEX_CMD, "kimi": True, "codex": True, "main_llm": "codex"}
+    assert _route([case], router_v2=True) == ["claude"]
+
+
+def test_main_kimi_does_not_affect_codex_command():
+    """V2: Main=kimi nao afeta comando codex (familias diferentes) -> CODEX."""
+    case = {"name": CODEX_CMD, "kimi": False, "codex": True, "main_llm": "kimi"}
+    assert _route([case], router_v2=True) == ["codex"]
+
+
+def test_main_codex_does_not_affect_kimi_command():
+    """V2: Main=codex nao afeta comando kimi (familias diferentes) -> KIMI."""
+    case = {"name": KIMI_CMD, "kimi": True, "codex": False, "main_llm": "codex"}
+    assert _route([case], router_v2=True) == ["kimi"]
+
+
+def test_v2_without_workers_still_falls_back_to_claude():
+    """V2 ligado e nenhum worker: o early-return legado sumiu, mas o destino nao muda.
+
+    O ramo V2 substituiu o `return CLAUDE` antecipado de "nenhum worker ativo".
+    Este teste prova que as regras 4/5 continuam exigindo worker ligado e que o
+    fallback final devolve CLAUDE, inclusive quando a familia NAO bate com o Main.
+    """
+    cases = [
+        # Familia bate com o Main (retorno pela regra de familia).
+        {"name": KIMI_CMD, "kimi": False, "codex": False, "main_llm": "kimi"},
+        # Familia NAO bate (retorno so pelo fallback final).
+        {"name": CODEX_CMD, "kimi": False, "codex": False, "main_llm": "kimi"},
+        # Comando fora das duas whitelists (familia "unknown").
+        {"name": OTHER_CMD, "kimi": False, "codex": False, "main_llm": "claude"},
+    ]
+    assert _route(cases, router_v2=True) == ["claude", "claude", "claude"]
+
+
+def test_legacy_mode_keeps_worker_precedence_on_main_worker_collision():
+    """Flags ausentes (default de producao): worker vence o Main na colisao.
+
+    Trava o lado legado da divergencia — contrato de 2026-05-30, so superado
+    quando o Router V2 virar default.
+    """
+    cases = [
+        {"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"},
+        {"name": CODEX_CMD, "kimi": False, "codex": True, "main_llm": "codex"},
+        {
+            "name": OTHER_CMD,
+            "kimi_eligible": True,
+            "kimi": True,
+            "codex": False,
+            "main_llm": "kimi",
+        },
+    ]
+    assert _route(cases, router_v2=False) == ["kimi", "codex", "kimi"]
+
+
+# A colisao Main==Worker e o oraculo de modo: no legado o worker vence, no V2 o
+# Main vence. Toda combinacao que NAO seja a conjuncao das duas flags em "1"
+# tem de produzir o resultado legado (fail-closed).
+_COLLISION_CASE = [{"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"}]
+
+
+@pytest.mark.parametrize(
+    "global_flag,router_flag",
+    [
+        ("1", None),  # global ligado, especifica ausente
+        (None, "1"),  # especifica ligada, global ausente
+        ("0", "1"),  # especifica ligada, global explicitamente desligado
+        ("1", "0"),  # global ligado, especifica explicitamente desligada
+        ("true", "1"),  # valor nao reconhecido no global (sem casefold/strip)
+        ("1", " 1 "),  # valor nao reconhecido na especifica (sem strip)
+        (None, None),  # ambas ausentes
+    ],
+    ids=[
+        "global-on-router-absent",
+        "router-on-global-absent",
+        "router-on-global-off",
+        "global-on-router-off",
+        "global-unrecognized",
+        "router-unrecognized",
+        "both-absent",
+    ],
+)
+def test_router_v2_requires_both_kill_switches(global_flag, router_flag):
+    """So a conjuncao das duas em `"1"` liga o modo novo; o resto e legado."""
+    got = _run_route_probe(_COLLISION_CASE, global_flag=global_flag, router_flag=router_flag)
+    assert got["providers"] == ["kimi"], got
+
+
+_BOOT_FREEZE_PROBE = """
+import json
+import os
+import sys
+
+from workflow_app.config import feature_flags
+
+before = {
+    "state": feature_flags.provider_router_v2_state(),
+    "enabled": feature_flags.provider_router_v2_enabled(),
+}
+os.environ[feature_flags.provider_router_v2_flag_name()] = "1"
+after_set = {
+    "state": feature_flags.provider_router_v2_state(),
+    "enabled": feature_flags.provider_router_v2_enabled(),
+}
+os.environ.pop(feature_flags.provider_router_v2_flag_name(), None)
+after_unset = {
+    "state": feature_flags.provider_router_v2_state(),
+    "enabled": feature_flags.provider_router_v2_enabled(),
+}
+sys.stdout.write(
+    json.dumps({"before": before, "after_set": after_set, "after_unset": after_unset})
+)
+"""
+
+
+@pytest.mark.parametrize(
+    "initial,expected_state",
+    [(None, "absent"), ("0", "off"), ("1", "on"), ("sim", "unrecognized")],
+    ids=["absent", "off", "on", "unrecognized"],
+)
+def test_router_kill_switch_state_is_frozen_at_boot(initial, expected_state):
+    """Mutar o ambiente DEPOIS do import nao muda a resposta da flag especifica.
+
+    Mesmo contrato do item 002 (nao existe hook de reset). Sem este probe, uma
+    implementacao que voltasse a `os.environ` a cada chamada continuaria verde
+    em todos os outros testes, porque nenhum deles muta a variavel in-process.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _BOOT_FREEZE_PROBE],
+        capture_output=True,
+        text=True,
+        env=_probe_env(global_flag=None, router_flag=initial),
+        cwd=str(_WORKFLOW_APP_ROOT),
+    )
+    assert result.returncode == 0, f"probe falhou: {result.stderr}"
+    got = json.loads(result.stdout)
+    assert got["before"] == {"state": expected_state, "enabled": expected_state == "on"}, got
+    assert got["after_set"] == got["before"], got
+    assert got["after_unset"] == got["before"], got
+
+
+def test_public_family_variant_name_still_resolves_without_polluting_dir():
+    """O nome publico do item 010 continua acessivel, mas fora de `dir()`.
+
+    `classify_family_variant` foi criado publico pelo item 010; o snapshot legado
+    trava `dir(provider_router)`. PEP 562 concilia os dois — este teste impede
+    que qualquer um dos dois lados seja quebrado silenciosamente.
+    """
+    assert (
+        provider_router_module.classify_family_variant
+        is provider_router_module._classify_family_variant
+    )
+    assert provider_router_module.classify_family_variant("kimi") == ("kimi", "kimi")
+    assert "classify_family_variant" not in dir(provider_router_module)
+
+    with pytest.raises(AttributeError):
+        provider_router_module.nome_que_nao_existe

@@ -56,19 +56,22 @@ _PROVIDER_BTN_STYLE: dict[Provider, tuple[str, str]] = {
     Provider.CLAUDE: ("#22C55E", "#86EFAC"),  # verde  -> T1
     Provider.KIMI:   ("#3B82F6", "#93C5FD"),  # azul   -> T2
     Provider.CODEX:  ("#A855F7", "#D8B4FE"),  # roxo   -> T3
-    Provider.QWEN:   ("#F59E0B", "#FCD34D"),  # ambar  -> T1-qwen
+    Provider.QWEN:   ("#F59E0B", "#FCD34D"),  # ambar  -> T2-qwen
+    Provider.GROK:   ("#EF4444", "#FCA5A5"),  # vermelho -> T3-grok
 }
 _PROVIDER_LABEL: dict[Provider, str] = {
     Provider.CLAUDE: "Claude",
     Provider.KIMI:   "Kimi worker",
     Provider.CODEX:  "Codex worker",
-    Provider.QWEN:   "Qwen",
+    Provider.QWEN:   "Qwen worker",
+    Provider.GROK:   "Grok worker",
 }
 _PROVIDER_DEST: dict[Provider, str] = {
     Provider.CLAUDE: "T1 terminal-interactive",
     Provider.KIMI:   "T2 terminal-workspace",
     Provider.CODEX:  "T3 terminal-codex-output",
-    Provider.QWEN:   "T1 terminal-interactive (qwen)",
+    Provider.QWEN:   "T2 terminal-workspace (qwen)",
+    Provider.GROK:   "T3 terminal-codex-output (grok)",
 }
 # Cinza do estado Desabilitado (item nao executavel / recalculo falhou).
 _PROVIDER_DISABLED_COLOR = "#52525B"
@@ -135,9 +138,9 @@ def _format_command_label(name: str, config_path: str, *, max_lines: int = 3) ->
 
 
 # Flags MCP intra-comando suportadas (eixo-flag; distinto do eixo-worker
-# queue-chk-use-*). Apenas estes literais entram no sufixo; qualquer outro token
-# em active_flags e ignorado (Zero Assumido: o conjunto e explicito).
-_SUPPORTED_MCP_FLAGS: frozenset[str] = frozenset({"--kimi", "--codex"})
+# queue-chk-use-*). Conjunto FECHADO canonico em config.llm_flags; qualquer
+# token fora e ignorado (Zero Assumido, MF-01, MF-02).
+from workflow_app.config.llm_flags import _SUPPORTED_MCP_FLAGS
 
 
 def render_with_mcp_flags(

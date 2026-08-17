@@ -34,10 +34,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QFontMetrics, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTextEdit,
     QToolTip,
     QVBoxLayout,
@@ -58,6 +60,10 @@ from PySide6.QtWidgets import (
 
 from workflow_app.command_queue.add_command_dialog import AddCommandDialog
 from workflow_app.command_queue.command_queue_widget import (
+    _SECTION_BTN_STYLE,
+    _TAB_ACTIVE_STYLE,
+    _TAB_INACTIVE_STYLE,
+    PERSONA_FILTER_ALL_LABEL,
     PERSONA_FILTER_CATEGORIES,
     PERSONA_FILTER_DEFAULT,
     PROMPT_FILTER_CATEGORIES,
@@ -68,13 +74,14 @@ from workflow_app.command_queue.command_queue_widget import (
 from workflow_app.command_queue.command_queue_widget import (
     enable_height_for_width as _enable_height_for_width_impl,
 )
-from workflow_app.command_queue.command_queue_widget import (
-    _TAB_ACTIVE_STYLE,
-    _TAB_INACTIVE_STYLE,
-)
 from workflow_app.config.app_state import app_state
 from workflow_app.config.config_bar import ConfigBar
 from workflow_app.config.config_parser import parse_config
+from workflow_app.config.feature_flags import (
+    instance_group_route_aware_enabled,
+    llm_config_v2_enabled,
+    llm_flags_rules_v2_enabled,
+)
 from workflow_app.domain import CommandSpec
 from workflow_app.errors import ConfigError
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
@@ -90,11 +97,11 @@ from workflow_app.widgets.execution_history_widget import ExecutionHistoryWidget
 from workflow_app.widgets.filter_panel import FilterPanel
 from workflow_app.widgets.mcp_prompt_actions import append_public_context, build_prompt
 from workflow_app.widgets.mcp_prompt_button import (
+    BUTTON_V_PADDING_PX,
     VALID_ACTIONS,
     VALID_BUTTON_TYPES,
     VALID_TERMINALS,
     MCPPromptButton,
-    BUTTON_V_PADDING_PX,
 )
 from workflow_app.widgets.toast_notifier import ToastNotifier
 from workflow_app.widgets.version_update_banner import VersionUpdateBanner
@@ -161,6 +168,18 @@ class TerminalPublishReport:
     errors: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class HeterogeneousInsertionReport:
+    """Render and transport outcome for one payload variant per terminal."""
+
+    requested: tuple[str, ...] = ()
+    rendered: tuple[tuple[str, str], ...] = ()
+    accepted: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+    notes_copied: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
 class _BrainstormSeedError(ValueError):
     """Seed invalido em blacksmith/brainstorm-mcp/0[1-9]-*.md."""
 
@@ -177,7 +196,7 @@ _BRAINSTORM_PROVIDER_LABELS: dict[str, str] = {
 }
 _BRAINSTORM_PROVIDER_SLUGS: frozenset[str] = frozenset(_BRAINSTORM_PROVIDER_LABELS)
 
-# Indices das secoes de `output-toolbar-section-stack`. TODAS as cinco tem
+# Indices das secoes de `output-toolbar-section-stack`. TODAS as seis tem
 # conteudo de flow responsivo (altura real != sizeHint) e todas passam pelo teto
 # de `_sync_flow_section_height()` desde 2026-07-27 — antes so as duas ultimas
 # eram medidas, e as tres primeiras herdavam a altura da pagina mais alta do
@@ -191,6 +210,8 @@ _TOOLBAR_SECTION_TERMINAL_INSERTIONS = 1
 _TOOLBAR_SECTION_AGENTES = 2
 _TOOLBAR_SECTION_MCPS = 3
 _TOOLBAR_SECTION_BRAINSTORM = 4
+_TOOLBAR_SECTION_CORGLY = 5
+_TOOLBAR_SECTION_LLM_CONFIG = 6
 
 # `QWIDGETSIZE_MAX` do Qt (nao exposto pelo PySide6): valor de "sem teto" que
 # `QWidget.setMaximumHeight` reconhece. Usado por `_sync_flow_section_height()`
@@ -923,6 +944,7 @@ _DATATEST_FILTERED_IDS = frozenset({
     # com o testid original `output-toolbar-mcp`).
     "output-toolbar-agentes",
     "output-toolbar-brainstorm",
+    "output-toolbar-corgly",
     "output-toolbar-test-mode",
     "terminal-interactive",
     "terminal-workspace",
@@ -1418,18 +1440,67 @@ class MainWindow(QMainWindow):
             ),
         )
 
-        # Paginas do stack, na ordem do seletor (D1: nenhum dos cinco testids
+        # Catalogo Corgly gerenciado pelo repositorio-pai. O builder roda depois
+        # de `_build_mcp_column`, que inicializa `_flow_section_pages`.
+        _corgly_column = self._build_corgly_column()
+
+        # Paginas do stack, na ordem do seletor (D1: nenhum dos testids
         # troca de widget, so muda quem e o pai).
         _section_stack.addWidget(self._command_queue.header_widget)   # 0 = left
         _section_stack.addWidget(_center_widget)                      # 1 = center
         _section_stack.addWidget(_agentes_widget)                     # 2 = agentes
         _section_stack.addWidget(_mcp_column)                         # 3 = mcps
         _section_stack.addWidget(_brainstorm_column)                  # 4 = brainstorm
+        _section_stack.addWidget(_corgly_column)                      # 5 = corgly
+
+        # Item 017: aba LLM Config (kill-switch SF_LLM_CONFIG_V2).
+        # Flag ligada: TERMINAL INSERTIONS sai do stack, LLM CONFIG entra na
+        # ultima posicao (indice 6). Flag desligada: stack inalterado.
+        _llm_config_widget = None
+        if llm_config_v2_enabled():
+            _llm_config_widget = QWidget()
+            _llm_config_widget.setObjectName("OutputToolbarLLMConfig")
+            _llm_config_widget.setProperty("testid", "output-toolbar-section-llm-config")
+            _llm_config_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            _llm_config_widget.setStyleSheet(
+                "QWidget#OutputToolbarLLMConfig { background-color: #1E1E21;"
+                "  border: 1px solid #3F3F46; border-radius: 6px; }"
+            )
+            _llm_config_layout = QHBoxLayout(_llm_config_widget)
+            _llm_config_layout.setContentsMargins(4, 4, 4, 4)
+            _llm_config_layout.setSpacing(6)
+            # Reparenteia queue-div-llm-routing da top-row para esta aba (C-04).
+            _llm_config_layout.addWidget(self._command_queue._llm_box, stretch=1)
+            # Containers vazios para itens 018-021 (testids estaveis).
+            _llm_config_main_container = QWidget()
+            _llm_config_main_container.setProperty("testid", "llm-config-main-llm-container")
+            _llm_config_main_container.setMinimumSize(0, 0)
+            _llm_config_layout.addWidget(_llm_config_main_container, stretch=1)
+            _llm_config_parallel_container = QWidget()
+            _llm_config_parallel_container.setProperty("testid", "llm-config-parallel-container")
+            _llm_config_parallel_container.setMinimumSize(0, 0)
+            _llm_config_layout.addWidget(_llm_config_parallel_container, stretch=1)
+            _llm_config_flags_container = QWidget()
+            _llm_config_flags_container.setProperty("testid", "llm-config-flags-container")
+            _llm_config_flags_container.setMinimumSize(0, 0)
+            _llm_config_layout.addWidget(_llm_config_flags_container, stretch=1)
+            # Item 021: FlagsPanel no container (7 checkboxes, C-57).
+            from workflow_app.llm_config.flags_panel import FlagsPanel
+            self._llm_config_flags_panel = FlagsPanel(
+                _llm_config_flags_container,
+                main_llm_resolver=self._current_llm_provider,
+            )
+            _flags_panel_layout = QHBoxLayout(_llm_config_flags_container)
+            _flags_panel_layout.setContentsMargins(0, 0, 0, 0)
+            _flags_panel_layout.addWidget(self._llm_config_flags_panel)
+            self._llm_config_widget = _llm_config_widget
+            _section_stack.addWidget(_llm_config_widget)              # 6 = llm_config
+
         # Boot fixo em COMMAND SEQUENCE (D14), sem persistencia entre sessoes
         # (mesmo precedente do `_active_section = 0` do CommandQueueWidget).
         _section_stack.setCurrentIndex(0)
 
-        # As tres primeiras secoes entram no MESMO mecanismo de teto das duas de
+        # As tres primeiras secoes entram no MESMO mecanismo de teto das tres de
         # flow (`_flow_section_pages`, semeado por `_build_mcp_column`). Sem
         # isso o QStackedLayout as dimensiona pelo maximo entre as cinco paginas
         # e sobra faixa vazia em COMMAND SEQUENCE / TERMINAL INSERTIONS /
@@ -1437,13 +1508,22 @@ class MainWindow(QMainWindow):
         # no stack, sem coluna externa) — `_sync_flow_section_height` trata esse
         # caso sem somar as margens duas vezes.
         _header_widget = self._command_queue.header_widget
-        self._flow_section_pages.update(
-            {
-                _TOOLBAR_SECTION_COMMAND_SEQUENCE: (_header_widget, _header_widget),
-                _TOOLBAR_SECTION_TERMINAL_INSERTIONS: (_center_widget, _center_widget),
-                _TOOLBAR_SECTION_AGENTES: (_agentes_widget, _agentes_widget),
-            }
-        )
+        _flow_update = {
+            _TOOLBAR_SECTION_COMMAND_SEQUENCE: (_header_widget, _header_widget),
+            _TOOLBAR_SECTION_AGENTES: (_agentes_widget, _agentes_widget),
+        }
+        if llm_config_v2_enabled():
+            # Flag ligada: TERMINAL INSERTIONS sai, LLM CONFIG entra no indice 6.
+            if _llm_config_widget is not None:
+                _flow_update[_TOOLBAR_SECTION_LLM_CONFIG] = (
+                    _llm_config_widget, _llm_config_widget,
+                )
+        else:
+            # Flag desligada: layout legado com TERMINAL INSERTIONS no indice 1.
+            _flow_update[_TOOLBAR_SECTION_TERMINAL_INSERTIONS] = (
+                _center_widget, _center_widget,
+            )
+        self._flow_section_pages.update(_flow_update)
         for _watched in (_header_widget, _center_widget, _agentes_widget):
             _watched.installEventFilter(self)
 
@@ -1469,9 +1549,12 @@ class MainWindow(QMainWindow):
         # Worker | MCP Flags) para esta linha. Ancorado no topo: a coluna do
         # meio agora cresce com o conteudo do stack e nao deve esticar os
         # vizinhos junto.
-        _top_row_layout.addWidget(                                                 # llm-routing
-            self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
-        )
+        # Item 017: com SF_LLM_CONFIG_V2="1", _llm_box foi reparenteado para
+        # a aba LLM Config (_llm_config_widget). Nao adicionar na top-row.
+        if not llm_config_v2_enabled():
+            _top_row_layout.addWidget(                                                 # llm-routing
+                self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
+            )
 
         # Seletor das secoes do header (I3.2), ja carregando o stack como
         # segundo item do proprio container.
@@ -1721,7 +1804,10 @@ class MainWindow(QMainWindow):
         """Seletor das secoes do header (I3.2 de
         07-27-workflow-app-header-toggles-llm-unico).
 
-        Sao CINCO desde 2026-07-27: a aba 'Agentes' saiu do
+        Sao SEIS: as cinco secoes consolidadas em 2026-07-27 mais o catalogo
+        Corgly gerenciado pelo repositorio-pai.
+
+        A aba 'Agentes' saiu do
         `queue-subtabs-insertions` e virou pagina do stack, e a secao unica
         `MCP & BRAINSTORM` foi dissolvida — suas duas sub-abas internas (MCPs e
         Brainstorm) subiram para as duas ULTIMAS posicoes do seletor, cada uma
@@ -1765,13 +1851,29 @@ class MainWindow(QMainWindow):
         _tabs_row.setSpacing(3)
 
         self._toolbar_section_btns: list[QPushButton] = []
-        _specs = (
-            ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
-            ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
-            ("output-toolbar-section-agentes", "AGENTES"),
-            ("output-toolbar-section-mcps", "MCPs"),
-            ("output-toolbar-section-brainstorm", "BRAINSTORM"),
-        )
+        if llm_config_v2_enabled():
+            # Item 017: TERMINAL INSERTIONS sai, LLM CONFIG entra na ultima
+            # posicao (C-03: 6 secoes, LLM Config na ultima).
+            _specs = (
+                ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
+                ("output-toolbar-section-agentes", "AGENTES"),
+                ("output-toolbar-section-mcps", "MCPs"),
+                ("output-toolbar-section-brainstorm", "BRAINSTORM"),
+                ("output-toolbar-section-corgly", "CORGLY"),
+                ("output-toolbar-section-llm-config", "LLM CONFIG"),
+            )
+            # Stack indices: sem TERMINAL INSERTIONS (idx 1), LLM CONFIG no idx 6.
+            self._toolbar_section_stack_indices = [0, 2, 3, 4, 5, 6]
+        else:
+            _specs = (
+                ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
+                ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
+                ("output-toolbar-section-agentes", "AGENTES"),
+                ("output-toolbar-section-mcps", "MCPs"),
+                ("output-toolbar-section-brainstorm", "BRAINSTORM"),
+                ("output-toolbar-section-corgly", "CORGLY"),
+            )
+            self._toolbar_section_stack_indices = [0, 1, 2, 3, 4, 5]
         for idx, (testid, label) in enumerate(_specs):
             btn = QPushButton(label)
             btn.setFixedHeight(22)
@@ -1798,7 +1900,7 @@ class MainWindow(QMainWindow):
 
     def _sync_flow_section_height(self) -> None:
         """Encolhe `output-toolbar-section-selector` ate o conteudo real da
-        secao ativa. Vale para as CINCO secoes desde 2026-07-27.
+        secao ativa. Vale para as SEIS secoes.
 
         Motivacao: `ResponsiveButtonFlowLayout.sizeHint()` reporta a altura de
         uma largura de referencia estreita (360px, varias linhas de botoes),
@@ -1813,7 +1915,7 @@ class MainWindow(QMainWindow):
         Historico: a 1a versao (2026-07-27) media so MCPs/BRAINSTORM e liberava
         o teto nas outras tres — que por isso herdavam a altura da pagina mais
         alta entre elas (TERMINAL INSERTIONS, inflada pelo QTabWidget interno).
-        Hoje as cinco entram em `_flow_section_pages`; o teto so e liberado
+        Hoje as seis entram em `_flow_section_pages`; o teto so e liberado
         quando nao ha `heightForWidth` utilizavel.
 
         Nunca corta abaixo do `minimumSizeHint` da pagina: o piso e o proprio
@@ -1898,8 +2000,14 @@ class MainWindow(QMainWindow):
         chamado tambem no boot para fixar `COMMAND SEQUENCE` (D14).
         """
         stack = getattr(self, "_toolbar_section_stack", None)
-        if stack is not None and 0 <= index < stack.count():
-            stack.setCurrentIndex(index)
+        # Item 017: mapeia indice do botao para indice do stack (quando flag
+        # ligada, TERMINAL INSERTIONS e pulada e LLM CONFIG entra no idx 6).
+        stack_index = index
+        section_indices = getattr(self, "_toolbar_section_stack_indices", None)
+        if section_indices is not None and 0 <= index < len(section_indices):
+            stack_index = section_indices[index]
+        if stack is not None and 0 <= stack_index < stack.count():
+            stack.setCurrentIndex(stack_index)
         for i, btn in enumerate(getattr(self, "_toolbar_section_btns", [])):
             btn.setStyleSheet(
                 _TAB_ACTIVE_STYLE if i == index else _TAB_INACTIVE_STYLE
@@ -1979,7 +2087,17 @@ class MainWindow(QMainWindow):
         left_top_layout = QVBoxLayout(left_top)
         left_top_layout.setContentsMargins(6, 6, 6, 6)
         left_top_layout.setSpacing(0)
-        left_top_layout.addWidget(self._metrics_bar._instance_group)
+        # Item 024 (D024-d): under SF_INSTANCE_GROUP_ROUTE_AWARE="1",
+        # instance_group goes to queue-div-main-llm (first position) instead
+        # of output-toolbar-center. Legacy path: reparent to left_top as before.
+        if instance_group_route_aware_enabled():
+            _main_llm_layout = self._command_queue.main_llm_section.layout()
+            if _main_llm_layout is not None:
+                _main_llm_layout.insertWidget(0, self._metrics_bar._instance_group)
+            else:
+                left_top_layout.addWidget(self._metrics_bar._instance_group)
+        else:
+            left_top_layout.addWidget(self._metrics_bar._instance_group)
 
         # Checkboxes de rota de terminal (T1/T2/T3) e de Notes do T1.
         # 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2/I1.3/I1.4):
@@ -2037,6 +2155,13 @@ class MainWindow(QMainWindow):
         )
         self._chk_notes_t1.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
+        # Item 024: emit terminal_route_updated whenever any route checkbox
+        # changes, so MetricsBar can cache the snapshot for route-aware
+        # instance-group dispatch.
+        for _chk in (self._chk_route_t1, self._chk_route_t2, self._chk_route_t3):
+            _chk.toggled.connect(self._emit_terminal_route_snapshot)
+        # Emit initial snapshot so MetricsBar has a valid cache at boot.
+        self._emit_terminal_route_snapshot()
 
         _MCP_TEST_PROMPT = (
             "/mcp:codex ping test — verificar se MCP Codex esta ativo. "
@@ -2110,6 +2235,20 @@ class MainWindow(QMainWindow):
              "description": "Compara planejado vs implantado no loop e delega gaps"},
             {"label": "create-agent",    "path": "ai-forge/custom-prompts/prompts-subtab/create-agent.md",
              "description": "Cria persona MCP com pesquisa web, deduplicacao, validacao e botao na sub-aba Agentes"},
+            {"label": "Delegador MCP", "path": "ai-forge/custom-prompts/prompts-subtab/estrategista-delegador.md",
+             "description": "Debate o problema com Codex e delega o fix a Kimi/Qwen"},
+            {"label": "SF DB",           "path": "ai-forge/custom-prompts/prompts-subtab/systemforge-db-update.md",
+             "description": "Atualiza o BD Hostinger do systemforge-dashboard"},
+            {"label": "SF Deploy",       "path": "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
+             "description": "Valida, commita e publica o systemforge-dashboard"},
+            {"label": "only commit",     "path": "ai-forge/custom-prompts/prompts-subtab/only-commit.md",
+             "description": "Commit local sem push no repositório alvo"},
+            {"label": "only push",       "path": "ai-forge/custom-prompts/prompts-subtab/only-push.md",
+             "description": "Push do branch alvo sem novo commit"},
+            {"label": "full deploy",     "path": "ai-forge/custom-prompts/prompts-subtab/full-deploy.md",
+             "description": "Commita, faz push e executa deploy do projeto"},
+            {"label": "commit & push",   "path": "ai-forge/custom-prompts/prompts-subtab/commit-push.md",
+             "description": "Commita e faz push no projeto alvo"},
         ]
 
         _pset = QSettings("systemForge", "workflow-app")
@@ -2840,6 +2979,8 @@ class MainWindow(QMainWindow):
             QFileDialog,
             QGridLayout,
             QHBoxLayout,
+            QLabel,
+            QTabBar,
             QVBoxLayout,
         )
 
@@ -3006,12 +3147,43 @@ class MainWindow(QMainWindow):
             chk = QCheckBox(label)
             chk.setProperty("testid", testid)
             chk.setProperty("persona_prompt", prompt)
+            # Item 023: categoria de filtro para a barra de personas MCPs.
+            _suffix = testid.replace("output-mcp-persona-", "", 1)
+            _cat = self._MCP_PERSONA_CATEGORIES.get(_suffix, PERSONA_FILTER_DEFAULT)
+            chk.setProperty("persona_category", _cat)
             chk.setToolTip(prompt)
             chk.setCursor(Qt.CursorShape.PointingHandCursor)
             chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             chk.setStyleSheet(checkbox_style)
             persona_layout.addWidget(chk)
             self._mcp_persona_checkboxes.append(chk)
+        # Item 023: barra de filtro de personas na secao MCPs (C-16).
+        # Compartilha a logica de categorias com a sub-aba Agentes
+        # (PERSONA_FILTER_CATEGORIES). Visivel apenas sob kill-switch ligado.
+        self._mcp_persona_filter_bar = None
+        if llm_config_v2_enabled():
+            _mcp_pf_bar = QTabBar()
+            _mcp_pf_bar.setProperty("testid", "output-mcp-persona-filter-bar")
+            _mcp_pf_bar.setExpanding(False)
+            _mcp_pf_bar.setDrawBase(False)
+            _mcp_pf_bar.setUsesScrollButtons(True)
+            _mcp_pf_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            _mcp_pf_bar.setStyleSheet(
+                "QTabBar { background: transparent; }"
+                "QTabBar::tab { background: #27272A; color: #A1A1AA;"
+                "  border: none; border-radius: 3px;"
+                "  padding: 2px 7px; font-size: 9px; font-weight: 700;"
+                "  letter-spacing: 0.4px; margin-right: 2px; }"
+                "QTabBar::tab:selected { background: #8B5CF6; color: #FAFAFA; }"
+                "QTabBar::tab:hover:!selected { background: #3F3F46; color: #D4D4D8; }"
+            )
+            _mcp_pf_bar.addTab("All")
+            for _cat in PERSONA_FILTER_CATEGORIES:
+                _mcp_pf_bar.addTab(_cat)
+            _mcp_pf_bar.currentChanged.connect(self._on_mcp_personas_filter_changed)
+            self._mcp_persona_filter_bar = _mcp_pf_bar
+            mcps_layout.addWidget(_mcp_pf_bar)
+
         mcps_layout.addWidget(persona_row)
 
         # Integracoes suplementares de agentes (AGENT-TASK-007): as specs vivem
@@ -3023,13 +3195,26 @@ class MainWindow(QMainWindow):
         # nao cria nenhum widget (zero mudanca visual). A lista e RECRIADA a cada
         # build, entao um rebuild nao acumula nem perde botoes.
         self._mcp_agent_buttons: list[QPushButton] = []
-        agent_specs = self._collect_mcp_agent_specs(
-            [str(chk.property("testid")) for chk in self._mcp_persona_checkboxes]
-            + [
+        if llm_config_v2_enabled():
+            _action_testids = [
+                "output-mcp-action-thinking-claude",
+                "output-mcp-action-thinking-codex",
+                "output-mcp-action-thinking-kimi",
+                "output-mcp-action-execution-claude",
+                "output-mcp-action-execution-codex",
+                "output-mcp-action-execution-kimi",
+                "output-mcp-action-execution-grok",
+                "output-mcp-action-execution-qwen",
+            ]
+        else:
+            _action_testids = [
                 "output-mcp-action-main",
                 "output-mcp-action-parallel",
                 "output-mcp-action-dual",
             ]
+        agent_specs = self._collect_mcp_agent_specs(
+            [str(chk.property("testid")) for chk in self._mcp_persona_checkboxes]
+            + _action_testids
         )
         agent_button_style = (
             "QPushButton { color: #D4D4D8; font-size: 10px; font-weight: 700;"
@@ -3070,6 +3255,7 @@ class MainWindow(QMainWindow):
                     f"Ativar integracao MCP do agente {spec.label}"
                 )
                 btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                btn.setFixedHeight(22)
                 btn.setStyleSheet(agent_button_style)
                 row_layout.addWidget(btn)
                 self._mcp_agent_buttons.append(btn)
@@ -3093,6 +3279,8 @@ class MainWindow(QMainWindow):
                 return base_text
             return f"{base_text.rstrip()} {'; e depois disso '.join(prompts)}"
 
+        # Item 023: action row com divisao Thinking/Execution (TE-01) sob
+        # kill-switch ligado; legado Main/Parallel/Dual sob kill-switch off.
         action_row = QWidget()
         action_row.setProperty("testid", "output-mcp-action-row")
         action_layout = ResponsiveButtonFlowLayout(
@@ -3101,46 +3289,155 @@ class MainWindow(QMainWindow):
         action_layout.setContentsMargins(0, 0, 0, 0)
         _enable_height_for_width(action_row)
 
-        def _make_mcp_action_btn(label: str, action_id: str) -> QPushButton:
+        _te_btn_style = (
+            "QPushButton { background-color: #334155; color: #FAFAFA;"
+            "  border: 1px solid #475569; border-radius: 5px;"
+            "  font-size: 10px; font-weight: 800; padding: 1px 8px; }"
+            "QPushButton:hover { background-color: #3F4F66; border-color: #64748B; }"
+            "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
+            "  border-color: #FBBF24; }"
+            "QPushButton:disabled { color: #71717A; border-color: #3F3F46;"
+            "  background-color: #27272A; }"
+        )
+        _te_label_style = (
+            "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
+            "  letter-spacing: 0.5px; padding: 0 2px; }"
+        )
+
+        def _make_te_btn(label: str, testid: str, command: str,
+                         tooltip: str = "", enabled: bool = True) -> QPushButton:
             btn = QPushButton(label)
-            btn.setProperty("testid", f"output-mcp-action-{action_id}")
+            btn.setProperty("testid", testid)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setProperty("action_id", action_id)
-            btn.setToolTip(self._mcp_action_tooltip(action_id))
-            btn.setStyleSheet(
-                "QPushButton { background-color: #334155; color: #FAFAFA;"
-                "  border: 1px solid #475569; border-radius: 5px;"
-                "  font-size: 10px; font-weight: 800; padding: 1px 8px; }"
-                "QPushButton:hover { background-color: #3F4F66; border-color: #64748B; }"
-                "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
-                "  border-color: #FBBF24; }"
-            )
+            btn.setProperty("action_id", testid)
+            btn.setProperty("te_command", command)
+            btn.setToolTip(tooltip or command)
+            btn.setEnabled(enabled)
+            btn.setStyleSheet(_te_btn_style)
             return btn
 
-        def _on_mcp_action(action_id: str) -> None:
-            # O Main LLM (queue-div-main-llm) escolhe APENAS o comando
-            # (base_text). O terminal de destino e decidido pelos checkboxes de
-            # rota nos headers T1/T2/T3, via _publish_to_terminal (refactor
-            # 2026-05-24). O 2o elemento da tupla (terminal fixo legado) e
-            # ignorado de proposito.
-            provider = self._current_llm_provider()
-            if provider not in mcp_commands:
-                provider = "claude"
-            base_text, _legacy_terminal = mcp_commands[provider][action_id]
-            self._publish_to_terminal(_compose_mcp_text(base_text))
+        def _on_te_action(testid: str) -> None:
+            command = _TE_COMMANDS.get(testid, "")
+            if command:
+                self._publish_to_terminal(_compose_mcp_text(command))
 
-        self._mcp_action_buttons = []
-        for label, action_id in (
-            ("Main MCP", "main"),
-            ("Parallel", "parallel"),
-            ("Dual", "dual"),
-        ):
-            btn = _make_mcp_action_btn(label, action_id)
-            btn.clicked.connect(
-                lambda _checked=False, aid=action_id: _on_mcp_action(aid)
+        if llm_config_v2_enabled():
+            # TE-01: matriz fixa por botao, independente do Main LLM.
+            _TE_COMMANDS: dict[str, str] = {
+                "output-mcp-action-thinking-claude":
+                    "claude --model opus --effort high",
+                "output-mcp-action-thinking-codex": "/mcp:codex",
+                "output-mcp-action-thinking-kimi": "/mcp:kimi-k3",
+                "output-mcp-action-execution-claude":
+                    "claude --model sonnet --effort standard",
+                "output-mcp-action-execution-codex": "/mcp:codex",
+                "output-mcp-action-execution-kimi": "/mcp:kimi",
+                "output-mcp-action-execution-grok": "/mcp:grok",
+                "output-mcp-action-execution-qwen": "/mcp:qwen",
+            }
+
+            # Grupo Thinking (3 pastilhas)
+            _thinking_group = QWidget()
+            _thinking_group.setProperty(
+                "testid", "output-mcp-action-thinking"
             )
-            action_layout.addWidget(btn)
-            self._mcp_action_buttons.append(btn)
+            _thinking_lay = QHBoxLayout(_thinking_group)
+            _thinking_lay.setContentsMargins(0, 0, 0, 0)
+            _thinking_lay.setSpacing(3)
+            _th_lbl = QLabel("Thinking")
+            _th_lbl.setStyleSheet(_te_label_style)
+            _thinking_lay.addWidget(_th_lbl)
+            for lbl, tid, cmd in (
+                ("Claude", "output-mcp-action-thinking-claude",
+                 _TE_COMMANDS["output-mcp-action-thinking-claude"]),
+                ("Codex", "output-mcp-action-thinking-codex",
+                 _TE_COMMANDS["output-mcp-action-thinking-codex"]),
+                ("Kimi", "output-mcp-action-thinking-kimi",
+                 _TE_COMMANDS["output-mcp-action-thinking-kimi"]),
+            ):
+                btn = _make_te_btn(lbl, tid, cmd)
+                btn.clicked.connect(
+                    lambda _c=False, t=tid: _on_te_action(t)
+                )
+                _thinking_lay.addWidget(btn)
+
+            # Grupo Execution (5 pastilhas)
+            _exec_group = QWidget()
+            _exec_group.setProperty("testid", "output-mcp-action-execution")
+            _exec_lay = QHBoxLayout(_exec_group)
+            _exec_lay.setContentsMargins(0, 0, 0, 0)
+            _exec_lay.setSpacing(3)
+            _ex_lbl = QLabel("Execution")
+            _ex_lbl.setStyleSheet(_te_label_style)
+            _exec_lay.addWidget(_ex_lbl)
+            for lbl, tid, cmd, tip, enabled in (
+                ("Claude", "output-mcp-action-execution-claude",
+                 _TE_COMMANDS["output-mcp-action-execution-claude"],
+                 "", True),
+                ("Codex", "output-mcp-action-execution-codex",
+                 _TE_COMMANDS["output-mcp-action-execution-codex"],
+                 "", True),
+                ("Kimi", "output-mcp-action-execution-kimi",
+                 _TE_COMMANDS["output-mcp-action-execution-kimi"],
+                 "", True),
+                ("Grok", "output-mcp-action-execution-grok",
+                 _TE_COMMANDS["output-mcp-action-execution-grok"],
+                 "Grok MCP server nao registrado", False),
+                ("Qwen", "output-mcp-action-execution-qwen",
+                 _TE_COMMANDS["output-mcp-action-execution-qwen"],
+                 "Qwen MCP server nao registrado", False),
+            ):
+                btn = _make_te_btn(lbl, tid, cmd, tip, enabled)
+                if enabled:
+                    btn.clicked.connect(
+                        lambda _c=False, t=tid: _on_te_action(t)
+                    )
+                _exec_lay.addWidget(btn)
+
+            action_layout.addWidget(_thinking_group)
+            action_layout.addWidget(_exec_group)
+            self._mcp_action_buttons = []
+        else:
+            # Legado: Main MCP / Parallel / Dual (kill-switch off, G3).
+            def _make_mcp_action_btn(
+                label: str, action_id: str,
+            ) -> QPushButton:
+                btn = QPushButton(label)
+                btn.setProperty("testid", f"output-mcp-action-{action_id}")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setProperty("action_id", action_id)
+                btn.setToolTip(self._mcp_action_tooltip(action_id))
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #334155; color: #FAFAFA;"
+                    "  border: 1px solid #475569; border-radius: 5px;"
+                    "  font-size: 10px; font-weight: 800; padding: 1px 8px; }"
+                    "QPushButton:hover { background-color: #3F4F66;"
+                    "  border-color: #64748B; }"
+                    "QPushButton:pressed { background-color: #FBBF24;"
+                    "  color: #18181B; border-color: #FBBF24; }"
+                )
+                return btn
+
+            def _on_mcp_action(action_id: str) -> None:
+                provider = self._current_llm_provider()
+                if provider not in mcp_commands:
+                    provider = "claude"
+                base_text, _legacy_terminal = mcp_commands[provider][action_id]
+                self._publish_to_terminal(_compose_mcp_text(base_text))
+
+            self._mcp_action_buttons = []
+            for label, action_id in (
+                ("Main MCP", "main"),
+                ("Parallel", "parallel"),
+                ("Dual", "dual"),
+            ):
+                btn = _make_mcp_action_btn(label, action_id)
+                btn.clicked.connect(
+                    lambda _c=False, aid=action_id: _on_mcp_action(aid)
+                )
+                action_layout.addWidget(btn)
+                self._mcp_action_buttons.append(btn)
+
         mcps_layout.addWidget(action_row)
         mcps_layout.addStretch(1)
         col_layout.addWidget(mcps_page, stretch=1)
@@ -3175,6 +3472,389 @@ class MainWindow(QMainWindow):
         brainstorm_column.installEventFilter(self)
 
         return column, brainstorm_column
+
+    @staticmethod
+    def _corgly_commands_root() -> Path:
+        """Canonical parent-owned Corgly command directory."""
+        return Path(__file__).resolve().parents[4] / ".claude" / "commands" / "corgly"
+
+    @staticmethod
+    def _corgly_class_sort_key(filename: str) -> tuple[tuple[int, int | str], ...]:
+        """Natural, case-insensitive ordering for numbered and thematic classes."""
+        return tuple(
+            (0, int(part)) if part.isdigit() else (1, part.casefold())
+            for part in re.split(r"(\d+)", filename)
+        )
+
+    def _corgly_command_with_selected_class(
+        self, slash: str, *, accepts_class: bool
+    ) -> str:
+        """Append the selected DOCX only to commands whose hint accepts a class."""
+        selected = self._corgly_class_select.currentText().strip()
+        if not accepts_class or not selected:
+            return slash
+        quoted = selected.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{slash} "{quoted}"'
+
+    def _paste_corgly_repository_path(self, path: str) -> None:
+        """Copy and insert a Corgly repository path without pressing Enter."""
+        QApplication.clipboard().setText(path)
+        self._publish_to_terminal(path)
+        signal_bus.toast_requested.emit(
+            f"Path copiado e digitado no terminal: {path}", "info"
+        )
+
+    def _make_corgly_path_button(
+        self, *, label: str, path: str, testid: str, description: str
+    ) -> QPushButton:
+        """Build one insertion-only repository file button."""
+        btn = QPushButton(label)
+        btn.setProperty("testid", testid)
+        btn.setProperty("corgly_path", path)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(_SECTION_BTN_STYLE)
+        btn.setToolTip(
+            f"{description}\n\nCola no terminal: {path}"
+        )
+        btn.clicked.connect(
+            lambda _checked=False, repository_path=path: (
+                self._paste_corgly_repository_path(repository_path)
+            )
+        )
+        return btn
+
+    @staticmethod
+    def _corgly_file_description(path: Path) -> str:
+        """Extract a short, file-specific tooltip summary from a Corgly file."""
+        try:
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return f"Arquivo de referência Corgly: {path.name}."
+
+        if path.suffix.casefold() == ".json":
+            try:
+                payload = yaml.safe_load(body)
+            except yaml.YAMLError:
+                payload = None
+            if isinstance(payload, dict) and isinstance(
+                payload.get("_comentario"), str
+            ):
+                return payload["_comentario"].strip()
+            return f"Dados estruturados de regras Corgly: {path.name}."
+
+        lines = body.splitlines()
+        title = next(
+            (line.lstrip("# ").strip() for line in lines if line.startswith("#")),
+            path.stem.replace("-", " "),
+        )
+        title_index = next(
+            (index for index, line in enumerate(lines) if line.startswith("#")),
+            -1,
+        )
+        paragraph: list[str] = []
+        started = False
+        for line in lines[title_index + 1 :]:
+            clean = line.strip()
+            if not clean:
+                if started:
+                    break
+                continue
+            if clean.startswith("#") or clean.startswith("```"):
+                if started:
+                    break
+                continue
+            started = True
+            paragraph.append(clean)
+            if len(" ".join(paragraph)) >= 220:
+                break
+        summary = re.sub(r"[`*_]", "", " ".join(paragraph))
+        summary = re.sub(r"\s+", " ", summary).strip()
+        return f"{title}. {summary}" if summary else title
+
+    def _build_corgly_column(self) -> QWidget:
+        """Build the dynamic Corgly catalog without executing any command.
+
+        Valid Markdown files become insertion-only buttons. Invalid files are
+        reported while valid siblings remain usable (Zero Silencio).
+        """
+        column = QWidget()
+        column.setObjectName("OutputToolbarCorgly")
+        column.setProperty("testid", "output-toolbar-corgly")
+        column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        column.setStyleSheet(
+            "QWidget#OutputToolbarCorgly { background-color: #1C1C1F;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        col_layout = QVBoxLayout(column)
+        col_layout.setContentsMargins(8, 6, 8, 6)
+        col_layout.setSpacing(4)
+
+        command_root = self._corgly_commands_root()
+        corgly_root = command_root.parents[2] / "corgly-classes"
+        invalid: list[str] = []
+        command_files: list[Path] = []
+        excluded_commands = {
+            "cmd/autocast-put.md",
+            "mcp/codex.md",
+            "mcp/grok.md",
+            "mcp/kimi.md",
+            "tools/auq-interview.md",
+        }
+        if command_root.is_dir():
+            command_files = sorted(
+                path
+                for path in command_root.rglob("*.md")
+                if "_shared" not in path.relative_to(command_root).parts
+                and path.relative_to(command_root).as_posix()
+                not in excluded_commands
+            )
+        else:
+            invalid.append(f"raiz ausente: {command_root}")
+
+        tabs = QTabWidget()
+        tabs.setProperty("testid", "output-toolbar-corgly-subtabs")
+        tabs.setDocumentMode(True)
+        tabs.setStyleSheet(
+            "QTabWidget::pane { border: none; background: transparent; }"
+            "QTabBar::tab { background: transparent; color: #A1A1AA;"
+            "  border: none; border-radius: 3px; padding: 5px 10px;"
+            "  font-size: 10px; font-weight: 700; letter-spacing: 0.5px;"
+            "  margin-right: 3px; }"
+            "QTabBar::tab:selected { background: #FBBF24; color: #18181B; }"
+            "QTabBar::tab:hover:!selected { background: #2D2D30; color: #D4D4D8; }"
+        )
+
+        classes_page = QWidget()
+        classes_page.setProperty(
+            "testid", "output-toolbar-corgly-subtab-classes"
+        )
+        classes_layout = QVBoxLayout(classes_page)
+        classes_layout.setContentsMargins(0, 2, 0, 2)
+        classes_layout.setSpacing(2)
+        flow_host = QWidget()
+        flow_host.setProperty("testid", "output-toolbar-corgly-flow")
+        flow = ResponsiveButtonFlowLayout(
+            flow_host, spacing=4, v_spacing=1, max_lines=None
+        )
+        flow.setContentsMargins(0, 0, 0, 0)
+        _enable_height_for_width(flow_host)
+        _enable_height_for_width(classes_page)
+
+        self._corgly_buttons: list[QPushButton] = []
+        for command_file in command_files:
+            rel = command_file.relative_to(command_root)
+            try:
+                body = command_file.read_text(encoding="utf-8")
+                if not body.startswith("---\n"):
+                    raise ValueError("frontmatter inicial ausente")
+                marker = body.find("\n---", 4)
+                if marker < 0:
+                    raise ValueError("frontmatter sem fechamento")
+                metadata = yaml.safe_load(body[4:marker])
+                if not isinstance(metadata, dict) or not metadata.get("description"):
+                    raise ValueError("description ausente no frontmatter")
+            except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
+                invalid.append(f"{rel.as_posix()}: {exc}")
+                continue
+
+            slug_parts = rel.with_suffix("").parts
+            slash = "/corgly:" + ":".join(slug_parts)
+            testid_suffix = "-".join(slug_parts)
+            label = " ".join(slug_parts).replace("-", " ").upper()
+            argument_hint = metadata.get("argument-hint")
+            accepts_class = (
+                isinstance(argument_hint, str)
+                and ".docx" in argument_hint.casefold()
+            )
+            btn = QPushButton(label)
+            btn.setProperty("testid", f"output-btn-corgly-{testid_suffix}")
+            btn.setProperty("corgly_slash", slash)
+            btn.setProperty("corgly_accepts_class", accepts_class)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(_SECTION_BTN_STYLE)
+            btn.setToolTip(
+                f"Insere sem Enter: {slash}"
+                + (" + aula selecionada" if accepts_class else "")
+                + f"\nRaiz operacional: {corgly_root}"
+            )
+            btn.clicked.connect(
+                lambda _checked=False, command=slash, accepts=accepts_class: (
+                    self._publish_insertion_llm_aware(
+                        self._corgly_command_with_selected_class(
+                            command, accepts_class=accepts
+                        )
+                    )
+                )
+            )
+            flow.addWidget(btn)
+            self._corgly_buttons.append(btn)
+
+        selector_host = QWidget()
+        selector_host.setProperty("testid", "output-toolbar-corgly-class-selector")
+        selector_layout = QHBoxLayout(selector_host)
+        selector_layout.setContentsMargins(0, 0, 0, 0)
+        selector_layout.setSpacing(0)
+
+        self._corgly_class_select = QComboBox()
+        self._corgly_class_select.setProperty(
+            "testid", "output-select-corgly-class"
+        )
+        self._corgly_class_select.setAccessibleName("Selecionar aula DOCX")
+        # O campo fechado fica compacto e elide visualmente nomes longos. A
+        # lista aberta recebe largura suficiente para exibir o nome completo.
+        self._corgly_class_select.setFixedWidth(220)
+        self._corgly_class_select.setToolTip(
+            "Aula DOCX usada como argumento nos comandos Corgly compatíveis. "
+            "Deixe vazio para inserir o comando sem aula."
+        )
+        self._corgly_class_select.addItem("")
+        class_names: list[str] = []
+        if corgly_root.is_dir():
+            class_names = sorted(
+                (
+                    path.name
+                    for path in corgly_root.iterdir()
+                    if path.is_file() and path.suffix.casefold() == ".docx"
+                ),
+                key=self._corgly_class_sort_key,
+            )
+            self._corgly_class_select.addItems(class_names)
+        class_name_width = max(
+            (
+                QFontMetrics(self._corgly_class_select.font()).horizontalAdvance(name)
+                for name in class_names
+            ),
+            default=0,
+        )
+        self._corgly_class_select.view().setMinimumWidth(
+            max(self._corgly_class_select.width(), class_name_width + 40)
+        )
+        selector_layout.addWidget(self._corgly_class_select)
+        tabs.setCornerWidget(selector_host, Qt.Corner.TopRightCorner)
+
+        empty = QLabel("Nenhum comando Corgly valido foi encontrado.")
+        empty.setProperty("testid", "output-toolbar-corgly-empty")
+        empty.setVisible(not self._corgly_buttons)
+        error = QLabel("Catalogo Corgly parcial: " + "; ".join(invalid))
+        error.setProperty("testid", "output-toolbar-corgly-error")
+        error.setWordWrap(True)
+        error.setVisible(bool(invalid))
+        self._corgly_empty_label = empty
+        self._corgly_error_label = error
+
+        classes_layout.addWidget(flow_host)
+        classes_layout.addWidget(empty)
+        classes_layout.addWidget(error)
+        classes_layout.addStretch(1)
+        tabs.addTab(classes_page, "classes")
+
+        strategy_page = QWidget()
+        strategy_page.setProperty(
+            "testid", "output-toolbar-corgly-subtab-strategy"
+        )
+        strategy_flow = ResponsiveButtonFlowLayout(
+            strategy_page, spacing=4, v_spacing=1, max_lines=None
+        )
+        strategy_flow.setContentsMargins(0, 2, 0, 2)
+        _enable_height_for_width(strategy_page)
+        strategy_specs = (
+            (
+                "Guia do repo",
+                "CLAUDE.md",
+                "Mapa operacional do repositório, suas fontes de verdade, comandos e integração com o workflow-app.",
+            ),
+            (
+                "Criar aulas",
+                "README-criar-aulas.md",
+                "Contrato prático para criar aulas, com a ordem das seções, arquivos do sistema e validações.",
+            ),
+            (
+                "Manifesto 100",
+                "MANIFESTO-CURSO-100.json",
+                "Manifesto estruturado com a ordem canônica e a composição das 100 aulas do curso legado.",
+            ),
+            (
+                "Template aula",
+                "template-aula.json",
+                "Template JSON oficial usado como base pelo gerador de aulas.",
+            ),
+            (
+                "Glossário",
+                "glossario-aulas.md",
+                "Mapa das aulas para seus temas, objetivos e conteúdos ensinados.",
+            ),
+            (
+                "Corgly 2.0",
+                "Corgly-2.0/README.md",
+                "Visão geral do curso redesenhado de 300 aulas, incluindo dados, geradores, catálogos e regras vigentes.",
+            ),
+            (
+                "Estratégia verbal",
+                "Corgly-2.0/PLANO-ESTRATEGIA-VERBAL-300-AULAS.md",
+                "Estratégia curricular vigente para progressão verbal e prática nas 300 aulas.",
+            ),
+            (
+                "Histórias 300",
+                "Corgly-2.0/ESTRUTURA-300-HISTORIAS-ENGRACADAS.md",
+                "Brief que alinha as 300 histórias engraçadas aos verbos, fases e fontes pedagógicas.",
+            ),
+        )
+        self._corgly_strategy_buttons: list[QPushButton] = []
+        for label, relative_path, description in strategy_specs:
+            if not (corgly_root / relative_path).is_file():
+                continue
+            full_path = f"corgly-classes/{relative_path}"
+            testid_suffix = re.sub(
+                r"[^a-z0-9]+", "-", relative_path.casefold()
+            ).strip("-")
+            btn = self._make_corgly_path_button(
+                label=label,
+                path=full_path,
+                testid=f"output-btn-corgly-strategy-{testid_suffix}",
+                description=description,
+            )
+            strategy_flow.addWidget(btn)
+            self._corgly_strategy_buttons.append(btn)
+        tabs.addTab(strategy_page, "strategy")
+
+        rules_page = QWidget()
+        rules_page.setProperty("testid", "output-toolbar-corgly-subtab-rules")
+        rules_flow = ResponsiveButtonFlowLayout(
+            rules_page, spacing=4, v_spacing=1, max_lines=None
+        )
+        rules_flow.setContentsMargins(0, 2, 0, 2)
+        _enable_height_for_width(rules_page)
+        self._corgly_rule_buttons: list[QPushButton] = []
+        rules_root = corgly_root / "rules"
+        if rules_root.is_dir():
+            for rule_file in sorted(
+                (path for path in rules_root.iterdir() if path.is_file()),
+                key=lambda path: self._corgly_class_sort_key(path.name),
+            ):
+                relative_path = f"rules/{rule_file.name}"
+                label = rule_file.stem.replace("-", " ")
+                testid_suffix = re.sub(
+                    r"[^a-z0-9]+", "-", rule_file.name.casefold()
+                ).strip("-")
+                btn = self._make_corgly_path_button(
+                    label=label,
+                    path=f"corgly-classes/{relative_path}",
+                    testid=f"output-btn-corgly-rule-{testid_suffix}",
+                    description=self._corgly_file_description(rule_file),
+                )
+                rules_flow.addWidget(btn)
+                self._corgly_rule_buttons.append(btn)
+        tabs.addTab(rules_page, "rules")
+
+        self._corgly_subtabs = tabs
+        col_layout.addWidget(tabs)
+        self._flow_section_pages[_TOOLBAR_SECTION_CORGLY] = (column, column)
+        column.installEventFilter(self)
+        flow_host.installEventFilter(self)
+        strategy_page.installEventFilter(self)
+        rules_page.installEventFilter(self)
+        tabs.currentChanged.connect(lambda _index: self._sync_flow_section_height())
+        return column
 
     def _codex_terminal_available(self) -> bool:
         """True quando existe um widget canonico T3 com testid
@@ -3258,7 +3938,7 @@ class MainWindow(QMainWindow):
         radios de provider eliminados. O estado em si nao precisa mais ser
         espelhado — `_current_llm_provider()` le `queue-div-main-llm` sob
         demanda —, entao o que sobra aqui e o refresh do que e cache visual:
-        os tooltips dos botoes `output-mcp-action-*`.
+        os tooltips dos botoes `output-mcp-action-*` e o FlagsPanel (item 021).
         """
         del provider  # o valor canonico e relido do widget, nunca do signal
         for btn in getattr(self, "_mcp_action_buttons", []) or []:
@@ -3268,6 +3948,41 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 # widget ja destruido em rebuild: nada a atualizar
                 continue
+        # Item 021: atualizar FlagsPanel (C-57 enabled/disabled por Main).
+        flags_panel = getattr(self, "_llm_config_flags_panel", None)
+        if flags_panel is not None:
+            try:
+                flags_panel.set_main_llm(self._current_llm_provider())
+            except RuntimeError:
+                pass
+
+    # ── Filtro de personas da secao MCPs (item 023, C-16) ──────────────────── #
+
+    def _mcp_persona_filter_category(self) -> str:
+        """Categoria selecionada na barra de filtro MCPs (ou 'All')."""
+        bar = getattr(self, "_mcp_persona_filter_bar", None)
+        if bar is None:
+            return PERSONA_FILTER_ALL_LABEL
+        idx = bar.currentIndex()
+        if 1 <= idx <= len(PERSONA_FILTER_CATEGORIES):
+            return PERSONA_FILTER_CATEGORIES[idx - 1]
+        return PERSONA_FILTER_ALL_LABEL
+
+    def _apply_mcp_persona_filter(self) -> None:
+        """Mostra/oculta checkboxes de persona MCPs por categoria.
+
+        'All' mostra todos. Espelha ``_apply_persona_filter`` do
+        CommandQueueWidget para a secao MCPs.
+        """
+        category = self._mcp_persona_filter_category()
+        show_all = category == PERSONA_FILTER_ALL_LABEL
+        for chk in getattr(self, "_mcp_persona_checkboxes", []):
+            cat = chk.property("persona_category")
+            chk.setVisible(show_all or cat == category)
+
+    def _on_mcp_personas_filter_changed(self, _index: int) -> None:
+        """Slot da barra de filtro MCPs: re-filtra as checkboxes."""
+        self._apply_mcp_persona_filter()
 
     def _get_brainstorm_runtime_provider(self) -> str:
         """Getter canonico do provider runtime dos botoes de brainstorm (T7).
@@ -4489,7 +5204,14 @@ class MainWindow(QMainWindow):
         "plan-vs-loop-coverage": "Review",
         "create-agent": "Build",
         "analista-trajeto-delegador": "Plan",
+        "estrategista-delegador": "Build",
+        "systemforge-db-update": "commit",
+        "systemforge-hostinger-deploy": "commit",
         "generated-command-list-comparison-whit-rules": "Review",
+        "only-commit": "commit",
+        "only-push": "commit",
+        "full-deploy": "commit",
+        "commit-push": "commit",
     }
 
     @staticmethod
@@ -4620,6 +5342,10 @@ class MainWindow(QMainWindow):
     # pela engrenagem; o basename e estavel.
     _PROMPT_CONTEXT_RESOLVERS: dict[str, str] = {
         "plan-vs-loop-coverage.md": "_prompt_context_plan_vs_loop_coverage",
+        "only-commit.md": "_prompt_context_commit_project_json",
+        "only-push.md": "_prompt_context_commit_project_json",
+        "full-deploy.md": "_prompt_context_commit_project_json",
+        "commit-push.md": "_prompt_context_commit_project_json",
     }
 
     def _prompt_context_plan_vs_loop_coverage(self) -> str | None:
@@ -4706,6 +5432,37 @@ class MainWindow(QMainWindow):
             f"metrics_loop_pill_json={loop_config_path}; "
             f"brainstorm_md_picker_row={plan_md}"
         )
+
+    def _prompt_context_commit_project_json(self) -> str | None:
+        """Contexto runtime para os quatro botões de commit.
+
+        Devolve `project_json=<path>` quando o metrics-project-pill está
+        carregado e evita bloquear o clique se não houver config.
+        """
+        from workflow_app.config.app_state import app_state
+
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit(
+                "Sem project.json ativo: prompt enviado sem project_json. "
+                "Identifique o repositório alvo pelo contexto da conversa.",
+                "info",
+            )
+            return ""
+        config_path = (app_state.config.config_path or "").strip()
+        if not config_path:
+            signal_bus.toast_requested.emit(
+                "Nenhum path de project.json encontrado no contexto. Prompt enviado sem project_json; identifique o repositório pelo contexto da conversa.",
+                "warning",
+            )
+            return ""
+        _json_path = Path(config_path).expanduser()
+        if not _json_path.is_file():
+            signal_bus.toast_requested.emit(
+                f"Project_json não encontrado: {_json_path}. Prompt enviado sem project_json; identifique o repositório pelo contexto.",
+                "warning",
+            )
+            return ""
+        return f"project_json={_json_path}"
 
     def _on_prompt_btn_clicked(self, idx: int) -> None:
         """Handler dos botoes da sub-aba prompts.
@@ -5212,6 +5969,43 @@ class MainWindow(QMainWindow):
         )
         return TerminalRouteSnapshot(t1=t1, t2=t2, t3=t3, notes_t1=n1)
 
+    def _emit_terminal_route_snapshot(self) -> None:
+        """Capture current route checkboxes and emit terminal_route_updated.
+
+        Item 024: connected to T1/T2/T3 checkbox ``toggled`` signals so
+        MetricsBar always has a fresh snapshot cached for route-aware
+        instance-group dispatch.
+        """
+        snapshot = self._capture_terminal_route_snapshot()
+        signal_bus.terminal_route_updated.emit(snapshot)
+
+    def _on_command_dispatched_route_aware(
+        self, command: str, snapshot: object
+    ) -> None:
+        """Route-aware terminal injection for instance-group (item 024).
+
+        Receives the command and a TerminalRouteSnapshot. Sends the command
+        + Enter to each terminal targeted by the snapshot. Falls back to
+        interactive (T1) when no route is marked.
+        """
+        snap = snapshot
+        t1 = getattr(snap, "t1", True)
+        t2 = getattr(snap, "t2", False)
+        t3 = getattr(snap, "t3", False)
+        sent = False
+        if t1:
+            signal_bus.run_command_in_terminal.emit(command)
+            sent = True
+        if t2:
+            signal_bus.run_command_in_workspace_terminal.emit(command)
+            sent = True
+        if t3:
+            self._xterm_inject_text(command, with_enter=True)
+            sent = True
+        if not sent:
+            # Fallback: interactive (historical default).
+            signal_bus.run_command_in_terminal.emit(command)
+
     def _publish_to_terminal_report(
         self,
         text: str,
@@ -5355,84 +6149,154 @@ class MainWindow(QMainWindow):
         snapshot = self._capture_terminal_route_snapshot()
         self._publish_to_terminal_report(text, snapshot)
 
-    def _publish_insertion_llm_aware(self, text: str) -> bool:
-        """Publica uma insercao LLM-aware: renderiza o payload para o LLM de
-        destino ANTES de colar (paste/no-Enter), reusando o renderer puro
-        `CommandQueueWidget.render_for_llm`. Separa renderizacao (no widget da
-        fila) de transporte (aqui), sem tocar na fila.
+    def _publish_insertion_llm_aware_report(
+        self, text: str
+    ) -> HeterogeneousInsertionReport:
+        """Render all requested variants first, then publish best-effort.
 
-        Contrato (blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md
-        §5.1/§8.2/§9.3/§10):
-        - payload neutro (path, texto livre, `/clear`) -> delega ao
-          `_publish_to_terminal` (passthrough byte-identico ao legado);
-        - payload LLM-especifico (slash-command/custom-prompt directive, exceto
-          `/clear`) -> corte Phase-1: so T1 (+ Notes T1). Se T2/T3 tambem marcados,
-          aborta com toast (fan-out heterogeneo nao suportado neste MVP, §9.3).
-          Renderiza para o Main LLM do T1 e cola sem Enter; em `abort_reason`,
-          toast e nada publicado (Zero Silencio).
-
-        NUNCA chama `_on_run_command`, `_dispatch_*`, marca item de fila, usa
-        `run_command_in_*` ou prefixa `WF_CHANNEL_OVERRIDE=` (§8.2/§11.1).
-        Retorna True quando publicou (ou copiou via Notes), False em abort/no-op.
+        T1 uses Main LLM/interactive, T2 uses Kimi/workspace and T3 uses
+        Codex/workspace_xterm. No branch sends Enter or falls back to another
+        route. A render failure is atomic; a sink failure is isolated.
         """
+        snapshot = self._capture_terminal_route_snapshot()
+        requested = snapshot.requested_destinations()
+        if not requested:
+            return HeterogeneousInsertionReport()
+
         cq = self._command_queue
         head = cq._command_head(text)
         is_llm_specific = head.startswith("/") and head != "/clear"
         if not is_llm_specific:
-            # path / texto livre / /clear -> comportamento legado (passthrough).
-            self._publish_to_terminal(text)
-            return True
-
-        t1 = bool(self._chk_route_t1.isChecked()) if hasattr(self, "_chk_route_t1") else True
-        t2 = bool(self._chk_route_t2.isChecked()) if hasattr(self, "_chk_route_t2") else False
-        t3 = bool(self._chk_route_t3.isChecked()) if hasattr(self, "_chk_route_t3") else False
-        n1 = bool(self._chk_notes_t1.isChecked()) if hasattr(self, "_chk_notes_t1") else False
-        if not (t1 or t2 or t3):
-            return False  # nenhum destino -> no-op (igual _publish_to_terminal)
-
-        # A guarda "Notes multiplo" (D6 do 06-15) foi removida em
-        # 07-27-workflow-app-header-toggles-llm-unico (I1.3): com o checkbox
-        # `terminal-notes-t2` eliminado, `t1 and t2 and n1 and n2` era
-        # inalcancavel. O caso T2 marcado continua barrado pela guarda de
-        # fan-out logo abaixo, com toast proprio (Zero Silencio preservado).
-
-        # Guarda Phase-1 (§9.3): fan-out heterogeneo (T2/T3) ainda nao suportado.
-        if t2 or t3:
-            signal_bus.toast_requested.emit(
-                "Fan-out heterogeneo (T2/T3) ainda nao suportado para payload "
-                "LLM-especifico — deixe apenas T1 marcado.", "warning",
+            generic = self._publish_to_terminal_report(text, snapshot)
+            return HeterogeneousInsertionReport(
+                requested=generic.requested,
+                rendered=tuple((route, text) for route in generic.requested),
+                accepted=generic.accepted,
+                failed=generic.failed,
+                notes_copied=generic.notes_copied,
+                errors=generic.errors,
             )
-            return False
 
-        # T1 unico: renderiza para o Main LLM efetivo do T1.
-        llm = cq.current_main_llm()
-        rendered = cq.render_for_llm(
-            text, llm, listener_channel="interactive", mode="insert",
-        )
-        if rendered.abort_reason or rendered.text is None:
+        route_specs: list[tuple[str, str, str]] = []
+        if snapshot.t1:
+            route_specs.append(("T1", cq.current_main_llm(), "interactive"))
+        if snapshot.t2:
+            route_specs.append(("T2", "kimi", "workspace"))
+        if snapshot.t3:
+            route_specs.append(("T3", "codex", "workspace_xterm"))
+
+        payloads: dict[str, str] = {}
+        render_errors: list[str] = []
+        for route, llm, channel in route_specs:
+            rendered = cq.render_for_llm(
+                text, llm, listener_channel=channel, mode="insert"
+            )
+            if rendered.abort_reason or rendered.text is None:
+                render_errors.append(
+                    f"{route}: {rendered.abort_reason or 'nada a publicar'}"
+                )
+            else:
+                payloads[route] = rendered.text
+
+        if render_errors:
             signal_bus.toast_requested.emit(
-                "Insercao LLM-aware abortada: "
-                f"{rendered.abort_reason or 'nada a publicar'}.",
+                "Insercao LLM-aware abortada antes do fan-out: "
+                + "; ".join(render_errors),
                 "warning",
             )
-            return False
-
-        payload = rendered.text
-        if t1 and n1:
-            # Notes T1 (D6): clipboard recebe o texto RENDERIZADO para o destino.
-            QApplication.clipboard().setText(payload)
-            signal_bus.toast_requested.emit(
-                "Notas (T1): texto renderizado copiado para clipboard.", "info",
+            return HeterogeneousInsertionReport(
+                requested=requested,
+                rendered=tuple(payloads.items()),
+                failed=requested,
+                errors=tuple(render_errors),
             )
-            return True
-        # Cola no T1 SEM Enter (semantica de insercao), foca e da feedback.
-        QApplication.clipboard().setText(payload)
-        signal_bus.paste_text_in_terminal.emit(payload)
-        signal_bus.focus_interactive_terminal.emit()
+
+        accepted: list[str] = []
+        failed: list[str] = []
+        notes_copied: list[str] = []
+        errors: list[str] = []
+
+        def _failed(route: str, reason: str) -> None:
+            failed.append(route)
+            errors.append(f"{route}: {reason}")
+
+        if snapshot.t1:
+            payload = payloads["T1"]
+            if snapshot.notes_t1:
+                try:
+                    clipboard = QApplication.clipboard()
+                    clipboard.setText(payload)
+                    if clipboard.text() != payload:
+                        _failed("T1", "clipboard_verify_failed")
+                    else:
+                        accepted.append("T1")
+                        notes_copied.append("T1")
+                except Exception:  # noqa: BLE001
+                    logger.exception("insertion_t1_notes_failed")
+                    _failed("T1", "clipboard_exception")
+            else:
+                try:
+                    self._paste_text_to_t1(payload)
+                    accepted.append("T1")
+                except Exception:  # noqa: BLE001
+                    logger.exception("insertion_t1_publish_failed")
+                    _failed("T1", "sink_exception")
+
+        if snapshot.t2:
+            try:
+                self._paste_text_to_t2(payloads["T2"])
+                accepted.append("T2")
+            except Exception:  # noqa: BLE001
+                logger.exception("insertion_t2_publish_failed")
+                _failed("T2", "sink_exception")
+
+        if snapshot.t3:
+            try:
+                if self._xterm_inject_text(payloads["T3"], with_enter=False):
+                    accepted.append("T3")
+                else:
+                    _failed("T3", "sink_unavailable")
+            except Exception:  # noqa: BLE001
+                logger.exception("insertion_t3_publish_failed")
+                _failed("T3", "sink_exception")
+
+        try:
+            if "T1" in accepted and not snapshot.notes_t1:
+                signal_bus.focus_interactive_terminal.emit()
+            elif "T2" in accepted:
+                terminal = getattr(getattr(self, "_workspace_panel", None), "_terminal", None)
+                if terminal is not None:
+                    terminal.setFocus()
+            elif "T3" in accepted:
+                terminal = getattr(
+                    getattr(self, "_workspace_panel_xterm", None), "_terminal", None
+                )
+                if terminal is not None:
+                    terminal.setFocus()
+        except Exception:  # noqa: BLE001
+            logger.exception("insertion_focus_failed")
+            errors.append("focus_exception")
+
+        level = "warning" if failed else "info"
+        summary = ", ".join(accepted) or "nenhuma rota"
+        suffix = f"; falhas: {', '.join(failed)}" if failed else ""
         signal_bus.toast_requested.emit(
-            f"Insercao LLM-aware ({llm}) publicada no T1.", "info",
+            f"Insercao LLM-aware publicada em {summary}{suffix} (sem Enter).",
+            level,
         )
-        return True
+        return HeterogeneousInsertionReport(
+            requested=requested,
+            rendered=tuple((route, payloads[route]) for route in requested),
+            accepted=tuple(accepted),
+            failed=tuple(failed),
+            notes_copied=tuple(notes_copied),
+            errors=tuple(errors),
+        )
+
+    def _publish_insertion_llm_aware(self, text: str) -> bool:
+        """Insertion-only public API retained for button handlers."""
+        report = self._publish_insertion_llm_aware_report(text)
+        return bool(report.accepted or report.notes_copied)
 
     def _populate_header_actions(self) -> list[QPushButton]:
         """Constroi botoes da actions-tab: JSON, WS, MCPs Claude-side (laranja),
@@ -5722,6 +6586,18 @@ class MainWindow(QMainWindow):
         )
         workflow_app_btn.clicked.connect(_paste_path("ai-forge/workflow-app"))
 
+        llm_flags_rules_btn: QPushButton | None = None
+        if llm_flags_rules_v2_enabled():
+            llm_flags_rules_btn = _make_btn(
+                "Llm-flags-rules", "queue-btn-llm-flags-rules-path",
+                "#0EA5E9", "#0284C7", "#0369A1",
+                "Cola o path ai-forge/rules/llm-flags.md no terminal\n"
+                "(contrato implementado do eixo-flag, distinto de Main e worker)",
+            )
+            llm_flags_rules_btn.clicked.connect(
+                _paste_path("ai-forge/rules/llm-flags.md")
+            )
+
         ws_rules_btn = _make_btn(
             "ws-rules", "queue-btn-ws-rules-path",
             "#14B8A6", "#0D9488", "#0F766E",
@@ -5981,8 +6857,8 @@ class MainWindow(QMainWindow):
         )
         add_rules_btn.clicked.connect(_paste_add_rules)
 
-        return [
-            workflow_app_btn, ws_rules_btn, dcp_rules_btn, meta_feeding_rules_btn,
+        rules_buttons = [
+            ws_rules_btn, dcp_rules_btn, meta_feeding_rules_btn,
             cmd_rules_btn, terminal_rules_btn, listeners_rules_btn, cascade_bug_btn,
             indicators_rules_btn, prompt_rules_btn,
             build_render_rules_btn, matrix_spec_rules_btn, llm_routing_rules_btn,
@@ -5993,6 +6869,9 @@ class MainWindow(QMainWindow):
             listener_vermelho_btn,
             add_rules_btn,
         ]
+        if llm_flags_rules_btn is not None:
+            rules_buttons.insert(0, llm_flags_rules_btn)
+        return [workflow_app_btn, *rules_buttons]
 
     # ── PERSONAS sub-aba (ai-forge/MCP/agents/) ───────────────────────────── #
     # Diretorio canonico do registry de personas MCP (INDEX.md). Path
@@ -6062,6 +6941,7 @@ class MainWindow(QMainWindow):
         "search-in-rules": "search-in",
         "search-out-rules": "search-out",
         "search-forge-rules": "search-forge",
+        "search-prod": "search-prod",
         "landing-page-conversion-rules": "LP Conversion",
         "code-debugger": "Debugger",
         "loop-preparer-rules": "Loop Preparer",
@@ -6078,6 +6958,28 @@ class MainWindow(QMainWindow):
         "questioner-rules": "Questionador",
         "ux-ui-specialist": "UX/UI",
         "performance-engineer": "Performance",
+    }
+
+    # Item 023: categorias das 16 personas hardcoded da secao MCPs.
+    # Chave = sufixo do testid (ex: "search-in" de "output-mcp-persona-search-in").
+    # Valores DEVEM pertencer a PERSONA_FILTER_CATEGORIES.
+    _MCP_PERSONA_CATEGORIES: dict[str, str] = {
+        "search-in": "Research",
+        "search-out": "Research",
+        "search-forge": "Research",
+        "controversial": "Review",
+        "hardening": "Review",
+        "criar-task": "Build",
+        "revisar-task": "Review",
+        "executor": "Build",
+        "rev-exec": "Review",
+        "revisar-qa": "Review",
+        "code-debugger": "Review",
+        "delegador": "Plan",
+        "scaffolds-blueprints-updater": "Build",
+        "questioner": "Review",
+        "ux-ui": "Design",
+        "performance-engineer": "specialists",
     }
 
     # Atribuicao canonica persona -> categoria de filtro da sub-aba 'Agentes'.
@@ -6103,11 +7005,13 @@ class MainWindow(QMainWindow):
         "layout-architect-rules": "Design",
         "landing-page-conversion-rules": "Design",
         "seo-specialist": "Design",
+        "art-creator": "Design",
         # Build — criacao/execucao de tasks e slash-commands
         "criar-task-rules": "Build",
         "executar-task-rules": "Build",
         "executor-de-slash-commands-rules": "Build",
         "scaffolds-blueprints-updater": "Build",
+        "writer": "Build",
         # Review — revisao, QA, hardening, debug, critica adversarial
         "revisar-task-rules": "Review",
         "revisar-execucao-rules": "Review",
@@ -6117,6 +7021,7 @@ class MainWindow(QMainWindow):
         "code-debugger": "Review",
         "specific-reviewer": "Review",
         "questioner-rules": "Review",
+        "tester": "Review",
         # specialists — especialistas de dominio acionados sob demanda
         "billing-scpecialist": "specialists",
         "auth-security-specialist": "specialists",
@@ -7740,6 +8645,10 @@ class MainWindow(QMainWindow):
         signal_bus.focus_interactive_terminal.connect(self._on_focus_interactive_terminal)
         signal_bus.run_command_in_workspace_xterm.connect(
             lambda text: self._xterm_inject_text(text, with_enter=True)
+        )
+        # Item 024: route-aware dispatch from instance-group (KS-01).
+        signal_bus.run_command_route_aware.connect(
+            self._on_command_dispatched_route_aware
         )
         signal_bus.pipeline_completed.connect(self._refresh_history_list)
         signal_bus.permission_request_received.connect(self._on_permission_request)

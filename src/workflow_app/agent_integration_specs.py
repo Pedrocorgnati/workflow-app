@@ -332,13 +332,57 @@ class BrainstormAgentSpec:
 
 # ── Registry literal (fonte unica; editado por /mcp:create-agent) ────────────
 #
-# Vazio ate um agente real pedir integracao opcional. Acrescentar entradas AQUI
-# e a unica forma suportada de registrar um botao suplementar: qualquer lista
-# paralela em main_window.py e duplicacao proibida.
+# Acrescentar entradas AQUI e a unica forma suportada de registrar um botao
+# suplementar: qualquer lista paralela em main_window.py e duplicacao proibida.
 
-_MCP_AGENT_SPECS: Final[tuple[McpAgentSpec, ...]] = ()
+_MCP_AGENT_SPECS: Final[tuple[McpAgentSpec, ...]] = (
+    McpAgentSpec(
+        slug="writer",
+        label="Writer",
+        directive=(
+            "no papel de Writer, seguindo as regras em "
+            "ai-forge/MCP/agents/writer.md"
+        ),
+    ),
+    McpAgentSpec(
+        slug="tester",
+        label="Tester",
+        directive=(
+            "no papel de Tester, seguindo as regras em "
+            "ai-forge/MCP/agents/tester.md"
+        ),
+    ),
+    McpAgentSpec(
+        slug="art-creator",
+        label="Art Creator",
+        directive=(
+            "no papel de Art Creator, seguindo as regras em "
+            "ai-forge/MCP/agents/art-creator.md"
+        ),
+    ),
+    McpAgentSpec(
+        slug="search-prod",
+        label="Search-prod",
+        directive=(
+            "no papel de Investigador de Ambiente de Producao, seguindo as "
+            "regras em ai-forge/MCP/agents/search-prod.md"
+        ),
+    ),
+)
 
-_BRAINSTORM_AGENT_SPECS: Final[tuple[BrainstormAgentSpec, ...]] = ()
+_BRAINSTORM_AGENT_SPECS: Final[tuple[BrainstormAgentSpec, ...]] = (
+    BrainstormAgentSpec(
+        slug="search-prod",
+        label="Search-prod",
+        button_type="type-selector-radio-input",
+        action="Otimizar",
+        agent_name="investigador de ambiente de producao",
+        agent_path="ai-forge/MCP/agents/search-prod.md",
+        prompt_path="blacksmith/brainstorm-mcp/search-prod.md",
+        target_terminal=None,
+        target_path_edit_inplace=True,
+    ),
+)
 
 
 # ── Validacao de unicidade (pura) ────────────────────────────────────────────

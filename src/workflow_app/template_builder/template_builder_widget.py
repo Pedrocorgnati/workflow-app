@@ -91,8 +91,12 @@ COMMAND_CATALOG_DCP: list[tuple[str, list[tuple[str, ModelName, InteractionType]
     ("D - F8 micro", [
         ("/clear",                      _S, _A),
         ("/model sonnet",               _H, _A),
+        # Cadeia canonica de credenciais (nao reordenar).
         ("/credentials:env-creation",   _H, _I),
-        ("/create-test-user",           _H, _I),
+        ("/credentials:create",         _H, _I),
+        ("/credentials:execute --mode write", _H, _I),
+        ("/credentials:verify",         _H, _A),
+        ("/credentials:test-user",      _H, _I),
         ("/seed-data-create",           _S, _I),
         ("/dev-bootstrap-create",       _H, _I),
         ("/pending-actions-mcp",        _S, _I),
@@ -241,9 +245,12 @@ COMMAND_CATALOG: list[tuple[str, list[tuple[str, ModelName, InteractionType]]]] 
     ]),
     ("F8 — Complemento", [
         ("/credentials:env-creation", _H, _I),
+        ("/credentials:create",     _H, _I),
+        ("/credentials:execute --mode write", _H, _I),
+        ("/credentials:verify",     _H, _A),
         ("/docker-create",          _S, _A),
         ("/seed-data-create",       _S, _A),
-        ("/create-test-user",       _H, _A),
+        ("/credentials:test-user",  _H, _A),
     ]),
     ("F9 — QA", [
         ("/qa:prep",                _S, _I),

@@ -71,6 +71,37 @@ def _prompt_md_basenames() -> set[str]:
     }
 
 
+def test_systemforge_prompts_delegate_to_exact_canonical_invocations():
+    from workflow_app.main_window import MainWindow
+
+    prompts_dir = (
+        MainWindow._systemforge_root()
+        / "ai-forge/custom-prompts/prompts-subtab"
+    )
+    expected = {
+        "systemforge-db-update.md": (
+            "title: SF DB",
+            "/hostinger:update-bd systemforge-dashboard",
+            ".claude/commands/hostinger/update-bd.md",
+        ),
+        "systemforge-hostinger-deploy.md": (
+            "title: SF Deploy",
+            "/commit:nextjs-hostinger systemforge-dashboard",
+            ".claude/commands/commit/nextjs-hostinger.md",
+        ),
+    }
+    for filename, required_tokens in expected.items():
+        prompt_path = prompts_dir / filename
+        text = prompt_path.read_text(encoding="utf-8")
+        assert len(prompt_path.stem) <= 32
+        assert "category: commit" in text
+        assert ".claude/project.json" in text
+        assert "pending-actions/systemforge-dashboard.md" in text
+        assert text.count("Pare quando ") == 1
+        for token in required_tokens:
+            assert token in text
+
+
 def test_prompts_subtab_renders_all_md_regardless_of_cwd(qtbot, tmp_path):
     """Lancado de um cwd != raiz do repo, a sub-aba ainda cria um botao por
     .md real (reconciliacao de boot cwd-independente)."""
@@ -143,6 +174,7 @@ def test_prompts_filter_bar_has_all_first_then_categories(qtbot):
     labels = [bar.tabText(i) for i in range(bar.count())]
     assert labels[0] == PROMPT_FILTER_ALL_LABEL == "All"
     assert tuple(labels[1:]) == PROMPT_FILTER_CATEGORIES
+    assert labels[-1] == "commit"
 
 
 def test_every_prompt_button_has_valid_category_and_tooltip(qtbot):
@@ -179,6 +211,138 @@ def test_create_agent_prompt_button_is_registered(qtbot):
         and entry["path"] == "ai-forge/custom-prompts/prompts-subtab/create-agent.md"
         for entry in win._prompt_entries
     )
+
+
+def test_estrategista_delegador_prompt_button_is_registered(qtbot):
+    win = _new_window(qtbot)
+
+    btn = _button_by_testid(win, "output-btn-prompt-delegador-mcp")
+
+    assert btn.property("prompt_category") == "Build"
+    description = btn.property("prompt_description")
+    for token in ("Codex", "Kimi", "Qwen"):
+        assert token in description, description
+    assert any(
+        entry["path"]
+        == "ai-forge/custom-prompts/prompts-subtab/estrategista-delegador.md"
+        for entry in win._prompt_entries
+    )
+
+
+def test_estrategista_delegador_label_survives_old_qsettings(qtbot):
+    """QSettings antigo sem a entry nova: a reconciliacao de boot descobre o .md
+    e respeita o `title` do frontmatter (label 'Delegador MCP', nao o
+    Title-Case do nome do arquivo)."""
+    QSettings("systemForge", "workflow-app").setValue(
+        "prompts_row/entries",
+        json.dumps([
+            {
+                "label": "MCP-test",
+                "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md",
+                "description": "legacy settings without estrategista-delegador",
+            }
+        ]),
+    )
+
+    win = _new_window(qtbot)
+
+    assert any(
+        entry["label"] == "Delegador MCP"
+        and entry["path"]
+        == "ai-forge/custom-prompts/prompts-subtab/estrategista-delegador.md"
+        for entry in win._prompt_entries
+    )
+
+
+def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot):
+    win = _new_window(qtbot)
+    try:
+        expected = {
+            "output-btn-prompt-sf-db": (
+                "SF DB",
+                "ai-forge/custom-prompts/prompts-subtab/systemforge-db-update.md",
+            ),
+            "output-btn-prompt-sf-deploy": (
+                "SF Deploy",
+                "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
+            ),
+            "output-btn-prompt-only-commit": (
+                "only commit",
+                "ai-forge/custom-prompts/prompts-subtab/only-commit.md",
+            ),
+            "output-btn-prompt-only-push": (
+                "only push",
+                "ai-forge/custom-prompts/prompts-subtab/only-push.md",
+            ),
+            "output-btn-prompt-full-deploy": (
+                "full deploy",
+                "ai-forge/custom-prompts/prompts-subtab/full-deploy.md",
+            ),
+            "output-btn-prompt-commit-push": (
+                "commit & push",
+                "ai-forge/custom-prompts/prompts-subtab/commit-push.md",
+            ),
+        }
+        for testid, (label, path) in expected.items():
+            btn = _button_by_testid(win, testid)
+            assert btn.text() == label
+            assert btn.property("prompt_category") == "commit"
+            assert btn.toolTip().strip()
+            assert any(
+                entry["label"] == label and entry["path"] == path
+                for entry in win._prompt_entries
+            )
+
+        _set_prompt_filter(win, "commit")
+        assert not _button_by_testid(win, "output-btn-prompt-sf-db").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-sf-deploy").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-only-commit").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-only-push").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-full-deploy").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-commit-push").isHidden()
+        assert _button_by_testid(win, "output-btn-prompt-mcp-test").isHidden()
+    finally:
+        from workflow_app.command_queue.command_queue_widget import PROMPT_FILTER_ALL_LABEL
+
+        _set_prompt_filter(win, PROMPT_FILTER_ALL_LABEL)
+        QSettings("systemForge", "workflow-app").setValue("prompts/active_filter", 0)
+
+
+def test_systemforge_commit_labels_survive_old_qsettings(qtbot):
+    QSettings("systemForge", "workflow-app").setValue(
+        "prompts_row/entries",
+        json.dumps([
+            {
+                "label": "MCP-test",
+                "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md",
+                "description": "legacy settings without systemforge prompts",
+            }
+        ]),
+    )
+
+    win = _new_window(qtbot)
+
+    labels_by_path = {
+        entry["path"]: entry["label"] for entry in win._prompt_entries
+    }
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/systemforge-db-update.md"
+    ] == "SF DB"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md"
+    ] == "SF Deploy"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/only-commit.md"
+    ] == "only commit"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/only-push.md"
+    ] == "only push"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/full-deploy.md"
+    ] == "full deploy"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/commit-push.md"
+    ] == "commit & push"
 
 
 def test_create_agent_prompt_keeps_frontmatter_label_when_qsettings_is_old(qtbot):

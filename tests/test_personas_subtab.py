@@ -90,6 +90,9 @@ def test_persona_buttons_use_user_friendly_labels(qtbot):
         "queue-btn-persona-questioner-rules": "Questionador",
         "queue-btn-persona-ux-ui-specialist": "UX/UI",
         "queue-btn-persona-performance-engineer": "Performance",
+        "queue-btn-persona-writer": "Writer",
+        "queue-btn-persona-tester": "Tester",
+        "queue-btn-persona-art-creator": "Art Creator",
     }
     for testid, label in expected.items():
         btn = _button_by_testid(win, testid)
@@ -531,6 +534,9 @@ def test_persona_category_known_mappings(qtbot):
         "queue-btn-persona-questioner-rules": "Review",
         "queue-btn-persona-ux-ui-specialist": "Design",
         "queue-btn-persona-performance-engineer": "specialists",
+        "queue-btn-persona-writer": "Build",
+        "queue-btn-persona-tester": "Review",
+        "queue-btn-persona-art-creator": "Design",
     }
     for tid, cat in expected.items():
         btn = _button_by_testid(win, tid)
@@ -671,3 +677,86 @@ def test_new_persona_via_update_respects_active_filter(qtbot, tmp_path, monkeypa
         assert review_btn.isHidden()
     finally:
         _set_persona_filter(win, PERSONA_FILTER_ALL_LABEL)
+
+
+# ---------------------------------------------------------------------------
+# Item 002 do loop 08-11-llm-config-multillm-expansion (ST006).
+#
+# A expansao multi-LLM acrescentou `qwen` e `grok` ao enum de provider_support
+# do perfil `agent` em ai-forge/MCP/agents/FRONTMATTER-SCHEMA-v1.0.0.yaml. Nao
+# existe parser de `items_enum` em Python neste repo (finding A002-1 da task:
+# `grep -rn "items_enum" --include='*.py'` nao retorna nada), entao nao ha
+# validador a invocar e o teste le o schema diretamente como fonte da verdade.
+#
+# A segunda assercao trava a paridade descrita em A002-2: o texto do prompt de
+# /mcp:create-agent (create_agent_prompt.py) enumera o mesmo conjunto de
+# providers e e a segunda fonte da verdade de facto; deixar as duas divergirem
+# faz o operador gravar persona com provider que o schema recusa, ou o
+# contrario.
+# ---------------------------------------------------------------------------
+
+_AI_FORGE_ROOT = Path(__file__).resolve().parents[2]
+_FRONTMATTER_SCHEMA_PATH = (
+    _AI_FORGE_ROOT / "MCP" / "agents" / "FRONTMATTER-SCHEMA-v1.0.0.yaml"
+)
+
+#: Providers que ja existiam antes da expansao. Personas gravadas com qualquer
+#: um deles precisam continuar validas (nao-quebra de persona existente).
+_LEGACY_PROVIDERS = ["claude", "codex", "kimi"]
+#: Conjunto canonico pos-expansao, na ordem em que o schema o declara.
+_EXPANDED_PROVIDERS = ["claude", "codex", "kimi", "qwen", "grok"]
+
+
+def _agent_provider_support_items_enum() -> list[str]:
+    """Le o `items_enum` de provider_support do perfil `agent` no schema."""
+    import yaml
+
+    raw = _FRONTMATTER_SCHEMA_PATH.read_text(encoding="utf-8")
+    schema = yaml.safe_load(raw)
+    field = schema["profiles"]["agent"]["fields"]["provider_support"]
+    assert field["type"] == "array", f"provider_support deixou de ser array: {field}"
+    items_enum = field["items_enum"]
+    assert isinstance(items_enum, list), f"items_enum nao e lista: {items_enum!r}"
+    return items_enum
+
+
+def _providers_enumerated_in_create_agent_prompt() -> list[str]:
+    """Extrai a lista de providers escrita em prosa no prompt de create-agent."""
+    from workflow_app.create_agent_prompt import _PROMPT_TEMPLATE
+
+    normalized = " ".join(_PROMPT_TEMPLATE.split())
+    marker = "Grave provider_support como array nao vazio composto apenas por "
+    assert marker in normalized, (
+        "a frase de provider_support sumiu de create_agent_prompt.py; "
+        "a paridade com o schema deixou de ser verificavel"
+    )
+    start = normalized.index(marker) + len(marker)
+    end = normalized.index(".", start)
+    enumeration = normalized[start:end]
+    return [
+        token.strip()
+        for token in enumeration.replace(" e ", ", ").split(",")
+        if token.strip()
+    ]
+
+
+def test_provider_support_items_enum_covers_qwen_grok_and_keeps_legacy():
+    items_enum = _agent_provider_support_items_enum()
+
+    # Expansao: os cinco providers, exatamente, sem duplicata.
+    assert items_enum == _EXPANDED_PROVIDERS, (
+        f"items_enum de provider_support divergiu do canonico: {items_enum}"
+    )
+    # Nao-quebra: nenhuma persona ja gravada com provider legado fica invalida.
+    for provider in _LEGACY_PROVIDERS:
+        assert provider in items_enum, (
+            f"provider legado {provider} sumiu do enum; personas existentes "
+            "que o declaram passariam a ser invalidas"
+        )
+
+    # Paridade A002-2: o prompt de /mcp:create-agent enumera o mesmo conjunto.
+    prompt_providers = _providers_enumerated_in_create_agent_prompt()
+    assert prompt_providers == items_enum, (
+        "segunda fonte da verdade fora de sincronia: create_agent_prompt.py "
+        f"enumera {prompt_providers} e o schema declara {items_enum}"
+    )

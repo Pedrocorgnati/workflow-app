@@ -41,6 +41,9 @@ cache_dir = ".cache/.pytest_cache"
 # Hardening T9 §7 (criterio 10) do loop 05-21-implantation-tasklist-aba-brainstorm:
 # line + branch coverage combinado >=80% nos modulos do MCPPromptButton.
 addopts = "--cov=workflow_app.widgets.mcp_prompt_button --cov=workflow_app.widgets.mcp_prompt_actions --cov-branch --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "grok_live: testes de integracao Grok que exigem credencial real (item 025). BLOCKED sem GROK_API_KEY.",
+]
 
 [tool.hatch.envs.default.scripts]
 db-seed = "python3 scripts/seed.py"

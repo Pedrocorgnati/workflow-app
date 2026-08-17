@@ -1,0 +1,86 @@
+version: "1.0.0"
+fields:
+  - field: description
+    class: in-band-only
+    types: [str]
+    rationale: "D-35: descriptive metadata can travel in-band."
+  - field: model
+    class: native
+    types: [str]
+    rationale: "D-35: model requires a declared provider mapping."
+  - field: argument-hint
+    class: in-band-only
+    types: [str]
+    rationale: "D-35: argument guidance is descriptive."
+  - field: disable-model-invocation
+    class: adapter-enforced
+    types: [bool]
+    rationale: "D-35: invocation safety is fail-closed in the adapter."
+  - field: allowed-tools
+    class: adapter-enforced
+    types: [str, list]
+    rationale: "D-35: tool permissions are security-sensitive and fail-closed."
+  - field: context
+    class: unsupported
+    types: [str]
+    rationale: "D-35: non-Claude providers do not expose Claude fork context."
+  - field: agent
+    class: unsupported
+    types: [str]
+    rationale: "D-35: Claude subagent selection has no generic provider path."
+  - field: paths
+    class: unsupported
+    types: [str, list]
+    rationale: "D-35: Claude file auto-activation has no generic provider path."
+  - field: dcp_version
+    class: in-band-only
+    types: [str]
+    rationale: "D-35: contract version is descriptive at the provider boundary."
+  - field: effort
+    class: native
+    types: [str]
+    rationale: "D-35: effort requires a declared provider mapping."
+  - field: scope
+    class: in-band-only
+    types: [str]
+    rationale: "D-35: task scope travels as explicit prompt context."
+  - field: mode_support
+    class: adapter-enforced
+    types: [list]
+    rationale: "D-35: unsupported execution modes are rejected by the app."
+  - field: state_transition
+    class: adapter-enforced
+    types: [str, "null"]
+    rationale: "D-35: state transitions are fail-closed without exception."
+  - field: expected_state
+    class: adapter-enforced
+    types: [dict]
+    rationale: "D-35: state drift gates are enforced by the app."
+  - field: phase_hint
+    class: in-band-only
+    types: [str]
+    rationale: "D-35: phase hints are descriptive context."
+  - field: has_handoff_contract
+    class: in-band-only
+    types: [bool]
+    rationale: "D-35: handoff presence is descriptive at this boundary."
+  - field: phase
+    class: in-band-only
+    types: [str]
+    rationale: "D-35: workflow phase travels as prompt context."
+  - field: dcp_refs
+    class: in-band-only
+    types: [list]
+    rationale: "D-35: documentation references travel in-band."
+  - field: task_refs
+    class: in-band-only
+    types: [list]
+    rationale: "D-35: task references travel in-band."
+  - field: autocast_template_version
+    class: adapter-enforced
+    types: [str]
+    rationale: "D-35: autocast contract compatibility is checked by the app."
+  - field: autocast_asq_template_version
+    class: adapter-enforced
+    types: [str]
+    rationale: "D-35: autocast ASQ compatibility is checked by the app."

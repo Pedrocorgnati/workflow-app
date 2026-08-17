@@ -11,7 +11,55 @@ from types import SimpleNamespace
 
 import pytest
 
+from workflow_app.config.feature_flags import llm_config_v2_enabled
 from workflow_app.signal_bus import signal_bus
+
+# Item 023 do loop 08-11 troca a action row do setor MCP SOMENTE atras de
+# `SF_LLM_CONFIG_V2`: os tres botoes legados
+# `output-mcp-action-{main,parallel,dual}` (comando escolhido pelo Main LLM)
+# dao lugar aos grupos Thinking/Execution, com matriz FIXA por botao (TE-01).
+# Duas consequencias aqui:
+#   1. O que continua valendo nos dois lados — a rota do texto sai dos
+#      checkboxes T1/T2/T3, e a composicao anexa os prompts de persona — segue
+#      testado nos dois modos, ancorando no botao equivalente
+#      (`thinking-codex` publica exatamente o mesmo `/mcp:codex` que o
+#      `Main MCP` legado sob Main Claude).
+#   2. O que so existe no legado — Main Kimi virar `/skill:claude`, Main Codex
+#      injetar `Use skill-kimi...` no xterm — nao tem equivalente sob a flag e
+#      e pulado. Esse lado esta travado em `tests/test_llm_config_tab.py`, que
+#      roda os dois estados em subprocesso porque `feature_flags` e boot-frozen
+#      (resolve `os.environ` no import, sem hook de reset).
+_LLM_CONFIG_V2 = llm_config_v2_enabled()
+
+_MCP_ACTION_MAIN = (
+    "output-mcp-action-thinking-codex" if _LLM_CONFIG_V2 else "output-mcp-action-main"
+)
+_MCP_ACTION_LABELS = (
+    {
+        "output-mcp-action-thinking-claude": "Claude",
+        "output-mcp-action-thinking-codex": "Codex",
+        "output-mcp-action-thinking-kimi": "Kimi",
+        "output-mcp-action-execution-claude": "Claude",
+        "output-mcp-action-execution-codex": "Codex",
+        "output-mcp-action-execution-kimi": "Kimi",
+        "output-mcp-action-execution-grok": "Grok",
+        "output-mcp-action-execution-qwen": "Qwen",
+    }
+    if _LLM_CONFIG_V2
+    else {
+        "output-mcp-action-main": "Main MCP",
+        "output-mcp-action-parallel": "Parallel",
+        "output-mcp-action-dual": "Dual",
+    }
+)
+_skip_under_llm_config_v2 = pytest.mark.skipif(
+    _LLM_CONFIG_V2,
+    reason=(
+        "afirma a semantica legada (Main LLM escolhe o comando da acao MCP); "
+        "sob SF_LLM_CONFIG_V2 o comando e fixo por botao (item 023) e esse lado "
+        "e travado em tests/test_llm_config_tab.py"
+    ),
+)
 
 
 def _new_window(qtbot):
@@ -248,12 +296,9 @@ def test_mcp_toolbar_uses_main_llm_and_three_actions(qtbot):
     for testid, label in personas.items():
         assert _checkbox_by_testid(win, testid).text() == label
 
-    actions = {
-        "output-mcp-action-main": "Main MCP",
-        "output-mcp-action-parallel": "Parallel",
-        "output-mcp-action-dual": "Dual",
-    }
-    for testid, label in actions.items():
+    # A moldura da action row depende do kill-switch (item 023): tres botoes
+    # Main/Parallel/Dual no legado, oito pastilhas Thinking/Execution sob a flag.
+    for testid, label in _MCP_ACTION_LABELS.items():
         assert _button_by_testid(win, testid).text() == label
 
 
@@ -308,7 +353,7 @@ def test_mcp_toolbar_claude_main_command_routes_by_toggles_not_provider(qtbot):
     signal_bus.paste_text_in_workspace_terminal.connect(sent_t2.append)
     try:
         _set_main_llm(win, "claude")
-        _button_by_testid(win, "output-mcp-action-main").click()
+        _button_by_testid(win, _MCP_ACTION_MAIN).click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
         signal_bus.paste_text_in_workspace_terminal.disconnect(sent_t2.append)
@@ -329,7 +374,7 @@ def test_mcp_toolbar_provider_does_not_force_terminal_when_no_toggle(qtbot):
     signal_bus.paste_text_in_workspace_terminal.connect(sent_t2.append)
     try:
         _set_main_llm(win, "claude")
-        _button_by_testid(win, "output-mcp-action-main").click()
+        _button_by_testid(win, _MCP_ACTION_MAIN).click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
         signal_bus.paste_text_in_workspace_terminal.disconnect(sent_t2.append)
@@ -347,7 +392,7 @@ def test_mcp_toolbar_appends_selected_persona_prompt(qtbot):
     try:
         _set_main_llm(win, "claude")
         _checkbox_by_testid(win, "output-mcp-persona-controversial").setChecked(True)
-        _button_by_testid(win, "output-mcp-action-main").click()
+        _button_by_testid(win, _MCP_ACTION_MAIN).click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
 
@@ -367,7 +412,7 @@ def test_mcp_toolbar_joins_multiple_persona_prompts_in_ui_order(qtbot):
         _set_main_llm(win, "claude")
         _checkbox_by_testid(win, "output-mcp-persona-search-in").setChecked(True)
         _checkbox_by_testid(win, "output-mcp-persona-hardening").setChecked(True)
-        _button_by_testid(win, "output-mcp-action-main").click()
+        _button_by_testid(win, _MCP_ACTION_MAIN).click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
 
@@ -426,7 +471,7 @@ def test_mcp_toolbar_joins_old_and_fourth_row_personas_in_ui_order(qtbot):
         _checkbox_by_testid(
             win, "output-mcp-persona-performance-engineer"
         ).setChecked(True)
-        _button_by_testid(win, "output-mcp-action-main").click()
+        _button_by_testid(win, _MCP_ACTION_MAIN).click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
 
@@ -438,6 +483,7 @@ def test_mcp_toolbar_joins_old_and_fourth_row_personas_in_ui_order(qtbot):
     ]
 
 
+@_skip_under_llm_config_v2
 def test_mcp_toolbar_kimi_command_routes_by_toggle(qtbot):
     # Kimi seleciona o comando /skill:claude; o toggle T2 manda para T2.
     win = _new_window(qtbot)
@@ -449,7 +495,7 @@ def test_mcp_toolbar_kimi_command_routes_by_toggle(qtbot):
     signal_bus.paste_text_in_workspace_terminal.connect(sent_t2.append)
     try:
         _set_main_llm(win, "kimi")
-        _button_by_testid(win, "output-mcp-action-main").click()
+        _button_by_testid(win, _MCP_ACTION_MAIN).click()
     finally:
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
         signal_bus.paste_text_in_workspace_terminal.disconnect(sent_t2.append)
@@ -458,6 +504,7 @@ def test_mcp_toolbar_kimi_command_routes_by_toggle(qtbot):
     assert sent_t2 == ["/skill:claude"]
 
 
+@_skip_under_llm_config_v2
 def test_mcp_toolbar_codex_parallel_publishes_purple_parallel_to_t3(
     qtbot, monkeypatch,
 ):
@@ -477,6 +524,7 @@ def test_mcp_toolbar_codex_parallel_publishes_purple_parallel_to_t3(
     assert xterm_calls == [("Use skill-kimi. Output JSON. Prompt: ", False)]
 
 
+@_skip_under_llm_config_v2
 def test_mcp_toolbar_codex_persona_prompt_has_single_spacing(qtbot, monkeypatch):
     win = _new_window(qtbot)
     _set_route(win, t1=False, t2=False, t3=True)

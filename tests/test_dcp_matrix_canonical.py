@@ -151,8 +151,13 @@ def test_matrix_emits_dual_field_name_and_template(migrated_matrix: DcpCommandMa
 
 
 def test_matrix_accepts_canonical_dcp_enums(migrated_matrix: DcpCommandMatrix) -> None:
+    # `--no-cascade` faz parte do template canonico da FASE A-creation, nao e
+    # ruido: `.claude/commands/create-task.md` L1095-L1100 declara que quem
+    # enfileira /create-task-layout, /create-overview e /update-task-user-stories
+    # DEVE desligar a cascata interna, e a fila DCP e uma dessas superficies.
+    # Ver StepSpec em `.claude/commands/_lib/specific_flow/profiles.py` (A-creation).
     create_task = _find_first(
-        migrated_matrix, lambda e: e.name == "/create-task {task}"
+        migrated_matrix, lambda e: e.name == "/create-task {task} --no-cascade"
     )
     assert create_task.phase == "A-creation"
     assert create_task.model == "opus"
@@ -185,7 +190,13 @@ def test_matrix_derivation_can_return_real_commands_without_directives(
     assert "/clear" not in names
     assert not any(name.startswith("/model ") for name in names)
     assert not any(name.startswith("/effort ") for name in names)
-    assert names[0] == "/create-task modules/module-1-foundations/TASK-1.md"
+    # A flag `--no-cascade` viaja junto com o template (ver comentario em
+    # test_matrix_accepts_canonical_dcp_enums); sua ausencia aqui significaria
+    # que a fila DCP voltou a duplicar layout/overview/user-stories.
+    assert (
+        names[0]
+        == "/create-task modules/module-1-foundations/TASK-1.md --no-cascade"
+    )
     assert any(name.startswith("/commit:simple") for name in names)
     assert names[-1] == "/delivery:sign-off"
 
@@ -204,7 +215,7 @@ def test_matrix_derivation_renders_directives_as_separate_deduped_rows(
         "/clear",
         "/model opus",
         "/effort high",
-        "/create-task modules/module-1-foundations/TASK-1.md",
+        "/create-task modules/module-1-foundations/TASK-1.md --no-cascade",
     ]
     assert all(" /model " not in name for name in names)
     assert names.count("/model opus") >= 2

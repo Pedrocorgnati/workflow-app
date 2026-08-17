@@ -22,6 +22,7 @@ from workflow_app.domain import (
     CommandStatus,
     ModelName,
 )
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture()
@@ -154,3 +155,139 @@ class TestCommandItemWidgetIncertoState:
         assert item._error_row.isVisible()
         item.set_status(CommandStatus.INCERTO)
         assert not item._error_row.isVisible()
+
+
+# ───────────────────── command_text_with_flags (item 012) ─────────── #
+
+from workflow_app.command_queue.command_item_widget import command_text_with_flags
+from workflow_app.command_queue.provider_router import Provider
+
+
+def _make_spec(name="/prd-create", config_path="", kind="slash"):
+    return CommandSpec(
+        name=name,
+        model=ModelName.SONNET,
+        position=0,
+        config_path=config_path,
+        kind=kind,
+    )
+
+
+class TestCommandTextWithFlags:
+    """Produtor unico de texto de comando com sufixo de flag (item 012)."""
+
+    def test_claude_with_kimi(self):
+        """Claude + flag --kimi -> /prd-create --kimi."""
+        spec = _make_spec()
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        assert result == "/prd-create --kimi"
+
+    def test_claude_with_config_path(self):
+        """Claude + config_path + flags -> /cmd --kimi 'path'."""
+        spec = _make_spec(name="/cmd", config_path="path/to/config.json")
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        # Ordem: nome + flags + config_path (shlex.quote sem aspas para path simples).
+        assert result == "/cmd --kimi path/to/config.json"
+
+    def test_worker_strips_flags(self):
+        """Provider KIMI -> sem flags (worker strip)."""
+        spec = _make_spec()
+        result = command_text_with_flags(
+            spec, provider=Provider.KIMI, active_flags=["--kimi", "--codex"]
+        )
+        assert result == "/prd-create"
+
+    def test_codex_worker_strips_flags(self):
+        """Provider CODEX -> sem flags (worker strip)."""
+        spec = _make_spec()
+        result = command_text_with_flags(
+            spec, provider=Provider.CODEX, active_flags=["--kimi"]
+        )
+        assert result == "/prd-create"
+
+    def test_session_directive_no_suffix(self):
+        """/clear nunca recebe sufixo."""
+        spec = _make_spec(name="/clear")
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        assert result == "/clear"
+
+    def test_model_directive_no_suffix(self):
+        """/model nunca recebe sufixo."""
+        spec = _make_spec(name="/model opus")
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        assert result == "/model opus"
+
+    def test_local_action_no_suffix(self):
+        """local-action nunca recebe sufixo."""
+        spec = _make_spec(name="/daily", kind="local-action")
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi"]
+        )
+        assert result == "/daily"
+
+    def test_empty_flags(self):
+        """active_flags vazia -> /prd-create (regressao zero)."""
+        spec = _make_spec()
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=[]
+        )
+        assert result == "/prd-create"
+
+    def test_both_flags(self):
+        """Claude + ambas flags -> /cmd --kimi --codex."""
+        spec = _make_spec(name="/cmd")
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi", "--codex"]
+        )
+        assert result == "/cmd --kimi --codex"
+
+    def test_none_provider_no_suffix(self):
+        """Provider None (Desabilitado) -> sem sufixo."""
+        spec = _make_spec()
+        result = command_text_with_flags(
+            spec, provider=None, active_flags=["--kimi"]
+        )
+        assert result == "/prd-create"
+
+
+class TestDispatchText:
+    """set_dispatch_text / dispatch_text (item 012)."""
+
+    def test_dispatch_text_default_fallback(self, item):
+        """Sem set_dispatch_text, dispatch_text() == command_text()."""
+        assert item.dispatch_text() == item.command_text()
+
+    def test_dispatch_text_set_overrides(self, item):
+        """Apos set_dispatch_text, dispatch_text() retorna o texto setado."""
+        item.set_dispatch_text("/prd-create --kimi")
+        assert item.dispatch_text() == "/prd-create --kimi"
+
+    def test_dispatch_text_empty_restores_fallback(self, item):
+        """set_dispatch_text('') restaura fallback para command_text()."""
+        item.set_dispatch_text("/prd-create --kimi")
+        item.set_dispatch_text("")
+        assert item.dispatch_text() == item.command_text()
+
+    def test_per_item_run_uses_dispatch_text(self, item, qtbot):
+        """_on_run_clicked emite dispatch_text() (com flags)."""
+        item.set_dispatch_text("/prd-create --kimi")
+        captured = []
+        item.run_in_terminal_requested.connect(captured.append)
+        item._on_run_clicked()
+        assert captured == ["/prd-create --kimi"]
+
+    def test_per_item_copy_uses_dispatch_text(self, item, qtbot):
+        """_on_copy_clicked copia dispatch_text() (com flags)."""
+        item.set_dispatch_text("/prd-create --kimi")
+        item._on_copy_clicked()
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            assert clipboard.text() == "/prd-create --kimi"

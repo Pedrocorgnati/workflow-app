@@ -28,6 +28,7 @@ HELPER_COMMANDS: tuple[str, ...] = (
     "/model", "/effort", "/clear",            # slash-helpers
     "cd",                                      # bash directory change
     "clauded", "kimid", "codex", "codex-high",  # CLI launches
+    "qwened", "grokd",                         # CLI launches (item 020)
 )
 
 

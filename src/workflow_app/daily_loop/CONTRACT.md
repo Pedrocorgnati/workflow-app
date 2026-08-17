@@ -50,6 +50,19 @@ Por que no bucket e nao so em `items_index`: per CONTRACT.md secao 1, `items_ind
 
 Producers (`/loop:create-structure`, `/loop:integration`) devem materializar `kind` + `task_path` em ambos `buckets[*].items[*]` e `items_index[NNN]` (paridade exata, gate W9 do `/loop:workflow-app`).
 
+### 2.1.1 Checkpoint `review_created_*` e bucket-only
+
+O checkpoint formado por `review_created_completed_at` e
+`review_created_summary` e uma excecao explicita a paridade geral: no schema V3,
+o producer `/loop:iteraction:review-created-task` grava essas duas chaves somente
+no item autoritativo `daily_loop.buckets[*].items[*]`. Ele nao grava, espelha nem
+exige as chaves em `daily_loop.items_index`.
+
+Entradas historicas do indice que ja contenham `review_created_*` sao toleradas
+e preservadas. Nao existe backfill nem remocao retroativa. Essa excecao nao se
+estende a `create_*`, `execute_*` ou `review_executed_*`, cujos contratos de
+espelhamento permanecem inalterados.
+
 ### 2.2 Path field convention (adicionado 2026-05-19 — Onda 9 hardening, anti workspace-doubled-path)
 
 **Regra de ouro:** todo campo path do bloco `daily_loop` (e adjacentes) e **filename-only relativo a `loop_root`** (ou path raso `tasks/...` para `spec_path`/`task_path`). Absoluto e tolerado para `loop_root` e `basic_flow.*`; workspace-relative (com slug embutido) e PROIBIDO.

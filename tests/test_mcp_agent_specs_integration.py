@@ -5,16 +5,17 @@ Cobre o contrato de `output-toolbar-mcp` quando o registry de
 `persona_prompt`, composicao apenas do que esta ativo, ordem deterministica e
 rebuild sem perda nem duplicacao de widgets.
 
-O registry canonico e vazio por design (as specs sao acrescentadas por
-`/mcp:create-agent`), entao cada teste injeta suas proprias specs via
-monkeypatch de `workflow_app.agent_integration_specs.mcp_agent_specs` e
-reconstroi a coluna com `_build_mcp_column`.
+O registry canonico contem as specs persistentes `writer`, `tester` e
+`art-creator`. Testes genericos
+injetam specs isoladas via monkeypatch de
+`workflow_app.agent_integration_specs.mcp_agent_specs` e reconstroem a coluna
+com `_build_mcp_column`.
 """
 
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QCheckBox, QPushButton, QRadioButton, QWidget
 
 from workflow_app import agent_integration_specs as specs_mod
@@ -22,7 +23,69 @@ from workflow_app.agent_integration_specs import (
     AgentIntegrationSpecError,
     McpAgentSpec,
 )
+from workflow_app.config.feature_flags import llm_config_v2_enabled
 from workflow_app.signal_bus import signal_bus
+
+# Item 023 do loop 08-11 troca a action row do setor MCP SOMENTE atras de
+# `SF_LLM_CONFIG_V2`: os tres botoes `output-mcp-action-{main,parallel,dual}`
+# (comando escolhido pelo Main LLM) dao lugar aos grupos Thinking/Execution,
+# com matriz FIXA por botao (TE-01, main_window.py `_TE_COMMANDS`). O contrato
+# coberto AQUI — materializacao das specs suplementares e composicao do prompt —
+# nao depende dessa moldura, entao o ancora e os pares (acao, comando base) sao
+# derivados da flag em vez de hardcoded: `thinking-codex` publica exatamente o
+# mesmo `/mcp:codex` que o `Main MCP` legado sob Main Claude. Fica pulado apenas
+# o caso que afirma a semantica legada de "o Main LLM escolhe o comando", que
+# sob a flag deixou de existir; esse lado esta travado em
+# `tests/test_llm_config_tab.py`, que roda os dois estados em subprocesso porque
+# `feature_flags` e boot-frozen (resolve `os.environ` no import, sem reset).
+_LLM_CONFIG_V2 = llm_config_v2_enabled()
+
+_ANCHOR_ACTION = (
+    "output-mcp-action-thinking-codex" if _LLM_CONFIG_V2 else "output-mcp-action-main"
+)
+_ACTION_TESTIDS = (
+    (
+        "output-mcp-action-thinking-claude",
+        "output-mcp-action-thinking-codex",
+        "output-mcp-action-thinking-kimi",
+        "output-mcp-action-execution-claude",
+        "output-mcp-action-execution-codex",
+        "output-mcp-action-execution-kimi",
+        "output-mcp-action-execution-grok",
+        "output-mcp-action-execution-qwen",
+    )
+    if _LLM_CONFIG_V2
+    else (
+        "output-mcp-action-main",
+        "output-mcp-action-parallel",
+        "output-mcp-action-dual",
+    )
+)
+# Tres acoes por lado, cada uma com o comando base que ela publica: no legado o
+# trio Main/Parallel/Dual sob Main Claude; sob a flag, o trio equivalente da
+# matriz fixa. Os botoes Grok/Qwen ficam de fora de proposito — nascem
+# desabilitados (MCP server nao registrado) e nao publicam nada.
+_ACTION_BASE_PAIRS = (
+    [
+        ("output-mcp-action-thinking-codex", "/mcp:codex"),
+        ("output-mcp-action-thinking-kimi", "/mcp:kimi-k3"),
+        ("output-mcp-action-execution-kimi", "/mcp:kimi"),
+    ]
+    if _LLM_CONFIG_V2
+    else [
+        ("output-mcp-action-main", "/mcp:codex"),
+        ("output-mcp-action-parallel", "/mcp:kimi"),
+        ("output-mcp-action-dual", "/mcp:dual"),
+    ]
+)
+_skip_under_llm_config_v2 = pytest.mark.skipif(
+    _LLM_CONFIG_V2,
+    reason=(
+        "afirma a semantica legada (Main LLM escolhe o comando da acao MCP); "
+        "sob SF_LLM_CONFIG_V2 o comando e fixo por botao (item 023) e esse lado "
+        "e travado em tests/test_llm_config_tab.py"
+    ),
+)
 
 _HARDENING_DIRECTIVE = (
     "no papel de engenheiro de hardening suplementar, conforme regras em "
@@ -32,10 +95,32 @@ _UX_DIRECTIVE = (
     "no papel de especialista UX suplementar, conforme regras em "
     "ai-forge/MCP/agents/ux-ui-specialist.md"
 )
+_WRITER_DIRECTIVE = (
+    "no papel de Writer, seguindo as regras em "
+    "ai-forge/MCP/agents/writer.md"
+)
+_TESTER_DIRECTIVE = (
+    "no papel de Tester, seguindo as regras em "
+    "ai-forge/MCP/agents/tester.md"
+)
+_ART_CREATOR_DIRECTIVE = (
+    "no papel de Art Creator, seguindo as regras em "
+    "ai-forge/MCP/agents/art-creator.md"
+)
+_SEARCH_PROD_DIRECTIVE = (
+    "no papel de Investigador de Ambiente de Producao, seguindo as "
+    "regras em ai-forge/MCP/agents/search-prod.md"
+)
+_PERSISTENT_AGENTS = (
+    ("writer", _WRITER_DIRECTIVE),
+    ("tester", _TESTER_DIRECTIVE),
+    ("art-creator", _ART_CREATOR_DIRECTIVE),
+    ("search-prod", _SEARCH_PROD_DIRECTIVE),
+)
 
 
 @pytest.fixture
-def win(qapp):
+def win(qapp, monkeypatch):
     """MainWindow com teardown ORDENADO: a janela morre antes dos popups.
 
     Rebuildar `output-toolbar-mcp` instancia QComboBox novos, e cada combo
@@ -46,11 +131,17 @@ def win(qapp):
     janela aqui primeiro, os popups ja nascem invalidos para o conftest, que
     apenas os ignora. Por isso tambem nao se usa `qtbot.addWidget`: o cleanup
     do pytest-qt chamaria `close()` no wrapper ja destruido.
+
+    O registry servido e estado de classe e pode conter um modulo paralelo
+    deixado por suites de live-reload anteriores. Zerar antes de construir a
+    janela garante que estes testes monkeypatcham o mesmo modulo canonico que
+    o builder consulta, sem depender da ordem global de coleta.
     """
     import shiboken6
 
     from workflow_app.main_window import MainWindow
 
+    monkeypatch.setattr(MainWindow, "_agent_registry_served", None)
     window = MainWindow()
     yield window
     if shiboken6.isValid(window):
@@ -141,9 +232,24 @@ def _row_of(leaf: QWidget) -> QWidget:
     return row
 
 
+def _action_row_of(action_btn: QWidget) -> QWidget:
+    """Sobe do botao de acao ate `output-mcp-action-row`.
+
+    No legado o botao e filho DIRETO da action row; sob `SF_LLM_CONFIG_V2` ele
+    mora dentro do grupo Thinking ou Execution (item 023), que por sua vez e
+    filho da action row. Subir por testid cobre os dois casos sem afrouxar a
+    assercao de que a linha existe e continua sendo a mesma.
+    """
+    node = action_btn.parentWidget()
+    while node is not None and node.property("testid") != "output-mcp-action-row":
+        node = node.parentWidget()
+    assert node is not None, "output-mcp-action-row nao encontrado"
+    return node
+
+
 def _mcp_column_of(win) -> QWidget:
     """Sobe do action-btn ate o container com testid output-toolbar-mcp."""
-    node = _by_testid(win, "output-mcp-action-main").parentWidget()
+    node = _by_testid(win, _ANCHOR_ACTION).parentWidget()
     while node is not None and node.property("testid") != "output-toolbar-mcp":
         node = node.parentWidget()
     assert node is not None, "output-toolbar-mcp nao encontrado"
@@ -184,21 +290,100 @@ def _publish_and_capture(win, action_testid: str, column: QWidget) -> list[str]:
 # ── Registry vazio: zero widget novo, zero mudanca de contrato ──────────────
 
 
-def test_registry_vazio_nao_cria_botao_nem_linha(win):
-    column = _mcp_column_of(win)
+def test_registry_vazio_nao_cria_botao_nem_linha(win, monkeypatch):
+    monkeypatch.setattr(specs_mod, "mcp_agent_specs", lambda: ())
+    column = _rebuild_column(win)
 
     assert _agent_buttons(column) == []
     assert win._mcp_agent_buttons == []
 
 
-def test_registry_vazio_preserva_composicao_existente(win):
+def test_registry_vazio_preserva_composicao_existente(win, monkeypatch):
+    monkeypatch.setattr(specs_mod, "mcp_agent_specs", lambda: ())
+    column = _rebuild_column(win)
+    _set_route(win, t1=True, t2=False, t3=False)
+    _set_main_llm(win, "claude")
+
+    assert _publish_and_capture(win, _ANCHOR_ACTION, column) == [
+        "/mcp:codex"
+    ]
+
+
+# ── Spec persistente Writer: estado ativo/inativo nas tres acoes ────────
+
+
+@pytest.mark.parametrize(("agent_slug", "directive"), _PERSISTENT_AGENTS)
+def test_agente_persistente_materializa_contrato_visual(
+    win, agent_slug, directive
+):
+    column = _mcp_column_of(win)
+    btn = _by_testid(column, f"output-mcp-agent-{agent_slug}")
+
+    assert isinstance(btn, QPushButton)
+    assert not isinstance(btn, QCheckBox)
+    assert btn.isCheckable()
+    assert not btn.isChecked()
+    assert btn.height() == 22
+    assert btn.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert btn.toolTip() == directive
+    assert btn.accessibleName()
+    assert "#27272A" in btn.styleSheet()
+    assert "#16A34A" in btn.styleSheet()
+
+
+@pytest.mark.parametrize(("action_testid", "base"), _ACTION_BASE_PAIRS)
+@pytest.mark.parametrize(("agent_slug", "directive"), _PERSISTENT_AGENTS)
+def test_agente_inativo_nao_altera_as_tres_acoes(
+    win, action_testid, base, agent_slug, directive
+):
     column = _mcp_column_of(win)
     _set_route(win, t1=True, t2=False, t3=False)
     _set_main_llm(win, "claude")
 
-    assert _publish_and_capture(win, "output-mcp-action-main", column) == [
-        "/mcp:codex"
-    ]
+    btn = _by_testid(column, f"output-mcp-agent-{agent_slug}")
+    assert not btn.isChecked()
+    sent = _publish_and_capture(win, action_testid, column)
+    assert sent == [base]
+    assert directive not in sent[0]
+
+
+@pytest.mark.parametrize(("action_testid", "base"), _ACTION_BASE_PAIRS)
+@pytest.mark.parametrize(("agent_slug", "directive"), _PERSISTENT_AGENTS)
+def test_agente_ativo_anexa_uma_diretiva_nas_tres_acoes(
+    win, action_testid, base, agent_slug, directive
+):
+    column = _mcp_column_of(win)
+    _set_route(win, t1=True, t2=False, t3=False)
+    _set_main_llm(win, "claude")
+    _by_testid(column, f"output-mcp-agent-{agent_slug}").setChecked(True)
+
+    sent = _publish_and_capture(win, action_testid, column)
+
+    assert sent == [f"{base} {directive}"]
+    assert sent[0].count(directive) == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "base"),
+    [
+        ("claude", "/mcp:codex"),
+        ("kimi", "/skill:claude"),
+        ("codex", "Use skill-claude. Output JSON. Prompt:"),
+    ],
+)
+@_skip_under_llm_config_v2
+@pytest.mark.parametrize(("agent_slug", "directive"), _PERSISTENT_AGENTS)
+def test_agente_preserva_o_provider_selecionado(
+    win, provider_id, base, agent_slug, directive
+):
+    column = _mcp_column_of(win)
+    _set_route(win, t1=True, t2=False, t3=False)
+    _set_main_llm(win, provider_id)
+    _by_testid(column, f"output-mcp-agent-{agent_slug}").setChecked(True)
+
+    sent = _publish_and_capture(win, _ANCHOR_ACTION, column)
+
+    assert sent == [f"{base} {directive}"]
 
 
 # ── Materializacao: botao real, checkable, com contrato visual ──────────────
@@ -216,10 +401,9 @@ def test_spec_vira_qpushbutton_real_checkable_com_persona_prompt(win, monkeypatc
     assert btn.text() == "hardening+"
     assert btn.property("persona_prompt") == _HARDENING_DIRECTIVE
     assert btn.property("agent_slug") == "hardening-suplementar"
-    # Sem `setFixedHeight`: a altura sai do label + padding 1px do stylesheet.
-    assert btn.minimumHeight() == 0
-    assert btn.maximumHeight() > btn.sizeHint().height()
-    assert btn.sizeHint().height() <= 24
+    assert btn.minimumHeight() == 22
+    assert btn.maximumHeight() == 22
+    assert btn.height() == 22
     assert btn.toolTip() == _HARDENING_DIRECTIVE
     assert btn.accessibleName()
 
@@ -238,8 +422,8 @@ def test_controles_existentes_continuam_intactos(win, monkeypatch):
     column = _rebuild_column(win)
 
     assert len(win._mcp_persona_checkboxes) == 16
-    for action_id in ("main", "parallel", "dual"):
-        assert _by_testid(column, f"output-mcp-action-{action_id}")
+    for action_testid in _ACTION_TESTIDS:
+        assert _by_testid(column, action_testid)
     # A tab bar interna (`output-mcp-tab-mcps` / `-brainstorm`) morreu em
     # 2026-07-27: as duas sub-abas viraram secoes de primeiro nivel do
     # `output-toolbar-section-selector`, entao a coluna nao tem mais nivel de
@@ -251,14 +435,7 @@ def test_controles_existentes_continuam_intactos(win, monkeypatch):
 # ── Composicao: so entra o que esta ativo ───────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("action_testid", "base"),
-    [
-        ("output-mcp-action-main", "/mcp:codex"),
-        ("output-mcp-action-parallel", "/mcp:kimi"),
-        ("output-mcp-action-dual", "/mcp:dual"),
-    ],
-)
+@pytest.mark.parametrize(("action_testid", "base"), _ACTION_BASE_PAIRS)
 def test_botao_inativo_nao_altera_prompt_nas_tres_acoes(
     win, monkeypatch, action_testid, base
 ):
@@ -270,14 +447,7 @@ def test_botao_inativo_nao_altera_prompt_nas_tres_acoes(
     assert _publish_and_capture(win, action_testid, column) == [base]
 
 
-@pytest.mark.parametrize(
-    ("action_testid", "base"),
-    [
-        ("output-mcp-action-main", "/mcp:codex"),
-        ("output-mcp-action-parallel", "/mcp:kimi"),
-        ("output-mcp-action-dual", "/mcp:dual"),
-    ],
-)
+@pytest.mark.parametrize(("action_testid", "base"), _ACTION_BASE_PAIRS)
 def test_botao_ativo_anexa_diretiva_uma_vez_nas_tres_acoes(
     win, monkeypatch, action_testid, base
 ):
@@ -307,7 +477,7 @@ def test_apenas_specs_ativas_entram_na_composicao(win, monkeypatch):
     _set_main_llm(win, "claude")
     _by_testid(column, "output-mcp-agent-ux-suplementar").setChecked(True)
 
-    sent = _publish_and_capture(win, "output-mcp-action-main", column)
+    sent = _publish_and_capture(win, _ANCHOR_ACTION, column)
 
     assert sent == [f"/mcp:codex {_UX_DIRECTIVE}"]
     assert _HARDENING_DIRECTIVE not in sent[0]
@@ -324,7 +494,7 @@ def test_ordem_persona_antes_de_suplemento(win, monkeypatch):
     _by_testid(column, "output-mcp-persona-search-in", QCheckBox).setChecked(True)
     _by_testid(column, "output-mcp-agent-hardening-suplementar").setChecked(True)
 
-    sent = _publish_and_capture(win, "output-mcp-action-main", column)
+    sent = _publish_and_capture(win, _ANCHOR_ACTION, column)
 
     assert sent == [
         "/mcp:codex no papel de search-in, conforme regras em "
@@ -348,7 +518,7 @@ def test_ordem_entre_suplementos_segue_o_registry(win, monkeypatch):
     _by_testid(column, "output-mcp-agent-hardening-suplementar").setChecked(True)
     _by_testid(column, "output-mcp-agent-ux-suplementar").setChecked(True)
 
-    sent = _publish_and_capture(win, "output-mcp-action-main", column)
+    sent = _publish_and_capture(win, _ANCHOR_ACTION, column)
 
     assert sent == [
         f"/mcp:codex {_UX_DIRECTIVE}; e depois disso {_HARDENING_DIRECTIVE}"
@@ -367,7 +537,7 @@ def test_suplementos_ficam_entre_personas_e_action_row(win, monkeypatch):
     persona_row = _row_of(
         _by_testid(column, "output-mcp-persona-performance-engineer", QCheckBox)
     )
-    action_row = _row_of(_by_testid(column, "output-mcp-action-main"))
+    action_row = _action_row_of(_by_testid(column, _ANCHOR_ACTION))
     # Refactor 07-27: container unico de personas (nao ha mais `-2/-3/-4`).
     assert persona_row.property("testid") == "output-mcp-persona-checkboxes"
     assert action_row.property("testid") == "output-mcp-action-row"
@@ -516,7 +686,7 @@ def test_composicao_apos_rebuild_usa_os_botoes_novos(win, monkeypatch):
     _set_main_llm(win, "claude")
     _by_testid(column, "output-mcp-agent-hardening-suplementar").setChecked(True)
 
-    sent = _publish_and_capture(win, "output-mcp-action-main", column)
+    sent = _publish_and_capture(win, _ANCHOR_ACTION, column)
 
     assert sent == [f"/mcp:codex {_HARDENING_DIRECTIVE}"]
     assert sent[0].count(_HARDENING_DIRECTIVE) == 1
@@ -535,7 +705,7 @@ def test_registry_invalido_monta_coluna_sem_suplementos(win, monkeypatch, caplog
         column = _rebuild_column(win)
 
     assert _agent_buttons(column) == []
-    assert _by_testid(column, "output-mcp-action-main")
+    assert _by_testid(column, _ANCHOR_ACTION)
     assert any(
         "specs MCP suplementares ignoradas" in record.message
         for record in caplog.records
@@ -580,7 +750,7 @@ def test_registry_que_falha_no_import_nao_derruba_a_coluna(win, monkeypatch, cap
         column = _rebuild_column(win)
 
     assert _agent_buttons(column) == []
-    assert _by_testid(column, "output-mcp-action-main")
+    assert _by_testid(column, _ANCHOR_ACTION)
     assert any(
         "falha ao importar o registry" in record.message
         for record in caplog.records

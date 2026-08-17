@@ -2,6 +2,168 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+_WORKFLOW_APP_ROOT = Path(__file__).resolve().parents[1]
+_RULES_SHORTCUT_FLAG = "SF_LLM_FLAGS_RULES_V2"
+_RULES_SHORTCUT_PATH = "ai-forge/rules/llm-flags.md"
+
+
+_RULES_SHORTCUT_PROBE = r'''import json
+import os
+import tempfile
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QPushButton
+from workflow_app.config.feature_flags import (
+    llm_flags_rules_v2_enabled,
+    llm_flags_rules_v2_flag_name,
+    llm_flags_rules_v2_state,
+)
+
+settings_root = tempfile.mkdtemp(prefix="sf-rules-shortcut-")
+for settings_format in (QSettings.Format.IniFormat, QSettings.Format.NativeFormat):
+    QSettings.setPath(
+        settings_format, QSettings.Scope.UserScope, settings_root
+    )
+    QSettings.setPath(
+        settings_format, QSettings.Scope.SystemScope, settings_root
+    )
+
+before = {
+    "name": llm_flags_rules_v2_flag_name(),
+    "state": llm_flags_rules_v2_state(),
+    "enabled": llm_flags_rules_v2_enabled(),
+}
+os.environ["SF_LLM_FLAGS_RULES_V2"] = "0" if before["enabled"] else "1"
+after_mutation = {
+    "state": llm_flags_rules_v2_state(),
+    "enabled": llm_flags_rules_v2_enabled(),
+}
+
+app = QApplication.instance() or QApplication([])
+from workflow_app.main_window import MainWindow
+
+original = MainWindow._populate_header_workflow_app
+
+def capture_widgets(self):
+    widgets = original(self)
+    self._rules_shortcut_probe_widgets = widgets
+    return widgets
+
+MainWindow._populate_header_workflow_app = capture_widgets
+window = MainWindow()
+widgets = window._rules_shortcut_probe_widgets
+index = next(
+    (
+        position
+        for position, widget in enumerate(widgets)
+        if widget.property("testid") == "queue-btn-llm-flags-rules-path"
+    ),
+    -1,
+)
+buttons = [
+    button
+    for button in window.findChildren(QPushButton)
+    if button.property("testid") == "queue-btn-llm-flags-rules-path"
+]
+
+payload = {
+    "before": before,
+    "after_mutation": after_mutation,
+    "count": len(buttons),
+    "index": index,
+}
+if buttons:
+    button = buttons[0]
+    ancestor = button.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "queue-subtab-insertions-rules":
+        ancestor = ancestor.parentWidget()
+    published = []
+    window._publish_to_terminal = published.append
+    app.clipboard().clear()
+    button.click()
+    repo_root = Path.cwd().parents[1]
+    payload.update(
+        {
+            "rules_ancestor": ancestor.property("testid") if ancestor else None,
+            "clipboard": app.clipboard().text(),
+            "published": published,
+            "target_exists": (repo_root / app.clipboard().text()).is_file(),
+        }
+    )
+
+print("RULES_SHORTCUT_JSON=" + json.dumps(payload, sort_keys=True))
+'''
+
+
+def _run_rules_shortcut_probe(flag_value: str | None) -> dict:
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    if flag_value is None:
+        env.pop(_RULES_SHORTCUT_FLAG, None)
+    else:
+        env[_RULES_SHORTCUT_FLAG] = flag_value
+    result = subprocess.run(
+        [sys.executable, "-c", _RULES_SHORTCUT_PROBE],
+        cwd=_WORKFLOW_APP_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"probe rules_shortcut falhou para {flag_value!r}:\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    line = next(
+        item
+        for item in result.stdout.splitlines()
+        if item.startswith("RULES_SHORTCUT_JSON=")
+    )
+    return json.loads(line.split("=", 1)[1])
+
+
+def test_rules_shortcut_legacy_states_do_not_register_button():
+    expected_states = ((None, "absent"), ("0", "off"), ("future", "unrecognized"))
+    for raw_value, expected_state in expected_states:
+        got = _run_rules_shortcut_probe(raw_value)
+        assert got["before"] == {
+            "name": _RULES_SHORTCUT_FLAG,
+            "state": expected_state,
+            "enabled": False,
+        }
+        assert got["after_mutation"] == {
+            "state": expected_state,
+            "enabled": False,
+        }
+        assert got["count"] == 0
+        assert got["index"] == -1
+
+
+def test_rules_shortcut_enabled_is_in_rules_and_targets_existing_file():
+    got = _run_rules_shortcut_probe("1")
+    assert got["before"] == {
+        "name": _RULES_SHORTCUT_FLAG,
+        "state": "on",
+        "enabled": True,
+    }
+    assert got["after_mutation"] == {"state": "on", "enabled": True}
+    assert got["count"] == 1
+    assert got["index"] >= 1
+    assert got["rules_ancestor"] == "queue-subtab-insertions-rules"
+    assert got["clipboard"] == _RULES_SHORTCUT_PATH
+    assert got["published"] == [_RULES_SHORTCUT_PATH]
+    assert got["target_exists"] is True
+
 
 def test_main_window_opens(qapp):
     from workflow_app.main_window import MainWindow

@@ -72,6 +72,9 @@ PIPELINE_COMMANDS: list[_PipelineEntry] = [
     ("/auto-flow execute",     ModelName.SONNET, InteractionType.AUTO,        False, ["f7"]),
     # F8 — Complemento
     ("/credentials:env-creation", ModelName.SONNET,  InteractionType.AUTO,        True,  ["f8"]),
+    ("/credentials:create",    ModelName.SONNET, InteractionType.INTERACTIVE, True,  ["f8"]),
+    ("/credentials:execute --mode write", ModelName.SONNET, InteractionType.INTERACTIVE, True,  ["f8"]),
+    ("/credentials:verify",    ModelName.SONNET, InteractionType.AUTO,        True,  ["f8"]),
     ("/seed-data-create",      ModelName.SONNET, InteractionType.AUTO,        True,  ["f8"]),
     ("/docker-create",         ModelName.SONNET, InteractionType.AUTO,        True,  ["f8"]),
     # F9 — QA

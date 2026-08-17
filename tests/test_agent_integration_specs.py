@@ -117,8 +117,10 @@ def test_import_frio_nao_escreve_no_disco(tmp_path):
         "import os, sys\n"
         "from workflow_app.agent_integration_specs import mcp_agent_specs\n"
         "from workflow_app.agent_integration_specs import brainstorm_agent_specs\n"
-        "assert mcp_agent_specs() == (), mcp_agent_specs()\n"
-        "assert brainstorm_agent_specs() == (), brainstorm_agent_specs()\n"
+        "assert [s.slug for s in mcp_agent_specs()] == "
+        "['writer', 'tester', 'art-creator', 'search-prod'], mcp_agent_specs()\n"
+        "assert [s.slug for s in brainstorm_agent_specs()] == "
+        "['search-prod'], brainstorm_agent_specs()\n"
         "print(os.listdir('.'))\n"
     )
     proc = subprocess.run(
@@ -133,13 +135,59 @@ def test_import_frio_nao_escreve_no_disco(tmp_path):
     assert list(Path(tmp_path).iterdir()) == []
 
 
-def test_registry_vazio_por_default_e_imutavel():
-    """Sem agente registrado, os dois registries sao tuplas vazias."""
-    assert mcp_agent_specs() == ()
-    assert brainstorm_agent_specs() == ()
-    assert isinstance(mcp_agent_specs(), tuple)
-    assert isinstance(brainstorm_agent_specs(), tuple)
-    assert registry_testids() == ()
+def test_registry_default_contem_agentes_persistentes_e_e_imutavel():
+    """As specs MCP e Brainstorm persistentes."""
+    specs = mcp_agent_specs()
+    expected = [
+        (
+            "writer",
+            "Writer",
+            "no papel de Writer, seguindo as regras em "
+            "ai-forge/MCP/agents/writer.md",
+        ),
+        (
+            "tester",
+            "Tester",
+            "no papel de Tester, seguindo as regras em "
+            "ai-forge/MCP/agents/tester.md",
+        ),
+        (
+            "art-creator",
+            "Art Creator",
+            "no papel de Art Creator, seguindo as regras em "
+            "ai-forge/MCP/agents/art-creator.md",
+        ),
+        (
+            "search-prod",
+            "Search-prod",
+            "no papel de Investigador de Ambiente de Producao, seguindo as "
+            "regras em ai-forge/MCP/agents/search-prod.md",
+        ),
+    ]
+    assert [spec.slug for spec in specs] == [item[0] for item in expected]
+    assert [spec.label for spec in specs] == [item[1] for item in expected]
+    assert [spec.persona_prompt for spec in specs] == [
+        item[2] for item in expected
+    ]
+    assert [spec.testid for spec in specs] == [
+        f"output-mcp-agent-{item[0]}" for item in expected
+    ]
+    brainstorm = brainstorm_agent_specs()
+    assert [spec.slug for spec in brainstorm] == ["search-prod"]
+    assert [spec.testid for spec in brainstorm] == ["mcp-prompt-btn-search-prod"]
+    assert [spec.action for spec in brainstorm] == ["Otimizar"]
+    assert [spec.resolved_target_terminal for spec in brainstorm] == [
+        "terminal-interactive-output"
+    ]
+    assert isinstance(specs, tuple)
+    assert isinstance(brainstorm, tuple)
+    assert registry_testids() == (
+        "output-mcp-agent-writer",
+        "output-mcp-agent-tester",
+        "output-mcp-agent-art-creator",
+        "output-mcp-agent-search-prod",
+        "mcp-prompt-btn-search-prod",
+    )
 
 
 def test_leitura_repetida_e_deterministica():

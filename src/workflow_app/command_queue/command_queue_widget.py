@@ -789,6 +789,25 @@ class RenderedInsertion:
     listener_channel: str | None = None
 
 
+@dataclass(frozen=True)
+class FrozenContract:
+    """Snapshot do contrato de execucao de um item no momento do enqueue.
+
+    Item 019: congela Main LLM, flags de worker, sufixo de flags MCP e
+    provider resolvido para que trocas de configuracao entre enqueue e
+    dispatch nao alterem o item ja enfileirado. O dispatch consome este
+    snapshot, nunca o estado atual da UI.
+    """
+
+    main_llm: str
+    kimi_worker_enabled: bool
+    codex_worker_enabled: bool
+    active_flags: tuple[str, ...]
+    resolved_provider: Provider
+    qwen_worker_enabled: bool = False
+    grok_worker_enabled: bool = False
+
+
 class CommandQueueWidget(QWidget):
     """Right sidebar showing the pipeline command queue."""
 
@@ -805,6 +824,11 @@ class CommandQueueWidget(QWidget):
         )
 
         self._items: list[CommandItemWidget] = []
+        # Item 019: contrato congelado por item (id(item) -> FrozenContract).
+        # Capturado no _make_item (enqueue), consumido no _on_step_btn_clicked
+        # (dispatch). Garante que trocas de Main LLM / flags entre enqueue e
+        # dispatch nao reinterpretam itens ja enfileirados.
+        self._frozen_contracts: dict[int, FrozenContract] = {}
 
         # Auto-loop (main-command-queue-auto-loop-btn, main_window): quando
         # ligado, o verde autoritativo do T1 rearma a fila — toda seta unica
@@ -3208,6 +3232,9 @@ class CommandQueueWidget(QWidget):
         self._make_llm_divider = _make_llm_divider
 
         _main_section = QWidget()
+        # Item 024: exposed as public attribute so MainWindow can reparent
+        # instance_group here under SF_INSTANCE_GROUP_ROUTE_AWARE="1" (D024-d).
+        self.main_llm_section = _main_section
         _main_section.setProperty("testid", "queue-div-main-llm")
         _main_section.setStyleSheet("background: transparent; border: none;")
         # Layout em coluna: label em cima, inputs (radios) embaixo. spacing 2
@@ -3234,6 +3261,8 @@ class CommandQueueWidget(QWidget):
         self._force_kimi_chk = self._main_kimi_radio
         self._main_qwen_radio = QRadioButton("qwen")
         self._main_qwen_radio.setProperty("testid", "queue-radio-main-qwen")
+        self._main_grok_radio = QRadioButton("grok")
+        self._main_grok_radio.setProperty("testid", "queue-radio-main-grok")
         self._main_llm_group = QButtonGroup(self)
         self._main_llm_group.setExclusive(True)
         for _btn in (
@@ -3241,6 +3270,7 @@ class CommandQueueWidget(QWidget):
             self._main_codex_radio,
             self._main_kimi_radio,
             self._main_qwen_radio,
+            self._main_grok_radio,
         ):
             _btn.setStyleSheet(_control_qss)
             self._main_llm_group.addButton(_btn)
@@ -3250,6 +3280,11 @@ class CommandQueueWidget(QWidget):
         from workflow_app.config import llm_config_v2_enabled
         if not llm_config_v2_enabled():
             self._main_qwen_radio.setVisible(False)
+        # Item 026: kill-switch — grok radio visivel somente quando
+        # SF_GROK_SPIKE esta ligado. Ausente ou off = oculto.
+        from workflow_app.config.feature_flags import grok_spike_enabled
+        if not grok_spike_enabled():
+            self._main_grok_radio.setVisible(False)
         # Item 018: persistencia do radio Main LLM via QSettings.
         # Restaura a selecao da sessao anterior (default: claude).
         _main_stg = QSettings("systemForge", "workflow-app")
@@ -3259,6 +3294,7 @@ class CommandQueueWidget(QWidget):
             "codex": self._main_codex_radio,
             "kimi": self._main_kimi_radio,
             "qwen": self._main_qwen_radio,
+            "grok": self._main_grok_radio,
         }
         _saved_radio = _main_radio_map.get(_saved_main, self._main_claude_radio)
         if _saved_radio.isVisible():
@@ -3292,13 +3328,28 @@ class CommandQueueWidget(QWidget):
         self._use_kimi_chk.setToolTip(
             "Quando marcado, [Rodar proximo] usa Kimi para items compativeis."
         )
+        self._use_qwen_chk = QCheckBox("qwen")
+        self._use_qwen_chk.setProperty("testid", "queue-chk-use-qwen")
+        self._use_qwen_chk.setToolTip(
+            "Quando marcado, [Rodar proximo] usa Qwen para items compativeis."
+        )
         self._use_codex_chk = QCheckBox("codex")
         self._use_codex_chk.setProperty("testid", "queue-chk-use-codex")
         self._use_codex_chk.setToolTip(
             "Quando marcado, [Rodar proximo] envia ao T3 Codex apenas os itens com seta azul "
             "(worker-elegiveis). Itens so com seta verde seguem no T1."
         )
-        for _btn in (self._use_kimi_chk, self._use_codex_chk):
+        self._use_grok_chk = QCheckBox("grok")
+        self._use_grok_chk.setProperty("testid", "queue-chk-use-grok")
+        self._use_grok_chk.setToolTip(
+            "Quando marcado, [Rodar proximo] usa Grok para items compativeis."
+        )
+        for _btn in (
+            self._use_kimi_chk,
+            self._use_qwen_chk,
+            self._use_codex_chk,
+            self._use_grok_chk,
+        ):
             _btn.setStyleSheet(_control_qss)
             _worker_options_layout.addWidget(_btn)
         _worker_options_layout.addStretch(1)
@@ -3393,10 +3444,16 @@ class CommandQueueWidget(QWidget):
         # play-next preference path.
         self._force_kimi_chk.toggled.connect(self._on_force_kimi_toggled)
         self._use_kimi_chk.toggled.connect(self._on_use_kimi_toggled)
+        self._use_qwen_chk.toggled.connect(self._on_use_qwen_toggled)
         self._main_codex_radio.toggled.connect(self._on_main_codex_toggled)
         self._main_claude_radio.toggled.connect(self._on_main_claude_toggled)
         self._main_qwen_radio.toggled.connect(self._on_main_qwen_toggled)
+        self._main_grok_radio.toggled.connect(self._on_main_grok_toggled)
         self._use_codex_chk.toggled.connect(self._on_use_codex_toggled)
+        self._use_grok_chk.toggled.connect(self._on_use_grok_toggled)
+
+        # Item 020: restaurar selecao de worker da sessao anterior.
+        self._restore_worker_selection()
 
         main_layout.addWidget(play_bar)
 
@@ -8076,6 +8133,16 @@ class CommandQueueWidget(QWidget):
         self._emit_progress_metrics()
         self._update_save_btn_state()
 
+        # Item 018: o preflight ORCH barra **no enqueue**, com motivo. Este e o
+        # ponto onde o operador ainda pode trocar o Main sem ter uma fila a meio
+        # caminho. O guard equivalente em `_on_step_btn_clicked` permanece como
+        # backstop fail-closed (a credencial pode sumir depois do enqueue), mas
+        # nao e mais o primeiro lugar onde o problema aparece.
+        if specs:
+            _orch_err = self._orch_preflight_main_credential()
+            if _orch_err is not None:
+                signal_bus.toast_requested.emit(_orch_err, "warning")
+
     def load_commands(self, commands: list[CommandSpec]) -> None:
         """Alias for load_pipeline() — called via signal pipeline_created."""
         self.load_pipeline(commands)
@@ -8438,7 +8505,52 @@ class CommandQueueWidget(QWidget):
                 active_flags=_active_flags,
             )
             item.set_dispatch_text(_full_dispatch)
+        # Item 019: congelar o contrato de execucao no enqueue. O snapshot
+        # captura Main LLM, workers, flags e provider resolvido ANTES de
+        # qualquer mutacao posterior da UI. O dispatch consome este snapshot.
+        self._frozen_contracts[id(item)] = self._capture_frozen_contract(spec)
         return item
+
+    def _capture_frozen_contract(self, spec: CommandSpec) -> FrozenContract:
+        """Snapshot do estado de roteamento atual (item 019 + item 020)."""
+        _kimi_on = bool(
+            getattr(self, "_use_kimi_chk", None) is not None
+            and self._use_kimi_chk.isChecked()
+        )
+        _codex_on = bool(
+            getattr(self, "_use_codex_chk", None) is not None
+            and self._use_codex_chk.isChecked()
+        )
+        _qwen_on = bool(
+            getattr(self, "_use_qwen_chk", None) is not None
+            and self._use_qwen_chk.isChecked()
+        )
+        _grok_on = bool(
+            getattr(self, "_use_grok_chk", None) is not None
+            and self._use_grok_chk.isChecked()
+        )
+        return FrozenContract(
+            main_llm=self._resolve_interactive_main_llm(),
+            kimi_worker_enabled=_kimi_on,
+            codex_worker_enabled=_codex_on,
+            active_flags=tuple(self._active_mcp_flags()),
+            resolved_provider=classify_provider(
+                spec,
+                RoutingState(
+                    kimi_worker_enabled=_kimi_on,
+                    codex_worker_enabled=_codex_on,
+                    main_llm=self._resolve_interactive_main_llm(),
+                    qwen_worker_enabled=_qwen_on,
+                    grok_worker_enabled=_grok_on,
+                ),
+            ),
+            qwen_worker_enabled=_qwen_on,
+            grok_worker_enabled=_grok_on,
+        )
+
+    def get_frozen_contract(self, item: CommandItemWidget) -> FrozenContract | None:
+        """Acessor do contrato congelado de um item (para testes e diagnostico)."""
+        return self._frozen_contracts.get(id(item))
 
     def _on_single_button_codex_dispatch(
         self, item: CommandItemWidget, cmd_text: str
@@ -8513,21 +8625,23 @@ class CommandQueueWidget(QWidget):
         """Qual LLM ocupa o terminal interactive (T1) AGORA.
 
         Espelha a precedencia de `_dispatch_green_arrow`/`_on_btn_next_clicked`:
-        radio Main Codex > radio Main Qwen > checkbox Main Kimi (--force) > Claude (default)."""
+        radio Main Codex > radio Main Qwen > radio Main Grok > checkbox Main Kimi (--force) > Claude (default)."""
         if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
             return "codex"
         if getattr(self, "_main_qwen_radio", None) and self._main_qwen_radio.isChecked():
             return "qwen"
+        if getattr(self, "_main_grok_radio", None) and self._main_grok_radio.isChecked():
+            return "grok"
         if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
             return "kimi"
         return "claude"
 
     def current_main_llm(self) -> str:
-        """Acessor publico read-only do Main LLM (`claude|codex|kimi|qwen`).
+        """Acessor publico read-only do Main LLM (`claude|codex|kimi|qwen|grok`).
 
         Superficie UNICA para o `main_window` (insercoes LLM-aware) ler o Main LLM
         sem instanciar radio proprio nem ler o cache `MetricsBar._main_llm`. Encapsula
-        `_resolve_interactive_main_llm()` (precedencia codex > qwen > kimi > claude).
+        `_resolve_interactive_main_llm()` (precedencia codex > qwen > grok > kimi > claude).
         Ver blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §11.1/D1.
         """
         return self._resolve_interactive_main_llm()
@@ -8544,39 +8658,153 @@ class CommandQueueWidget(QWidget):
             "main_llm/selected", slug
         )
 
-    def _orch_preflight_main_credential(self) -> str | None:
+    def _orch_preflight_main_credential(self, main_llm: str | None = None) -> str | None:
         """Item 018: preflight de credencial do Main LLM antes do enqueue.
 
         Verifica se a credencial basica do provider selecionado como Main
         esta disponivel no ambiente. Retorna ``None`` quando OK, ou uma
         mensagem de erro quando a credencial esta ausente.
 
-        Mapeamento de credenciais:
-          - claude: ANTHROPIC_API_KEY
-          - kimi:    KIMI_API_KEY (ou MOONSHOT_API_KEY)
-          - codex:   OPENAI_API_KEY
-          - qwen:    DASHSCOPE_API_KEY (ou QWEN_API_KEY)
+        ``main_llm`` permite avaliar um Main **explicito** em vez do estado
+        atual da UI. O dispatch passa o Main do contrato congelado no enqueue
+        (item 019): um item enfileirado sob Claude tem que ser checado contra
+        a credencial do Claude mesmo que o operador tenha girado o radio para
+        Codex depois de enfileirar. Sem o parametro, cair no estado vivo faria
+        o preflight reinterpretar item ja congelado — que e exatamente o que o
+        contrato do item 019 proibe.
 
-        O preflight barra no enqueue (antes do dispatch), nunca no meio do
-        dispatch. Mensagem inclui o motivo e o provider afetado.
+        **Fontes de verdade (PF-01, source.md §10.13).** Credencial de provider
+        e **ORCH**: quem le e o agente/CLI, nao a aplicacao entregue. Por isso
+        ela vive em ``.claude/projects/{slug}.json > credentials.mcp_servers.
+        <provider>.*`` e **nunca** no ``.env``. O preflight resolve, nesta ordem:
+
+        1. **CLI resolvivel** — binario do provider no ``PATH`` ou em
+           ``~/.local/bin``. "Provider sem CLI resolvivel" e a primeira metade
+           do fail-closed de PF-01 (source.md:1415).
+        2. **Credencial ORCH** — segunda metade. Aceita, nesta ordem:
+           ``credentials.mcp_servers.<provider>.*`` no project.json detectado;
+           config local do proprio CLI (``~/.codex/auth.json``,
+           ``~/.kimi/config.toml``, ``~/.qwen/settings.json``,
+           ``~/.grok/auth.json``, ``~/.claude.json``); variavel de ambiente,
+           apenas como ultimo sinal e nunca como fonte canonica.
+
+        A config local do CLI conta como credencial porque e assim que os CLIs
+        deste host de fato autenticam. Exigir a env var reprovaria provider
+        perfeitamente autenticado, que e falso-negativo, nao fail-closed. Ja
+        um provider sem CLI e sem nenhuma das tres fontes reprova de verdade.
+
+        Retorna ``None`` quando aprovado, ou a mensagem de bloqueio (com motivo
+        e provider afetado) que o chamador emite como toast. **Proibido fallback
+        silencioso para outro provider** (PF-01, Zero Silencio).
         """
         import os
-        main_llm = self._resolve_interactive_main_llm()
-        _cred_map = {
-            "claude": ("ANTHROPIC_API_KEY",),
-            "kimi": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
-            "codex": ("OPENAI_API_KEY",),
-            "qwen": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
-        }
-        candidates = _cred_map.get(main_llm, ())
-        if not candidates:
+
+        if main_llm is None:
+            main_llm = self._resolve_interactive_main_llm()
+
+        entry = self._ORCH_PROVIDER_SOURCES.get(main_llm)
+        if entry is None:
             return None
-        for key in candidates:
+        binaries, cred_key, config_paths, env_keys = entry
+
+        if not self._orch_cli_resolvable(binaries):
+            return (
+                f"CLI do Main LLM '{main_llm}' nao resolvivel: nenhum de "
+                f"{', '.join(binaries)} encontrado no PATH ou em ~/.local/bin."
+            )
+
+        if self._orch_credential_in_project_json(cred_key):
+            return None
+        for rel in config_paths:
+            if os.path.exists(os.path.expanduser(rel)):
+                return None
+        for key in env_keys:
             if os.environ.get(key, "").strip():
                 return None
+
         return (
-            f"Credencial do Main LLM '{main_llm}' ausente: "
-            f"defina {', '.join(candidates)} no .env antes de enfileirar."
+            f"Credencial ORCH do Main LLM '{main_llm}' ausente: nada em "
+            f"credentials.mcp_servers.{cred_key} do project.json, nenhuma config "
+            f"local ({', '.join(config_paths)}) e nenhuma de {', '.join(env_keys)}."
+        )
+
+    # provider -> (binarios aceitos, chave ORCH, configs locais do CLI, envs de fallback)
+    _ORCH_PROVIDER_SOURCES: dict[
+        str, tuple[tuple[str, ...], str, tuple[str, ...], tuple[str, ...]]
+    ] = {
+        "claude": (
+            ("claude", "clauded"),
+            "claude",
+            ("~/.claude.json", "~/.claude/settings.json"),
+            ("ANTHROPIC_API_KEY",),
+        ),
+        "kimi": (
+            ("kimi", "kimid"),
+            "kimi",
+            ("~/.kimi/config.toml",),
+            ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+        ),
+        "codex": (
+            ("codex", "codex-high"),
+            "codex",
+            ("~/.codex/auth.json", "~/.codex/config.toml"),
+            ("OPENAI_API_KEY",),
+        ),
+        "qwen": (
+            ("qwen", "qwen-high"),
+            "qwen",
+            ("~/.qwen/settings.json",),
+            ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
+        ),
+        "grok": (
+            ("grok",),
+            "grok",
+            ("~/.grok/auth.json", "~/.grok/config.toml"),
+            ("GROK_API_KEY", "XAI_API_KEY"),
+        ),
+    }
+
+    @staticmethod
+    def _orch_cli_resolvable(binaries: tuple[str, ...]) -> bool:
+        """PF-01, metade 1: algum binario do provider existe e e executavel."""
+        import os
+        import shutil
+
+        for name in binaries:
+            if shutil.which(name):
+                return True
+            local = os.path.expanduser(f"~/.local/bin/{name}")
+            if os.path.isfile(local) and os.access(local, os.X_OK):
+                return True
+        return False
+
+    @staticmethod
+    def _orch_credential_in_project_json(provider_key: str) -> bool:
+        """PF-01, metade 2: credencial ORCH declarada no project.json detectado.
+
+        Le ``credentials.mcp_servers.<provider_key>`` e aceita qualquer valor
+        escalar nao vazio (``api_key``, ``access_token``, ``binary``, ``enabled``
+        ...). Nao loga o valor: o preflight so precisa saber se existe.
+        """
+        import json
+
+        from workflow_app.config.config_parser import detect_config
+
+        try:
+            path = detect_config()
+            if not path:
+                return False
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        node = data.get("credentials", {}).get("mcp_servers", {}).get(provider_key)
+        if not isinstance(node, dict):
+            return bool(node)
+        return any(
+            isinstance(v, (str, bool, int, float)) and str(v).strip() not in ("", "False")
+            for v in node.values()
         )
 
     @staticmethod
@@ -8716,8 +8944,34 @@ class CommandQueueWidget(QWidget):
             signal_bus.main_llm_changed.emit("kimi")
 
     def _on_use_kimi_toggled(self, checked: bool) -> None:
-        """Parallel Worker Kimi keeps the legacy play-next preference toggle."""
+        """Parallel Worker Kimi (T2). PW-01: exclusividade com qwen."""
+        if checked:
+            if self._use_qwen_chk.isChecked():
+                self._use_qwen_chk.blockSignals(True)
+                self._use_qwen_chk.setChecked(False)
+                self._use_qwen_chk.blockSignals(False)
+                signal_bus.toast_requested.emit(
+                    "Kimi substituiu Qwen no worker T2 (exclusividade PW-01)",
+                    "info",
+                )
+            self._warn_main_worker_collision("kimi")
         self._refresh_kimi_btn_visibility()
+        self._persist_worker_selection()
+
+    def _on_use_qwen_toggled(self, checked: bool) -> None:
+        """Parallel Worker Qwen (T2). PW-01: exclusividade com kimi."""
+        if checked:
+            if self._use_kimi_chk.isChecked():
+                self._use_kimi_chk.blockSignals(True)
+                self._use_kimi_chk.setChecked(False)
+                self._use_kimi_chk.blockSignals(False)
+                signal_bus.toast_requested.emit(
+                    "Qwen substituiu Kimi no worker T2 (exclusividade PW-01)",
+                    "info",
+                )
+            self._warn_main_worker_collision("qwen")
+        self._refresh_kimi_btn_visibility()
+        self._persist_worker_selection()
 
     def _on_main_codex_toggled(self, checked: bool) -> None:
         """Hook kept explicit for symmetry with Main Kimi."""
@@ -8743,13 +8997,102 @@ class CommandQueueWidget(QWidget):
         if checked:
             signal_bus.main_llm_changed.emit("qwen")
 
-    def _on_use_codex_toggled(self, checked: bool) -> None:
-        """Parallel Worker Codex: recolore o botao unico (roxo/T3) sem reload.
-
-        Nao altera a visibilidade da seta worker (eixo Kimi), mas o provider
-        efetivo de itens Codex-elegiveis muda, entao recalcula a cor de todos
-        os itens (requisito visual 3)."""
+    def _on_main_grok_toggled(self, checked: bool) -> None:
+        """Main LLM Grok: dispatch via provider bridge (D-30, item 026)."""
         self._refresh_kimi_btn_visibility()
+        self._refresh_flag_checkboxes_state()
+        if checked:
+            signal_bus.main_llm_changed.emit("grok")
+
+    def _on_use_codex_toggled(self, checked: bool) -> None:
+        """Parallel Worker Codex (T3). PW-01: exclusividade com grok."""
+        if checked:
+            if self._use_grok_chk.isChecked():
+                self._use_grok_chk.blockSignals(True)
+                self._use_grok_chk.setChecked(False)
+                self._use_grok_chk.blockSignals(False)
+                signal_bus.toast_requested.emit(
+                    "Codex substituiu Grok no worker T3 (exclusividade PW-01)",
+                    "info",
+                )
+            self._warn_main_worker_collision("codex")
+        self._refresh_kimi_btn_visibility()
+        self._persist_worker_selection()
+
+    def _on_use_grok_toggled(self, checked: bool) -> None:
+        """Parallel Worker Grok (T3). PW-01: exclusividade com codex."""
+        if checked:
+            if self._use_codex_chk.isChecked():
+                self._use_codex_chk.blockSignals(True)
+                self._use_codex_chk.setChecked(False)
+                self._use_codex_chk.blockSignals(False)
+                signal_bus.toast_requested.emit(
+                    "Grok substituiu Codex no worker T3 (exclusividade PW-01)",
+                    "info",
+                )
+            self._warn_main_worker_collision("grok")
+        self._refresh_kimi_btn_visibility()
+        self._persist_worker_selection()
+
+    def _warn_main_worker_collision(self, worker_provider: str) -> None:
+        """Item 020: toast de aviso quando Main e worker ocupam o mesmo provider.
+
+        Nao bloqueia — apenas alerta sobre custo/rate-limit duplicado.
+        """
+        main_llm = self._resolve_interactive_main_llm()
+        if main_llm == worker_provider:
+            signal_bus.toast_requested.emit(
+                f"Provider {worker_provider} ocupa Main (T1) e worker"
+                " simultaneamente (custo/rate-limit)",
+                "warning",
+            )
+
+    def _persist_worker_selection(self) -> None:
+        """Item 020: salva selecao de worker no QSettings.
+
+        Persiste qual provider esta marcado em cada terminal (T2/T3).
+        Chave: ``worker/t2_selected`` e ``worker/t3_selected``.
+        """
+        stg = QSettings("systemForge", "workflow-app")
+        if self._use_kimi_chk.isChecked():
+            t2 = "kimi"
+        elif self._use_qwen_chk.isChecked():
+            t2 = "qwen"
+        else:
+            t2 = ""
+        if self._use_codex_chk.isChecked():
+            t3 = "codex"
+        elif self._use_grok_chk.isChecked():
+            t3 = "grok"
+        else:
+            t3 = ""
+        stg.setValue("worker/t2_selected", t2)
+        stg.setValue("worker/t3_selected", t3)
+
+    def _restore_worker_selection(self) -> None:
+        """Item 020: restaura selecao de worker do QSettings.
+
+        blockSignals para nao disparar PW-01 durante restore.
+        """
+        stg = QSettings("systemForge", "workflow-app")
+        t2 = stg.value("worker/t2_selected", "")
+        t3 = stg.value("worker/t3_selected", "")
+
+        for chk, name in (
+            (self._use_kimi_chk, "kimi"),
+            (self._use_qwen_chk, "qwen"),
+        ):
+            chk.blockSignals(True)
+            chk.setChecked(t2 == name)
+            chk.blockSignals(False)
+
+        for chk, name in (
+            (self._use_codex_chk, "codex"),
+            (self._use_grok_chk, "grok"),
+        ):
+            chk.blockSignals(True)
+            chk.setChecked(t3 == name)
+            chk.blockSignals(False)
 
     def _refresh_kimi_btn_visibility(self) -> None:
         """Aplica regra de visibilidade da seta de worker per-item + recolore.
@@ -8785,16 +9128,72 @@ class CommandQueueWidget(QWidget):
 
         Idempotente: o sufixo e sempre recomputado do zero a partir de spec.name
         via render_with_mcp_flags, entao toggles repetidos nunca acumulam nem
-        duplicam flags. Espelha os handlers _on_use_*_toggled do eixo-worker."""
+        duplicam flags. Espelha os handlers _on_use_*_toggled do eixo-worker.
+
+        Item 021: tambem espelha o estado no FlagsPanel (aba LLM Config).
+        """
         _ = checked
+        self._sync_flags_panel_to_mirror()
         self._refresh_flag_suffix()
 
     def _active_mcp_flags(self) -> list[str]:
-        """Le o estado dos checkboxes queue-chk-flag-* na ordem kimi, codex.
+        """Le o estado das flags MCP ativas.
 
+        Item 021: le do FlagsPanel (aba LLM Config) quando disponivel; fallback
+        para os checkboxes locais queue-chk-flag-* (retrocompat).
         Ordem de entrada preservada (dedupe/ordenacao final ficam no helper puro
-        render_with_mcp_flags). Guard getattr para tolerar chamada antes do build
-        completo da UI."""
+        render_with_mcp_flags)."""
+        # Item 021: FlagsPanel como fonte canonica quando disponivel.
+        flags_panel = self._get_flags_panel()
+        if flags_panel is not None:
+            try:
+                return flags_panel.checked_flags()
+            except RuntimeError:
+                pass
+        # Fallback: checkboxes locais do command_queue.
+        flags: list[str] = []
+        if (
+            getattr(self, "_flag_kimi_chk", None) is not None
+            and self._flag_kimi_chk.isChecked()
+        ):
+            flags.append("--kimi")
+        if (
+            getattr(self, "_flag_codex_chk", None) is not None
+            and self._flag_codex_chk.isChecked()
+        ):
+            flags.append("--codex")
+        return flags
+
+    def _get_flags_panel(self):
+        """Acessa o FlagsPanel da aba LLM Config via MainWindow (item 021).
+
+        Retorna None quando a aba esta desabilitada (kill-switch) ou o widget
+        ainda nao foi construido.
+        """
+        try:
+            main_win = self.window()
+            return getattr(main_win, "_llm_config_flags_panel", None)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _sync_flags_panel_to_mirror(self) -> None:
+        """Espelha o estado do FlagsPanel nos checkboxes locais (item 021).
+
+        Bidirecional: quando o FlagsPanel muda, os checkboxes locais refletem;
+        quando os checkboxes locais mudam, o FlagsPanel reflete. Usa
+        blockSignals para evitar loop de feedback.
+        """
+        flags_panel = self._get_flags_panel()
+        if flags_panel is None:
+            return
+        try:
+            active = self._active_mcp_flags_from_local()
+            flags_panel.set_flag_states_from_mirror(active)
+        except RuntimeError:
+            pass
+
+    def _active_mcp_flags_from_local(self) -> list[str]:
+        """Le checkboxes locais queue-chk-flag-* (sem passar pelo FlagsPanel)."""
         flags: list[str] = []
         if (
             getattr(self, "_flag_kimi_chk", None) is not None
@@ -8848,77 +9247,67 @@ class CommandQueueWidget(QWidget):
             item.set_dispatch_text(full_dispatch)
 
     def _refresh_flag_checkboxes_state(self) -> None:
-        """Atualiza enabled/tooltip das checkboxes de flag (item 012, ST005).
+        """Atualiza enabled/tooltip das checkboxes de flag (item 021).
 
         Regras:
-          - Main == Claude: ambas sempre habilitadas (independente do kill-switch).
-          - Main != Claude E kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0:
-            ambas desabilitadas (freio imediato).
-          - Main != Claude E kill-switch ativo (default):
-            - queue-chk-flag-kimi: habilitada.
-            - queue-chk-flag-codex: sempre disabled (C-43).
-              - Main Kimi: tooltip cita auto-proxy (R-40).
-              - Main Codex: tooltip cita redundancia.
+          - Kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0:
+            todas desabilitadas (independente do Main).
+          - Main == Claude: todas habilitadas.
+          - Main != Claude: flag cujo provider bate com o Main -> disabled
+            (redundante); demais habilitadas.
+          - **C-43 (R-40): Main == Kimi -> `--codex` disabled com tooltip
+            citando auto-proxy.** As skills de provider do lado Kimi
+            (`.kimi/skills/codex`) sao auto-proxies: marcar `--codex` sob Main
+            Kimi seria intencao explicita aceita e silenciosamente convertida
+            em auto-consulta. Desabilitar com motivo visivel e a resolucao
+            honesta (source.md §10.15, ponto 1) — Zero Silencio.
         """
         from workflow_app.config import delegation_flags_nonclaude_enabled
+        from workflow_app.config.llm_flags import (
+            _FLAG_LITERAL_TO_MAIN,
+            _SUPPORTED_MCP_FLAGS,
+        )
 
         main_llm = self._resolve_interactive_main_llm()
-        kimi_chk = getattr(self, "_flag_kimi_chk", None)
-        codex_chk = getattr(self, "_flag_codex_chk", None)
-        if kimi_chk is None or codex_chk is None:
-            return
-
-        if main_llm == "claude":
-            # Main Claude: ambas sempre habilitadas.
-            kimi_chk.setEnabled(True)
-            kimi_chk.setToolTip(
-                "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
-                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-            )
-            codex_chk.setEnabled(True)
-            codex_chk.setToolTip(
-                "Quando marcado, anexa --codex ao label dos itens T1 (Claude). "
-                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-            )
-            return
-
-        # Main != Claude
         ks_enabled = delegation_flags_nonclaude_enabled()
-        if not ks_enabled:
-            # Kill-switch desligado: ambas desabilitadas.
-            kimi_chk.setEnabled(False)
-            kimi_chk.setToolTip(
-                "Paridade de flags desabilitada pelo kill-switch "
-                "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
-            )
-            codex_chk.setEnabled(False)
-            codex_chk.setToolTip(
-                "Paridade de flags desabilitada pelo kill-switch "
-                "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
-            )
-            return
 
-        # Kill-switch ativo, Main != Claude.
-        kimi_chk.setEnabled(True)
-        kimi_chk.setToolTip(
-            "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
-            "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-        )
-        # queue-chk-flag-codex sempre disabled sob Main nao-Claude (C-43).
-        codex_chk.setEnabled(False)
-        if main_llm == "kimi":
-            codex_chk.setToolTip(
-                "Kimi usa auto-proxy; delegar ao Codex geraria registro falso "
-                "de segunda opiniao (R-40)."
-            )
-        elif main_llm == "codex":
-            codex_chk.setToolTip(
-                "Codex como Main; flag --codex e redundante."
-            )
-        else:
-            codex_chk.setToolTip(
-                "Flag --codex indisponivel sob Main atual."
-            )
+        for flag in _SUPPORTED_MCP_FLAGS:
+            chk = getattr(self, f"_flag_{flag.lstrip('-').replace('-', '_')}_chk", None)
+            if chk is None:
+                continue
+            if not ks_enabled:
+                chk.setEnabled(False)
+                chk.setToolTip(
+                    "Paridade de flags desabilitada pelo kill-switch "
+                    "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
+                )
+                continue
+            if main_llm == "claude":
+                chk.setEnabled(True)
+                chk.setToolTip(
+                    "Quando marcado, anexa " + flag + " ao label dos itens T1 (Claude). "
+                    "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+                )
+                continue
+            flag_main = _FLAG_LITERAL_TO_MAIN.get(flag, "")
+            if flag == "--codex" and main_llm == "kimi":
+                # C-43 / R-40: as skills de provider do lado Kimi sao auto-proxy.
+                chk.setEnabled(False)
+                chk.setToolTip(
+                    "--codex desabilitado sob Main Kimi: as skills de provider do "
+                    "lado Kimi sao auto-proxy, entao a flag viraria auto-consulta "
+                    "silenciosa em vez de segunda opiniao explicita. Para pedir "
+                    "Codex de forma explicita, troque o Main."
+                )
+            elif flag_main and flag_main == main_llm:
+                chk.setEnabled(False)
+                chk.setToolTip(flag + " redundante sob Main " + main_llm + ".")
+            else:
+                chk.setEnabled(True)
+                chk.setToolTip(
+                    "Quando marcado, anexa " + flag + " ao label dos itens T1 (Claude). "
+                    "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+                )
 
     # Diretorios pesquisados para resolver existencia de uma skill quando
     # --force Kimi reescreve `/cmd` como `/skill:cmd`. Caches resolvidos uma
@@ -9798,6 +10187,27 @@ class CommandQueueWidget(QWidget):
         """
         return True
 
+    def _dispatch_grok_main_command(self, cmd_text: str) -> bool:
+        """Dispatch through the Main LLM Grok path (item 026, D-30).
+
+        Grok as Main LLM routes through the interactive terminal.
+        /model and /effort are Claude-specific directives, skipped.
+        /clear always goes raw to T1.
+        """
+        head = self._command_head(cmd_text)
+        if head.startswith("/model") or head.startswith("/effort"):
+            signal_bus.listener_helper_pulse.emit("interactive")
+            return True
+        if head == "/clear":
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+        # Route through interactive terminal for now (provider bridge
+        # migration is ST002).
+        signal_bus.run_command_in_terminal.emit(cmd_text)
+        self._on_run_command(cmd_text)
+        return True
+
     def _dispatch_green_arrow(self, cmd_text: str) -> bool:
         """Handler unico para `item.run_in_terminal_requested` (provider efetivo
         Claude/T1). Retorna True quando publicou de fato (fix D-1: o slot
@@ -9843,6 +10253,9 @@ class CommandQueueWidget(QWidget):
 
         if getattr(self, "_main_qwen_radio", None) and self._main_qwen_radio.isChecked():
             return self._dispatch_qwen_main_command(cmd_text)
+
+        if getattr(self, "_main_grok_radio", None) and self._main_grok_radio.isChecked():
+            return self._dispatch_grok_main_command(cmd_text)
 
         if not getattr(self, "_force_kimi_chk", None) or not self._force_kimi_chk.isChecked():
             signal_bus.run_command_in_terminal.emit(cmd_text)
@@ -9915,10 +10328,22 @@ class CommandQueueWidget(QWidget):
         if not cmd_text or not cmd_text.strip():
             return
         head = cmd_text.strip().split(None, 1)[0].lower()
-        if head == "/clear" and self._use_kimi_chk.isChecked():
+        # Item 020: T2 family = kimi OR qwen; T3 family = codex OR grok.
+        _t2_active = (
+            self._use_kimi_chk.isChecked()
+            or (getattr(self, "_use_qwen_chk", None) is not None
+                and self._use_qwen_chk.isChecked())
+        )
+        _t3_active = (
+            (getattr(self, "_use_codex_chk", None) is not None
+             and self._use_codex_chk.isChecked())
+            or (getattr(self, "_use_grok_chk", None) is not None
+                and self._use_grok_chk.isChecked())
+        )
+        if head == "/clear" and _t2_active:
             signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
             self._last_workspace_dispatch_was_clear = True
-        if head == "/clear" and getattr(self, "_use_codex_chk", None) and self._use_codex_chk.isChecked():
+        if head == "/clear" and _t3_active:
             # Fix D-7: mesmo gate de prontidao do T3 que o step path
             # (`clear_both`) — sem ele, o /clear ia para um xterm Codex
             # possivelmente inexistente em silencio. T3 indisponivel -> toast.
@@ -9926,7 +10351,7 @@ class CommandQueueWidget(QWidget):
                 signal_bus.run_command_in_workspace_xterm.emit(cmd_text)
             else:
                 signal_bus.toast_requested.emit(
-                    "Worker Codex (T3): terminal-codex-output nao esta pronto"
+                    "Worker (T3): terminal-codex-output nao esta pronto"
                     " — /clear nao espelhado.",
                     "warning",
                 )
@@ -10364,9 +10789,14 @@ class CommandQueueWidget(QWidget):
             )
             return
 
-        # Item 018: preflight ORCH — barra no enqueue se a credencial do
-        # Main LLM selecionado estiver ausente. Nunca no meio do dispatch.
-        _orch_err = self._orch_preflight_main_credential()
+        # Item 018: preflight ORCH — barra se a credencial do Main LLM estiver
+        # ausente. Item 019: o Main avaliado aqui e o do contrato congelado no
+        # enqueue, nao o do radio atual — trocar de Main depois de enfileirar
+        # nao pode mudar contra qual credencial o item ja enfileirado e checado.
+        _fc_preflight = self.get_frozen_contract(next_item)
+        _orch_err = self._orch_preflight_main_credential(
+            _fc_preflight.main_llm if _fc_preflight is not None else None
+        )
         if _orch_err is not None:
             signal_bus.toast_requested.emit(_orch_err, "warning")
             return
@@ -10413,15 +10843,40 @@ class CommandQueueWidget(QWidget):
         # concordam para Kimi E Codex (antes so o Codex consumia o router; o gate
         # Kimi legado usava is_kimi_compatible isolado e divergia do clique para
         # itens kimi_eligible-only).
-        routing_state = RoutingState(
-            kimi_worker_enabled=self._use_kimi_chk.isChecked(),
-            codex_worker_enabled=bool(
-                getattr(self, "_use_codex_chk", None) is not None
-                and self._use_codex_chk.isChecked()
-            ),
-            main_llm=self._resolve_interactive_main_llm(),
-        )
-        self._last_classified_provider = classify_provider(spec, routing_state)
+        #
+        # Item 019: usa o contrato congelado no enqueue quando disponivel.
+        # O snapshot garante que trocas de Main LLM / flags entre enqueue e
+        # dispatch nao reinterpretam o item ja enfileirado. RoutingState e
+        # montado a partir do frozen contract (nao da UI live); classify_provider
+        # continua sendo invocado (paridade com testes que fazem patch).
+        _fc = self.get_frozen_contract(next_item)
+        if _fc is not None:
+            routing_state = RoutingState(
+                kimi_worker_enabled=_fc.kimi_worker_enabled,
+                codex_worker_enabled=_fc.codex_worker_enabled,
+                main_llm=_fc.main_llm,
+                qwen_worker_enabled=getattr(_fc, "qwen_worker_enabled", False),
+                grok_worker_enabled=getattr(_fc, "grok_worker_enabled", False),
+            )
+            self._last_classified_provider = classify_provider(spec, routing_state)
+        else:
+            routing_state = RoutingState(
+                kimi_worker_enabled=self._use_kimi_chk.isChecked(),
+                codex_worker_enabled=bool(
+                    getattr(self, "_use_codex_chk", None) is not None
+                    and self._use_codex_chk.isChecked()
+                ),
+                main_llm=self._resolve_interactive_main_llm(),
+                qwen_worker_enabled=bool(
+                    getattr(self, "_use_qwen_chk", None) is not None
+                    and self._use_qwen_chk.isChecked()
+                ),
+                grok_worker_enabled=bool(
+                    getattr(self, "_use_grok_chk", None) is not None
+                    and self._use_grok_chk.isChecked()
+                ),
+            )
+            self._last_classified_provider = classify_provider(spec, routing_state)
 
         # ── Regra de capacidade exclusiva: GERACAO DE IMAGEM ──────────────── #
         # Enforce mecanico (progress.md "Capacidade exclusiva"): so o Codex gera
@@ -10452,6 +10907,10 @@ class CommandQueueWidget(QWidget):
             self._last_classified_provider is Provider.KIMI
             and next_item.is_worker_arrow_visible()
         )
+        use_qwen = (
+            self._last_classified_provider is Provider.QWEN
+            and next_item.is_worker_arrow_visible()
+        )
 
         # use_codex e governado SO pelo router: Provider.CODEX significa worker
         # Codex ativo E comando na whitelist Codex (is_codex_compatible) E Kimi
@@ -10465,6 +10924,7 @@ class CommandQueueWidget(QWidget):
         # /effort e local-action resolvem para CLAUDE no router, nunca chegam como
         # CODEX; is_codex_compatible so casa `/`-commands, entao CODEX => slash.
         use_codex = self._last_classified_provider is Provider.CODEX
+        use_grok = self._last_classified_provider is Provider.GROK
 
         # ALWAYS cancel any pending modal-confirmation Enter from a previous
         # dispatch. Otherwise a 1s-delayed Enter scheduled by a previous
@@ -10477,16 +10937,30 @@ class CommandQueueWidget(QWidget):
         # sessions. T1 always receives /clear raw (Claude, Codex and Kimi all
         # understand /clear unchanged); the active worker terminal mirrors it
         # so both contexts reset together.
+        # Item 019: usa frozen contract para /clear mirror (workers congelados).
+        # Item 020: estendido para qwen (T2) e grok (T3).
+        _fc_kimi = _fc.kimi_worker_enabled if _fc else self._use_kimi_chk.isChecked()
+        _fc_codex = _fc.codex_worker_enabled if _fc else self._use_codex_chk.isChecked()
+        _fc_qwen = getattr(_fc, "qwen_worker_enabled", False) if _fc else bool(
+            getattr(self, "_use_qwen_chk", None) is not None
+            and self._use_qwen_chk.isChecked()
+        )
+        _fc_grok = getattr(_fc, "grok_worker_enabled", False) if _fc else bool(
+            getattr(self, "_use_grok_chk", None) is not None
+            and self._use_grok_chk.isChecked()
+        )
+        _t2_active = _fc_kimi or _fc_qwen
+        _t3_active = _fc_codex or _fc_grok
         clear_both = (
             cmd_head == "/clear"
-            and (self._use_kimi_chk.isChecked() or self._use_codex_chk.isChecked())
+            and (_t2_active or _t3_active)
         )
         if clear_both:
             signal_bus.run_command_in_terminal.emit(cmd_text)
-            if self._use_kimi_chk.isChecked():
+            if _t2_active:
                 signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
                 self._last_workspace_dispatch_was_clear = True
-            if self._use_codex_chk.isChecked():
+            if _t3_active:
                 # task 006 finding F3 — mesmo gate de terminal alvo nao pronto
                 # (condicao de falha 4) que ja vale em _dispatch_codex_command:
                 # so espelha /clear para o T3 quando o terminal-codex-output
@@ -10514,20 +10988,40 @@ class CommandQueueWidget(QWidget):
             next_item._on_kimi_clicked()
             self._last_workspace_dispatch_was_clear = False  # consumed by blue arrow
             return
+        if use_qwen:
+            # Item 020: Qwen worker routes to T2 (workspace terminal),
+            # same dispatch path as Kimi but via Provider.QWEN.
+            next_item._on_kimi_clicked()
+            self._last_workspace_dispatch_was_clear = False
+            return
         if use_codex:
             if self._dispatch_codex_command(cmd_text):  # to_t1=False → T3 xterm
+                next_item._mark_as_sent()
+            return
+        if use_grok:
+            # Item 020: Grok worker routes to T3 (workspace xterm),
+            # same dispatch path as Codex but via Provider.GROK.
+            if self._dispatch_codex_command(cmd_text):
                 next_item._mark_as_sent()
             return
 
         # ── Main-LLM axis ─────────────────────────────────────────────── #
         # No worker claimed this command → dispatch to T1 in the Main LLM's
         # own format.
-        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
+        # Item 019: usa frozen main_llm quando disponivel (contrato congelado
+        # no enqueue). A troca de Main LLM entre enqueue e dispatch nao altera
+        # o formato de dispatch do item ja enfileirado.
+        _frozen_main = _fc.main_llm if _fc else self._resolve_interactive_main_llm()
+        if _frozen_main == "codex":
             if self._dispatch_codex_command(cmd_text, to_t1=True):
                 next_item._mark_as_sent()
             return
-        if self._force_kimi_chk.isChecked():
+        if _frozen_main == "kimi":
             if self._dispatch_kimi_main_command(cmd_text):
+                next_item._mark_as_sent()
+            return
+        if _frozen_main == "qwen":
+            if self._dispatch_qwen_main_command(cmd_text):
                 next_item._mark_as_sent()
             return
 
@@ -10537,7 +11031,8 @@ class CommandQueueWidget(QWidget):
         # per-item run/copy e mass copy (caminho 4). classify_provider ja
         # rodou e _last_classified_provider e CLAUDE neste ramo — o worker
         # axis e as esteiras Main Codex/Kimi retornaram ANTES.
-        active_flags = self._active_mcp_flags()
+        # Item 019: usa frozen active_flags quando disponivel.
+        active_flags = list(_fc.active_flags) if _fc else self._active_mcp_flags()
         cmd_text_t1 = command_text_with_flags(
             spec,
             provider=self._last_classified_provider,
