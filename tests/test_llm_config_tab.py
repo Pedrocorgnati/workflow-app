@@ -67,6 +67,7 @@ if llm_box.parentWidget() is not None:
     llm_box_parent_testid = llm_box.parentWidget().property("testid")
 
 llm_box_layout_type = type(llm_box.layout()).__name__
+llm_box_hint = llm_box.sizeHint()
 
 # Check for terminal-insertions button
 has_terminal_insertions = "output-toolbar-section-terminal-insertions" in btn_testids
@@ -90,13 +91,71 @@ print(json.dumps({
     "has_terminal_insertions": has_terminal_insertions,
     "llm_config_parent_testid": llm_box_parent_testid,
     "llm_box_layout_type": llm_box_layout_type,
+    "llm_box_hint_w": llm_box_hint.width(),
+    "llm_box_hint_h": llm_box_hint.height(),
     "llm_config_containers": sorted(containers),
     "flag_enabled": llm_config_btn is not None,
 }))
 """
 
 
-def _run_probe(env_override: dict[str, str] | None = None) -> dict:
+# Probe do teto de altura (C-04/R-18). Diferente da sonda acima, esta PRECISA
+# de geometria viva: `_sync_flow_section_height` so mede depois de show() +
+# resize(), e o offscreen do Qt entrega geometria real.
+_LLM_CONFIG_HEIGHT_PROBE = """\
+import json
+import os
+import sys
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QCoreApplication, QEventLoop
+from PySide6.QtWidgets import QApplication
+
+app = QApplication.instance() or QApplication(sys.argv)
+
+from workflow_app.main_window import MainWindow
+
+win = MainWindow()
+win.resize(1747, 749)
+win.show()
+
+
+def _settle():
+    for _ in range(6):
+        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 200)
+
+
+_settle()
+selector = win._toolbar_section_selector
+stack = win._toolbar_section_stack
+
+boot_cap = selector.maximumHeight()
+
+llm_index = None
+for i in range(stack.count()):
+    if stack.widget(i).property("testid") == "output-toolbar-section-llm-config":
+        llm_index = i
+        break
+
+llm_cap = None
+if llm_index is not None:
+    win._select_toolbar_section(llm_index)
+    _settle()
+    llm_cap = selector.maximumHeight()
+
+print(json.dumps({
+    "qt_size_max": 16777215,
+    "boot_cap": boot_cap,
+    "llm_cap": llm_cap,
+}))
+"""
+
+
+def _run_probe(
+    env_override: dict[str, str] | None = None,
+    source: str = _LLM_CONFIG_TAB_PROBE,
+) -> dict:
     """Run the probe in a subprocess with the given env overrides."""
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
@@ -107,7 +166,7 @@ def _run_probe(env_override: dict[str, str] | None = None) -> dict:
         env.pop(_FLAG_NAME, None)
 
     result = subprocess.run(
-        [sys.executable, "-c", _LLM_CONFIG_TAB_PROBE],
+        [sys.executable, "-c", source],
         capture_output=True,
         text=True,
         env=env,
@@ -184,6 +243,57 @@ class TestLLMConfigTabLayout:
             f"Expected containers {expected}, got {data['llm_config_containers']}"
         )
 
+    def test_llm_routing_is_qhboxlayout_when_flag_enabled(self):
+        """C-04 (metade que faltava): a div e QHBoxLayout dentro da aba.
+
+        A sonda ja coletava `llm_box_layout_type` desde o item 017, mas nenhum
+        teste afirmava o valor: a div continuou QVBoxLayout com a flag ligada e
+        os 51 testes seguiram verdes.
+        """
+        data = _run_probe({_FLAG_NAME: "1"})
+        assert data["llm_box_layout_type"] == "QHBoxLayout", (
+            f"queue-div-llm-routing deve ser QHBoxLayout dentro da aba LLM "
+            f"Config, got: {data['llm_box_layout_type']}"
+        )
+
+    def test_llm_routing_is_shorter_in_row_than_in_legacy_column(self):
+        """C-04/R-18: a row de 3 colunas nao pode ser mais alta que a coluna.
+
+        Premissa do risco R-18: em linha a div tem de ficar mais baixa que
+        empilhada. O teto efetivo do selector e travado separadamente em
+        `test_llm_config_section_caps_selector_height`.
+        """
+        on = _run_probe({_FLAG_NAME: "1"})
+        off = _run_probe()
+        assert on["llm_box_hint_h"] < off["llm_box_hint_h"], (
+            f"altura da div em linha ({on['llm_box_hint_h']}) deveria ser menor "
+            f"que empilhada ({off['llm_box_hint_h']})"
+        )
+
+    def test_llm_config_section_caps_selector_height(self):
+        """C-04/R-18: com LLM CONFIG ativa, o selector fica com teto medido.
+
+        `_sync_flow_section_height` so aplica teto quando consegue medir a
+        pagina. A pagina LLM CONFIG e a unica de `_flow_section_pages` sem
+        flow layout, entao `hasHeightForWidth()` volta False e o teto cairia
+        no release (`_QT_WIDGET_SIZE_MAX`); ai o QStackedLayout dimensionaria
+        a aba pela pagina mais alta do stack e sobraria faixa vazia sob a row.
+        Este teste trava as duas metades: teto aplicado (nao liberado) e nao
+        maior que o da secao de boot.
+        """
+        data = _run_probe({_FLAG_NAME: "1"}, source=_LLM_CONFIG_HEIGHT_PROBE)
+        assert data["llm_cap"] is not None, (
+            "pagina output-toolbar-section-llm-config nao encontrada no stack"
+        )
+        assert data["llm_cap"] != data["qt_size_max"], (
+            "teto do selector foi liberado com a secao LLM CONFIG ativa "
+            "(_sync_flow_section_height nao mediu a pagina)"
+        )
+        assert 0 < data["llm_cap"] <= data["boot_cap"], (
+            f"teto com LLM CONFIG ({data['llm_cap']}) deveria caber no teto da "
+            f"secao de boot ({data['boot_cap']})"
+        )
+
 
 # --- Flag ausente: aba LLM Config NAO existe, layout legado ---
 
@@ -216,6 +326,14 @@ class TestLLMConfigTabFlagAbsent:
         data = _run_probe()
         assert data["llm_config_parent_testid"] != "output-toolbar-section-llm-config", (
             "queue-div-llm-routing should NOT be in LLM Config tab when flag is absent"
+        )
+
+    def test_llm_routing_keeps_column_layout_when_flag_absent(self):
+        """ST003: sem a flag, a div segue empilhada (QVBoxLayout) na top-row."""
+        data = _run_probe()
+        assert data["llm_box_layout_type"] == "QVBoxLayout", (
+            f"layout legado deve permanecer QVBoxLayout, "
+            f"got: {data['llm_box_layout_type']}"
         )
 
 

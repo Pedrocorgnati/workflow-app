@@ -3169,11 +3169,22 @@ class CommandQueueWidget(QWidget):
 
         # LLM routing: one container with the main session selector and
         # optional worker preference toggles used by [Rodar proximo].
-        # Reparenteado pelo MainWindow para a linha 1 da OutputToolbar; por isso
-        # e exposto como self._llm_box. Layout em coluna: as tres secoes (Main
-        # LLM | Parallel Worker | Flag) ficam empilhadas uma sobre a
-        # outra, separadas por divisores HLine. Nas duas primeiras o label fica
-        # em cima dos inputs; em Flag o label divide a linha com os checkboxes.
+        # Reparenteado pelo MainWindow para a linha 1 da OutputToolbar (layout
+        # legado) ou para a aba LLM Config (SF_LLM_CONFIG_V2="1"); por isso e
+        # exposto como self._llm_box.
+        #
+        # A orientacao depende do kill-switch (item 017, C-04):
+        # - flag OFF: coluna. As tres secoes (Main LLM | Parallel Worker | Flag)
+        #   ficam empilhadas, separadas por divisores HLine. A div mora na
+        #   top-row, ao lado do selector, onde so ha largura para uma coluna.
+        # - flag ON: linha. As tres secoes ficam lado a lado, separadas por
+        #   divisores VLine. A div mora dentro da aba LLM Config, que tem a
+        #   largura inteira do header e um teto de altura (R-18); empilhar ali
+        #   estouraria o maximo do selector.
+        # Em ambos os casos, nas duas primeiras secoes o label fica em cima dos
+        # inputs; em Flag o label divide a linha com os checkboxes.
+        from workflow_app.config import llm_config_v2_enabled as _llm_v2_on
+        _llm_box_horizontal = _llm_v2_on()
         _llm_box = QWidget()
         self._llm_box = _llm_box
         _llm_box.setProperty("testid", "queue-div-llm-routing")
@@ -3183,7 +3194,9 @@ class CommandQueueWidget(QWidget):
         )
         # spacing 6 entre secoes (o de dentro de cada secao e 2), para o par
         # label+controles ler como um bloco so.
-        _llm_layout = QVBoxLayout(_llm_box)
+        _llm_layout = (
+            QHBoxLayout(_llm_box) if _llm_box_horizontal else QVBoxLayout(_llm_box)
+        )
         _llm_layout.setContentsMargins(8, 4, 8, 4)
         _llm_layout.setSpacing(6)
         self._llm_layout = _llm_layout
@@ -3221,12 +3234,20 @@ class CommandQueueWidget(QWidget):
             "  background: transparent; border: none; }"
         )
         def _make_llm_divider() -> QFrame:
-            """Divisor horizontal fino entre secoes empilhadas do _llm_box."""
+            """Divisor fino entre secoes do _llm_box.
+
+            Segue a orientacao do `_llm_layout`: HLine de 1px de altura na
+            coluna legada, VLine de 1px de largura na linha da aba LLM Config.
+            """
             line = QFrame()
-            line.setFrameShape(QFrame.Shape.HLine)
             line.setFrameShadow(QFrame.Shadow.Plain)
             line.setStyleSheet("color: #3F3F46; background: #3F3F46; border: none;")
-            line.setFixedHeight(1)
+            if _llm_box_horizontal:
+                line.setFrameShape(QFrame.Shape.VLine)
+                line.setFixedWidth(1)
+            else:
+                line.setFrameShape(QFrame.Shape.HLine)
+                line.setFixedHeight(1)
             return line
 
         self._make_llm_divider = _make_llm_divider

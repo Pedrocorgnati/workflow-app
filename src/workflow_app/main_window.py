@@ -1470,20 +1470,30 @@ class MainWindow(QMainWindow):
             _llm_config_layout.setContentsMargins(4, 4, 4, 4)
             _llm_config_layout.setSpacing(6)
             # Reparenteia queue-div-llm-routing da top-row para esta aba (C-04).
-            _llm_config_layout.addWidget(self._command_queue._llm_box, stretch=1)
-            # Containers vazios para itens 018-021 (testids estaveis).
+            # Sob a flag a div ja e QHBoxLayout (as tres secoes lado a lado),
+            # entao ela entra com a largura natural: `stretch=1` a esticaria
+            # para 1/4 da row e espalharia as secoes com folga no meio.
+            _llm_config_layout.addWidget(
+                self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
+            )
+            # Containers vazios para itens 018-021 (testids estaveis). Dois
+            # deles seguem sem conteudo por decisao dos proprios itens (018 e
+            # 020 mantiveram os controles dentro de queue-div-llm-routing);
+            # entram com stretch=0 para nao reservarem faixa vazia na row.
             _llm_config_main_container = QWidget()
             _llm_config_main_container.setProperty("testid", "llm-config-main-llm-container")
             _llm_config_main_container.setMinimumSize(0, 0)
-            _llm_config_layout.addWidget(_llm_config_main_container, stretch=1)
+            _llm_config_layout.addWidget(_llm_config_main_container)
             _llm_config_parallel_container = QWidget()
             _llm_config_parallel_container.setProperty("testid", "llm-config-parallel-container")
             _llm_config_parallel_container.setMinimumSize(0, 0)
-            _llm_config_layout.addWidget(_llm_config_parallel_container, stretch=1)
+            _llm_config_layout.addWidget(_llm_config_parallel_container)
             _llm_config_flags_container = QWidget()
             _llm_config_flags_container.setProperty("testid", "llm-config-flags-container")
             _llm_config_flags_container.setMinimumSize(0, 0)
-            _llm_config_layout.addWidget(_llm_config_flags_container, stretch=1)
+            _llm_config_layout.addWidget(
+                _llm_config_flags_container, alignment=Qt.AlignmentFlag.AlignTop
+            )
             # Item 021: FlagsPanel no container (7 checkboxes, C-57).
             from workflow_app.llm_config.flags_panel import FlagsPanel
             self._llm_config_flags_panel = FlagsPanel(
@@ -1524,7 +1534,13 @@ class MainWindow(QMainWindow):
                 _center_widget, _center_widget,
             )
         self._flow_section_pages.update(_flow_update)
-        for _watched in (_header_widget, _center_widget, _agentes_widget):
+        _watched_pages = [_header_widget, _center_widget, _agentes_widget]
+        if _llm_config_widget is not None:
+            # Sem filtro de evento a pagina entra em `_flow_section_pages` mas
+            # nunca dispara o recalculo: o teto de altura (R-18/C-04) so seria
+            # medido na troca de secao, e ficaria stale a cada resize do header.
+            _watched_pages.append(_llm_config_widget)
+        for _watched in _watched_pages:
             _watched.installEventFilter(self)
 
         # A troca de sub-aba de `queue-subtabs-insertions` muda a altura real da
@@ -1948,6 +1964,15 @@ class MainWindow(QMainWindow):
         content = -1
         if page_layout is not None and width > 0 and page_layout.hasHeightForWidth():
             content = page_layout.heightForWidth(width)
+        if content <= 0 and page is getattr(self, "_llm_config_widget", None):
+            # LLM CONFIG (item 017) e a unica pagina de `_flow_section_pages`
+            # sem flow layout: seus filhos sao widgets de altura fixa, entao o
+            # QHBoxLayout nao implementa heightForWidth e o teto cairia no
+            # release abaixo. Sem teto, o QStackedLayout dimensiona a aba pela
+            # pagina mais alta do stack (MCPs/BRAINSTORM) e sobra uma faixa
+            # vazia de ~250px sob a row — exatamente o R-18 ao contrario.
+            # Aqui o sizeHint E a altura real (nada depende da largura).
+            content = max(page.sizeHint().height(), page.minimumSizeHint().height())
         if content <= 0:
             # Sem heightForWidth utilizavel (stub de teste, pagina ainda sem
             # geometria): mantem o comportamento antigo em vez de chutar altura.
