@@ -22,6 +22,7 @@ from workflow_app.llm_config.grok_spike import (
     GrokSpikeCLINotFound,
     GrokSpikeGateError,
     GrokSpikeSession,
+    _env_with_cli_on_path,
     _resolve_cli,
     _validate_auth,
 )
@@ -96,6 +97,26 @@ class TestGrokSpikeCLI:
         )
         with pytest.raises(GrokSpikeCLINotFound, match="nao encontrado"):
             _resolve_cli()
+
+    def test_resolved_cli_dir_is_prepended_to_path(self) -> None:
+        """CLI fora do PATH: o diretorio resolvido entra no PATH do subprocesso.
+
+        Regressao do finding do item 009: ``_resolve_cli()`` aceita
+        ``~/.local/bin/grok`` mesmo fora do PATH, enquanto o adapter resolve por
+        ``shutil.which("grok")``. Sem a normalizacao as duas resolucoes divergem.
+        """
+        env = {"PATH": "/usr/bin:/bin"}
+        patched = _env_with_cli_on_path(env, "/home/someone/.local/bin/grok")
+        assert patched["PATH"].split(os.pathsep)[0] == "/home/someone/.local/bin"
+        assert "/usr/bin" in patched["PATH"].split(os.pathsep)
+        assert env["PATH"] == "/usr/bin:/bin", "env de entrada nao pode ser mutado"
+
+    def test_path_untouched_when_cli_dir_already_present(self) -> None:
+        """CLI ja no PATH: nenhuma copia nem reordenacao do PATH."""
+        env = {"PATH": "/usr/local/bin:/usr/bin"}
+        patched = _env_with_cli_on_path(env, "/usr/local/bin/grok")
+        assert patched is env
+        assert patched["PATH"] == "/usr/local/bin:/usr/bin"
 
 
 # ── Live integration (exige credencial) ──────────────────────────────────────

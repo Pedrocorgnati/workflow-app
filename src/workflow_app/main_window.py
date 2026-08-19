@@ -81,6 +81,7 @@ from workflow_app.config.feature_flags import (
     instance_group_route_aware_enabled,
     llm_config_v2_enabled,
     llm_flags_rules_v2_enabled,
+    mcp_think_exec_v2_enabled,
 )
 from workflow_app.domain import CommandSpec
 from workflow_app.errors import ConfigError
@@ -195,6 +196,22 @@ _BRAINSTORM_PROVIDER_LABELS: dict[str, str] = {
     "codex": "Codex",
 }
 _BRAINSTORM_PROVIDER_SLUGS: frozenset[str] = frozenset(_BRAINSTORM_PROVIDER_LABELS)
+
+# Roster COMPLETO do Main LLM (`queue-div-main-llm`), superset do roster de
+# brainstorm. Os botoes de brainstorm continuam falando so Claude/Kimi/Codex
+# porque `MCPPromptButton._resolve_provider` so conhece esses tres; mas
+# `_current_llm_provider()` NAO pode achatar qwen/grok em "claude": achatar
+# faz o app pastear comando de Claude enquanto o radio marcado diz Qwen
+# (violacao de Zero Silencio). Quem nao suporta o slug degrada explicitamente
+# no proprio consumidor, nunca na fonte.
+_MAIN_LLM_LABELS: dict[str, str] = {
+    "claude": "Claude",
+    "kimi": "Kimi",
+    "codex": "Codex",
+    "qwen": "Qwen",
+    "grok": "Grok",
+}
+_MAIN_LLM_SLUGS: frozenset[str] = frozenset(_MAIN_LLM_LABELS)
 
 # Indices das secoes de `output-toolbar-section-stack`. TODAS as seis tem
 # conteudo de flow responsivo (altura real != sizeHint) e todas passam pelo teto
@@ -1476,33 +1493,37 @@ class MainWindow(QMainWindow):
             _llm_config_layout.addWidget(
                 self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
             )
-            # Containers vazios para itens 018-021 (testids estaveis). Dois
-            # deles seguem sem conteudo por decisao dos proprios itens (018 e
-            # 020 mantiveram os controles dentro de queue-div-llm-routing);
-            # entram com stretch=0 para nao reservarem faixa vazia na row.
-            _llm_config_main_container = QWidget()
-            _llm_config_main_container.setProperty("testid", "llm-config-main-llm-container")
-            _llm_config_main_container.setMinimumSize(0, 0)
-            _llm_config_layout.addWidget(_llm_config_main_container)
-            _llm_config_parallel_container = QWidget()
-            _llm_config_parallel_container.setProperty("testid", "llm-config-parallel-container")
-            _llm_config_parallel_container.setMinimumSize(0, 0)
-            _llm_config_layout.addWidget(_llm_config_parallel_container)
-            _llm_config_flags_container = QWidget()
-            _llm_config_flags_container.setProperty("testid", "llm-config-flags-container")
-            _llm_config_flags_container.setMinimumSize(0, 0)
-            _llm_config_layout.addWidget(
-                _llm_config_flags_container, alignment=Qt.AlignmentFlag.AlignTop
+            # Containers de compatibilidade dos itens 018-021 (testids
+            # estaveis). Os TRES ficam vazios: as tres secoes (Main | Parallel
+            # | Flag) vivem DENTRO de `queue-div-llm-routing`, que ja e a row
+            # canonica do escopo (source.md:1189). Instanciar conteudo aqui era
+            # o que produzia "parte dentro da div, parte fora" — o FlagsPanel
+            # do item 021 nascia como IRMAO da div em vez de morar dentro de
+            # `queue-div-flag`.
+            #
+            # Eles permanecem filhos reais (nao sao deletados) porque
+            # test_llm_config_tab.py os procura via findChildren, mas entram
+            # ocultos: um QWidget vazio visivel ainda consome o spacing de 6px
+            # do QHBoxLayout tres vezes, o que empurrava a div para a esquerda
+            # e abria faixa morta a direita.
+            _llm_config_containers = []
+            for _tid in (
+                "llm-config-main-llm-container",
+                "llm-config-parallel-container",
+                "llm-config-flags-container",
+            ):
+                _c = QWidget(_llm_config_widget)
+                _c.setProperty("testid", _tid)
+                _c.setMinimumSize(0, 0)
+                _c.setVisible(False)
+                _llm_config_containers.append(_c)
+            self._llm_config_containers = _llm_config_containers
+            # Item 021: o FlagsPanel canonico e o que o CommandQueueWidget
+            # embutiu em `queue-div-flag`. Aqui so guardamos a referencia para
+            # `_on_main_llm_changed` continuar aplicando C-57/C-43 nele.
+            self._llm_config_flags_panel = getattr(
+                self._command_queue, "_flags_panel", None
             )
-            # Item 021: FlagsPanel no container (7 checkboxes, C-57).
-            from workflow_app.llm_config.flags_panel import FlagsPanel
-            self._llm_config_flags_panel = FlagsPanel(
-                _llm_config_flags_container,
-                main_llm_resolver=self._current_llm_provider,
-            )
-            _flags_panel_layout = QHBoxLayout(_llm_config_flags_container)
-            _flags_panel_layout.setContentsMargins(0, 0, 0, 0)
-            _flags_panel_layout.addWidget(self._llm_config_flags_panel)
             self._llm_config_widget = _llm_config_widget
             _section_stack.addWidget(_llm_config_widget)              # 6 = llm_config
 
@@ -3056,6 +3077,20 @@ class MainWindow(QMainWindow):
                 "parallel": ("Use skill-kimi. Output JSON. Prompt: ", 3),
                 "dual": ("Use skill-dual. Output JSON. Mode: stereo. Prompt: ", 3),
             },
+            # PW-02: qwen herda a posicao de rota do kimi (T2) e grok a do
+            # codex (T3). Sem estas duas linhas, `_on_mcp_action` caia no
+            # fallback `provider = "claude"` e pasteava um comando de Claude
+            # com o radio marcado em Qwen/Grok (Zero Silencio).
+            "qwen": {
+                "main": ("/skill:claude", 2),
+                "parallel": ("/skill:codex", 2),
+                "dual": ("/skill:dual", 2),
+            },
+            "grok": {
+                "main": ("Use skill-claude. Output JSON. Prompt: ", 3),
+                "parallel": ("Use skill-kimi. Output JSON. Prompt: ", 3),
+                "dual": ("Use skill-dual. Output JSON. Mode: stereo. Prompt: ", 3),
+            },
         }
         self._mcp_toolbar_commands = mcp_commands
 
@@ -3306,6 +3341,11 @@ class MainWindow(QMainWindow):
 
         # Item 023: action row com divisao Thinking/Execution (TE-01) sob
         # kill-switch ligado; legado Main/Parallel/Dual sob kill-switch off.
+        # Item 005 (C26): o kill-switch em questao passou a ser o dedicado
+        # `SF_MCP_THINK_EXEC_V2` — o gate foi MOVIDO do global
+        # `SF_LLM_CONFIG_V2`, nao duplicado. Ausente/off = caminho legado
+        # Main MCP / Parallel / Dual; "1" = matriz `_TE_COMMANDS` (3 pastilhas
+        # Thinking + 5 Execution).
         action_row = QWidget()
         action_row.setProperty("testid", "output-mcp-action-row")
         action_layout = ResponsiveButtonFlowLayout(
@@ -3346,7 +3386,7 @@ class MainWindow(QMainWindow):
             if command:
                 self._publish_to_terminal(_compose_mcp_text(command))
 
-        if llm_config_v2_enabled():
+        if mcp_think_exec_v2_enabled():
             # TE-01: matriz fixa por botao, independente do Main LLM.
             _TE_COMMANDS: dict[str, str] = {
                 "output-mcp-action-thinking-claude":
@@ -3911,15 +3951,21 @@ class MainWindow(QMainWindow):
         return False
 
     def _current_llm_provider(self) -> str:
-        """Fonte de verdade UNICA do provider ativo (`claude|kimi|codex`).
+        """Fonte de verdade UNICA do Main LLM (`claude|kimi|codex|qwen|grok`).
 
         Le `queue-div-main-llm` via `CommandQueueWidget.current_main_llm()` e
         normaliza para slug minusculo. Substitui os dois radios de provider
         eliminados (`output-mcp-provider-radio-input` e
         `type-selector-radio-input`) — ver
         blacksmith/brainstorm-mcp/07-27-workflow-app-header-toggles-llm-unico.md
-        (I2.2). Nunca levanta excecao: qualquer valor fora do conjunto canonico
-        ou ausencia do `_command_queue` cai em "claude".
+        (I2.2). Nunca levanta excecao: valor fora do roster canonico ou ausencia
+        do `_command_queue` cai em "claude".
+
+        O clamp e contra `_MAIN_LLM_SLUGS` (5 slugs), NAO contra o roster de
+        brainstorm (3): achatar qwen/grok em "claude" aqui faria o app pastear
+        comando de Claude com o radio marcado em Qwen. Consumidor que so fala
+        Claude/Kimi/Codex degrada no proprio ponto de consumo
+        (`_get_brainstorm_runtime_provider`).
         """
         cq = getattr(self, "_command_queue", None)
         if cq is None:
@@ -3929,7 +3975,7 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - defensive: helper nunca propaga
             return "claude"
         slug = str(raw or "").strip().lower()
-        if slug in _BRAINSTORM_PROVIDER_SLUGS:
+        if slug in _MAIN_LLM_SLUGS:
             return slug
         return "claude"
 
@@ -3947,7 +3993,7 @@ class MainWindow(QMainWindow):
             base_text = str(commands[provider][action_id][0])
         except (KeyError, IndexError, TypeError):
             base_text = ""
-        label = _BRAINSTORM_PROVIDER_LABELS.get(provider, "Claude")
+        label = _MAIN_LLM_LABELS.get(provider, "Claude")
         suffix = f"\nComando atual: {base_text.strip()}" if base_text else ""
         return (
             "Publica a acao MCP do Main LLM selecionado em queue-div-main-llm "
@@ -4017,7 +4063,10 @@ class MainWindow(QMainWindow):
         esperado por `MCPPromptButton._resolve_provider` para botoes
         button_type=type-selector-radio-input (I2.2b: a traducao slug ->
         rotulo continua sendo responsabilidade de _BRAINSTORM_PROVIDER_LABELS).
-        Default "Claude" em qualquer caminho degradado.
+        Default "Claude" em qualquer caminho degradado — inclusive Main=Qwen e
+        Main=Grok, que existem em `_MAIN_LLM_SLUGS` mas nao tem persona de
+        brainstorm correspondente. Este e o ponto canonico de degradacao: a
+        fonte (`_current_llm_provider`) preserva o slug real.
         """
         slug_norm = self._current_llm_provider()
         if slug_norm in _BRAINSTORM_PROVIDER_LABELS:
@@ -4656,13 +4705,19 @@ class MainWindow(QMainWindow):
             # da task-004 do loop 05-21-implantation-tasklist-aba-brainstorm)
             # protege contra mutacao concorrente durante a montagem do prompt.
             if button_type == "type-selector-radio-input":
+                # Main=Qwen/Grok nao tem persona de brainstorm: degradar para
+                # "Claude" AQUI (mesma regra de _get_brainstorm_runtime_provider).
+                # Sem isso o fallback devolvia o literal
+                # "type-selector-radio-input" como nome de provider.
                 resolved_slug = self._current_llm_provider()
+                resolved_type = _BRAINSTORM_PROVIDER_LABELS.get(
+                    resolved_slug, "Claude"
+                )
             else:
                 resolved_slug = str(button_type).lower()
-
-            resolved_type = _BRAINSTORM_PROVIDER_LABELS.get(
-                resolved_slug, str(button_type)
-            )
+                resolved_type = _BRAINSTORM_PROVIDER_LABELS.get(
+                    resolved_slug, str(button_type)
+                )
 
             # "Criar arquivo" (botao 1 / Criar md) cria um MD NOVO a partir
             # do T1. Ele nunca deve ler, anexar ou renderizar o .md selecionado
@@ -8804,7 +8859,13 @@ class MainWindow(QMainWindow):
             session_factory=db_manager.session_factory,
             workspace_dir=workspace,
         )
-        self._pipeline_manager.set_queue(commands)
+        # `commands` e a lista de ENTRADA, em dialeto Claude. `load_pipeline`
+        # (:8826) traduziu para o dialeto do Main corrente e renumerou as
+        # positions; sob Codex/Qwen/Grok isso muda o TAMANHO da fila. Entregar
+        # a lista de entrada aqui deixaria `PipelineManager._queue` desalinhado
+        # da tela, e `reorder_command` indexa esse `_queue` com a position que
+        # vem do item arrastado — arrastar uma linha moveria outra (C27).
+        self._pipeline_manager.set_queue(self._command_queue.rendered_specs())
         self._command_queue.set_pipeline_manager(self._pipeline_manager)
 
         self._show_toast(

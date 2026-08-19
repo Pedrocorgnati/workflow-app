@@ -94,7 +94,9 @@ class TestWhitelist:
         # - 3 (familia /credentials:* removida em 2026-08-12: env-creation,
         #      update-base, test-user — TTY real + mutacao de provider + CAS,
         #      ver nota em kimi_whitelist.py) = 126
-        assert len(KIMI_COMPATIBLE_COMMANDS) == 127
+        # + 1 (/loop:iteraction:create-task, score 73, SC93) = 128
+        # + 1 (/loop:iteraction:execute-task, score 65, SC94; --approved override) = 129
+        assert len(KIMI_COMPATIBLE_COMMANDS) == 129
 
     def test_known_compatible_commands(self):
         for cmd in ("/secrets-scan", "/qa:prep", "/dev-bootstrap-create", "/sync:github"):

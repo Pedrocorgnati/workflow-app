@@ -161,9 +161,11 @@ def render_with_mcp_flags(
     Regras (grounded source.md apendice A3):
       - Base = `spec.name`, sempre. NUNCA mutada (I1); get_queue_snapshot sai limpo.
       - Exclusoes (I2): `local-action` e as diretivas de sessao `/clear`, `/model`,
-        `/effort` NUNCA recebem sufixo — retorna a base crua. Fonte unica do
-        conjunto de diretivas: provider_router._SESSION_DIRECTIVES (:48) +
-        classify_provider local-action (:108); nao duplicado aqui.
+        `/effort` e `/reasoning` (dialeto revogado, so residuo de snapshot; C27)
+        NUNCA recebem
+        sufixo — retorna a base crua. Fonte unica do conjunto de diretivas:
+        provider_router._SESSION_DIRECTIVES + classify_provider local-action;
+        nao duplicado aqui.
       - provider KIMI ou CODEX (item vai a worker T2/T3): retorna a base SEM flags
         (strip; decisao D1 / invariante I3). O strip e governado por `provider`,
         nao por `for_dispatch`.

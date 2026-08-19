@@ -28,11 +28,7 @@ from workflow_app.command_queue.command_item_widget import (
 )
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 from workflow_app.command_queue.provider_router import Provider, _PROVIDER_FAMILIES
-from workflow_app.config.feature_flags import (
-    llm_config_v2_enabled,
-    llm_config_v2_flag_name,
-    provider_router_v2_enabled,
-)
+from workflow_app.config.feature_flags import llm_config_v2_flag_name
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -41,24 +37,15 @@ from workflow_app.domain import (
 )
 from workflow_app.signal_bus import signal_bus
 
-# Colisao "mesmo provider como Main e como Worker": os dois modos do router
-# discordam DE PROPOSITO (provider_router.classify_provider, docstring) — o
-# legado manda ao WORKER (contrato de 2026-05-30) e o Router V2 manda ao MAIN
-# (item 010, regra 3). Os casos de widget abaixo afirmam o lado LEGADO; o lado
-# V2 da mesma colisao esta travado por oraculo em subprocesso em
-# `tests/test_provider_router.py`. `feature_flags` e boot-frozen (sem hook de
-# reset), entao a unica forma honesta de conviver com a suite rodada com os 11
-# kill-switches ligados (KS-01, item 029) e pular estes dois casos quando o par
-# de flags do router esta ON neste processo — nao afrouxar a assercao.
-_ROUTER_V2_ACTIVE = llm_config_v2_enabled() and provider_router_v2_enabled()
-_skip_under_router_v2 = pytest.mark.skipif(
-    _ROUTER_V2_ACTIVE,
-    reason=(
-        "colisao Main==Worker: este caso afirma o lado LEGADO (worker vence); "
-        "sob Router V2 o Main vence e esse lado e travado em "
-        "tests/test_provider_router.py"
-    ),
-)
+# Colisao "mesmo provider como Main e como Worker": ate 2026-08-17 os dois modos
+# do router discordavam DE PROPOSITO — o legado mandava ao WORKER e o Router V2
+# mandava ao MAIN —, e os dois casos de widget abaixo eram PULADOS quando o par
+# de flags do router estava ON neste processo. A divergencia foi **revogada por
+# D3** (item 006 do loop `08-17-systemforge-multillm-gaps-refactor`, gap C7):
+# existe um regime unico, o worker vence sempre, sem flag. O skip saiu junto com
+# o ramo — estes casos agora rodam incondicionalmente, inclusive com os
+# kill-switches de KS-01 ligados (item 029). O oraculo puro da mesma colisao
+# vive em `tests/test_provider_router.py`.
 
 
 @pytest.fixture()
@@ -763,13 +750,28 @@ class TestForceKimi:
             "/skill:daily-loop:do --slug inbox --item 001"
         ]
 
-    # ---- /model e /effort suprimidos -----------------------------------
+    # ---- /model e /effort somem sob Main nao-Claude (C27) -----------------
 
-    def test_force_on_model_effort_no_terminal_emit(
-        self, force_kimi_widget, model_effort_specs
+    @pytest.mark.parametrize("raw", [None, "0", "1"])
+    def test_force_on_model_effort_rows_are_dropped_at_enqueue(
+        self, force_kimi_widget, model_effort_specs, monkeypatch, raw
     ):
-        """/model e /effort viram bolinha amarela SEM enviar para terminal,
-        nem interactive nem workspace."""
+        """Sob Main Kimi as duas linhas somem da fila no enqueue.
+
+        O Kimi CLI nao tem diretiva TEXTUAL de modelo/reasoning: `/model k3`
+        DESCARTA o argumento e abre picker bloqueante (que engoliria a proxima
+        linha colada) e `/reasoning` responde `Unknown slash command`. Renderizar
+        uma linha que nunca sera aplicada e a mentira que o C27 existe para
+        matar, entao a linha nao e renderizada.
+
+        `raw` cobre os tres valores da env-var revogada
+        (`SF_MODEL_EFFORT_EQUIV`): o resultado precisa ser o MESMO nos tres — a
+        flag foi removida junto com a traducao e nao pode voltar por acidente.
+        """
+        if raw is None:
+            monkeypatch.delenv("SF_MODEL_EFFORT_EQUIV", raising=False)
+        else:
+            monkeypatch.setenv("SF_MODEL_EFFORT_EQUIV", raw)
         emitted_interactive: list[str] = []
         emitted_workspace: list[str] = []
         pulses: list[str] = []
@@ -777,37 +779,61 @@ class TestForceKimi:
         signal_bus.run_command_in_workspace_terminal.connect(emitted_workspace.append)
         signal_bus.listener_helper_pulse.connect(pulses.append)
         try:
+            # Checkbox ANTES do load: a adequacao acontece no enqueue.
             force_kimi_widget._force_kimi_chk.setChecked(True)
             force_kimi_widget.load_pipeline(model_effort_specs)
-            # Per-item green em /model
-            force_kimi_widget._items[0]._on_run_clicked()
-            # Per-item green em /effort
-            force_kimi_widget._items[1]._on_run_clicked()
+            assert [i.command_text() for i in force_kimi_widget._items] == []
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
             signal_bus.listener_helper_pulse.disconnect(pulses.append)
         assert emitted_interactive == []
-        assert emitted_workspace == []
-        # NAO enviado ao terminal, MAS o listener pulsa verde para o autocast
-        # avancar — kimi main roda em T1 (interactive).
-        assert pulses == ["interactive", "interactive"]
-        # Bolinha amarela: items marcados como sent
-        assert force_kimi_widget._items[0].is_pending_run() is False
-        assert force_kimi_widget._items[1].is_pending_run() is False
+        assert emitted_workspace == [], "diretiva de Main Kimi nunca vai ao T2"
+        assert pulses == [], "linha que nao existe na fila nao pulsa"
 
-    def test_force_on_model_effort_does_not_update_last_command_label(
+    def test_force_on_claude_dialect_directive_is_still_suppressed(
         self, force_kimi_widget, model_effort_specs
     ):
-        """/model e /effort suprimidos NAO devem aparecer como ultimo comando
-        executado (review MEDIUM 4)."""
-        force_kimi_widget._force_kimi_chk.setChecked(True)
+        """Main trocado DEPOIS do enqueue: a fila ficou em dialeto Claude.
+
+        `/model opus` nao existe no Kimi. Despachar seria erro de sintaxe no
+        terminal, entao o contrato antigo (suprimir + pulse) sobrevive
+        exatamente para este caso."""
+        emitted_interactive: list[str] = []
+        pulses: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
+        signal_bus.listener_helper_pulse.connect(pulses.append)
+        try:
+            # Enqueue sob Main Claude -> identidade.
+            force_kimi_widget.load_pipeline(model_effort_specs)
+            assert [i.command_text() for i in force_kimi_widget._items] == [
+                "/model opus", "/effort high",
+            ]
+            # So DEPOIS o operador troca para Kimi.
+            force_kimi_widget._force_kimi_chk.setChecked(True)
+            force_kimi_widget._items[0]._on_run_clicked()
+            force_kimi_widget._items[1]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
+            signal_bus.listener_helper_pulse.disconnect(pulses.append)
+        assert emitted_interactive == []
+        assert pulses == ["interactive", "interactive"]
+
+    def test_suppressed_directive_never_feeds_the_model_effort_row(
+        self, force_kimi_widget, model_effort_specs
+    ):
+        """A row `queue-model-effort-row` so mostra o que REALMENTE rodou.
+
+        Diretiva suprimida (fila em dialeto Claude, Main trocado para Kimi
+        depois do enqueue) nao chega ao PTY, entao a row precisa continuar em
+        `—`. Escrever `/model: opus` aqui seria a mentira original do C27 com
+        outro rosto: o operador leria um modelo que o Kimi nunca recebeu."""
         force_kimi_widget.load_pipeline(model_effort_specs)
-        # Estado inicial: label invisivel / vazio
+        force_kimi_widget._force_kimi_chk.setChecked(True)
         force_kimi_widget._items[0]._on_run_clicked()
-        # Last command label deve permanecer vazio/invisivel
-        assert not force_kimi_widget._last_cmd_label.isVisible() or \
-            force_kimi_widget._last_cmd_label.text().strip() == ""
+        force_kimi_widget._items[1]._on_run_clicked()
+        assert force_kimi_widget._last_model_label.text() == "/model: —"
+        assert force_kimi_widget._last_effort_label.text() == "/effort: —"
 
     # ---- /clear vai SO para interactive ---------------------------------
 
@@ -1079,7 +1105,24 @@ class TestCodexLlmRouting:
         assert "If your final answer says `BLOCKED`" in emitted_t1[0]
         assert "Do not emit success for this case" in emitted_t1[0]
 
-    def test_main_codex_model_effort_are_suppressed(self, codex_widget):
+    @pytest.mark.parametrize("raw", [None, "0", "1"])
+    def test_main_codex_model_effort_rows_are_dropped_at_enqueue(
+        self, codex_widget, monkeypatch, raw
+    ):
+        """Main Codex: `/model` e `/effort` nao chegam nem a ser renderizados.
+
+        O Codex CLI 0.147.0 nao tem forma TEXTUAL de trocar modelo/effort — o
+        `/model` e um picker interativo de duas etapas e `/effort` nao existe
+        (evidencia em `_EVIDENCE-RJ1-RJ2-CLI-SYNTAX.md`). Entao a fila nao tem
+        para onde traduzir: as duas linhas somem no enqueue, e a fila de 2 itens
+        vira uma fila VAZIA — nao ha o que despachar nem o que pulsar.
+
+        A parametrizacao trava a REMOCAO da flag `SF_MODEL_EFFORT_EQUIV`: com
+        ela ligada, desligada ou ausente o resultado e o mesmo."""
+        if raw is None:
+            monkeypatch.delenv("SF_MODEL_EFFORT_EQUIV", raising=False)
+        else:
+            monkeypatch.setenv("SF_MODEL_EFFORT_EQUIV", raw)
         emitted_t1: list[str] = []
         emitted_t3: list[str] = []
         pulses: list[str] = []
@@ -1092,20 +1135,143 @@ class TestCodexLlmRouting:
                 CommandSpec("/model opus", ModelName.OPUS, position=1),
                 CommandSpec("/effort medium", ModelName.OPUS, position=2),
             ])
-            codex_widget._on_step_btn_clicked()
+            assert [i.command_text() for i in codex_widget._items] == []
             codex_widget._on_step_btn_clicked()
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
             signal_bus.run_command_in_workspace_xterm.disconnect(emitted_t3.append)
             signal_bus.listener_helper_pulse.disconnect(pulses.append)
 
+        assert emitted_t1 == [], "nao existe linha textual de modelo no Codex"
+        assert emitted_t3 == [], "Main Codex publica no T1, nunca no worker T3"
+        assert pulses == [], "sem item na fila nao ha dot para pulsar"
+
+    def test_st007_rendered_queue_list_shows_no_directive_under_main_codex(
+        self, codex_widget
+    ):
+        """ST007: o que o operador LE em `queue-command-list` e o que roda.
+
+        Os testes acima leem `command_text()` (o modelo). Este le o TEXTO
+        RENDERIZADO dos QLabel dentro do container com
+        `testid == "queue-command-list"` — a unica assercao que falharia se a
+        adequacao acontecesse no dispatch em vez do enqueue, deixando a linha
+        na tela e removendo-a so na hora de colar.
+
+        O bug original do C27 era exatamente esse: a UI afirmava um `/model
+        opus` que o Codex jamais receberia."""
+        codex_widget._main_codex_radio.setChecked(True)
+        codex_widget.load_pipeline([
+            CommandSpec("/clear", ModelName.OPUS, position=1),
+            CommandSpec("/model opus", ModelName.OPUS, position=2),
+            CommandSpec("/effort high", ModelName.OPUS, position=3),
+            CommandSpec("/prd-create", ModelName.OPUS, position=4),
+        ])
+
+        container = codex_widget._items_container
+        assert container.property("testid") == "queue-command-list"
+        rendered = [
+            child._name_label.text()
+            for child in container.findChildren(CommandItemWidget)
+        ]
+        assert rendered == ["/clear", "/prd-create"], (
+            "a fila desenhada nao pode mostrar diretiva que o Codex nao aplica"
+        )
+        blob = "\n".join(rendered)
+        assert "/model" not in blob and "/effort" not in blob
+
+    def test_main_codex_claude_dialect_directive_is_suppressed_on_click(
+        self, codex_widget
+    ):
+        """Main trocado DEPOIS do enqueue: `/model opus` nao existe no Codex.
+
+        Alcancavel pelo CLIQUE per-item, que le o radio ao vivo. O caminho
+        `_on_step_btn_clicked` nao chega aqui: ele usa o `FrozenContract`
+        (item 019) e continua tratando o item como Claude, despachando raw ao
+        T1 — que e o comportamento certo para uma linha em dialeto Claude."""
+        emitted_t1: list[str] = []
+        pulses: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        signal_bus.listener_helper_pulse.connect(pulses.append)
+        try:
+            codex_widget.load_pipeline([
+                CommandSpec("/model opus", ModelName.OPUS, position=1),
+                CommandSpec("/effort medium", ModelName.OPUS, position=2),
+            ])
+            assert len(codex_widget._items) == 2, "enqueue sob Claude = identidade"
+            codex_widget._main_codex_radio.setChecked(True)
+            codex_widget._items[0]._on_run_clicked()
+            codex_widget._items[1]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+            signal_bus.listener_helper_pulse.disconnect(pulses.append)
+
         assert emitted_t1 == []
-        assert emitted_t3 == []
-        # NAO enviado ao terminal, MAS o listener pulsa verde para o autocast
-        # avancar — codex main roda em T1 (interactive).
         assert pulses == ["interactive", "interactive"]
         assert codex_widget._items[0].is_pending_run() is False
         assert codex_widget._items[1].is_pending_run() is False
+
+    @pytest.mark.parametrize(
+        "residue", ["/model sol high", "/model k3", "/reasoning yes"]
+    )
+    def test_main_claude_foreign_dialect_directive_is_suppressed_on_click(
+        self, codex_widget, residue
+    ):
+        """Residuo de snapshot em dialeto estrangeiro chegando ao Main Claude.
+
+        Nada mais PRODUZ essas linhas: a traducao que as gerava foi revogada em
+        2026-08-17. Mas uma fila salva naquela janela
+        (`output/wbs/pipeline-position/{slug}.json`) pode conter qualquer uma
+        delas, e o Claude Code nao entende `sol`, `k3` nem `/reasoning`. Por isso
+        os literais entram aqui como texto LITERAL — reproduzem o snapshot sem
+        depender de um caminho de producao que nao existe mais.
+
+        `is_foreign_directive` os reprova, o dispatcher suprime + pulsa, e o dot
+        fecha sem colar lixo no T1."""
+        emitted_t1: list[str] = []
+        pulses: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        signal_bus.listener_helper_pulse.connect(pulses.append)
+        try:
+            codex_widget._main_claude_radio.setChecked(True)
+            codex_widget.load_pipeline([
+                CommandSpec(residue, ModelName.OPUS, position=1),
+            ])
+            assert [i.command_text() for i in codex_widget._items] == [residue], (
+                "sob Main Claude a adequacao e identidade: nada e removido"
+            )
+            codex_widget._items[0]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+            signal_bus.listener_helper_pulse.disconnect(pulses.append)
+
+        assert emitted_t1 == [], f"`{residue}` nao existe no Claude Code"
+        assert pulses == ["interactive"]
+        assert codex_widget._items[0].is_pending_run() is False
+
+    def test_main_claude_native_directive_still_dispatches_raw(self, codex_widget):
+        """Controle do fail-open: a supressao acima nao pode pegar `/model opus`.
+
+        `is_foreign_directive` reprova apenas o que e comprovadamente residuo da
+        traducao revogada. Diretiva Claude legitima — inclusive um modelo que
+        nenhuma tabela de traducao jamais listou, como `haiku` — continua indo
+        raw ao T1."""
+        emitted_t1: list[str] = []
+        pulses: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        signal_bus.listener_helper_pulse.connect(pulses.append)
+        try:
+            codex_widget.load_pipeline([
+                CommandSpec("/model opus", ModelName.OPUS, position=1),
+                CommandSpec("/model haiku", ModelName.OPUS, position=2),
+            ])
+            codex_widget._items[0]._on_run_clicked()
+            codex_widget._items[1]._on_run_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+            signal_bus.listener_helper_pulse.disconnect(pulses.append)
+
+        assert emitted_t1 == ["/model opus", "/model haiku"]
+        assert pulses == []
 
     def test_parallel_codex_worker_routes_next_eligible_command_to_t3(
         self, codex_widget
@@ -1224,7 +1390,6 @@ class TestWorkerRoutingExpandedToAllMainLlms:
         assert blue[0].startswith("/skill:")
         assert routed_widget._items[0].is_pending_run() is False
 
-    @_skip_under_router_v2
     def test_main_codex_worker_codex_routes_blue_arrow_to_t3(self, routed_widget):
         """Main Codex + Worker Codex: a codex-compatible command (/cmd:review)
         goes to T3 Codex worker (channel workspace_xterm), NOT to T1.
@@ -3570,7 +3735,6 @@ class TestSingleButtonDispatchFailureConditions:
         assert t2 == ["/clear"], "/clear espelhado ao worker Kimi/T2"
         assert all("Command:" not in x for x in t1), "nao pode virar prompt executor Codex"
 
-    @_skip_under_router_v2
     def test_d3_main_kimi_plus_worker_kimi_routes_to_t2(self, disp_widget):
         """D-3 (Position A, invariante 2): Main Kimi + Worker Kimi -> a seta
         worker NAO e escondida e um comando kimi-elegivel roteia ao T2 no step
@@ -4315,6 +4479,32 @@ class TestDispatchProviderResolution:
         w = self._widget(qapp, qtbot, [spec])
         w._use_kimi_chk.setChecked(True)
         assert w._resolve_item_provider(spec) is Provider.KIMI
+
+    def test_resolve_item_provider_passes_qwen_worker_through(self, qapp, qtbot):
+        """Checkbox `queue-chk-use-qwen` chega ao router (regra 4b -> QWEN).
+
+        Antes do item 006 (ST001, gap C7) o `_resolve_item_provider` montava o
+        `RoutingState` so com kimi/codex, entao o botao unico do item pintava
+        CLAUDE com o worker Qwen ligado enquanto o step path pintava QWEN. Este
+        caso trava a paridade dos dois caminhos no eixo T2.
+        """
+        spec = CommandSpec(
+            "/prd-create", ModelName.OPUS, position=1, kimi_eligible=True
+        )
+        w = self._widget(qapp, qtbot, [spec])
+        w._use_qwen_chk.setChecked(True)
+        assert w._resolve_item_provider(spec) is Provider.QWEN
+
+    def test_resolve_item_provider_passes_grok_worker_through(self, qapp, qtbot):
+        """Checkbox `queue-chk-use-grok` chega ao router (regra 5b -> GROK).
+
+        Lado T3 da mesma paridade do caso Qwen acima: elegibilidade Grok vem da
+        whitelist Codex (`/cmd:review` e codex-compativel).
+        """
+        spec = CommandSpec("/cmd:review", ModelName.OPUS, position=1)
+        w = self._widget(qapp, qtbot, [spec])
+        w._use_grok_chk.setChecked(True)
+        assert w._resolve_item_provider(spec) is Provider.GROK
 
     def test_worker_never_carries_flag_to_external(self, qapp, qtbot):
         """T2/T3: mesmo com flag marcada, o render de dispatch sai sem flag."""
@@ -5534,3 +5724,328 @@ class TestFrozenContractAtEnqueue:
         fc_after = w.get_frozen_contract(item)
         assert fc_after.active_flags == ()
         assert fc_after is fc_before
+
+
+class TestSnapshotUnderTranslation:
+    """Persistencia da fila x traducao C27.
+
+    O snapshot vive em `output/wbs/pipeline-position/{slug}.json` e o Main LLM
+    vive em QSettings: duas persistencias independentes. Salvar sob um Main e
+    restaurar sob outro e sessao normal, nao caso de borda.
+    """
+
+    def test_effort_and_kimi_eligible_survive_the_round_trip(self, qapp, qtbot):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_claude_radio.setChecked(True)
+        w.load_pipeline([
+            CommandSpec("/effort high", ModelName.OPUS, position=1,
+                        effort=EffortLevel.HIGH),
+            CommandSpec("/prd-create", ModelName.OPUS, position=2,
+                        effort=EffortLevel.HIGH, kimi_eligible=True),
+        ])
+
+        snap = w.get_queue_snapshot()
+        assert snap[0]["effort"] == EffortLevel.HIGH.value
+        assert snap[1]["kimi_eligible"] is True
+
+        w2 = CommandQueueWidget()
+        qtbot.addWidget(w2)
+        w2._main_claude_radio.setChecked(True)
+        w2.restore_queue_snapshot(snap)
+        assert w2._items[0].get_spec().effort == EffortLevel.HIGH
+        assert w2._items[1].get_spec().kimi_eligible is True
+
+    def test_restore_never_fabricates_a_directive_the_cli_cannot_run(
+        self, qapp, qtbot
+    ):
+        """Snapshot da janela de traducao (2026-08-17) nao volta a ser executavel.
+
+        Uma fila salva naquelas horas pode conter `/model k3` e `/reasoning yes`.
+        Restaurar sob QUALQUER Main nao-Claude tem que REMOVER os dois — sao
+        literais que CLI nenhum entende. O bug que este teste tranca era a
+        re-traducao: `/model k3` voltava como `/model sol medium` (`sol` pelo
+        default do `.get`, `medium` porque `effort` nao era persistido),
+        fabricando uma diretiva que ninguem enfileirou."""
+        saved = CommandQueueWidget()
+        qtbot.addWidget(saved)
+        saved._main_claude_radio.setChecked(True)
+        saved.load_pipeline([
+            CommandSpec("/model k3", ModelName.OPUS, position=1,
+                        effort=EffortLevel.HIGH),
+            CommandSpec("/reasoning yes", ModelName.OPUS, position=2,
+                        effort=EffortLevel.HIGH),
+            CommandSpec("/prd-create", ModelName.OPUS, position=3,
+                        effort=EffortLevel.HIGH),
+        ])
+        assert [i.command_text() for i in saved._items] == [
+            "/model k3", "/reasoning yes", "/prd-create",
+        ], "sob Claude a adequacao e identidade — o residuo fica visivel"
+        snap = saved.get_queue_snapshot()
+
+        restored = CommandQueueWidget()
+        qtbot.addWidget(restored)
+        restored._main_codex_radio.setChecked(True)
+        restored.restore_queue_snapshot(snap)
+        assert [i.command_text() for i in restored._items] == ["/prd-create"]
+        assert restored._items[0].get_spec().effort == EffortLevel.HIGH
+
+    def test_status_realigns_when_adaptation_drops_rows(
+        self, qapp, qtbot
+    ):
+        """Sob Qwen as duas diretivas somem; `zip` posicional daria o status da
+        diretiva ao `/prd-create` e truncaria a cauda."""
+        saved = CommandQueueWidget()
+        qtbot.addWidget(saved)
+        saved._main_claude_radio.setChecked(True)
+        saved.load_pipeline([
+            CommandSpec("/model opus", ModelName.OPUS, position=1),
+            CommandSpec("/effort high", ModelName.OPUS, position=2),
+            CommandSpec("/prd-create", ModelName.OPUS, position=3),
+            CommandSpec("/qa:trace", ModelName.OPUS, position=4),
+        ])
+        saved._items[2].set_status(CommandStatus.CONCLUIDO)
+        snap = saved.get_queue_snapshot()
+
+        restored = CommandQueueWidget()
+        qtbot.addWidget(restored)
+        restored._main_qwen_radio.setChecked(True)
+        restored.restore_queue_snapshot(snap)
+
+        assert [i.command_text() for i in restored._items] == [
+            "/prd-create", "/qa:trace",
+        ]
+        assert restored._items[0]._status == CommandStatus.CONCLUIDO
+        assert restored._items[1]._status == CommandStatus.PENDENTE
+
+    def test_rendered_specs_matches_what_is_on_screen(self, qapp, qtbot):
+        """`rendered_specs()` e o que o PipelineManager tem que receber: sob
+        Codex a fila encolhe, e indexar `_queue` com a position da tela contra
+        a lista de ENTRADA move a linha errada no drag-and-drop."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w._main_codex_radio.setChecked(True)
+        entrada = [
+            CommandSpec("/model opus", ModelName.OPUS, position=1),
+            CommandSpec("/effort high", ModelName.OPUS, position=2),
+            CommandSpec("/prd-create", ModelName.OPUS, position=3),
+            CommandSpec("/qa:trace", ModelName.OPUS, position=4),
+        ]
+        w.load_pipeline(entrada)
+
+        rendered = w.rendered_specs()
+        assert [s.name for s in rendered] == ["/prd-create", "/qa:trace"]
+        assert [s.position for s in rendered] == [1, 2], (
+            "position e renumerada 1-based DEPOIS da remocao"
+        )
+        assert len(rendered) != len(entrada)
+        assert [s.name for s in rendered] == [i.command_text() for i in w._items]
+
+
+# ======================================================================
+# Item 004 (loop 08-17-systemforge-multillm-gaps-refactor) — C6/C13
+# Radios de VARIANTE do eixo Main: opus, sonnet, kimi-k3.
+# ======================================================================
+
+class TestMainLlmVariantRadios:
+    """C6 (os 3 testids passam a existir) + C13 (lista canonica de 7).
+
+    MF-01 (source.md:1198): `opus`/`sonnet` sao variantes de modelo da family
+    `claude` e `kimi-k3` e variante da family `kimi`. Nenhum deles vira membro
+    de `provider_router.Provider` — o teste de paridade dos mapas em
+    `test_loop_0811_item018.py::TestMapParity` continua exigindo exatamente os
+    5 providers de sempre.
+    """
+
+    @pytest.fixture()
+    def _v2(self):
+        """Guard explicito: o corpo destes testes exige o regime v2 ligado.
+
+        O gate e boot-frozen, entao nao da para ligar a flag dentro do
+        processo. Sem a flag os 3 radios existem mas ficam ocultos, e
+        selecionar radio oculto nao e cenario de operador — a cobertura do
+        regime legado e o `test_variant_radios_hidden_in_legacy_regime` abaixo,
+        que nao depende do valor da flag.
+
+        Item 005 (C26): o gate do roster de radios Main MIGROU do global
+        `SF_LLM_CONFIG_V2` para o dedicado `SF_MAIN_PROVIDERS_V2`. O guard
+        acompanha a migracao — checar o switch antigo aqui deixaria o teste
+        verde num regime em que os radios estao ocultos.
+        """
+        from workflow_app.config.feature_flags import main_providers_v2_enabled
+
+        if not main_providers_v2_enabled():
+            pytest.skip(
+                "exige SF_MAIN_PROVIDERS_V2=1 (roster Main v2); ver bloco "
+                "Verificacao da task 005"
+            )
+
+    def test_three_variant_testids_exist(self, widget, _v2):
+        """C6: os 3 testids eram declarados no plano e nunca criados."""
+        assert widget._main_opus_radio.property("testid") == "queue-radio-main-opus"
+        assert widget._main_sonnet_radio.property("testid") == "queue-radio-main-sonnet"
+        assert widget._main_kimi_k3_radio.property("testid") == "queue-radio-main-kimi-k3"
+
+    def test_variant_radios_are_selectable(self, widget, _v2):
+        """Selecionaveis de verdade: nao ocultos, habilitados, no grupo exclusivo.
+
+        O oraculo e `isHidden()` (flag explicito de `setVisible(False)`), nao
+        `isVisible()`: `_llm_box` so ganha parent quando o `MainWindow` o
+        reparenteia para a `OutputToolbar`, entao com o widget standalone
+        NENHUM radio do eixo Main e `isVisible()` — nem os cinco antigos.
+        """
+        for radio in (
+            widget._main_opus_radio,
+            widget._main_sonnet_radio,
+            widget._main_kimi_k3_radio,
+        ):
+            testid = radio.property("testid")
+            assert radio in widget._main_llm_group.buttons(), testid
+            assert radio.isHidden() is False, testid
+            assert radio.isEnabled(), testid
+            radio.setChecked(True)
+            assert radio.isChecked(), testid
+
+    def test_selecting_variant_unchecks_the_others(self, widget, _v2):
+        """Exclusividade: variante e family disputam o MESMO eixo."""
+        widget._main_opus_radio.setChecked(True)
+        assert not widget._main_claude_radio.isChecked()
+        assert not widget._main_sonnet_radio.isChecked()
+        widget._main_claude_radio.setChecked(True)
+        assert not widget._main_opus_radio.isChecked()
+
+    def test_sonnet_resolves_family_claude_variant_sonnet(self, widget, _v2):
+        """Criterio de aceite literal do item 004."""
+        widget._main_sonnet_radio.setChecked(True)
+        assert widget._resolve_interactive_main_llm_slug() == "sonnet"
+        assert widget._resolve_interactive_main_llm_pair() == ("claude", "sonnet")
+        # ST004: o acessor legado colapsa para family DE PROPOSITO.
+        assert widget._resolve_interactive_main_llm() == "claude"
+        assert widget.current_main_llm() == "claude"
+
+    def test_opus_and_kimi_k3_pairs(self, widget, _v2):
+        widget._main_opus_radio.setChecked(True)
+        assert widget._resolve_interactive_main_llm_pair() == ("claude", "opus")
+        widget._main_kimi_k3_radio.setChecked(True)
+        assert widget._resolve_interactive_main_llm_pair() == ("kimi", "k3")
+        assert widget._resolve_interactive_main_llm() == "kimi"
+
+    def test_family_slugs_keep_variant_none(self, widget, _v2):
+        """Regressao dos 5 slugs legados: nada de variante fantasma."""
+        for slug in ("claude", "codex", "kimi", "qwen", "grok"):
+            widget._main_radio_map[slug].setChecked(True)
+            family, variant = widget._resolve_interactive_main_llm_pair()
+            assert (family, variant) == (slug, None), slug
+            assert widget._resolve_interactive_main_llm() == slug
+
+    def test_variant_emits_family_on_main_llm_changed(self, widget, _v2):
+        """ST006: os 4 rosters externos sao fechados em 5 slugs de provider.
+
+        `metrics_bar._on_main_llm_changed` IGNORA slug desconhecido em silencio
+        (deixa o cache no Main ANTERIOR) e os outros 3 clampam para `claude`.
+        Emitir `opus` la seria descartar a selecao; emitimos a family.
+        """
+        received: list[str] = []
+        signal_bus.main_llm_changed.connect(received.append)
+        try:
+            widget._main_opus_radio.setChecked(True)
+            widget._main_kimi_k3_radio.setChecked(True)
+            assert received[-2:] == ["claude", "kimi"]
+        finally:
+            signal_bus.main_llm_changed.disconnect(received.append)
+
+    def test_no_variant_slug_leaks_to_external_rosters(self, widget, _v2):
+        """Nenhum slug de variante e descartado em silencio la fora.
+
+        A garantia e estrutural: o que sai do widget para os rosters e sempre
+        family, entao `{opus, sonnet, kimi-k3}` nunca chega neles.
+        """
+        from workflow_app.command_queue.command_queue_widget import (
+            _MAIN_LLM_VARIANTS,
+        )
+        from workflow_app.main_window import _MAIN_LLM_SLUGS as MW_SLUGS
+        from workflow_app.metrics_bar.metrics_bar import MetricsBar
+
+        MB_SLUGS = MetricsBar._MAIN_LLM_SLUGS
+        families = {fam for fam, _ in _MAIN_LLM_VARIANTS.values()} | {"claude"}
+        assert families <= set(MW_SLUGS)
+        assert families <= set(MB_SLUGS)
+        variant_slugs = {s for s, (_, v) in _MAIN_LLM_VARIANTS.items() if v}
+        assert variant_slugs == {"opus", "sonnet", "kimi-k3"}
+        for slug in variant_slugs:
+            widget._main_radio_map[slug].setChecked(True)
+            assert widget._resolve_interactive_main_llm() in MW_SLUGS
+            assert widget._resolve_interactive_main_llm() in MB_SLUGS
+
+    def test_persist_keeps_raw_variant_slug(self, widget, _v2):
+        """Persistir a family reabriria a sessao seguinte em `claude`."""
+        from PySide6.QtCore import QSettings
+
+        stg = QSettings("systemForge", "workflow-app")
+        try:
+            widget._main_sonnet_radio.setChecked(True)
+            widget._persist_main_llm_selection()
+            assert stg.value("main_llm/selected") == "sonnet"
+        finally:
+            stg.remove("main_llm/selected")
+
+    def test_frozen_contract_carries_variant(self, widget, _v2):
+        """ST005: o snapshot do enqueue leva family + variante."""
+        widget._main_opus_radio.setChecked(True)
+        fc = widget._capture_frozen_contract(
+            CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        )
+        assert fc.main_llm == "claude"
+        assert fc.main_llm_variant == "opus"
+        assert fc.resolved_provider is Provider.CLAUDE
+
+        widget._main_claude_radio.setChecked(True)
+        fc_family = widget._capture_frozen_contract(
+            CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        )
+        assert fc_family.main_llm == "claude"
+        assert fc_family.main_llm_variant is None
+
+    def test_frozen_contract_variant_defaults_to_none(self):
+        """Default preserva o comportamento pre-item-004 em todo call site."""
+        from workflow_app.command_queue.command_queue_widget import FrozenContract
+
+        fc = FrozenContract(
+            main_llm="claude",
+            kimi_worker_enabled=False,
+            codex_worker_enabled=False,
+            active_flags=(),
+            resolved_provider=Provider.CLAUDE,
+        )
+        assert fc.main_llm_variant is None
+
+    def test_variant_radios_hidden_in_legacy_regime(self, qapp, qtbot):
+        """Regime legado: nenhum radio novo no eixo Main.
+
+        Independe do valor da flag neste processo — le a flag efetiva e afirma
+        o lado correspondente, de modo que as DUAS invocacoes do bloco
+        `## Verificacao` da task 004 exercitam este teste de verdade.
+
+        Item 005 (C26): a flag efetiva passou a ser `SF_MAIN_PROVIDERS_V2`, e o
+        roster gateado cresceu para 4 slugs — `qwen` migrou junto com as 3
+        variantes. `grok` NAO entra: continua so sob `SF_GROK_SPIKE`.
+        """
+        from workflow_app.config.feature_flags import main_providers_v2_enabled
+
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        for slug in ("qwen", "opus", "sonnet", "kimi-k3"):
+            radio = w._main_radio_map[slug]
+            assert radio.isHidden() is not main_providers_v2_enabled(), slug
+        # Nenhum dos 3 slugs de provider legado muda de regime.
+        for slug in ("claude", "codex", "kimi"):
+            assert w._main_radio_map[slug].isHidden() is False, slug
+
+    def test_variant_is_not_a_provider(self):
+        """MF-01: `Provider` nao pode ser inflado com variante."""
+        assert {p.value for p in Provider} == {
+            "claude", "kimi", "codex", "qwen", "grok",
+        }
+        for slug in ("opus", "sonnet", "kimi-k3"):
+            assert slug not in _PROVIDER_FAMILIES

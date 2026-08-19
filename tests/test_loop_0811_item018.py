@@ -32,26 +32,80 @@ from workflow_app.command_queue.provider_router import (
 # --------------------------------------------------------------------------- #
 
 class TestMainRadioExistence:
-    """Radios de Main para Claude, Kimi, Codex e Qwen existem com testids."""
+    """Radios de Main existem com testids.
 
-    def test_main_llm_container_has_four_radios(self, qtbot):
+    Item 004 (C6/C13) do loop 08-17-systemforge-multillm-gaps-refactor: o eixo
+    Main deixou de ser so provider. A lista canonica fechada em `source.md:1196`
+    tem 7 slugs com semantica family+variant (opus, sonnet, codex, kimi,
+    kimi-k3, qwen, grok), mais o radio `claude` (family nua) que permanece o
+    default do regime legado — 8 radios instanciados.
+
+    O teste antigo `test_main_llm_container_has_four_radios` afirmava "quatro"
+    listando quatro atributos: a contagem era da propria lista literal, nao do
+    widget, e por isso continuava verde com 5, 6 ou 8 radios no grupo. A
+    contagem agora sai do `_main_llm_group` e o regime de gate esta declarado
+    explicitamente em cada assercao.
+    """
+
+    def test_main_llm_group_has_all_canonical_radios(self, qtbot):
+        """Contagem real, lida do QButtonGroup, nao de uma lista literal.
+
+        A INSTANCIACAO dos 8 radios independe de flag — quem depende de
+        `llm_config_v2_enabled()`/`grok_spike_enabled()` e a VISIBILIDADE
+        (coberta por `test_variant_radios_visibility_follows_gate`).
+        """
+        from workflow_app.command_queue.command_queue_widget import (
+            _MAIN_LLM_VARIANTS,
+        )
+
         w = CommandQueueWidget()
         qtbot.addWidget(w)
-        radios = [
-            w._main_claude_radio,
-            w._main_codex_radio,
-            w._main_kimi_radio,
-            w._main_qwen_radio,
-        ]
-        assert len(radios) == 4
+        assert len(w._main_llm_group.buttons()) == 8
+        # os 7 canonicos + `claude`, cada um alcancavel pelo slug
+        assert set(w._main_radio_map) == set(_MAIN_LLM_VARIANTS) | {"claude"}
+        for slug, radio in w._main_radio_map.items():
+            assert radio in w._main_llm_group.buttons(), slug
 
     def test_main_radio_testids(self, qtbot):
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         assert w._main_claude_radio.property("testid") == "queue-radio-main-claude"
         assert w._main_codex_radio.property("testid") == "queue-radio-main-codex"
+        # D-004-C: o testid do kimi permanece o alias historico
+        # `queue-chk-force-kimi`. Renomear e mudanca de contrato de testid e
+        # esta fora do escopo do item 004.
         assert w._main_kimi_radio.property("testid") == "queue-chk-force-kimi"
         assert w._main_qwen_radio.property("testid") == "queue-radio-main-qwen"
+        assert w._main_grok_radio.property("testid") == "queue-radio-main-grok"
+        # Item 004 (C6): os 3 testids que eram declarados e nunca criados.
+        assert w._main_opus_radio.property("testid") == "queue-radio-main-opus"
+        assert w._main_sonnet_radio.property("testid") == "queue-radio-main-sonnet"
+        assert w._main_kimi_k3_radio.property("testid") == "queue-radio-main-kimi-k3"
+
+    def test_variant_radios_visibility_follows_gate(self, qtbot):
+        """Regime declarado: `SF_LLM_CONFIG_V2` liga/desliga os 3 de variante.
+
+        `llm_config_v2_enabled()` e boot-frozen, entao este teste le a flag
+        efetiva do processo em vez de fingir os dois regimes. Rodando a suite
+        com a flag e sem ela (as duas invocacoes do bloco `## Verificacao` da
+        task 004) exercita os dois lados.
+        """
+        from workflow_app.config import llm_config_v2_enabled
+
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        expected_hidden = not llm_config_v2_enabled()
+        for radio in (
+            w._main_opus_radio,
+            w._main_sonnet_radio,
+            w._main_kimi_k3_radio,
+        ):
+            assert radio.isHidden() is expected_hidden, radio.property("testid")
+        # Regime legado: nenhum radio NOVO visivel — o eixo Main volta a ser
+        # exatamente o roster de provider de antes do item 004.
+        assert w._main_claude_radio.isHidden() is False
+        assert w._main_codex_radio.isHidden() is False
+        assert w._main_kimi_radio.isHidden() is False
 
     def test_main_radio_group_exclusive(self, qtbot):
         w = CommandQueueWidget()

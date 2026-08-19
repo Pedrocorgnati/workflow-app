@@ -22,9 +22,6 @@ from workflow_app.config.feature_flags import (
     llm_flags_rules_v2_enabled,
     llm_flags_rules_v2_flag_name,
     llm_flags_rules_v2_state,
-    provider_router_v2_enabled,
-    provider_router_v2_flag_name,
-    provider_router_v2_state,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +62,4 @@ __all__ = [
     "llm_flags_rules_v2_enabled",
     "llm_flags_rules_v2_flag_name",
     "llm_flags_rules_v2_state",
-    "provider_router_v2_enabled",
-    "provider_router_v2_flag_name",
-    "provider_router_v2_state",
 ]

@@ -29,7 +29,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from workflow_app.command_queue.kimi_whitelist import adapt_to_kimi
@@ -41,10 +44,65 @@ from workflow_app.command_queue.provider_transport_envelope import (
 )
 from workflow_app.command_queue.provider_router import Provider
 
+
+# Load ai-forge/scripts bridge modules (underscored, not part of workflow_app).
+# The repo root is found by walking up until ai-forge/scripts exists, instead of
+# a fixed parents[N] hop: the hop silently breaks if this file ever moves depth.
+def _find_scripts_dir() -> Path:  # pragma: no cover - import plumbing
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "ai-forge" / "scripts"
+        if candidate.is_dir():
+            return candidate
+    raise ImportError(
+        "ai-forge/scripts not found above "
+        f"{Path(__file__).resolve()}; provider bridge modules are unreachable"
+    )
+
+
+_SCRIPTS_DIR = str(_find_scripts_dir())
+if _SCRIPTS_DIR not in sys.path:  # pragma: no cover - import plumbing
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+import _provider_adapters as adapters  # noqa: E402
+import _provider_bridge_kernel as kernel  # noqa: E402
+
 if TYPE_CHECKING:
     from workflow_app.domain import CommandSpec
 
 logger = logging.getLogger(__name__)
+
+# Reason codes canonicos para WARNING [delegation-degraded] (C9).
+# Mantidos como constantes para garantir estabilidade de contrato com o
+# executor LLM (Kimi/Codex) e com os testes de protocolo.
+DELEGATION_DEGRADED_REASONS: tuple[str, ...] = (
+    "no-transport",
+    "binary-missing",
+    "credential-missing",
+)
+
+
+def format_delegation_degraded_warning(
+    step_id: str,
+    provider: str,
+    reason: str,
+) -> str:
+    """Produz a literal `WARNING [delegation-degraded]` (C9).
+
+    Args:
+        step_id: identificador da etapa delegada (C-46).
+        provider: provider alvo (kimi, codex, grok, qwen).
+        reason: um de `DELEGATION_DEGRADED_REASONS`; valores fora do enum
+            ainda sao emitidos (fail-open), mas o caller deve preferir os
+            reason codes canonicos.
+
+    Returns:
+        Linha literal no formato exato consumido pelos contratos de executor:
+        `WARNING [delegation-degraded] step_id=<id> provider=<p> reason=<r>`.
+    """
+    return (
+        f"WARNING [delegation-degraded] step_id={step_id} "
+        f"provider={provider} reason={reason}"
+    )
 
 
 @dataclass(frozen=True)
@@ -135,6 +193,40 @@ def build_kernel_dispatch(kernel_runner: KernelRunner) -> DispatchFn:
         return result.parsed
 
     return dispatch
+
+
+def run_provider_request(request: ProviderTransportRequest) -> dict[str, Any]:
+    """Real kernel runner for provider delegation requests.
+
+    Bridges the neutral ``ProviderTransportRequest`` envelope to the
+    ``_provider_bridge_kernel`` + ``_provider_adapters`` stack.  Builds
+    ``SpecParams`` from the request, resolves the adapter, and invokes the
+    kernel with the provider's required environment.
+
+    The Codex path always uses ``sandbox="danger-full-access"`` and an
+    absolute ``cwd`` (enforced by ``CodexAdapter``); tests assert these
+    kwargs are present. The same ``cwd`` goes into ``SpecParams`` and into the
+    kernel call, so the argv ``--cd`` and the subprocess kwarg cannot diverge.
+    """
+    adapter = adapters.get_adapter(request.provider)
+    cwd = str(Path(os.getcwd()).resolve())
+    params = kernel.SpecParams(
+        prompt=request.command_text,
+        level=2,
+        cwd=cwd,
+    )
+    return kernel.invoke_provider(
+        request.provider,
+        lambda: adapter.build_spec(params),
+        cwd=cwd,
+        timeout=kernel.DEFAULT_TIMEOUT_SECONDS,
+        env_for=lambda: adapter.env(),
+    )
+
+
+def build_real_kernel_dispatch() -> DispatchFn:
+    """Production dispatch using the real bridge-kernel runner."""
+    return build_kernel_dispatch(run_provider_request)
 
 
 def _build_topic(step_id: str, spec: CommandSpec) -> str:
@@ -269,3 +361,38 @@ def should_fallback(result: TransportResult) -> bool:
     if not result.parsed:
         return True
     return False
+
+
+def fallback_reason_from_error(error: str | None) -> str:
+    """Mapeia uma mensagem de erro de transporte para reason code canonico (C9).
+
+    Reason codes minimos: `no-transport`, `binary-missing`, `credential-missing`.
+    Erros nao reconhecidos caem em `no-transport` (fail-open, nunca silencioso).
+    """
+    if not error:
+        return "no-transport"
+    low = error.lower()
+    if "credential" in low or "auth" in low or "token" in low:
+        return "credential-missing"
+    if "binary" in low or "not found" in low or "executable" in low:
+        return "binary-missing"
+    return "no-transport"
+
+
+def build_delegation_degraded_warning(
+    result: TransportResult,
+    provider: Provider,
+) -> str:
+    """Constroi o warning exato a partir de um TransportResult de falha (C9).
+
+    Usado pelo caminho de fallback inline para anunciar a degradacao audivel
+    antes de executar localmente. Nunca deve ser chamado para resultados OK.
+    """
+    reason = fallback_reason_from_error(
+        result.error if result.error is not None else ""
+    )
+    return format_delegation_degraded_warning(
+        step_id=result.step_id,
+        provider=provider.value,
+        reason=reason,
+    )

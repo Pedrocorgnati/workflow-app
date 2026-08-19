@@ -11,24 +11,24 @@ task 004) consome `classify_provider` para colorir o botao unico e escolher o
 terminal de destino, mas NUNCA delega a decisao a frontmatter ou a matrix DCP.
 
 Invariantes preservadas (source.md secao 5):
-  - Inv 2 (modo LEGADO, default): o eixo Worker e avaliado ANTES do eixo
-    Main-LLM. `main_llm` vive em `RoutingState` para a UI/telemetria, mas a
-    classificacao escolhe apenas entre despachar a um worker (T2/T3) ou cair em
-    Claude/T1. Por isso "T1 verde via Main Kimi/Codex" da matriz (secao 11,
-    linhas 5-6) resolve para Provider.CLAUDE.
-    No modo ROUTER V2 (item 010, atras de kill-switch — ver `classify_provider`)
-    essa invariante e deliberadamente SUPERADA: a familia do Main participa da
-    decisao e vence o worker na colisao. Enquanto o V2 nao for default, Inv 2
-    continua valendo no caminho de producao.
+  - Inv 2 (regime unico): o eixo Worker e avaliado ANTES do eixo Main-LLM.
+    `main_llm` vive em `RoutingState` para a UI/telemetria, mas a classificacao
+    escolhe apenas entre despachar a um worker (T2/T3) ou cair em Claude/T1.
+    Por isso "T1 verde via Main Kimi/Codex" da matriz (secao 11, linhas 5-6)
+    resolve para Provider.CLAUDE.
+    O modo ROUTER V2 (item 010), que superava esta invariante fazendo a familia
+    do Main vencer o worker na colisao, foi REVOGADO pela decisao D3 do item 006
+    do loop 08-17-systemforge-multillm-gaps-refactor (gap C7): existe um unico
+    regime, e nele o worker vence sempre.
   - Inv 3: o provider por item NUNCA altera quais comandos entram na lista. Este
     modulo nao toca lista/ordem/matrix; so classifica um spec ja enfileirado.
   - Inv 8: `local-action` nao e comando de provider e nunca vai para T1/T2/T3.
 
 Pureza (source.md secao 12): sem import de Qt, sem I/O em tempo de chamada. As
-dependencias sao as duas whitelists puras, os helpers de feature flag
-(`workflow_app.config.feature_flags`, que resolvem o ambiente UMA vez no boot do
-processo e depois so leem constante congelada) e, apenas para tipagem, o
-`CommandSpec`. A leitura de ambiente e do modulo de flags, nao deste; aqui nao
+dependencias sao as duas whitelists puras e, apenas para tipagem, o
+`CommandSpec`. Desde a remocao do ramo Router V2 (item 006 do loop
+08-17-systemforge-multillm-gaps-refactor, gap C7) este modulo nao le nenhuma
+feature flag: a decisao nao depende mais de ambiente, nem congelado no boot. A leitura de ambiente e do modulo de flags, nao deste; aqui nao
 ha `os.environ` nem estado mutavel. `classify_provider` assume `spec` e `state`
 validos (nao-None); validacao de schema e responsabilidade do caller no step
 path (task 004). O comportamento com entrada invalida e indefinido por contrato.
@@ -43,17 +43,6 @@ from typing import TYPE_CHECKING
 from workflow_app.command_queue.codex_whitelist import is_codex_compatible
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
 
-# Import direto do modulo de flags (NUNCA via `workflow_app.config`, que arrasta
-# `ConfigBar`/Qt e quebraria o teste de pureza). Aliases com `_` porque o
-# snapshot legado compara `dir(provider_router)` contra fixture versionada:
-# qualquer binding publico novo neste modulo e regressao de superficie.
-from workflow_app.config.feature_flags import (
-    llm_config_v2_enabled as _llm_config_v2_enabled,
-)
-from workflow_app.config.feature_flags import (
-    provider_router_v2_enabled as _provider_router_v2_enabled,
-)
-
 if TYPE_CHECKING:
     # Tipagem apenas: importar em runtime acoplaria o router pure ao modulo de
     # dominio sem necessidade (classify_provider usa duck typing: spec.kind,
@@ -61,10 +50,20 @@ if TYPE_CHECKING:
     from workflow_app.domain import CommandSpec
 
 
-# Diretivas de sessao do Claude Code. Nunca sao elegiveis a worker por whitelist;
-# equivalem a cair no fallback Claude (source.md secao 7.1 regra 2 + secao 5
-# invariantes 6 e 7).
-_SESSION_DIRECTIVES: frozenset[str] = frozenset({"/clear", "/model", "/effort"})
+# Diretivas de sessao. Nunca sao elegiveis a worker por whitelist; equivalem a
+# cair no fallback Claude (source.md secao 7.1 regra 2 + secao 5 invariantes 6
+# e 7).
+#
+# `/reasoning` entrou em 2026-08-17 (C27) e FICA, mesmo depois da revogacao da
+# traducao que o produzia (decisao D-C27-2, mesmo dia). Ele existe hoje so como
+# residuo: filas salvas naquela janela podem trazer `/reasoning yes`. Sem ele
+# aqui, essa linha escapa da regra 2, cai no fallback CLAUDE por outro caminho
+# e — pior — `render_with_mcp_flags` passa a considera-la elegivel a sufixo,
+# rendendo `/reasoning yes --codex` na fila. Uma diretiva de sessao nunca recebe
+# flag, em qualquer dialeto, nem quando o dialeto ja morreu.
+_SESSION_DIRECTIVES: frozenset[str] = frozenset(
+    {"/clear", "/model", "/effort", "/reasoning"}
+)
 
 # --------------------------------------------------------------------------- #
 # Tabela de classificacao por familia e variante (item 010)                    #
@@ -95,6 +94,42 @@ _SESSION_DIRECTIVES: frozenset[str] = frozenset({"/clear", "/model", "/effort"})
 #
 # A etapa 2 e a mudanca do item 010: o Main selecionado agora participa da
 # decisao. Antes, main_llm era campo de telemetria ignorado pelo router.
+#
+# --------------------------------------------------------------------------- #
+# Gap C4 — degenerada POR DESIGN, nao mapeamento pela metade                    #
+# (item 003 do loop 08-17-systemforge-multillm-gaps-refactor)                   #
+# --------------------------------------------------------------------------- #
+#
+# (a) Os 5 pares 1:1 abaixo (familia == variante para todo provider) sao
+#     INTENCIONAIS. Nao ha familia com duas variantes hoje porque nao ha dois
+#     providers com identidade de comando compartilhada; o eixo variante existe
+#     no formato do valor, nao nos dados.
+#
+# (b) A tabela vale principalmente como ROSTER DE PARIDADE: e ela que
+#     `TestMapParity` cruza com o enum `Provider`, `_PROVIDER_BTN_STYLE`,
+#     `_PROVIDER_LABEL` e `_PROVIDER_DEST` (em `tests/test_command_queue_widget.py`
+#     e `tests/test_loop_0811_item018.py`). Provider novo que entre no enum sem
+#     entrar aqui — ou vice-versa — fica vermelho nos dois arquivos.
+#
+# (c) A coluna `variante` da UI NAO e alimentada por esta tabela. Por isso C4 e
+#     ruido estrutural DOCUMENTADO, nao defeito de runtime: nada em producao le
+#     o segundo elemento da tupla para decidir roteamento (`classify_provider`
+#     descarta com `_main_variant`). O eixo de variante de verdade e escopo
+#     integral do item 004; nada dele foi criado aqui.
+#
+# (d) Evidencia de que o retorno degenerado nunca e observado com entrada de
+#     variante: os dois unicos produtores de `main_llm` so emitem os 5 slugs de
+#     provider — `_resolve_interactive_main_llm` (`command_queue_widget.py`,
+#     codex|qwen|grok|kimi|claude) e `_current_llm_provider` (`main_window.py`,
+#     com clamp contra `_MAIN_LLM_SLUGS`). Nenhum slug de variante (`opus`,
+#     `sonnet`, `kimi-k3`) alcanca `_classify_family_variant`.
+#
+# MF-01 (nenhuma flag e redundante sob Main claude, porque `opus`/`sonnet` sao
+# variantes de claude e nao providers proprios) JA esta garantido em outro
+# ponto: `_REDUNDANT_FLAG_MAINS` em `workflow_app/config/llm_flags.py:69`, que
+# omite deliberadamente `--opus`/`--sonnet` e carrega o comentario
+# correspondente (consumidor unico: `llm_config/flags_panel.py`). Guard novo
+# aqui seria redundante e nao foi criado.
 _PROVIDER_FAMILIES: dict[str, tuple[str, str]] = {
     "claude": ("claude", "claude"),
     "kimi": ("kimi", "kimi"),
@@ -183,34 +218,30 @@ def __getattr__(name: str) -> object:
 def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
     """Classifica o provider efetivo de UM item da fila (funcao pura).
 
-    Dois modos, escolhidos pelos kill-switches congelados no boot. O modo V2 so
-    vale quando o global do item 002 (:func:`llm_config_v2_enabled`) E o
-    especifico do item 010 (:func:`provider_router_v2_enabled`) respondem ambos
-    ``True``; qualquer outro estado cai no legado (fail-closed, "ausente =
-    legado" na tabela P2 do source.md do loop
-    08-11-llm-config-multillm-expansion). Os nomes das env vars vivem uma unica
-    vez em ``workflow_app.config.feature_flags``; este modulo nunca os repete.
-
-    Modo LEGADO (default; invariante 2 preservada — `main_llm` nao participa):
+    REGIME UNICO (invariante 2 preservada — `main_llm` nao participa da
+    decisao):
       1. `spec.kind == "local-action"` -> CLAUDE (invariante 8: nunca a worker).
       2. Diretiva `/clear` | `/model` | `/effort` -> CLAUDE (nao elegivel a
          worker por whitelist; equivale ao fallback da regra 7).
       3. Nenhum worker ativo -> CLAUDE.
       4. Kimi worker ativo E (kimi_eligible OU is_kimi_compatible) -> KIMI.
+      4b. Qwen worker ativo E a mesma elegibilidade T2 -> QWEN (apos Kimi, PW-02).
       5. Codex worker ativo E is_codex_compatible -> CODEX.
+      5b. Grok worker ativo E is_codex_compatible -> GROK (apos Codex, PW-02).
       6. Kimi e Codex elegiveis ao mesmo tempo -> Kimi vence (regra 4 precede a 5).
       7. Sem elegibilidade worker -> CLAUDE.
 
-    Modo V2 (item 010): a regra 3 vira "familia do comando == familia do Main
-    -> CLAUDE", porque T1 executa o Main e nao faz sentido mandar a um worker um
-    comando que o proprio Main ja roda. As regras 4-7 seguem identicas ("nenhum
-    worker ativo" continua caindo em CLAUDE pelo fallback da regra 7, ja que 4 e
-    5 exigem worker ligado).
+    Quando o MESMO provider ocupa Main e Worker, o **worker vence**, sempre, sem
+    condicionar a switch nenhum. Ate o item 006 do loop
+    08-17-systemforge-multillm-gaps-refactor (gap C7, decisao D3) existia um
+    segundo regime, o Router V2 (item 010), atras do kill-switch global do item
+    002 mais um kill-switch proprio, no qual a familia do Main vencia o worker
+    nessa colisao. Esse regime foi REVOGADO e removido junto com o seu switch:
+    nunca rodou fora de teste (a env var nao era setada em lugar nenhum do repo) e
+    contradizia ``ai-forge/rules/llm-routing-div.md``, que trata "avaliar o eixo
+    Main antes do eixo Worker" como anti-pattern.
 
-    Enquanto o mesmo provider puder estar simultaneamente como Main e como
-    Worker, os dois modos discordam nessa colisao (legado: worker vence, fix
-    2026-05-30; V2: Main vence). Por isso a divergencia mora atras do
-    kill-switch, e nao no caminho default.
+    A ordem de avaliacao das regras 4/4b/5/5b/6/7 nao mudou com a revogacao.
 
     Assume ``spec`` e ``state`` nao-None (contrato; entrada invalida e
     comportamento indefinido).
@@ -225,15 +256,7 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
     if name in _SESSION_DIRECTIVES:
         return Provider.CLAUDE
 
-    if _llm_config_v2_enabled() and _provider_router_v2_enabled():
-        # Regra 3 em modo V2 (item 010): se a familia do comando bate com a
-        # familia do Main, o comando pertence ao terminal principal (T1 roda o
-        # Main selecionado). Familia do comando vem das whitelists reais + flag.
-        command_family = _command_family(spec, name)
-        main_family, _main_variant = _classify_family_variant(state.main_llm)
-        if command_family != "unknown" and command_family == main_family:
-            return Provider.CLAUDE
-    elif (
+    if (
         not state.kimi_worker_enabled
         and not state.codex_worker_enabled
         and not state.qwen_worker_enabled
@@ -263,17 +286,3 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
 
     # Regra 7: fallback.
     return Provider.CLAUDE
-
-
-def _command_family(spec: "CommandSpec", name: str) -> str:
-    """Determina a familia do provider de um comando.
-
-    Usa as whitelists reais (is_kimi_compatible, is_codex_compatible) e o flag
-    ``kimi_eligible``. Retorna a familia (``"kimi"``, ``"codex"``, ``"claude"``)
-    ou ``"unknown"`` quando nenhuma whitelist casa.
-    """
-    if spec.kimi_eligible or is_kimi_compatible(name):
-        return "kimi"
-    if is_codex_compatible(name):
-        return "codex"
-    return "unknown"

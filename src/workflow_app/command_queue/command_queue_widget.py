@@ -54,6 +54,11 @@ from workflow_app.command_queue.command_item_widget import (
 from workflow_app.command_queue.codex_whitelist import is_image_generation_command
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
+from workflow_app.command_queue.model_effort_equivalence import (
+    adapt_specs_to_main,
+    is_directive_line,
+    is_foreign_directive,
+)
 from workflow_app.command_queue.provider_router import (
     Provider,
     RoutingState,
@@ -517,6 +522,30 @@ _MODEL_MAP = {
     "opus": ModelName.OPUS,
     "sonnet": ModelName.SONNET,
 }
+# NOTA (item 004, D-004-A): `_MODEL_MAP` mapeia o texto de uma diretiva
+# `/model X` do CLI Claude para `ModelName`, que tem exatamente dois membros
+# (`domain.py`: OPUS, SONNET). `kimi-k3` NAO entra aqui: exigiria ou um membro
+# novo no enum — que deixa de ser Claude-only e afeta 5 modulos fora do widget
+# — ou um mapa paralelo. Decisao humana pendente; ver `## Decisoes abertas`
+# da task 004 do loop 08-17-systemforge-multillm-gaps-refactor.
+
+# Item 004 (C6/C13): lista canonica de 7 slugs do eixo Main LLM com semantica
+# family+variant. `opus` e `(claude, opus)`, NAO um provider novo — MF-01
+# (source.md:1198) proibe inflar `provider_router.Provider` com variante.
+# Este mapa vive no widget de proposito: `provider_router.py` esta em
+# "proibido editar" pela clausula de Dependencias do item 004, e o eixo de
+# variante nao atravessa o router.
+# `claude` (sem variante) permanece fora da lista de 7 como default do regime
+# legado — e a family nua, nao uma oitava opcao de variante.
+_MAIN_LLM_VARIANTS: dict[str, tuple[str, str | None]] = {
+    "opus": ("claude", "opus"),
+    "sonnet": ("claude", "sonnet"),
+    "codex": ("codex", None),
+    "kimi": ("kimi", None),
+    "kimi-k3": ("kimi", "k3"),
+    "qwen": ("qwen", None),
+    "grok": ("grok", None),
+}
 
 _EFFORT_MAP = {
     "low": EffortLevel.LOW,
@@ -606,6 +635,52 @@ GROUP_MAP: dict[str, dict[str, Any]] = {
     # so expressa um par model/effort unico por grupo. O builder
     # _enqueue_book_legacy resolve os tiers per-subcomando internamente.
 }
+
+
+def _realign_after_translation(
+    source: list[CommandSpec],
+    survivors: list[CommandSpec],
+    statuses: list[CommandStatus],
+    sent_flags: list[bool],
+) -> tuple[list[CommandStatus], list[bool]]:
+    """Remapeia status/sent quando a adequacao C27 muda o tamanho da fila.
+
+    A adequacao so mexe em linha de diretiva: sob qualquer Main nao-Claude o
+    run inteiro de `/model`+`/effort` e REMOVIDO. Toda linha nao-diretiva
+    sobrevive 1:1 e em ordem, entao da para reconstruir a correspondencia
+    caminhando as duas listas em paralelo, sem pedir proveniencia.
+
+    O branch de diretiva sobrevivente ficou defensivo (hoje nenhuma adequacao
+    preserva diretiva) e existe para nao corromper o alinhamento se uma versao
+    futura voltar a transformar em vez de remover: a diretiva herda o estado da
+    PRIMEIRA linha do run que a originou.
+    """
+    out_status: list[CommandStatus] = []
+    out_sent: list[bool] = []
+    s = 0
+    for spec in survivors:
+        if is_directive_line(spec.name):
+            start = s
+            while s < len(source) and is_directive_line(source[s].name):
+                s += 1
+            if s == start:  # defensivo: diretiva sem ancestral no source
+                out_status.append(CommandStatus.PENDENTE)
+                out_sent.append(False)
+                continue
+            out_status.append(statuses[start])
+            out_sent.append(sent_flags[start])
+            continue
+        # Linha comum: pula qualquer run de diretiva descartado antes dela.
+        while s < len(source) and is_directive_line(source[s].name):
+            s += 1
+        if s >= len(source):
+            out_status.append(CommandStatus.PENDENTE)
+            out_sent.append(False)
+            continue
+        out_status.append(statuses[s])
+        out_sent.append(sent_flags[s])
+        s += 1
+    return out_status, out_sent
 
 
 def _build_prep_specs(group: str, start_position: int = 1) -> list[CommandSpec]:
@@ -806,6 +881,13 @@ class FrozenContract:
     resolved_provider: Provider
     qwen_worker_enabled: bool = False
     grok_worker_enabled: bool = False
+    #: Item 004 (C6/ST005): variante de modelo do Main LLM no momento do
+    #: enqueue (`opus`, `sonnet`, `k3`) ou `None` quando o operador escolheu a
+    #: family nua. `main_llm` continua sendo SEMPRE a family — MF-01 proibe
+    #: variante virar provider, e `resolved_provider` deriva da family.
+    #: Default `None` = comportamento identico ao de antes do item 004 para
+    #: todo call site que constroi o contrato sem este campo.
+    main_llm_variant: str | None = None
 
 
 class CommandQueueWidget(QWidget):
@@ -3284,6 +3366,16 @@ class CommandQueueWidget(QWidget):
         self._main_qwen_radio.setProperty("testid", "queue-radio-main-qwen")
         self._main_grok_radio = QRadioButton("grok")
         self._main_grok_radio.setProperty("testid", "queue-radio-main-grok")
+        # Item 004 (C6/C13): radios de VARIANTE. `opus`/`sonnet` sao variantes
+        # de modelo da family `claude`; `kimi-k3` e variante da family `kimi`.
+        # Nenhum deles e provider novo — `provider_router.Provider` continua com
+        # os 5 membros de sempre (MF-01, source.md:1198).
+        self._main_opus_radio = QRadioButton("opus")
+        self._main_opus_radio.setProperty("testid", "queue-radio-main-opus")
+        self._main_sonnet_radio = QRadioButton("sonnet")
+        self._main_sonnet_radio.setProperty("testid", "queue-radio-main-sonnet")
+        self._main_kimi_k3_radio = QRadioButton("kimi-k3")
+        self._main_kimi_k3_radio.setProperty("testid", "queue-radio-main-kimi-k3")
         self._main_llm_group = QButtonGroup(self)
         self._main_llm_group.setExclusive(True)
         for _btn in (
@@ -3292,20 +3384,56 @@ class CommandQueueWidget(QWidget):
             self._main_kimi_radio,
             self._main_qwen_radio,
             self._main_grok_radio,
+            self._main_opus_radio,
+            self._main_sonnet_radio,
+            self._main_kimi_k3_radio,
         ):
             _btn.setStyleSheet(_control_qss)
             self._main_llm_group.addButton(_btn)
             _main_options_layout.addWidget(_btn)
         # ST006: kill-switch — qwen radio visivel somente quando llm_config_v2
         # esta ligado. Ausente ou off = oculto.
-        from workflow_app.config import llm_config_v2_enabled
-        if not llm_config_v2_enabled():
-            self._main_qwen_radio.setVisible(False)
         # Item 026: kill-switch — grok radio visivel somente quando
-        # SF_GROK_SPIKE esta ligado. Ausente ou off = oculto.
-        from workflow_app.config.feature_flags import grok_spike_enabled
-        if not grok_spike_enabled():
+        # SF_GROK_SPIKE esta ligado (D-41/C-58: nada de Grok publico antes do
+        # spike). Ausente ou off = oculto.
+        from workflow_app.config.feature_flags import (
+            grok_spike_enabled,
+            main_providers_v2_enabled,
+            parallel_workers_v2_enabled,
+        )
+
+        # Intencao de visibilidade por slug. `isVisible()` NAO serve como
+        # oraculo aqui: durante o __init__ nenhum widget foi mostrado ainda,
+        # entao ele retorna False ate para os radios habilitados — era isso que
+        # tornava a restauracao do Main persistido (abaixo) inalcancavel.
+        # Item 004 (C6): os 3 radios de variante passaram a ser gated.
+        # Item 005 (C26): o gate foi MOVIDO do global `SF_LLM_CONFIG_V2` para o
+        # kill-switch dedicado `SF_MAIN_PROVIDERS_V2`, que decide o roster de
+        # radios Main. Regime legado (flag ausente) = os 3 radios de variante
+        # (`opus`, `sonnet`, `kimi-k3`) mais o provider adicional `qwen` ficam
+        # ocultos, e o eixo Main volta a ser exatamente `claude`/`codex`/`kimi`.
+        # `grok` NAO entra neste switch: continua exclusivamente sob
+        # `SF_GROK_SPIKE`, para nao criar conjuncao de dois switches (C7).
+        _main_radio_visible = {
+            "claude": True,
+            "codex": True,
+            "kimi": True,
+            "qwen": main_providers_v2_enabled(),
+            "grok": grok_spike_enabled(),
+            "opus": main_providers_v2_enabled(),
+            "sonnet": main_providers_v2_enabled(),
+            "kimi-k3": main_providers_v2_enabled(),
+        }
+        if not _main_radio_visible["qwen"]:
+            self._main_qwen_radio.setVisible(False)
+        if not _main_radio_visible["grok"]:
             self._main_grok_radio.setVisible(False)
+        if not _main_radio_visible["opus"]:
+            self._main_opus_radio.setVisible(False)
+        if not _main_radio_visible["sonnet"]:
+            self._main_sonnet_radio.setVisible(False)
+        if not _main_radio_visible["kimi-k3"]:
+            self._main_kimi_k3_radio.setVisible(False)
         # Item 018: persistencia do radio Main LLM via QSettings.
         # Restaura a selecao da sessao anterior (default: claude).
         _main_stg = QSettings("systemForge", "workflow-app")
@@ -3316,10 +3444,21 @@ class CommandQueueWidget(QWidget):
             "kimi": self._main_kimi_radio,
             "qwen": self._main_qwen_radio,
             "grok": self._main_grok_radio,
+            "opus": self._main_opus_radio,
+            "sonnet": self._main_sonnet_radio,
+            "kimi-k3": self._main_kimi_k3_radio,
         }
-        _saved_radio = _main_radio_map.get(_saved_main, self._main_claude_radio)
-        if _saved_radio.isVisible():
-            _saved_radio.setChecked(True)
+        self._main_radio_map = _main_radio_map
+        _saved_slug = str(_saved_main or "claude").strip().lower()
+        if _saved_slug not in _main_radio_map:
+            _saved_slug = "claude"
+        # Slug persistido cujo radio esta oculto por kill-switch (ex.: sessao
+        # anterior rodou com SF_GROK_SPIKE=1 e esta nao) volta para claude em
+        # vez de marcar um radio invisivel — Main marcado tem que ser Main que
+        # o operador consegue ver e trocar.
+        if not _main_radio_visible[_saved_slug]:
+            _saved_slug = "claude"
+        _main_radio_map[_saved_slug].setChecked(True)
         self._main_llm_group.buttonClicked.connect(
             lambda btn: self._persist_main_llm_selection()
         )
@@ -3372,7 +3511,49 @@ class CommandQueueWidget(QWidget):
             self._use_grok_chk,
         ):
             _btn.setStyleSheet(_control_qss)
-            _worker_options_layout.addWidget(_btn)
+        # Item 005 (C26): roster de workers paralelos sob kill-switch dedicado
+        # `SF_PARALLEL_WORKERS_V2` (boot-frozen, fail-closed). Ausente/off = o
+        # roster legado de 2 workers (`kimi` no T2, `codex` no T3); "1" expoe os
+        # 4 em dois pares exclusivos. Este switch decide QUEM aparece — a
+        # exclusividade PW-01 (um worker por terminal) continua enforced nos
+        # handlers `_on_use_*_toggled` e nao e duplicada aqui.
+        # Os checkboxes ocultos sao desmarcados explicitamente: todos os
+        # consumidores a jusante leem `isChecked()` sem consultar visibilidade,
+        # entao worker invisivel marcado vazaria para a resolucao de terminal.
+        if not parallel_workers_v2_enabled():
+            for _hidden_worker in (self._use_qwen_chk, self._use_grok_chk):
+                _hidden_worker.setChecked(False)
+                _hidden_worker.setVisible(False)
+        # Split visual T2/T3 (source.md:1191 + §10.2): um terminal so aceita um
+        # worker, e a exclusividade PW-01 ja e enforced nos handlers
+        # `_on_use_*_toggled`. Sem os dois sub-grupos rotulados, os 4 checkboxes
+        # numa row unica nao dizem QUAL terminal cada par disputa — o operador
+        # so descobre a troca depois do toast. Agrupar e a projecao visual do
+        # invariante, nao decoracao.
+        _sub_label_qss = (
+            "QLabel { color: #71717A; font-size: 10px; font-weight: 700;"
+            "  background: transparent; border: none; }"
+        )
+        for _sub_testid, _sub_text, _sub_btns in (
+            ("queue-div-parallel-t2", "T2:", (self._use_kimi_chk, self._use_qwen_chk)),
+            ("queue-div-parallel-t3", "T3:", (self._use_codex_chk, self._use_grok_chk)),
+        ):
+            _sub = QWidget()
+            _sub.setProperty("testid", _sub_testid)
+            _sub.setStyleSheet("background: transparent; border: none;")
+            _sub_layout = QHBoxLayout(_sub)
+            _sub_layout.setContentsMargins(0, 0, 0, 0)
+            _sub_layout.setSpacing(6)
+            _sub_lbl = QLabel(_sub_text)
+            _sub_lbl.setStyleSheet(_sub_label_qss)
+            _sub_layout.addWidget(_sub_lbl)
+            for _btn in _sub_btns:
+                _sub_layout.addWidget(_btn)
+            # Os dois sub-grupos sobrevivem ao regime legado: cada terminal
+            # mantem exatamente um worker visivel (T2 kimi, T3 codex), entao os
+            # rotulos continuam verdadeiros e os testids
+            # `queue-div-parallel-t2`/`-t3` permanecem estaveis nos dois regimes.
+            _worker_options_layout.addWidget(_sub)
         _worker_options_layout.addStretch(1)
         _worker_layout.addWidget(_worker_label)
         _worker_layout.addWidget(_worker_options)
@@ -3396,32 +3577,62 @@ class CommandQueueWidget(QWidget):
         _flag_layout = QHBoxLayout(_flag_section)
         _flag_layout.setContentsMargins(0, 0, 0, 0)
         _flag_layout.setSpacing(8)
-        _flag_label = QLabel("Flag")
-        _flag_label.setStyleSheet(_section_label_qss)
-        _flag_options = QWidget()
-        _flag_options.setStyleSheet("background: transparent; border: none;")
-        _flag_options_layout = QHBoxLayout(_flag_options)
-        _flag_options_layout.setContentsMargins(0, 0, 0, 0)
-        _flag_options_layout.setSpacing(8)
-        self._flag_kimi_chk = QCheckBox("--kimi")
-        self._flag_kimi_chk.setProperty("testid", "queue-chk-flag-kimi")
-        self._flag_kimi_chk.setToolTip(
-            "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
-            "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-        )
-        self._flag_codex_chk = QCheckBox("--codex")
-        self._flag_codex_chk.setProperty("testid", "queue-chk-flag-codex")
-        self._flag_codex_chk.setToolTip(
-            "Quando marcado, anexa --codex ao label dos itens T1 (Claude). "
-            "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-        )
-        for _btn in (self._flag_kimi_chk, self._flag_codex_chk):
-            _btn.setStyleSheet(_control_qss)
-            _btn.toggled.connect(self._on_flag_toggled)
-            _flag_options_layout.addWidget(_btn)
-        _flag_options_layout.addStretch(1)
-        _flag_layout.addWidget(_flag_label)
-        _flag_layout.addWidget(_flag_options)
+        # Item 021 (fechado em 2026-08-17): sob a flag, quem preenche
+        # `queue-div-flag` e o FlagsPanel com os 7 literais canonicos, DENTRO
+        # da div. Antes o painel vivia num container irmao do `_llm_box`, fora
+        # da moldura de `queue-div-llm-routing`, o que (a) partia a secao em
+        # dois blocos visuais desalinhados e (b) duplicava os testids
+        # `queue-chk-flag-kimi`/`-codex` (um par no painel, outro aqui).
+        # Aliasando os checkboxes do painel como `_flag_<slug>_chk`, todo o
+        # plumbing existente (`_refresh_flag_checkboxes_state`,
+        # `_active_mcp_flags_from_local`, C-43/C-57) passa a valer para os 7
+        # sem duplicar controle.
+        self._flags_panel = None
+        if _llm_box_horizontal:
+            from workflow_app.config.llm_flags import _FLAG_CANONICAL_ORDER
+            from workflow_app.llm_config.flags_panel import FlagsPanel
+
+            _panel = FlagsPanel(main_llm_resolver=self._resolve_interactive_main_llm)
+            self._flags_panel = _panel
+            for _flag in _FLAG_CANONICAL_ORDER:
+                _chk = _panel.checkbox(_flag)
+                if _chk is None:
+                    continue
+                _chk.setStyleSheet(_control_qss)
+                setattr(
+                    self,
+                    f"_flag_{_flag.lstrip('-').replace('-', '_')}_chk",
+                    _chk,
+                )
+            _panel.flags_changed.connect(self._on_flags_panel_changed)
+            _flag_layout.addWidget(_panel)
+        else:
+            _flag_label = QLabel("Flag")
+            _flag_label.setStyleSheet(_section_label_qss)
+            _flag_options = QWidget()
+            _flag_options.setStyleSheet("background: transparent; border: none;")
+            _flag_options_layout = QHBoxLayout(_flag_options)
+            _flag_options_layout.setContentsMargins(0, 0, 0, 0)
+            _flag_options_layout.setSpacing(8)
+            self._flag_kimi_chk = QCheckBox("--kimi")
+            self._flag_kimi_chk.setProperty("testid", "queue-chk-flag-kimi")
+            self._flag_kimi_chk.setToolTip(
+                "Quando marcado, anexa --kimi ao label dos itens T1 (Claude). "
+                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+            )
+            self._flag_codex_chk = QCheckBox("--codex")
+            self._flag_codex_chk.setProperty("testid", "queue-chk-flag-codex")
+            self._flag_codex_chk.setToolTip(
+                "Quando marcado, anexa --codex ao label dos itens T1 (Claude). "
+                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+            )
+            for _btn in (self._flag_kimi_chk, self._flag_codex_chk):
+                _btn.setStyleSheet(_control_qss)
+                _btn.toggled.connect(self._on_flag_toggled)
+                _flag_options_layout.addWidget(_btn)
+            _flag_options_layout.addStretch(1)
+            _flag_layout.addWidget(_flag_label)
+            _flag_layout.addWidget(_flag_options)
         _llm_layout.addWidget(_make_llm_divider())
         _llm_layout.addWidget(_flag_section)
         # _llm_box NAO entra na play bar: o MainWindow o reparenteia para a
@@ -3470,6 +3681,11 @@ class CommandQueueWidget(QWidget):
         self._main_claude_radio.toggled.connect(self._on_main_claude_toggled)
         self._main_qwen_radio.toggled.connect(self._on_main_qwen_toggled)
         self._main_grok_radio.toggled.connect(self._on_main_grok_toggled)
+        # Item 004 (C6): radios de variante. Emitem a FAMILY no
+        # `main_llm_changed` — ver `_on_main_variant_toggled` (decisao ST006).
+        self._main_opus_radio.toggled.connect(self._on_main_opus_toggled)
+        self._main_sonnet_radio.toggled.connect(self._on_main_sonnet_toggled)
+        self._main_kimi_k3_radio.toggled.connect(self._on_main_kimi_k3_toggled)
         self._use_codex_chk.toggled.connect(self._on_use_codex_toggled)
         self._use_grok_chk.toggled.connect(self._on_use_grok_toggled)
 
@@ -8104,9 +8320,18 @@ class CommandQueueWidget(QWidget):
         if cmd_token == "/model" and len(parts) > 1:
             self._last_model_value = parts[1]
             self._last_model_label.setText(f"/model: {self._last_model_value}")
-        elif cmd_token == "/effort" and len(parts) > 1:
+            # Defensivo (C27): um `/model {modelo} {effort}` de duas palavras so
+            # pode ser residuo da traducao revogada, e hoje nao chega a ser
+            # despachado. Se chegar, o 3o token vai para a celula de effort em
+            # vez de deixar o lado direito congelado mentindo sobre o que rodou.
+            if len(parts) > 2:
+                self._last_effort_value = parts[2]
+                self._last_effort_label.setText(f"/effort: {self._last_effort_value}")
+        elif cmd_token in ("/effort", "/reasoning") and len(parts) > 1:
+            # `/reasoning` so aparece como residuo (C27): mesma celula da row,
+            # rotulada com o token realmente despachado.
             self._last_effort_value = parts[1]
-            self._last_effort_label.setText(f"/effort: {self._last_effort_value}")
+            self._last_effort_label.setText(f"{cmd_token}: {self._last_effort_value}")
         self._highlight_current_command(cleaned)
         self._maybe_auto_save(cmd_text)
 
@@ -8134,6 +8359,17 @@ class CommandQueueWidget(QWidget):
 
         # Remove stretch before inserting
         self._items_layout.takeAt(self._items_layout.count() - 1)
+
+        # Adequacao model/effort ao Main LLM corrente (`queue-div-main-llm`).
+        # Sob Main `claude` isto e identidade byte-a-byte; sob qualquer outro as
+        # linhas `/model`/`/effort` somem, porque nenhum dos CLIs nao-Claude tem
+        # diretiva textual equivalente (C27, evidencia em
+        # `model_effort_equivalence`). A leitura acontece AQUI, no enqueue, e
+        # nao no dispatch: trocar o Main depois de carregar a fila NAO reescreve
+        # as linhas ja renderizadas, pelo mesmo motivo que o FrozenContract
+        # existe — o operador precisa poder ler na tela exatamente o que vai ser
+        # colado.
+        specs = adapt_specs_to_main(specs, self._resolve_interactive_main_llm())
 
         for spec in specs:
             item = self._make_item(spec)
@@ -8421,8 +8657,9 @@ class CommandQueueWidget(QWidget):
 
         Classifica o provider efetivo do item via o modulo PURO
         provider_router.classify_provider, montando o RoutingState SOMENTE com
-        estado de worker (checkboxes T2/T3) + Main LLM ativo (invariantes 2 e 5:
-        eixo Worker antes do Main-LLM, nunca os checkboxes de rota de terminal
+        estado de worker (os quatro checkboxes de worker — kimi e qwen no T2,
+        codex e grok no T3) + Main LLM ativo (invariantes 2 e 5: eixo Worker
+        antes do Main-LLM, nunca os checkboxes de rota de terminal
         `terminal-route-t1/t2/t3`, que desde 07-27 vivem no header de cada
         terminal). Reusa a mesma construcao do step path
         (_on_step_btn_clicked)."""
@@ -8436,6 +8673,14 @@ class CommandQueueWidget(QWidget):
                 and self._use_codex_chk.isChecked()
             ),
             main_llm=self._resolve_interactive_main_llm(),
+            qwen_worker_enabled=bool(
+                getattr(self, "_use_qwen_chk", None) is not None
+                and self._use_qwen_chk.isChecked()
+            ),
+            grok_worker_enabled=bool(
+                getattr(self, "_use_grok_chk", None) is not None
+                and self._use_grok_chk.isChecked()
+            ),
         )
         return classify_provider(spec, routing_state)
 
@@ -8550,8 +8795,13 @@ class CommandQueueWidget(QWidget):
             getattr(self, "_use_grok_chk", None) is not None
             and self._use_grok_chk.isChecked()
         )
+        # Item 004 (ST005): uma unica leitura do eixo Main, ja em
+        # `(family, variant)`. `RoutingState.main_llm` e `resolved_provider`
+        # continuam recebendo a FAMILY — `classify_provider` raciocina em
+        # provider e `provider_router.py` esta congelado neste item.
+        _main_family, _main_variant = self._resolve_interactive_main_llm_pair()
         return FrozenContract(
-            main_llm=self._resolve_interactive_main_llm(),
+            main_llm=_main_family,
             kimi_worker_enabled=_kimi_on,
             codex_worker_enabled=_codex_on,
             active_flags=tuple(self._active_mcp_flags()),
@@ -8560,13 +8810,14 @@ class CommandQueueWidget(QWidget):
                 RoutingState(
                     kimi_worker_enabled=_kimi_on,
                     codex_worker_enabled=_codex_on,
-                    main_llm=self._resolve_interactive_main_llm(),
+                    main_llm=_main_family,
                     qwen_worker_enabled=_qwen_on,
                     grok_worker_enabled=_grok_on,
                 ),
             ),
             qwen_worker_enabled=_qwen_on,
             grok_worker_enabled=_grok_on,
+            main_llm_variant=_main_variant,
         )
 
     def get_frozen_contract(self, item: CommandItemWidget) -> FrozenContract | None:
@@ -8642,20 +8893,65 @@ class CommandQueueWidget(QWidget):
     # qualquer paste. Fonte: ai-forge/rules/workflow-app-listeners.md.
     _RECOVERY_VALID_CHANNELS = ("interactive", "workspace", "workspace_xterm")
 
+    #: Item 004 (C13): ordem de leitura do eixo Main LLM. Estende a precedencia
+    #: legada (codex > qwen > grok > kimi > claude) com os 3 slugs de variante.
+    #: O `_main_llm_group` e exclusivo, entao no maximo um radio esta marcado e
+    #: a ordem so importa como desempate defensivo; ela mantem os slugs legados
+    #: exatamente onde estavam para que o regime legado (variantes ocultas e
+    #: nunca marcadas) resolva byte a byte como antes.
+    _MAIN_LLM_PRECEDENCE = (
+        "codex",
+        "qwen",
+        "grok",
+        "kimi-k3",
+        "opus",
+        "sonnet",
+        "kimi",
+    )
+
+    def _resolve_interactive_main_llm_slug(self) -> str:
+        """Slug CRU do radio Main marcado AGORA.
+
+        Retorna um dos 7 slugs canonicos de `_MAIN_LLM_VARIANTS` (C13) ou
+        `claude` — a family nua, default do regime legado. E a unica leitura
+        que preserva a variante; `_resolve_interactive_main_llm()` colapsa
+        para family de proposito (ver docstring de lá).
+        """
+        _map = getattr(self, "_main_radio_map", None) or {}
+        for slug in self._MAIN_LLM_PRECEDENCE:
+            radio = _map.get(slug)
+            if radio is not None and radio.isChecked():
+                return slug
+        return "claude"
+
+    def _resolve_interactive_main_llm_pair(self) -> tuple[str, str | None]:
+        """Item 004 (C6/C13): `(family, variant)` do Main LLM marcado AGORA.
+
+        `variant` e `None` para os slugs que ja eram family nua
+        (`claude|codex|kimi|qwen|grok`) e carrega a variante de modelo para os
+        3 slugs novos: `opus`/`sonnet` -> family `claude`, `kimi-k3` -> family
+        `kimi`. MF-01: variante NAO vira membro de `provider_router.Provider`.
+        """
+        return _MAIN_LLM_VARIANTS.get(
+            self._resolve_interactive_main_llm_slug(), ("claude", None)
+        )
+
     def _resolve_interactive_main_llm(self) -> str:
-        """Qual LLM ocupa o terminal interactive (T1) AGORA.
+        """Qual LLM ocupa o terminal interactive (T1) AGORA — FAMILY apenas.
 
         Espelha a precedencia de `_dispatch_green_arrow`/`_on_btn_next_clicked`:
-        radio Main Codex > radio Main Qwen > radio Main Grok > checkbox Main Kimi (--force) > Claude (default)."""
-        if getattr(self, "_main_codex_radio", None) and self._main_codex_radio.isChecked():
-            return "codex"
-        if getattr(self, "_main_qwen_radio", None) and self._main_qwen_radio.isChecked():
-            return "qwen"
-        if getattr(self, "_main_grok_radio", None) and self._main_grok_radio.isChecked():
-            return "grok"
-        if getattr(self, "_force_kimi_chk", None) and self._force_kimi_chk.isChecked():
-            return "kimi"
-        return "claude"
+        radio Main Codex > radio Main Qwen > radio Main Grok > checkbox Main Kimi (--force) > Claude (default).
+
+        Item 004 (ST004/ST006): com os radios de variante ligados, este acessor
+        continua devolvendo `claude|codex|kimi|qwen|grok`. Isso e um ADAPTADOR
+        explicito, nao coercao silenciosa: os 14 call sites (routing, roster do
+        `main_window`, `MetricsBar`, recovery prompt/context, `FlagsPanel`)
+        raciocinam em provider, e `opus`/`sonnet`/`kimi-k3` nao sao providers.
+        Quem precisa da variante chama `_resolve_interactive_main_llm_pair()`;
+        quem precisa do slug cru (persistencia) chama
+        `_resolve_interactive_main_llm_slug()`.
+        """
+        return self._resolve_interactive_main_llm_pair()[0]
 
     def current_main_llm(self) -> str:
         """Acessor publico read-only do Main LLM (`claude|codex|kimi|qwen|grok`).
@@ -8671,10 +8967,16 @@ class CommandQueueWidget(QWidget):
         """Item 018: salva o radio Main LLM selecionado no QSettings.
 
         Chamado pelo signal ``buttonClicked`` do ``_main_llm_group``.
-        Persiste o slug (``claude|codex|kimi|qwen``) em ``main_llm/selected``
-        para restaurar na proxima inicializacao do widget.
+        Persiste o slug (``claude|codex|kimi|qwen|grok`` + os 3 de variante
+        do item 004: ``opus|sonnet|kimi-k3``) em ``main_llm/selected`` para
+        restaurar na proxima inicializacao do widget. A restauracao rejeita
+        slug cujo radio esteja oculto por kill-switch e cai em ``claude``.
+
+        Item 004: grava o slug CRU. Persistir a family colapsada faria a
+        sessao seguinte reabrir em ``claude`` depois do operador ter escolhido
+        ``opus`` — perda silenciosa da selecao.
         """
-        slug = self._resolve_interactive_main_llm()
+        slug = self._resolve_interactive_main_llm_slug()
         QSettings("systemForge", "workflow-app").setValue(
             "main_llm/selected", slug
         )
@@ -9025,6 +9327,52 @@ class CommandQueueWidget(QWidget):
         if checked:
             signal_bus.main_llm_changed.emit("grok")
 
+    def _on_main_variant_toggled(self, slug: str, checked: bool) -> None:
+        """Item 004 (C6/ST006): handler comum dos 3 radios de variante.
+
+        DECISAO ST006 (registrada aqui de proposito — Zero Silencio): o sinal
+        `main_llm_changed` carrega a FAMILY, nunca o slug de variante. Os 4
+        rosters externos do eixo Main sao fechados em 5 slugs de provider:
+
+          - `main_window._MAIN_LLM_SLUGS` (clampa desconhecido para `claude`);
+          - `metrics_bar._MAIN_LLM_SLUGS` (IGNORA desconhecido em silencio, o
+            que deixaria o cache preso no Main ANTERIOR — pior falha das 4);
+          - `metrics_bar/recovery_prompt.py` e `recovery_context.py` (tupla
+            hardcoded + fallback `claude`).
+
+        Emitir `opus` para eles seria descartar a selecao em silencio em 3 dos
+        4 e travar o cache no 4o. Emitir a family mantem os 4 corretos: quem
+        roteia por provider recebe provider. A variante nao vaza para roster
+        nenhum — ela vive no `FrozenContract` (ST005) e em
+        `_resolve_interactive_main_llm_pair()`. Inflar os 4 rosters com os
+        slugs de variante e trabalho de outro item (C13 fecha a lista de
+        radios; o roster externo permanece o eixo provider).
+        """
+        self._refresh_kimi_btn_visibility()
+        self._refresh_flag_checkboxes_state()
+        if checked:
+            family, _variant = _MAIN_LLM_VARIANTS.get(slug, ("claude", None))
+            signal_bus.main_llm_changed.emit(family)
+
+    def _on_main_opus_toggled(self, checked: bool) -> None:
+        """Main LLM `opus`: family `claude`, variante de modelo `opus`."""
+        self._on_main_variant_toggled("opus", checked)
+
+    def _on_main_sonnet_toggled(self, checked: bool) -> None:
+        """Main LLM `sonnet`: family `claude`, variante de modelo `sonnet`."""
+        self._on_main_variant_toggled("sonnet", checked)
+
+    def _on_main_kimi_k3_toggled(self, checked: bool) -> None:
+        """Main LLM `kimi-k3`: family `kimi`, variante de modelo `k3`.
+
+        D-004-B: sob Main nao-Claude, `/model` e `/effort` sao REMOVIDOS no
+        enqueue (llm-routing-div.md §14) e nao existe dialeto textual de
+        modelo para o Kimi hoje (gap R-J3 aberto). Ou seja: a variante `k3` e
+        carregada no contrato mas ainda nao tem tradutor de diretiva — decisao
+        humana pendente, ver `## Decisoes abertas` da task 004.
+        """
+        self._on_main_variant_toggled("kimi-k3", checked)
+
     def _on_use_codex_toggled(self, checked: bool) -> None:
         """Parallel Worker Codex (T3). PW-01: exclusividade com grok."""
         if checked:
@@ -9157,6 +9505,17 @@ class CommandQueueWidget(QWidget):
         self._sync_flags_panel_to_mirror()
         self._refresh_flag_suffix()
 
+    def _on_flags_panel_changed(self) -> None:
+        """Slot de ``FlagsPanel.flags_changed`` (painel embutido em queue-div-flag).
+
+        Quando o painel e a fonte unica (flag ON), nao ha espelho a sincronizar:
+        os checkboxes do painel JA sao `self._flag_*_chk`. Basta re-renderizar
+        o sufixo dos labels. Ate 2026-08-17 o sinal nem existia — o handler
+        fazia `if hasattr(self, "flags_changed")`, sempre False, e as 7
+        checkboxes eram controles mortos (Zero Silencio violado).
+        """
+        self._refresh_flag_suffix()
+
     def _active_mcp_flags(self) -> list[str]:
         """Le o estado das flags MCP ativas.
 
@@ -9186,11 +9545,16 @@ class CommandQueueWidget(QWidget):
         return flags
 
     def _get_flags_panel(self):
-        """Acessa o FlagsPanel da aba LLM Config via MainWindow (item 021).
+        """Acessa o FlagsPanel de `queue-div-flag` (item 021).
 
-        Retorna None quando a aba esta desabilitada (kill-switch) ou o widget
-        ainda nao foi construido.
+        Prioriza o painel EMBUTIDO na propria div; o lookup pelo MainWindow
+        continua como fallback para o periodo em que o painel morava num
+        container irmao. Retorna None quando a aba esta desabilitada
+        (kill-switch) ou o widget ainda nao foi construido.
         """
+        panel = getattr(self, "_flags_panel", None)
+        if panel is not None:
+            return panel
         try:
             main_win = self.window()
             return getattr(main_win, "_llm_config_flags_panel", None)
@@ -9207,6 +9571,12 @@ class CommandQueueWidget(QWidget):
         flags_panel = self._get_flags_panel()
         if flags_panel is None:
             return
+        # Painel EMBUTIDO: os checkboxes locais SAO os do painel. Espelhar aqui
+        # reescreveria o painel a partir de uma leitura parcial dele mesmo e
+        # apagaria silenciosamente as 5 flags que nao tem alias legado
+        # (--opus/--sonnet/--kimi-k3/--qwen/--grok).
+        if flags_panel is getattr(self, "_flags_panel", None):
+            return
         try:
             active = self._active_mcp_flags_from_local()
             flags_panel.set_flag_states_from_mirror(active)
@@ -9214,18 +9584,22 @@ class CommandQueueWidget(QWidget):
             pass
 
     def _active_mcp_flags_from_local(self) -> list[str]:
-        """Le checkboxes locais queue-chk-flag-* (sem passar pelo FlagsPanel)."""
+        """Le checkboxes locais queue-chk-flag-* (sem passar pelo FlagsPanel).
+
+        Percorre os 7 literais canonicos e nao apenas os dois legados: sob a
+        flag ON, `_flag_<slug>_chk` existe para todos eles (aliases dos
+        checkboxes do painel embutido). Sob a flag OFF so os dois legados
+        existem e o resultado e identico ao de antes.
+        """
+        from workflow_app.config.llm_flags import _FLAG_CANONICAL_ORDER
+
         flags: list[str] = []
-        if (
-            getattr(self, "_flag_kimi_chk", None) is not None
-            and self._flag_kimi_chk.isChecked()
-        ):
-            flags.append("--kimi")
-        if (
-            getattr(self, "_flag_codex_chk", None) is not None
-            and self._flag_codex_chk.isChecked()
-        ):
-            flags.append("--codex")
+        for flag in _FLAG_CANONICAL_ORDER:
+            chk = getattr(
+                self, f"_flag_{flag.lstrip('-').replace('-', '_')}_chk", None
+            )
+            if chk is not None and chk.isChecked():
+                flags.append(flag)
         return flags
 
     def _refresh_flag_suffix(self) -> None:
@@ -9271,8 +9645,11 @@ class CommandQueueWidget(QWidget):
         """Atualiza enabled/tooltip das checkboxes de flag (item 021).
 
         Regras:
-          - Kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0:
-            todas desabilitadas (independente do Main).
+          - Kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0: todas
+            desabilitadas **sob Main nao-Claude** (source.md:444). Sob Main
+            Claude o kill-switch nao tem efeito — o nome diz o escopo: ele
+            freia a paridade de delegacao *non-Claude*, e nao existe delegacao
+            non-Claude a frear quando o proprio Main ja e Claude.
           - Main == Claude: todas habilitadas.
           - Main != Claude: flag cujo provider bate com o Main -> disabled
             (redundante); demais habilitadas.
@@ -9282,6 +9659,12 @@ class CommandQueueWidget(QWidget):
             Kimi seria intencao explicita aceita e silenciosamente convertida
             em auto-consulta. Desabilitar com motivo visivel e a resolucao
             honesta (source.md §10.15, ponto 1) — Zero Silencio.
+
+        Sob v2 os checkboxes SAO os do `FlagsPanel` embutido em
+        `queue-div-flag`; delegamos para `FlagsPanel.set_main_llm`, que
+        implementa exatamente estas regras. Manter duas implementacoes das
+        mesmas regras sobre os mesmos widgets e a armadilha DUP-01: a proxima
+        flag entraria numa so das duas.
         """
         from workflow_app.config import delegation_flags_nonclaude_enabled
         from workflow_app.config.llm_flags import (
@@ -9290,13 +9673,23 @@ class CommandQueueWidget(QWidget):
         )
 
         main_llm = self._resolve_interactive_main_llm()
+
+        panel = getattr(self, "_flags_panel", None)
+        if panel is not None:
+            try:
+                panel.set_main_llm(main_llm)
+                return
+            except RuntimeError:
+                # painel ja destruido em rebuild: cai no caminho legado
+                pass
+
         ks_enabled = delegation_flags_nonclaude_enabled()
 
         for flag in _SUPPORTED_MCP_FLAGS:
             chk = getattr(self, f"_flag_{flag.lstrip('-').replace('-', '_')}_chk", None)
             if chk is None:
                 continue
-            if not ks_enabled:
+            if not ks_enabled and main_llm != "claude":
                 chk.setEnabled(False)
                 chk.setToolTip(
                     "Paridade de flags desabilitada pelo kill-switch "
@@ -9578,6 +9971,139 @@ class CommandQueueWidget(QWidget):
             return ""
         return head[1:].replace("/", ":")
 
+    # Runtimes de delegacao autorizados pelo executor universal (C8/C9).
+    # O valor default e `kimi` porque a skill slash-executor e a implementacao
+    # Kimi; qualquer outro provider (codex/grok/qwen) e transportado ate seu
+    # runtime nativo.
+    _DELEGATION_RUNTIMES: tuple[str, ...] = ("kimi", "codex", "grok", "qwen")
+
+    @classmethod
+    def _split_executor_flags(
+        cls,
+        cmd_text: str,
+        *,
+        default_runtime: str | None = None,
+    ) -> tuple[str, str | None, bool]:
+        """Separa flags de executor (`--recovery-mode`, `--delegation-runtime=`)
+        do texto do comando alvo.
+
+        Retorna uma tripla `(clean_text, runtime, recovery)` onde:
+          - `clean_text` e o comando original SEM as flags de executor.
+          - `runtime` e o valor de `--delegation-runtime=` quando presente e
+            valido, senao `default_runtime` (por default `None`, que significa
+            "o caller NAO declarou runtime"). Nao inventamos `kimi` aqui: o
+            envelope omite `Executing runtime identity:` quando o runtime e
+            desconhecido, e o executor assume a identidade do proprio runtime
+            (contrato de `executor-de-slash-commands-rules.md`, L30/L32/L33).
+          - `recovery` indica se `--recovery-mode` estava presente.
+
+        Regras (alinhadas a `<RESOLVE_COMMAND>` de slash-executor):
+          - Apenas tokens no inicio do comando (antes do slash alvo) sao
+            consumidos como flags de executor.
+          - `--recovery-mode` e reconhecido como flag booleano.
+          - `--delegation-runtime=<id>` exige `<id>` em `_DELEGATION_RUNTIMES`;
+            valor vazio/invalido deixa `runtime` como `default_runtime` e NAO
+            remove o token (o executor la embaixo decidira o bloqueio).
+          - Flags do eixo intra-comando (`--kimi`, `--codex`, etc.) NAO sao
+            removidas; elas viajam como argumentos do comando alvo.
+          - Preserva whitespace leading/trailing e a ordem canonica:
+            `--recovery-mode` primeiro, depois `--delegation-runtime=`, depois
+            o comando alvo e seus argumentos.
+        """
+        leading = cmd_text[: len(cmd_text) - len(cmd_text.lstrip())]
+        stripped = cmd_text.lstrip()
+        recovery = False
+        runtime: str | None = None
+        tokens = stripped.split()
+        consumed = 0
+        for tok in tokens:
+            if tok == "--recovery-mode":
+                recovery = True
+                consumed += 1
+                continue
+            if tok.startswith("--delegation-runtime="):
+                value = tok.split("=", 1)[1]
+                # So consome o token quando o valor e valido. Valor invalido
+                # deixa o token no comando alvo, para que o executor la embaixo
+                # bloqueie com reason BLOCKED (fail-closed no ponto mais cedo).
+                if value in cls._DELEGATION_RUNTIMES:
+                    runtime = value
+                    consumed += 1
+                    continue
+                break
+            break
+        clean = " ".join(tokens[consumed:])
+        if not clean:
+            clean = stripped
+        return (
+            f"{leading}{clean}",
+            runtime if runtime is not None else default_runtime,
+            recovery,
+        )
+
+    @classmethod
+    def _intra_command_flag_literals(cls) -> tuple[str, ...]:
+        """Literais de flag intra-comando reconhecidas no envelope (C8).
+
+        DERIVADO de `llm_flags._FLAG_CANONICAL_ORDER`, a fonte canonica unica
+        do conjunto fechado (boot-frozen pelo kill-switch dedicado que o
+        proprio `llm_flags` consulta uma unica vez):
+        regime legado = 2 literais (`--codex`, `--kimi`); regime v2 = os 7
+        canonicos, incluindo `--kimi-k3`, `--qwen` e `--grok`. NAO reescrever a
+        lista aqui: uma copia local diverge do conjunto vigente e volta a
+        deixar flags armadas invisiveis no envelope de delegacao.
+        """
+        from workflow_app.config.llm_flags import _FLAG_CANONICAL_ORDER
+
+        return tuple(_FLAG_CANONICAL_ORDER)
+
+    @classmethod
+    def _intra_command_flags(cls, cmd_text: str) -> list[str]:
+        """Retorna as flags intra-comando presentes em `cmd_text`, em ordem.
+
+        Apenas literais de `_intra_command_flag_literals()` sao reconhecidas;
+        nao remove nada do texto original. O resultado e usado para preencher a
+        linha `Delegation flags:` do envelope sem duplicar ou reordenar.
+        """
+        supported = cls._intra_command_flag_literals()
+        seen: set[str] = set()
+        result: list[str] = []
+        for tok in cmd_text.split():
+            if tok in supported and tok not in seen:
+                seen.add(tok)
+                result.append(tok)
+        return result
+
+    @classmethod
+    def _delegation_envelope_block(
+        cls, cmd_text: str, runtime: str | None
+    ) -> str:
+        """Bloco OPCIONAL do envelope de delegacao (C8).
+
+        As duas linhas sao emitidas SOMENTE quando ha o que declarar:
+          - `Delegation flags:` so aparece quando existe flag intra-comando
+            armada no comando alvo;
+          - `Executing runtime identity:` so aparece quando o caller declarou o
+            runtime via `--delegation-runtime=<id>`.
+
+        Sem nenhuma das duas condicoes o bloco e vazio e o payload volta a ser
+        byte-identico ao envelope pre-C8 (criterio C-35 do item 010). Emitir
+        `(none)` ou um `kimi` inventado violava esse criterio e ainda mentia
+        sobre a identidade do runtime quando o Codex era quem executava. A
+        ausencia das linhas ja tem semantica definida no contrato do executor:
+        "Ausente = assuma a identidade do proprio runtime".
+
+        O retorno ja inclui o `\n` terminal de cada linha emitida, para que o
+        callsite possa concatenar sem produzir linha em branco no caso vazio.
+        """
+        lines: list[str] = []
+        flags = cls._intra_command_flags(cmd_text)
+        if flags:
+            lines.append(f"Delegation flags: {' '.join(flags)}")
+        if runtime:
+            lines.append(f"Executing runtime identity: {runtime}")
+        return "".join(f"{line}\n" for line in lines)
+
     # Contrato de finalizacao do listener — comum a TODO dispatch Codex
     # (slash-command executor + custom-prompt directive). Extraido para uma
     # constante unica para que ambos os builders emitam exatamente as mesmas
@@ -9670,7 +10196,12 @@ class CommandQueueWidget(QWidget):
         contrato dos demais dispatches. Retorna None quando o slug nao e uma
         diretiva conhecida ou o arquivo do prompt nao existe (Zero Silencio: o
         caller aborta com toast)."""
-        stripped = cmd_text.strip()
+        # C8: separa flags de executor ANTES de resolver o slug. Um token
+        # `--delegation-runtime=codex` no inicio faria `stripped` comecar por
+        # `-` e a diretiva devolveria o texto cru sem envelope nenhum (mesmo
+        # cuidado ja tomado em `_build_codex_slash_executor_prompt`).
+        clean_text, runtime, _recovery = cls._split_executor_flags(cmd_text)
+        stripped = clean_text.strip()
         if not stripped or not stripped.startswith("/"):
             return cmd_text
         head, _, instruction = stripped.partition(" ")
@@ -9699,6 +10230,7 @@ class CommandQueueWidget(QWidget):
             f"Executor rules: {agent_ref}\n"
             f"Listener rules: {listener_ref}\n"
             f"Expected listener channel: {channel}\n"
+            f"{cls._delegation_envelope_block(clean_text, runtime)}"
             f"Instruction: {instruction.strip() or '(none)'}\n"
             f"Custom prompt file: {prompt_file}\n\n"
             + cls._CODEX_LISTENER_FINALIZATION_CONTRACT
@@ -9743,7 +10275,14 @@ class CommandQueueWidget(QWidget):
         Codex tem o MESMO equivalente do Claude (que roda o comando cru), sem
         depender de auto-deteccao fragil pelas regras. Ver
         ai-forge/rules/listener-vermelho.md."""
-        stripped = cmd_text.strip()
+        # C8: separa flags de executor (`--recovery-mode`, `--delegation-runtime=`)
+        # do texto que vira Command/Arguments. Fazemos isso ANTES de resolver o
+        # comando, senao um token `--delegation-runtime=codex` no inicio faria o
+        # slug resolver para um valor invalido e retornaria None.
+        clean_text, runtime, recovery_from_text = cls._split_executor_flags(cmd_text)
+        stripped = clean_text.strip()
+        clean_stripped = stripped
+        _, _, clean_args = clean_stripped.partition(" ")
         if not stripped or not stripped.startswith("/"):
             return cmd_text
         head, _, args = stripped.partition(" ")
@@ -9770,7 +10309,7 @@ class CommandQueueWidget(QWidget):
         # whitespace) para que Codex e Kimi tenham defesa identica — sem
         # divergencia latente (ex.: `/Tools:Listener-Recovery`).
         is_recovery = (
-            recovery_mode
+            (recovery_mode or recovery_from_text)
             and cls._normalized_slash_slug(stripped) == cls._RECOVERY_SLUG
         )
         if is_recovery:
@@ -9781,10 +10320,11 @@ class CommandQueueWidget(QWidget):
                 f"Executor rules: {agent_ref}\n"
                 f"Listener rules: {listener_ref}\n"
                 f"Expected listener channel: {channel}\n"
+                f"{cls._delegation_envelope_block(clean_text, runtime)}"
                 "Recovery mode: enabled by caller\n"
-                f"Command: {stripped}\n"
+                f"Command: {clean_stripped}\n"
                 f"Command markdown: {command_file}\n"
-                f"Arguments: {args.strip() or '(none)'}\n\n"
+                f"Arguments: {clean_args.strip() or '(none)'}\n\n"
                 + cls._CODEX_RECOVERY_FINALIZATION_CONTRACT
                 + "Protocol:\n"
                 "1. Read the executor rules file first (note Passo 3.5 "
@@ -9818,9 +10358,10 @@ class CommandQueueWidget(QWidget):
             f"Executor rules: {agent_ref}\n"
             f"Listener rules: {listener_ref}\n"
             f"Expected listener channel: {channel}\n"
-            f"Command: {stripped}\n"
+            f"{cls._delegation_envelope_block(clean_text, runtime)}"
+            f"Command: {clean_stripped}\n"
             f"Command markdown: {command_file}\n"
-            f"Arguments: {args.strip() or '(none)'}\n\n"
+            f"Arguments: {clean_args.strip() or '(none)'}\n\n"
             + cls._CODEX_LISTENER_FINALIZATION_CONTRACT
             + "Protocol:\n"
             "1. Read the executor rules file first.\n"
@@ -10003,11 +10544,15 @@ class CommandQueueWidget(QWidget):
             else signal_bus.run_command_in_workspace_xterm.emit
         )
         head = self._command_head(cmd_text)
-        if head.startswith("/model") or head.startswith("/effort"):
-            # Claude-specific directives: NOT sent to Codex (would error), but
-            # the listener still pulses yellow→green so the autocast loop
-            # advances exactly as it does under Claude. Channel matches the
-            # terminal Codex actually runs in (T1 when to_t1, else T3 xterm).
+        if is_directive_line(cmd_text):
+            # O Codex CLI nao tem diretiva TEXTUAL de modelo/effort: `/model` e
+            # picker de duas etapas que ignora argumento, e `/effort` nao
+            # existe (C27, evidencia em `model_effort_equivalence`). Qualquer
+            # diretiva que chegue aqui e residuo — fila enfileirada sob Claude
+            # com o Main trocado depois, ou snapshot antigo. Suprime e pulsa o
+            # listener yellow→green para o autocast avancar como avanca sob
+            # Claude. Canal = terminal onde o Codex roda de fato (T1 quando
+            # to_t1, senao T3 xterm).
             signal_bus.listener_helper_pulse.emit(
                 "interactive" if to_t1 else "workspace_xterm"
             )
@@ -10015,8 +10560,9 @@ class CommandQueueWidget(QWidget):
         # task 006 — condicao de falha 4 (terminal alvo nao pronto -> abortar
         # com feedback visivel). Vale apenas para o destino Worker Codex (T3,
         # to_t1=False); o caminho Main Codex (to_t1=True) publica no T1
-        # interactive, que existe sempre. Diretivas /model|/effort retornam
-        # acima (so pulsam o listener, nao publicam), logo nao passam por aqui.
+        # interactive, que existe sempre. Fica DEPOIS do branch de diretiva de
+        # proposito: diretiva nunca publica no PTY (so pulsa), entao nao precisa
+        # de T3 pronto.
         if not to_t1 and not self._codex_t3_available:
             signal_bus.toast_requested.emit(
                 "Worker Codex (T3): terminal-codex-output nao esta pronto — "
@@ -10025,6 +10571,8 @@ class CommandQueueWidget(QWidget):
             )
             return False
         if head == "/clear":
+            # Raw, sem wrapper de slash-executor: `/clear` e comando do proprio
+            # CLI Codex.
             emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
@@ -10083,10 +10631,14 @@ class CommandQueueWidget(QWidget):
     def _dispatch_kimi_main_command(self, cmd_text: str) -> bool:
         """Dispatch through the Main LLM Kimi path. Returns False on abort."""
         head = self._command_head(cmd_text)
-        if head.startswith("/model") or head.startswith("/effort"):
-            # Claude-specific directives: NOT sent to Kimi (would error), but
-            # the listener still pulses yellow→green so the autocast loop
-            # advances exactly as it does under Claude. Main Kimi runs in T1.
+        if is_directive_line(cmd_text):
+            # O Kimi CLI nao tem diretiva TEXTUAL de modelo/reasoning: o
+            # `/model` descarta o argumento e abre picker bloqueante (que ainda
+            # engoliria a proxima linha colada, corrompendo a fila) e
+            # `/reasoning` nao existe (C27, evidencia em
+            # `model_effort_equivalence`). Suprime e pulsa (ver Codex acima).
+            # Precisa vir ANTES do branch generico de slash — la `/reasoning`
+            # resolveria slug inexistente e abortaria com toast.
             signal_bus.listener_helper_pulse.emit("interactive")
             return True
         if head == "/clear":
@@ -10152,8 +10704,10 @@ class CommandQueueWidget(QWidget):
         Returns False on abort (dynamic unavailability or compile error).
         """
         head = self._command_head(cmd_text)
-        # /model, /effort: Claude-specific directives, not sent to Qwen.
-        if head.startswith("/model") or head.startswith("/effort"):
+        # Qwen nao expoe equivalente de modelo/effort: a adequacao REMOVE essas
+        # linhas no enqueue, entao qualquer diretiva que chegue aqui e residuo
+        # de outro dialeto. Suprime e pulsa, nunca despacha (C27).
+        if is_directive_line(cmd_text):
             signal_bus.listener_helper_pulse.emit("interactive")
             return True
         # /clear: always raw to T1.
@@ -10216,7 +10770,8 @@ class CommandQueueWidget(QWidget):
         /clear always goes raw to T1.
         """
         head = self._command_head(cmd_text)
-        if head.startswith("/model") or head.startswith("/effort"):
+        # Idem Qwen: sem equivalente hoje, diretiva que chegue aqui e residuo.
+        if is_directive_line(cmd_text):
             signal_bus.listener_helper_pulse.emit("interactive")
             return True
         if head == "/clear":
@@ -10279,6 +10834,15 @@ class CommandQueueWidget(QWidget):
             return self._dispatch_grok_main_command(cmd_text)
 
         if not getattr(self, "_force_kimi_chk", None) or not self._force_kimi_chk.isChecked():
+            # Main Claude com diretiva em dialeto estrangeiro (C27): um snapshot
+            # salvo antes de 2026-08-17 pode trazer `/model sol high`,
+            # `/model k3` ou `/reasoning yes` — residuo da traducao revogada,
+            # que o Claude Code tambem nao entende. Suprime e pulsa, simetrico
+            # ao que os dispatchers Codex/Kimi/Qwen/Grok ja fazem. Fail-open:
+            # `/model haiku` e qualquer diretiva legitima segue raw.
+            if is_foreign_directive(cmd_text):
+                signal_bus.listener_helper_pulse.emit("interactive")
+                return True
             signal_bus.run_command_in_terminal.emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
@@ -10450,6 +11014,18 @@ class CommandQueueWidget(QWidget):
 
     # ──────────────────────────────────────── Queue state persistence ─ #
 
+    def rendered_specs(self) -> list[CommandSpec]:
+        """Specs REALMENTE na fila, pos-traducao C27 e pos-renumeracao 1-based.
+
+        `load_pipeline` recebe a lista em dialeto Claude e a transforma: sob
+        Main Codex um par `/model`+`/effort` vira UMA linha, sob Qwen/Grok as
+        duas somem. Quem guardar a lista de ENTRADA fica com indices que nao
+        batem com a tela — e `PipelineManager.reorder_command` indexa a fila
+        dele com a `position` que o item arrastado carrega, que e a da tela.
+        Resultado: o operador arrasta uma linha e outra se move.
+        """
+        return [item.get_spec() for item in self._items]
+
     def get_queue_snapshot(self) -> list[dict]:
         """Return serializable snapshot of the current queue (commands + statuses)."""
         result = []
@@ -10463,6 +11039,13 @@ class CommandQueueWidget(QWidget):
                 "is_optional": spec.is_optional,
                 "config_path": spec.config_path,
                 "phase": spec.phase,
+                # C27: sem `effort`, `restore_queue_snapshot` reconstroi o spec
+                # com o default do dataclass (`EffortLevel.STANDARD`) — o item
+                # volta da fila salva afirmando um effort que nao e o que foi
+                # enfileirado. `kimi_eligible` some pelo mesmo caminho e muda
+                # roteamento de worker, entao vai junto.
+                "effort": spec.effort.value,
+                "kimi_eligible": spec.kimi_eligible,
                 "status": item._status.value,
                 "sent": not item.is_pending_run(),
             })
@@ -10512,6 +11095,12 @@ class CommandQueueWidget(QWidget):
                 status = CommandStatus(entry.get("status", "pendente"))
             except ValueError:
                 status = CommandStatus.PENDENTE
+            try:
+                # Snapshot pre-C27 nao tem a chave: cai no mesmo default do
+                # dataclass, que e o comportamento antigo — nao regride.
+                effort = EffortLevel(entry.get("effort", EffortLevel.STANDARD.value))
+            except ValueError:
+                effort = EffortLevel.STANDARD
             sent = bool(entry.get("sent", False))
 
             # So valida o que ainda VAI rodar; um item executado com ref hoje
@@ -10538,6 +11127,8 @@ class CommandQueueWidget(QWidget):
                 is_optional=entry.get("is_optional", False),
                 config_path=entry.get("config_path", ""),
                 phase=entry.get("phase", "F?"),
+                effort=effort,
+                kimi_eligible=bool(entry.get("kimi_eligible", False)),
             )
             specs.append(spec)
             statuses.append(status)
@@ -10560,6 +11151,18 @@ class CommandQueueWidget(QWidget):
                 f"[DCP: Build Module Pipeline].",
                 "warning",
             )
+
+        # A adequacao C27 REMOVE as linhas de diretiva sob qualquer Main
+        # nao-Claude. `zip` posicional aplicaria entao o status da linha N a um
+        # item que veio da linha N+k, e truncaria a cauda. Adequa AQUI para
+        # realinhar; `load_pipeline` adequa de novo, mas `adapt_specs_to_main`
+        # e idempotente, entao vira no-op.
+        survivors = adapt_specs_to_main(specs, self._resolve_interactive_main_llm())
+        if len(survivors) != len(specs):
+            statuses, sent_flags = _realign_after_translation(
+                specs, survivors, statuses, sent_flags
+            )
+            specs = survivors
 
         self.load_pipeline(specs)
 
@@ -11043,6 +11646,14 @@ class CommandQueueWidget(QWidget):
             return
         if _frozen_main == "qwen":
             if self._dispatch_qwen_main_command(cmd_text):
+                next_item._mark_as_sent()
+            return
+        if _frozen_main == "grok":
+            # Sem esta branch, Main=Grok caia no dispatch raw de Claude logo
+            # abaixo: o comando ia para T1 no formato do Claude enquanto o
+            # radio marcado dizia Grok. `_dispatch_green_arrow` ja roteava
+            # certo — era so o "Rodar proximo" que divergia.
+            if self._dispatch_grok_main_command(cmd_text):
                 next_item._mark_as_sent()
             return
 

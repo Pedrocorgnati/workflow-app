@@ -69,11 +69,15 @@ def llm_for_channel(channel: str, main_llm: str | None = None) -> str:
 
     workspace       -> kimi  (Parallel Worker Kimi, T2)
     workspace_xterm -> codex (Parallel Worker Codex, T3)
-    interactive     -> main_llm (claude|codex|kimi); default claude
+    interactive     -> main_llm (claude|codex|kimi|qwen|grok); default claude
     qualquer outro  -> INDISPONIVEL (nunca inferir)
+
+    O roster do canal interactive acompanha o roster do radio Main; um Main
+    ausente daqui apareceria no snapshot de diagnostico como "claude", ou
+    seja, o artefato de recuperacao mentiria sobre quem falhou.
     """
     if channel == "interactive":
-        if main_llm in ("claude", "codex", "kimi"):
+        if main_llm in ("claude", "codex", "kimi", "qwen", "grok"):
             return main_llm
         return "claude"
     return _CHANNEL_LLM.get(channel, UNAVAILABLE)

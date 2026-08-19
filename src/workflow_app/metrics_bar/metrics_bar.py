@@ -3002,10 +3002,18 @@ class MetricsBar(QWidget):
     # section) + ai-forge/rules/llm-routing-div.md (channel→LLM binding).
     _RECOVERY_DELAY_MS: int = 2_000
 
+    # Roster do radio `queue-div-main-llm`. Tem que acompanhar
+    # `_MAIN_LLM_SLUGS` do main_window: um slug ausente daqui era descartado em
+    # silencio e `self._main_llm` ficava com o Main ANTERIOR, fazendo o prompt
+    # de auto-recuperacao se dirigir ao LLM errado.
+    _MAIN_LLM_SLUGS: frozenset[str] = frozenset(
+        {"claude", "codex", "kimi", "qwen", "grok"}
+    )
+
     def _on_main_llm_changed(self, llm: str) -> None:
         """Cache which CLI occupies T1 (interactive). Workers are fixed by
         channel (workspace=kimi, workspace_xterm=codex)."""
-        if llm in ("claude", "codex", "kimi"):
+        if llm in self._MAIN_LLM_SLUGS:
             self._main_llm = llm
 
     def _on_dot_recovery_reset(self, channel: str, busy: bool) -> None:

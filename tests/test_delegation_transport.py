@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,9 @@ import pytest
 from workflow_app.command_queue.delegation_transport import (
     TransportResult,
     build_kernel_dispatch,
+    build_real_kernel_dispatch,
     delegate_command,
+    run_provider_request,
     should_fallback,
     _build_topic,
 )
@@ -426,3 +429,75 @@ class TestKernelDispatchIntegration:
         )
         assert result.error == "empty-parsed"
         assert should_fallback(result) is True
+
+    def test_delegate_command_with_real_kernel_runner_codex(self, spec, monkeypatch):
+        """Real runner builds Codex argv with danger-full-access + absolute cwd."""
+        captured = {}
+        # The codex binary must not be a test dependency: resolve it ourselves so
+        # the assertions hold on any machine/CI, with or without codex in PATH.
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/local/bin/{name}")
+
+        class FakeProc:
+            stdout = '{"verdict": "approve", "summary": "ok"}'
+            stderr = ""
+            returncode = 0
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs.get("cwd")
+            captured["env"] = kwargs.get("env")
+            return FakeProc()
+
+        monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+
+        result = delegate_command(
+            spec,
+            Provider.CODEX,
+            active_flags=[],
+            step_id="kernel-real-codex",
+            dispatch_fn=build_real_kernel_dispatch(),
+        )
+        assert result.ok is True
+        assert captured["cmd"][0].endswith("codex")
+        assert "exec" in captured["cmd"]
+        assert "--sandbox" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("--sandbox") + 1] == "danger-full-access"
+        assert "--cd" in captured["cmd"]
+        cwd_idx = captured["cmd"].index("--cd") + 1
+        assert Path(captured["cmd"][cwd_idx]).is_absolute()
+        assert Path(captured["cwd"]).is_absolute()
+        # argv `--cd` and the subprocess cwd must be the same directory: the
+        # adapter takes it from SpecParams.cwd, never from a second Path.cwd().
+        assert captured["cmd"][cwd_idx] == str(Path(captured["cwd"]).resolve())
+        # Model must be one that exists on the operator machine (~/.codex/config.toml).
+        assert captured["cmd"][captured["cmd"].index("--model") + 1] == "gpt-5.3-codex-spark"
+        assert captured["cmd"][-1].endswith("blog:stockpile-status")
+
+    def test_run_provider_request_codex_telemetry(self, spec, monkeypatch):
+        """run_provider_request returns kernel outcome with binary telemetry."""
+        captured = {}
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/local/bin/{name}")
+
+        class FakeProc:
+            stdout = '{"ok": true}'
+            stderr = ""
+            returncode = 0
+
+        def fake_subprocess_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return FakeProc()
+
+        monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+
+        request = SimpleNamespace(
+            provider="codex",
+            command_text="/skill:blog:stockpile-status",
+            step_id="telemetry",
+            topic="step:telemetry:blog:stockpile-status",
+        )
+        outcome = run_provider_request(request)
+        assert outcome["ok"] is True
+        assert outcome["provider"] == "codex"
+        assert outcome["binary"].endswith("codex")
+        assert "--sandbox" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("--sandbox") + 1] == "danger-full-access"

@@ -543,8 +543,14 @@ class TestFlagsPanelSupportedFlags:
         assert not panel._checkboxes["--kimi"].isEnabled()
         assert "redundante" in panel._checkboxes["--kimi"].toolTip().lower() or "kimi" in panel._checkboxes["--kimi"].toolTip().lower()
         assert not panel._checkboxes["--kimi-k3"].isEnabled()
+        # C-43 / R-40: --codex tambem cai sob Main Kimi, mas por auto-proxy,
+        # nao por redundancia. As skills de provider do lado Kimi
+        # (`.kimi/skills/codex`) sao o proprio Kimi se passando por Codex;
+        # honrar a flag registraria segunda opiniao falsa. O tooltip precisa
+        # dizer o motivo (C-57), e ele NAO e o de redundancia.
+        assert not panel._checkboxes["--codex"].isEnabled()
+        assert "auto-proxy" in panel._checkboxes["--codex"].toolTip().lower()
         # Demais habilitadas.
-        assert panel._checkboxes["--codex"].isEnabled()
         assert panel._checkboxes["--qwen"].isEnabled()
         assert panel._checkboxes["--grok"].isEnabled()
         assert panel._checkboxes["--opus"].isEnabled()
@@ -565,23 +571,45 @@ class TestFlagsPanelSupportedFlags:
         assert not panel._checkboxes["--grok"].isEnabled()
         assert panel._checkboxes["--codex"].isEnabled()
 
-    def test_kill_switch_disables_all_flags(self, qapp, monkeypatch):
-        import os
+    def test_kill_switch_disables_flags_only_under_non_claude_main(
+        self, qapp, monkeypatch
+    ):
+        """SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0 tem escopo, nao e global.
+
+        O nome da env var declara o escopo: ela freia a paridade de delegacao
+        *non-Claude*. Sob Main Claude nao existe delegacao non-Claude a frear,
+        entao desabilitar tudo era bug de escopo (corrigido em 2026-08-17).
+        """
         monkeypatch.setenv("SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE", "0")
         # Reimport para capturar o env patchado.
         import importlib
         import workflow_app.config.feature_flags as ff_mod
         importlib.reload(ff_mod)
         try:
-            from workflow_app.llm_config.flags_panel import FlagsPanel
-            panel = FlagsPanel()
+            import workflow_app.llm_config.flags_panel as fp_mod
+            importlib.reload(fp_mod)
+            panel = fp_mod.FlagsPanel()
+
+            # Main Claude: kill-switch nao alcanca; todas seguem habilitadas.
             panel.set_main_llm("claude")
             for flag, chk in panel._checkboxes.items():
-                assert not chk.isEnabled(), f"{flag} deveria estar disabled pelo kill-switch"
-                assert "kill-switch" in chk.toolTip().lower()
+                assert chk.isEnabled(), (
+                    f"{flag} nao deveria cair pelo kill-switch sob Main Claude"
+                )
+
+            # Main nao-Claude: as sete caem, com motivo visivel (C-57).
+            for main in ("kimi", "codex", "qwen", "grok"):
+                panel.set_main_llm(main)
+                for flag, chk in panel._checkboxes.items():
+                    assert not chk.isEnabled(), (
+                        f"{flag} deveria estar disabled sob Main {main}"
+                    )
+                    assert "kill-switch" in chk.toolTip().lower()
         finally:
             monkeypatch.delenv("SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE", raising=False)
             importlib.reload(ff_mod)
+            import workflow_app.llm_config.flags_panel as fp_mod
+            importlib.reload(fp_mod)
 
     def test_flags_panel_survives_rerun_after_main_change(self, qapp):
         from workflow_app.llm_config.flags_panel import FlagsPanel
@@ -592,8 +620,12 @@ class TestFlagsPanelSupportedFlags:
 
         panel.set_main_llm("kimi")
         assert not panel._checkboxes["--kimi"].isEnabled()
-        assert panel._checkboxes["--codex"].isEnabled()
+        # C-43: --codex tambem cai sob Main Kimi (auto-proxy).
+        assert not panel._checkboxes["--codex"].isEnabled()
+        assert panel._checkboxes["--qwen"].isEnabled()
 
+        # A volta a Claude precisa reabilitar TUDO, inclusive o --codex que
+        # caiu por auto-proxy: estado de disable nunca pode ficar grudado.
         panel.set_main_llm("claude")
         assert all(chk.isEnabled() for chk in panel._checkboxes.values())
 

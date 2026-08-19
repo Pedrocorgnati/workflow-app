@@ -225,6 +225,28 @@ class TestCommandTextWithFlags:
         )
         assert result == "/model opus"
 
+    @pytest.mark.parametrize(
+        "name", ["/model sol high", "/model k3", "/reasoning yes", "/reasoning no"]
+    )
+    def test_foreign_dialect_directive_no_suffix(self, name):
+        """Residuo do dialeto revogado (C27) ainda e diretiva de sessao.
+
+        Regressao real: `/reasoning` nao estava em `_SESSION_DIRECTIVES` quando a
+        traducao Kimi foi implantada. Como sob Main Kimi o `classify_provider`
+        devolve CLAUDE por fallback, a linha era considerada elegivel a flag e
+        saia da fila como `/reasoning yes --codex` — que nenhum REPL entende.
+
+        A traducao foi revogada em 2026-08-17 (D-C27-2) e nada mais PRODUZ esses
+        literais, mas snapshots salvos naquela janela ainda os trazem. A
+        exclusao de sufixo continua valendo para eles: a linha e suprimida no
+        dispatch, e uma linha suprimida nunca pode aparecer flagueada na fila.
+        """
+        spec = _make_spec(name=name)
+        result = command_text_with_flags(
+            spec, provider=Provider.CLAUDE, active_flags=["--kimi", "--codex"]
+        )
+        assert result == name
+
     def test_local_action_no_suffix(self):
         """local-action nunca recebe sufixo."""
         spec = _make_spec(name="/daily", kind="local-action")

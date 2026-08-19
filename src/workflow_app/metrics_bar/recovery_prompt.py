@@ -47,13 +47,22 @@ def llm_for_channel(channel: str, main_llm: str) -> str:
 
     workspace      -> kimi  (Parallel Worker Kimi, T2)
     workspace_xterm-> codex (Parallel Worker Codex, T3)
-    interactive    -> Main LLM (radio queue-div-main-llm): claude|codex|kimi|qwen
+    interactive    -> Main LLM (radio queue-div-main-llm):
+                      claude|codex|kimi|qwen|grok
+
+    O roster do canal interactive tem que acompanhar o roster do radio: um Main
+    ausente daqui cai em "claude" e o prompt de recuperacao passa a instruir o
+    LLM errado, sem sinal para o operador.
     """
     if channel == "workspace":
         return "kimi"
     if channel == "workspace_xterm":
         return "codex"
-    return main_llm if main_llm in ("claude", "codex", "kimi", "qwen") else "claude"
+    return (
+        main_llm
+        if main_llm in ("claude", "codex", "kimi", "qwen", "grok")
+        else "claude"
+    )
 
 
 def _blue_signal_block(channel: str) -> str:

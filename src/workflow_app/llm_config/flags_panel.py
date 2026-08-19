@@ -1,32 +1,72 @@
 """FlagsPanel — painel de flags MCP na aba LLM Config (item 021).
 
 7 checkboxes (um por literal canonico), com logica de disable/tooltip
-quando a flag e incompativel com o Main corrente (C-57).
+quando a flag e incompativel com o Main corrente (C-57 e C-43).
+
+Layout: grade 2xN (default 4 colunas) — 7 checkboxes numa unica linha
+esticariam `queue-div-flag` alem da largura util da aba. O escopo (source.md
+:1192) autoriza explicitamente a grade e proibe girar a orientacao da secao.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QWidget
-
-from workflow_app.config.llm_flags import (
-    _FLAG_LITERAL_TO_MAIN,
-    _REDUNDANT_FLAG_MAINS,
-    _SUPPORTED_MCP_FLAGS,
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QWidget,
 )
 
-if TYPE_CHECKING:
-    pass
+from workflow_app.config.llm_flags import (
+    _FLAG_CANONICAL_ORDER,
+    _FLAG_LITERAL_TO_MAIN,
+    _FLAGS_BY_TERMINAL,
+    _REDUNDANT_FLAG_MAINS,
+)
 
-# Ordem estavel dos checkboxes na UI (alfabetica por literal).
-_FLAG_ORDER: list[str] = sorted(_SUPPORTED_MCP_FLAGS)
+# Ordem estavel dos checkboxes na UI (canonica, source.md:1266).
+_FLAG_ORDER: list[str] = list(_FLAG_CANONICAL_ORDER)
+
+# Colunas da grade 2xN. 4 colunas -> 2 linhas (4 + 3).
+_GRID_COLUMNS = 4
 
 # Tooltip default para flags habilitadas.
 _DEFAULT_TOOLTIP = (
     "Quando marcado, anexa {flag} ao label dos itens T1 (Claude). "
     "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
 )
+
+# C-43 / R-40: as skills de provider do lado Kimi (`.kimi/skills/codex`) sao
+# auto-proxies do proprio Kimi. Honrar --codex sob Main Kimi produziria
+# registro falso de segunda opiniao.
+_KIMI_AUTOPROXY_TOOLTIP = (
+    "--codex desabilitado sob Main Kimi: as skills de provider do lado Kimi "
+    "sao auto-proxy, entao a flag viraria auto-consulta silenciosa em vez de "
+    "segunda opiniao explicita. Para pedir Codex de forma explicita, troque "
+    "o Main."
+)
+
+_KILL_SWITCH_TOOLTIP = (
+    "Paridade de flags desabilitada pelo kill-switch "
+    "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
+)
+
+
+def _terminals_for_flag(flag: str) -> str:
+    """Terminais que aceitam a flag, na ordem T1 > T2 > T3.
+
+    Consome `_FLAGS_BY_TERMINAL` (constante que ate 2026-08-17 nascia morta,
+    gap ST003 do item 021): o operador precisa ver, sem clicar, onde a flag
+    tem efeito.
+    """
+    return ", ".join(
+        term for term in ("T1", "T2", "T3")
+        if flag in _FLAGS_BY_TERMINAL.get(term, frozenset())
+    )
 
 
 class FlagsPanel(QWidget):
@@ -35,70 +75,117 @@ class FlagsPanel(QWidget):
     Sinal ``flags_changed`` e emitido quando qualquer checkbox muda de estado.
     """
 
+    flags_changed = Signal()
+
     def __init__(
         self,
         parent: QWidget | None = None,
         *,
         main_llm_resolver: Callable[[], str] | None = None,
+        show_label: bool = True,
     ) -> None:
         super().__init__(parent)
+        self.setStyleSheet("background: transparent; border: none;")
         self._main_llm_resolver = main_llm_resolver
         self._checkboxes: dict[str, QCheckBox] = {}
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
 
-        label = QLabel("Flag")
-        layout.addWidget(label)
+        self._label: QLabel | None = None
+        if show_label:
+            self._label = QLabel("Flag")
+            self._label.setStyleSheet(
+                "QLabel { color: #A1A1AA; font-size: 11px; font-weight: 700;"
+                "  background: transparent; border: none; }"
+            )
+            outer.addWidget(self._label)
 
-        for flag in _FLAG_ORDER:
+        grid_host = QWidget()
+        grid_host.setStyleSheet("background: transparent; border: none;")
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+
+        for idx, flag in enumerate(_FLAG_ORDER):
             chk = QCheckBox(flag)
             testid = f"queue-chk-flag-{flag.lstrip('-')}"
             chk.setProperty("testid", testid)
             chk.setToolTip(_DEFAULT_TOOLTIP.format(flag=flag))
             chk.toggled.connect(self._on_checkbox_toggled)
-            layout.addWidget(chk)
+            grid.addWidget(chk, idx // _GRID_COLUMNS, idx % _GRID_COLUMNS)
             self._checkboxes[flag] = chk
 
-        layout.addStretch(1)
+        outer.addWidget(grid_host)
+        outer.addStretch(1)
+
+        # Estado inicial coerente com o Main persistido e com o kill-switch:
+        # sem esta chamada o painel nascia com as 7 habilitadas ate o operador
+        # girar o radio de Main pela primeira vez (gap A4 do item 021).
+        if main_llm_resolver is not None:
+            self.refresh()
+
+    # ── Estado ────────────────────────────────────────────────────────────── #
 
     def _on_checkbox_toggled(self, checked: bool) -> None:
         _ = checked
-        # Re-emit para consumidores externos (command_queue, etc.).
-        if hasattr(self, "flags_changed"):
-            self.flags_changed.emit()  # type: ignore[attr-defined]
+        self.flags_changed.emit()
+
+    def checkbox(self, flag: str) -> QCheckBox | None:
+        """Acessor do QCheckBox de uma flag (None quando o literal e invalido).
+
+        Usado pelo `CommandQueueWidget` para expor os checkboxes do painel como
+        `_flag_<slug>_chk`, mantendo UM unico controle por literal (e portanto
+        um unico `queue-chk-flag-*` por testid).
+        """
+        return self._checkboxes.get(flag)
 
     def checked_flags(self) -> list[str]:
         """Retorna as flags marcadas na ordem estavel."""
         return [f for f in _FLAG_ORDER if self._checkboxes[f].isChecked()]
 
+    def refresh(self) -> None:
+        """Reaplica enabled/tooltip lendo o Main do resolver injetado."""
+        if self._main_llm_resolver is None:
+            return
+        try:
+            self.set_main_llm(self._main_llm_resolver())
+        except Exception:  # noqa: BLE001 - painel nunca derruba a janela
+            self.set_main_llm("claude")
+
     def set_main_llm(self, main: str) -> None:
         """Atualiza enabled/disabled e tooltip de cada checkbox.
 
-        Regras (C-57):
-          - Kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0: todas disabled.
+        Regras:
+          - Kill-switch SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0: disabled
+            apenas sob Main **nao-Claude** (source.md:444). Sob Main Claude o
+            kill-switch nao tem efeito: nao existe delegacao non-Claude a
+            frear quando o proprio Main ja e Claude.
           - Main claude: todas habilitadas.
-          - Main kimi: --kimi e --kimi-k3 disabled (redundantes).
+          - Main kimi: --kimi e --kimi-k3 disabled (redundantes) e --codex
+            disabled por auto-proxy (C-43/R-40).
           - Main codex: --codex disabled (redundante).
           - Main qwen: --qwen disabled (redundante).
           - Main grok: --grok disabled (redundante).
         """
         from workflow_app.config import delegation_flags_nonclaude_enabled
 
+        slug = main.strip().lower() if main else "claude"
         ks_enabled = delegation_flags_nonclaude_enabled()
-        if not ks_enabled:
-            for flag, chk in self._checkboxes.items():
+
+        if not ks_enabled and slug != "claude":
+            for chk in self._checkboxes.values():
                 chk.setEnabled(False)
-                chk.setToolTip(
-                    "Paridade de flags desabilitada pelo kill-switch "
-                    "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
-                )
+                chk.setToolTip(_KILL_SWITCH_TOOLTIP)
             return
 
-        slug = main.strip().lower() if main else "claude"
-
         for flag, chk in self._checkboxes.items():
+            if flag == "--codex" and slug == "kimi":
+                chk.setEnabled(False)
+                chk.setToolTip(_KIMI_AUTOPROXY_TOOLTIP)
+                continue
             redundant_main = _REDUNDANT_FLAG_MAINS.get(flag)
             if redundant_main is not None and slug == redundant_main:
                 chk.setEnabled(False)
@@ -127,11 +214,11 @@ class FlagsPanel(QWidget):
         if disabled:
             redundant_main = _REDUNDANT_FLAG_MAINS.get(flag)
             if redundant_main and main == redundant_main:
-                return (
-                    f"Flag {flag} redundante sob Main {main}."
-                )
-            return (
-                "Paridade de flags desabilitada pelo kill-switch "
-                "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
-            )
-        return _DEFAULT_TOOLTIP.format(flag=flag)
+                return f"Flag {flag} redundante sob Main {main}."
+            return _KILL_SWITCH_TOOLTIP
+        target = _FLAG_LITERAL_TO_MAIN.get(flag, "")
+        terminals = _terminals_for_flag(flag)
+        suffix = ""
+        if target and terminals:
+            suffix = f"\nDelega para {target}. Aceita em: {terminals}."
+        return _DEFAULT_TOOLTIP.format(flag=flag) + suffix

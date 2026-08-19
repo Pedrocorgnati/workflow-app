@@ -137,6 +137,11 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/loop:reconcile-check",        # 54 (KEEP_CLAUDE; whitelist via --approved override)
     "/loop:integration",                       # 54 (KEEP_CLAUDE; whitelist via --approved override)
     "/loop:iteraction:review-executed-loop",  # 54 (KEEP_CLAUDE; whitelist via --approved override)
+    # Loop iteration_template — lane worker Kimi (2026-08-18, SC93/SC94).
+    # A seta unica destes dois vira azul (T2) quando o Parallel Worker Kimi
+    # esta ligado; regra 4 de provider_router.classify_provider.
+    "/loop:iteraction:create-task",   # 73 (KIMI_OK — delegate determinista por kind, zero AskUser, zero Codex)
+    "/loop:iteraction:execute-task",  # 65 (KEEP_CLAUDE por <70; whitelist via --approved override do owner)
     # Meta — cmd hardening
     "/cmd:autocast-hardening",      # 94 (KIMI_PREFERRED)
     "/cmd:autocast-put",            # 91 (KIMI_PREFERRED)

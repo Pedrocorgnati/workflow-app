@@ -135,15 +135,22 @@ def test_rule1_local_action_always_claude_even_with_workers_on():
     assert classify_provider(spec, _state(kimi=True, codex=True)) is Provider.CLAUDE
 
 
-@pytest.mark.parametrize("directive", ["/clear", "/model", "/effort"])
+@pytest.mark.parametrize("directive", ["/clear", "/model", "/effort", "/reasoning"])
 def test_rule2_session_directives_are_claude(directive):
     # Diretivas nunca viram worker, mesmo com workers ativos.
     assert classify_provider(_spec(directive), _state(kimi=True, codex=True)) is Provider.CLAUDE
 
 
-def test_rule2_directive_with_args_normalized_to_head():
-    # "/model opus" deve normalizar para "/model" e cair em CLAUDE.
-    assert classify_provider(_spec("/model opus"), _state(kimi=True, codex=True)) is Provider.CLAUDE
+@pytest.mark.parametrize(
+    "directive",
+    ["/model opus", "/effort high", "/model sol high", "/model k3", "/reasoning yes"],
+)
+def test_rule2_directive_with_args_normalized_to_head(directive):
+    # A regra 2 olha o HEAD normalizado, entao vale para o dialeto Claude vivo
+    # e para o residuo do dialeto revogado em 2026-08-17 (D-C27-2): a forma
+    # Codex de 3 tokens, o `/model k3` e o `/reasoning` do Kimi. Snapshot salvo
+    # naquela janela nao pode virar worker por causa do argumento (C27).
+    assert classify_provider(_spec(directive), _state(kimi=True, codex=True)) is Provider.CLAUDE
 
 
 def test_rule3_no_worker_active_is_claude():
@@ -274,21 +281,156 @@ class TestClassifyFamilyVariant:
 
 
 # --------------------------------------------------------------------------- #
-# Main LLM participa da decisao (item 010) — SOMENTE em modo Router V2         #
+# Colisao Main == Worker: regime unico "worker vence" (item 006, gap C7)       #
 # --------------------------------------------------------------------------- #
-# A regra "familia do comando == familia do Main -> CLAUDE" vive atras de DOIS
-# kill-switches em conjuncao: `SF_LLM_CONFIG_V2` (global, item 002) e
-# `SF_PROVIDER_ROUTER_V2` (especifico, item 010). Ambos sao boot-frozen, entao
-# todo teste de estado de flag exige PROCESSO NOVO (contrato do feature_flags:
-# nao existe hook de reset). Por isso estes casos rodam em subprocesso.
+# Ate 2026-08-17 este arquivo travava DOIS regimes contraditorios para a MESMA
+# entrada: o legado mandava ao WORKER (contrato de 2026-05-30) e o ramo Router V2
+# — atras da conjuncao `SF_LLM_CONFIG_V2` + a flag propria do item 010 — mandava
+# ao MAIN. A divergencia foi **REVOGADA pela decisao D3** do item 006 do loop
+# `08-17-systemforge-multillm-gaps-refactor`: existe UM regime, e quando o mesmo
+# provider ocupa Main e Worker o **worker vence, sempre**, sem condicionar a
+# switch nenhum. O ramo V2, o helper `_command_family` e os tres helpers de flag
+# do item 010 sairam do codigo de producao; o guard de remocao (para que a flag
+# morta nao ressuscite o regime Main-vence) vive em `TestRouterV2FlagRemoved`.
 #
-# Divergencia deliberada, registrada aqui como oraculo executavel: enquanto o
-# mesmo provider puder estar simultaneamente como Main e como Worker, o legado
-# manda ao WORKER (contrato de 2026-05-30) e o V2 manda ao MAIN. Os dois lados
-# da colisao estao travados por teste abaixo.
+# Consequencia estrutural: `classify_provider` nao le NENHUMA feature flag, entao
+# estes casos nao precisam mais de processo novo — rodam in-process. O probe em
+# subprocesso sobreviveu somente onde ainda prova algo: o guard de remocao, que
+# precisa de ambiente controlado no boot para ser honesto.
 
-_ROUTE_PROBE = """
+
+def _route(cases: list[dict]) -> list[str]:
+    """Classifica `cases` in-process: o router e puro e nao le flag nenhuma."""
+    out: list[str] = []
+    for case in cases:
+        spec = _spec(
+            case["name"],
+            kind=case.get("kind", "slash"),
+            kimi_eligible=case.get("kimi_eligible", False),
+        )
+        state = RoutingState(
+            kimi_worker_enabled=case["kimi"],
+            codex_worker_enabled=case["codex"],
+            main_llm=case["main_llm"],
+        )
+        out.append(classify_provider(spec, state).value)
+    return out
+
+
+def test_main_kimi_with_kimi_worker_and_kimi_command_routes_to_worker():
+    """main=kimi, kimi worker ON, comando kimi -> KIMI (o worker vence).
+
+    Caso outrora chamado `..._routes_to_main`, que afirmava CLAUDE sob o Router
+    V2. Regime revogado por D3 (item 006): a colisao Main==Worker tem um unico
+    destino, o worker.
+    """
+    case = {"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"}
+    assert _route([case]) == ["kimi"]
+
+
+def test_main_kimi_with_kimi_worker_and_kimi_eligible_flag_routes_to_worker():
+    """main=kimi, `kimi_eligible=True`, kimi worker ON -> KIMI (o worker vence).
+
+    Mesma revogacao (D3, item 006): a elegibilidade por flag do spec entra na
+    regra 4b e continua caindo no worker, nao no Main.
+    """
+    case = {
+        "name": OTHER_CMD,
+        "kimi_eligible": True,
+        "kimi": True,
+        "codex": False,
+        "main_llm": "kimi",
+    }
+    assert _route([case]) == ["kimi"]
+
+
+def test_main_codex_with_codex_worker_and_codex_command_routes_to_worker():
+    """main=codex, codex worker ON, comando codex -> CODEX (o worker vence).
+
+    Lado Codex da mesma revogacao (D3, item 006). O comando nao e Kimi-compativel
+    e nao carrega `kimi_eligible`, entao a precedencia da regra 6 nao se aplica.
+    """
+    case = {"name": CODEX_CMD, "kimi": True, "codex": True, "main_llm": "codex"}
+    assert _route([case]) == ["codex"]
+
+
+def test_main_kimi_does_not_affect_codex_command():
+    """Main=kimi nao afeta comando codex (familias diferentes) -> CODEX.
+
+    Ja valia nos dois regimes; sobrevive intacto a revogacao de D3 e agora e
+    afirmado sem flag alguma.
+    """
+    case = {"name": CODEX_CMD, "kimi": False, "codex": True, "main_llm": "kimi"}
+    assert _route([case]) == ["codex"]
+
+
+def test_main_codex_does_not_affect_kimi_command():
+    """Main=codex nao afeta comando kimi (familias diferentes) -> KIMI.
+
+    Ja valia nos dois regimes; sobrevive intacto a revogacao de D3 e agora e
+    afirmado sem flag alguma.
+    """
+    case = {"name": KIMI_CMD, "kimi": True, "codex": False, "main_llm": "codex"}
+    assert _route([case]) == ["kimi"]
+
+
+def test_no_workers_falls_back_to_claude():
+    """Nenhum worker ativo -> CLAUDE, qualquer que seja o Main.
+
+    Antes era `test_v2_without_workers_still_falls_back_to_claude`, e media o
+    ramo V2. Com o ramo removido, o early-return legado (regra 3) voltou a ser o
+    caminho unico: este teste passa a travar que a conversao do `elif` de volta
+    para `if` (ST002 do item 006) preservou o destino em todas as tres formas —
+    familia batendo com o Main, familia divergente e comando fora das duas
+    whitelists.
+    """
+    cases = [
+        # Familia bate com o Main (antes retornava pela regra de familia do V2).
+        {"name": KIMI_CMD, "kimi": False, "codex": False, "main_llm": "kimi"},
+        # Familia NAO bate (antes retornava so pelo fallback final).
+        {"name": CODEX_CMD, "kimi": False, "codex": False, "main_llm": "kimi"},
+        # Comando fora das duas whitelists (familia "unknown").
+        {"name": OTHER_CMD, "kimi": False, "codex": False, "main_llm": "claude"},
+    ]
+    assert _route(cases) == ["claude", "claude", "claude"]
+
+
+def test_worker_precedence_on_main_worker_collision():
+    """Contrato UNICO da colisao Main==Worker: o worker vence, sempre.
+
+    Antes chamado `test_legacy_mode_keeps_worker_precedence_on_main_worker_collision`
+    e valido so com as flags ausentes. Depois de D3 (item 006) nao ha "modo
+    legado" — este e o contrato, e vale sem depender de flag.
+    """
+    cases = [
+        {"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"},
+        {"name": CODEX_CMD, "kimi": False, "codex": True, "main_llm": "codex"},
+        {
+            "name": OTHER_CMD,
+            "kimi_eligible": True,
+            "kimi": True,
+            "codex": False,
+            "main_llm": "kimi",
+        },
+    ]
+    assert _route(cases) == ["kimi", "codex", "kimi"]
+
+
+# --------------------------------------------------------------------------- #
+# Guard de remocao da flag do Router V2 (ST006 do item 006)                    #
+# --------------------------------------------------------------------------- #
+# Precedente seguido: `TestNoEnvFlag` em tests/test_model_effort_equivalence.py.
+# A flag foi REMOVIDA junto com o ramo que ela guardava; o literal so aparece
+# aqui, como nome de uma variavel morta que precisa PROVAR que e inerte.
+
+_DEAD_ROUTER_FLAG = "SF_PROVIDER_ROUTER_V2"
+
+# Colisao Main==Worker: a entrada que outrora divergia entre os dois regimes.
+_COLLISION_CASE = [{"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"}]
+
+_COLLISION_PROBE = """
 import json
+import os
 import sys
 
 from workflow_app.command_queue import provider_router as mod
@@ -320,13 +462,13 @@ sys.stdout.write(
             "providers": out,
             # Hermeticidade: prova que o filho importou ESTE checkout e que o
             # ambiente pedido chegou de fato ao processo novo. Sem isso, um
-            # probe que rodasse contra outro `workflow_app` (ou com a flag
+            # probe que rodasse contra outro `workflow_app` (ou com a variavel
             # perdida no caminho) poderia passar verde por coincidencia.
             "module_file": mod.__file__,
-            "flags": {
-                "global": feature_flags.llm_config_v2_state(),
-                "router": feature_flags.provider_router_v2_state(),
-            },
+            "global_flag_state": feature_flags.llm_config_v2_state(),
+            "dead_flag_env": os.environ.get("SF_PROVIDER_ROUTER_V2"),
+            # Superficie: nenhum helper da flag morta pode ter sobrevivido.
+            "flag_helpers": [n for n in dir(feature_flags) if "provider_router" in n],
         }
     )
 )
@@ -337,12 +479,12 @@ sys.stdout.write(
 _WORKFLOW_APP_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _probe_env(*, global_flag: str | None, router_flag: str | None) -> dict[str, str]:
+def _probe_env(*, global_flag: str | None, dead_flag: str | None) -> dict[str, str]:
     """Ambiente do filho: `None` REMOVE a variavel (estado `absent`)."""
     env = dict(os.environ)
     for var, value in (
         (feature_flags.llm_config_v2_flag_name(), global_flag),
-        (feature_flags.provider_router_v2_flag_name(), router_flag),
+        (_DEAD_ROUTER_FLAG, dead_flag),
     ):
         if value is None:
             env.pop(var, None)
@@ -351,18 +493,13 @@ def _probe_env(*, global_flag: str | None, router_flag: str | None) -> dict[str,
     return env
 
 
-def _run_route_probe(
-    cases: list[dict],
-    *,
-    global_flag: str | None,
-    router_flag: str | None,
-) -> dict:
-    """Classifica `cases` num processo NOVO com as flags no estado pedido."""
+def _run_collision_probe(*, global_flag: str | None, dead_flag: str | None) -> dict:
+    """Classifica a colisao num processo NOVO com o ambiente pedido no boot."""
     result = subprocess.run(
-        [sys.executable, "-c", _ROUTE_PROBE, json.dumps(cases)],
+        [sys.executable, "-c", _COLLISION_PROBE, json.dumps(_COLLISION_CASE)],
         capture_output=True,
         text=True,
-        env=_probe_env(global_flag=global_flag, router_flag=router_flag),
+        env=_probe_env(global_flag=global_flag, dead_flag=dead_flag),
         cwd=str(_WORKFLOW_APP_ROOT),
     )
     assert result.returncode == 0, (
@@ -373,183 +510,76 @@ def _run_route_probe(
     assert Path(got["module_file"]).resolve() == Path(provider_router_module.__file__).resolve(), (
         f"probe importou outro provider_router: {got['module_file']}"
     )
+    # E o ambiente pedido tem de ter chegado ao processo novo — sem isso, uma
+    # variavel perdida no caminho faria o guard medir sempre o mesmo estado.
+    assert got["dead_flag_env"] == dead_flag, got
     return got
 
 
-def _route(cases: list[dict], *, router_v2: bool) -> list[str]:
-    """Atalho dos dois modos canonicos: V2 ligado (conjuncao) ou legado (ausente).
+class TestRouterV2FlagRemoved:
+    """`SF_PROVIDER_ROUTER_V2` foi REMOVIDA junto com o ramo Router V2 (D3, item 006).
 
-    O modo legado REMOVE as duas variaveis em vez de setar `"0"`, para exercitar
-    o caminho default real de producao.
+    Deletar os testes da flag deixaria a porta aberta para a divergencia voltar
+    sem ninguem notar. Seguindo o precedente de `TestNoEnvFlag`
+    (tests/test_model_effort_equivalence.py), eles viram guard de remocao: a
+    variavel pode existir com qualquer valor no boot que o destino da colisao
+    Main==Worker nao muda, e nenhum leitor dela sobrevive na superficie publica.
     """
-    flag = "1" if router_v2 else None
-    got = _run_route_probe(cases, global_flag=flag, router_flag=flag)
-    expected_state = "on" if router_v2 else "absent"
-    # Prova que o estado pedido chegou ao filho: sem esta assercao, uma flag
-    # perdida no caminho degradaria silenciosamente para o legado e os testes
-    # "V2" passariam a medir o legado.
-    assert got["flags"] == {"global": expected_state, "router": expected_state}, got["flags"]
-    return got["providers"]
 
-
-def test_main_kimi_with_kimi_worker_and_kimi_command_routes_to_main():
-    """V2: main=kimi, kimi worker ON, comando kimi -> CLAUDE (T1 roda o Main)."""
-    case = {"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"}
-    assert _route([case], router_v2=True) == ["claude"]
-
-
-def test_main_kimi_with_kimi_worker_and_kimi_eligible_flag_routes_to_main():
-    """V2 (via flag): main=kimi, kimi_eligible=True, kimi worker ON -> CLAUDE."""
-    case = {
-        "name": OTHER_CMD,
-        "kimi_eligible": True,
-        "kimi": True,
-        "codex": False,
-        "main_llm": "kimi",
-    }
-    assert _route([case], router_v2=True) == ["claude"]
-
-
-def test_main_codex_with_codex_worker_and_codex_command_routes_to_main():
-    """V2: main=codex, codex worker ON, comando codex -> CLAUDE (T1 roda o Main)."""
-    case = {"name": CODEX_CMD, "kimi": True, "codex": True, "main_llm": "codex"}
-    assert _route([case], router_v2=True) == ["claude"]
-
-
-def test_main_kimi_does_not_affect_codex_command():
-    """V2: Main=kimi nao afeta comando codex (familias diferentes) -> CODEX."""
-    case = {"name": CODEX_CMD, "kimi": False, "codex": True, "main_llm": "kimi"}
-    assert _route([case], router_v2=True) == ["codex"]
-
-
-def test_main_codex_does_not_affect_kimi_command():
-    """V2: Main=codex nao afeta comando kimi (familias diferentes) -> KIMI."""
-    case = {"name": KIMI_CMD, "kimi": True, "codex": False, "main_llm": "codex"}
-    assert _route([case], router_v2=True) == ["kimi"]
-
-
-def test_v2_without_workers_still_falls_back_to_claude():
-    """V2 ligado e nenhum worker: o early-return legado sumiu, mas o destino nao muda.
-
-    O ramo V2 substituiu o `return CLAUDE` antecipado de "nenhum worker ativo".
-    Este teste prova que as regras 4/5 continuam exigindo worker ligado e que o
-    fallback final devolve CLAUDE, inclusive quando a familia NAO bate com o Main.
-    """
-    cases = [
-        # Familia bate com o Main (retorno pela regra de familia).
-        {"name": KIMI_CMD, "kimi": False, "codex": False, "main_llm": "kimi"},
-        # Familia NAO bate (retorno so pelo fallback final).
-        {"name": CODEX_CMD, "kimi": False, "codex": False, "main_llm": "kimi"},
-        # Comando fora das duas whitelists (familia "unknown").
-        {"name": OTHER_CMD, "kimi": False, "codex": False, "main_llm": "claude"},
-    ]
-    assert _route(cases, router_v2=True) == ["claude", "claude", "claude"]
-
-
-def test_legacy_mode_keeps_worker_precedence_on_main_worker_collision():
-    """Flags ausentes (default de producao): worker vence o Main na colisao.
-
-    Trava o lado legado da divergencia — contrato de 2026-05-30, so superado
-    quando o Router V2 virar default.
-    """
-    cases = [
-        {"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"},
-        {"name": CODEX_CMD, "kimi": False, "codex": True, "main_llm": "codex"},
-        {
-            "name": OTHER_CMD,
-            "kimi_eligible": True,
-            "kimi": True,
-            "codex": False,
-            "main_llm": "kimi",
-        },
-    ]
-    assert _route(cases, router_v2=False) == ["kimi", "codex", "kimi"]
-
-
-# A colisao Main==Worker e o oraculo de modo: no legado o worker vence, no V2 o
-# Main vence. Toda combinacao que NAO seja a conjuncao das duas flags em "1"
-# tem de produzir o resultado legado (fail-closed).
-_COLLISION_CASE = [{"name": KIMI_CMD, "kimi": True, "codex": True, "main_llm": "kimi"}]
-
-
-@pytest.mark.parametrize(
-    "global_flag,router_flag",
-    [
-        ("1", None),  # global ligado, especifica ausente
-        (None, "1"),  # especifica ligada, global ausente
-        ("0", "1"),  # especifica ligada, global explicitamente desligado
-        ("1", "0"),  # global ligado, especifica explicitamente desligada
-        ("true", "1"),  # valor nao reconhecido no global (sem casefold/strip)
-        ("1", " 1 "),  # valor nao reconhecido na especifica (sem strip)
-        (None, None),  # ambas ausentes
-    ],
-    ids=[
-        "global-on-router-absent",
-        "router-on-global-absent",
-        "router-on-global-off",
-        "global-on-router-off",
-        "global-unrecognized",
-        "router-unrecognized",
-        "both-absent",
-    ],
-)
-def test_router_v2_requires_both_kill_switches(global_flag, router_flag):
-    """So a conjuncao das duas em `"1"` liga o modo novo; o resto e legado."""
-    got = _run_route_probe(_COLLISION_CASE, global_flag=global_flag, router_flag=router_flag)
-    assert got["providers"] == ["kimi"], got
-
-
-_BOOT_FREEZE_PROBE = """
-import json
-import os
-import sys
-
-from workflow_app.config import feature_flags
-
-before = {
-    "state": feature_flags.provider_router_v2_state(),
-    "enabled": feature_flags.provider_router_v2_enabled(),
-}
-os.environ[feature_flags.provider_router_v2_flag_name()] = "1"
-after_set = {
-    "state": feature_flags.provider_router_v2_state(),
-    "enabled": feature_flags.provider_router_v2_enabled(),
-}
-os.environ.pop(feature_flags.provider_router_v2_flag_name(), None)
-after_unset = {
-    "state": feature_flags.provider_router_v2_state(),
-    "enabled": feature_flags.provider_router_v2_enabled(),
-}
-sys.stdout.write(
-    json.dumps({"before": before, "after_set": after_set, "after_unset": after_unset})
-)
-"""
-
-
-@pytest.mark.parametrize(
-    "initial,expected_state",
-    [(None, "absent"), ("0", "off"), ("1", "on"), ("sim", "unrecognized")],
-    ids=["absent", "off", "on", "unrecognized"],
-)
-def test_router_kill_switch_state_is_frozen_at_boot(initial, expected_state):
-    """Mutar o ambiente DEPOIS do import nao muda a resposta da flag especifica.
-
-    Mesmo contrato do item 002 (nao existe hook de reset). Sem este probe, uma
-    implementacao que voltasse a `os.environ` a cada chamada continuaria verde
-    em todos os outros testes, porque nenhum deles muta a variavel in-process.
-    """
-    result = subprocess.run(
-        [sys.executable, "-c", _BOOT_FREEZE_PROBE],
-        capture_output=True,
-        text=True,
-        env=_probe_env(global_flag=None, router_flag=initial),
-        cwd=str(_WORKFLOW_APP_ROOT),
+    @pytest.mark.parametrize(
+        "global_flag,dead_flag",
+        [
+            ("1", None),  # global ligado, variavel morta ausente
+            (None, "1"),  # variavel morta em "1", global ausente
+            ("0", "1"),  # variavel morta em "1", global explicitamente desligado
+            ("1", "0"),  # global ligado, variavel morta em "0"
+            ("1", "1"),  # a antiga conjuncao que ligava o regime Main-vence
+            ("true", "1"),  # valor nao reconhecido no global (sem casefold/strip)
+            ("1", " 1 "),  # valor nao reconhecido na variavel morta (sem strip)
+            ("1", ""),  # variavel morta vazia
+            ("1", "true"),  # variavel morta com valor arbitrario
+            (None, None),  # ambas ausentes (default real de producao)
+        ],
+        ids=[
+            "global-on-dead-absent",
+            "dead-on-global-absent",
+            "dead-on-global-off",
+            "global-on-dead-off",
+            "old-conjunction-both-on",
+            "global-unrecognized",
+            "dead-unrecognized",
+            "dead-empty",
+            "dead-true",
+            "both-absent",
+        ],
     )
-    assert result.returncode == 0, f"probe falhou: {result.stderr}"
-    got = json.loads(result.stdout)
-    assert got["before"] == {"state": expected_state, "enabled": expected_state == "on"}, got
-    assert got["after_set"] == got["before"], got
-    assert got["after_unset"] == got["before"], got
+    def test_env_var_does_not_change_the_collision(self, global_flag, dead_flag):
+        """Qualquer estado da variavel morta no boot: a colisao continua no worker."""
+        got = _run_collision_probe(global_flag=global_flag, dead_flag=dead_flag)
+        assert got["providers"] == ["kimi"], got
+        # A variavel morta tambem nao pode ter ressuscitado nenhum helper.
+        assert got["flag_helpers"] == [], got
+
+    def test_feature_flags_exposes_no_router_v2_reader(self):
+        """Os tres helpers do item 010 sairam de `feature_flags` (modulo e `__all__`)."""
+        for name in (
+            "provider_router_v2_enabled",
+            "provider_router_v2_state",
+            "provider_router_v2_flag_name",
+        ):
+            assert not hasattr(feature_flags, name), name
+            assert name not in feature_flags.__all__, name
+        assert not [n for n in dir(feature_flags) if "provider_router" in n]
+
+    def test_provider_router_exposes_no_flag_reader(self):
+        """O router ficou puro: nenhum leitor de flag e nenhum helper de familia do V2."""
+        for name in (
+            "provider_router_v2_enabled",
+            "provider_router_v2_state",
+            "provider_router_v2_flag_name",
+            "_command_family",
+        ):
+            assert not hasattr(provider_router_module, name), name
 
 
 def test_public_family_variant_name_still_resolves_without_polluting_dir():

@@ -145,8 +145,13 @@ _ACTIONS_RAW: dict[str, str] = {
         "crie um arquivo md em blacksmith/brainstorm-mcp/ com este trabalho feito; "
         "preencha o frontmatter com todos os paths relevantes ao assunto, incluindo "
         "implantation-destiny-path quando aplicavel; use o template "
-        "ai-forge/templates/mcp-flow/STARTER.md; nomeie no formato MM-DD-slug-simples.md "
-        "usando a data de hoje"
+        "ai-forge/templates/mcp-flow/STARTER.md; nomeie no formato "
+        "MM-DD-repositorio-slug-simples.md usando a data de hoje seguida do nome do "
+        "repositorio trabalhado, isto e, o diretorio alvo do trabalho (por exemplo "
+        "foot-stock quando o alvo e output/workspace/foot-stock, ou systemforge "
+        "quando o alvo e o proprio repo raiz); use o nome do diretorio em kebab-case, "
+        "sem caminho e sem extensao; quando o assunto nao estiver ligado a nenhum "
+        "repositorio, omita esse segmento e use apenas MM-DD-slug-simples.md"
     ),
     "Loop prepare": (
         f"antes de agir, leia e siga { _FILE_OPS_RULES_PATH }; "

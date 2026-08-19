@@ -11,11 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from workflow_app.config.feature_flags import llm_config_v2_enabled
+from workflow_app.config.feature_flags import mcp_think_exec_v2_enabled
 from workflow_app.signal_bus import signal_bus
 
 # Item 023 do loop 08-11 troca a action row do setor MCP SOMENTE atras de
-# `SF_LLM_CONFIG_V2`: os tres botoes legados
+# kill-switch: os tres botoes legados
 # `output-mcp-action-{main,parallel,dual}` (comando escolhido pelo Main LLM)
 # dao lugar aos grupos Thinking/Execution, com matriz FIXA por botao (TE-01).
 # Duas consequencias aqui:
@@ -29,10 +29,15 @@ from workflow_app.signal_bus import signal_bus
 #      e pulado. Esse lado esta travado em `tests/test_llm_config_tab.py`, que
 #      roda os dois estados em subprocesso porque `feature_flags` e boot-frozen
 #      (resolve `os.environ` no import, sem hook de reset).
-_LLM_CONFIG_V2 = llm_config_v2_enabled()
+# Item 005 do loop 08-17 MOVEU esse gate do global `SF_LLM_CONFIG_V2` para o
+# kill-switch dedicado do par Thinking/Execution. Este modulo escolhe testids
+# pelo regime vigente, entao tem que ler o MESMO switch que a UI le — apontar
+# para o antigo deixaria o arquivo esperando pastilhas TE numa action row que
+# foi construida no caminho legado.
+_TE_V2 = mcp_think_exec_v2_enabled()
 
 _MCP_ACTION_MAIN = (
-    "output-mcp-action-thinking-codex" if _LLM_CONFIG_V2 else "output-mcp-action-main"
+    "output-mcp-action-thinking-codex" if _TE_V2 else "output-mcp-action-main"
 )
 _MCP_ACTION_LABELS = (
     {
@@ -45,19 +50,19 @@ _MCP_ACTION_LABELS = (
         "output-mcp-action-execution-grok": "Grok",
         "output-mcp-action-execution-qwen": "Qwen",
     }
-    if _LLM_CONFIG_V2
+    if _TE_V2
     else {
         "output-mcp-action-main": "Main MCP",
         "output-mcp-action-parallel": "Parallel",
         "output-mcp-action-dual": "Dual",
     }
 )
-_skip_under_llm_config_v2 = pytest.mark.skipif(
-    _LLM_CONFIG_V2,
+_skip_under_te_v2 = pytest.mark.skipif(
+    _TE_V2,
     reason=(
         "afirma a semantica legada (Main LLM escolhe o comando da acao MCP); "
-        "sob SF_LLM_CONFIG_V2 o comando e fixo por botao (item 023) e esse lado "
-        "e travado em tests/test_llm_config_tab.py"
+        "sob SF_MCP_THINK_EXEC_V2 o comando e fixo por botao (item 023) e "
+        "esse lado e travado em tests/test_llm_config_tab.py"
     ),
 )
 
@@ -483,7 +488,7 @@ def test_mcp_toolbar_joins_old_and_fourth_row_personas_in_ui_order(qtbot):
     ]
 
 
-@_skip_under_llm_config_v2
+@_skip_under_te_v2
 def test_mcp_toolbar_kimi_command_routes_by_toggle(qtbot):
     # Kimi seleciona o comando /skill:claude; o toggle T2 manda para T2.
     win = _new_window(qtbot)
@@ -504,7 +509,7 @@ def test_mcp_toolbar_kimi_command_routes_by_toggle(qtbot):
     assert sent_t2 == ["/skill:claude"]
 
 
-@_skip_under_llm_config_v2
+@_skip_under_te_v2
 def test_mcp_toolbar_codex_parallel_publishes_purple_parallel_to_t3(
     qtbot, monkeypatch,
 ):
@@ -524,7 +529,7 @@ def test_mcp_toolbar_codex_parallel_publishes_purple_parallel_to_t3(
     assert xterm_calls == [("Use skill-kimi. Output JSON. Prompt: ", False)]
 
 
-@_skip_under_llm_config_v2
+@_skip_under_te_v2
 def test_mcp_toolbar_codex_persona_prompt_has_single_spacing(qtbot, monkeypatch):
     win = _new_window(qtbot)
     _set_route(win, t1=False, t2=False, t3=True)

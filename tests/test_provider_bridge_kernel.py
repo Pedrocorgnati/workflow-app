@@ -40,6 +40,7 @@ ADAPTERS_PATH = REPO_ROOT / "ai-forge" / "scripts" / "_provider_adapters.py"
 # Deterministic binary paths substituted for shutil.which during the tests.
 FAKE_CLAUDE_BIN = "/usr/bin/claude"
 FAKE_KIMI_BIN = "/usr/bin/kimi"
+FAKE_GROK_BIN = "/usr/bin/grok"
 
 # The prompt is an *input* to argv construction, never rendered by it.
 FROZEN_PROMPT = "PROMPT-BODY"
@@ -102,7 +103,11 @@ def which_stub(monkeypatch):
     """Deterministic shutil.which for claude/kimi; None for anything else."""
 
     def _which(name: str, *args: Any, **kwargs: Any) -> str | None:
-        return {"claude": FAKE_CLAUDE_BIN, "kimi": FAKE_KIMI_BIN}.get(name)
+        return {
+            "claude": FAKE_CLAUDE_BIN,
+            "kimi": FAKE_KIMI_BIN,
+            "grok": FAKE_GROK_BIN,
+        }.get(name)
 
     monkeypatch.setattr("shutil.which", _which)
     return _which
@@ -188,6 +193,17 @@ EXPECTED_KIMI_ARGV_LEVEL3 = [
     FROZEN_PROMPT,
 ]
 
+EXPECTED_GROK_ARGV = [
+    FAKE_GROK_BIN,
+    "--single",
+    FROZEN_PROMPT,
+    "--model",
+    "grok-4.5",
+    "--output-format",
+    "json",
+    "--always-approve",
+]
+
 # sha256 of the rendered provider prompt for the frozen args below, with no
 # agent block. Freezes the caller identity phrase plus the output contract.
 FROZEN_RENDER_SHA256 = (
@@ -246,9 +262,11 @@ class TestST001FrozenArgv:
         assert all(isinstance(part, str) for part in spec.command)
 
     def test_legacy_argv_unknown_provider_raises(self, bridge, which_stub):
+        """`grok` agora e conhecido; o papel de provider desconhecido foi
+        transferido para ``definitely-nonexistent-provider``."""
         args = _args(bridge, "--provider", "claude", "--level", "2")
         with pytest.raises(ValueError):
-            bridge._spec_for_provider("grok", args, FROZEN_PROMPT)
+            bridge._spec_for_provider("definitely-nonexistent-provider", args, FROZEN_PROMPT)
 
     def test_legacy_provider_prompt_frozen(self, bridge):
         """The caller identity phrase and the output contract are frozen."""
@@ -435,9 +453,31 @@ class TestST003Adapters:
         spec = adapters.get_adapter("kimi").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
         assert spec.command == EXPECTED_KIMI_ARGV_LEVEL2
 
+    def test_adapter_codex_uses_spec_params_cwd_not_process_cwd(
+        self, adapters, kernel, monkeypatch, tmp_path
+    ):
+        """`--cd` comes from SpecParams.cwd, never from a second Path.cwd() read."""
+        monkeypatch.setattr("shutil.which", lambda name, *a, **kw: f"/usr/local/bin/{name}")
+        spec = adapters.get_adapter("codex").build_spec(
+            kernel.SpecParams(prompt=FROZEN_PROMPT, cwd=str(tmp_path))
+        )
+        cd_value = spec.command[spec.command.index("--cd") + 1]
+        assert cd_value == str(tmp_path.resolve())
+        assert cd_value != str(Path.cwd().resolve())
+        assert spec.command[spec.command.index("--sandbox") + 1] == "danger-full-access"
+
+    def test_adapter_codex_model_default_exists_on_machine(self, adapters, kernel, monkeypatch):
+        """Default model must be the one declared in ~/.codex/config.toml."""
+        monkeypatch.setattr("shutil.which", lambda name, *a, **kw: f"/usr/local/bin/{name}")
+        spec = adapters.get_adapter("codex").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
+        assert spec.model == "gpt-5.3-codex-spark"
+        assert spec.command[spec.command.index("--model") + 1] == "gpt-5.3-codex-spark"
+
     def test_adapter_unknown_provider_raises(self, adapters):
+        """`grok` agora e conhecido; o literal substituto e
+        ``definitely-nonexistent-provider``."""
         with pytest.raises(ValueError):
-            adapters.get_adapter("grok")
+            adapters.get_adapter("definitely-nonexistent-provider")
 
     def test_adapter_missing_binary_raises_filenotfound(self, adapters, kernel, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda *a, **kw: None)
@@ -458,6 +498,25 @@ class TestST003Adapters:
     def test_adapter_env_kimi_untouched(self, adapters, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-kept-for-kimi")
         assert adapters.get_adapter("kimi").env()["ANTHROPIC_API_KEY"] == "sk-kept-for-kimi"
+
+    def test_adapter_grok_argv_matches_frozen(self, adapters, kernel, which_stub):
+        spec = adapters.get_adapter("grok").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
+        assert spec.command == EXPECTED_GROK_ARGV
+        assert spec.name == "grok"
+        assert spec.model == "grok-4.5"
+
+    def test_adapter_grok_env_is_normalized_copy(self, adapters, monkeypatch):
+        """Grok env is a normalized copy of the base env (no secret stripping)."""
+        monkeypatch.setenv("GROK_API_KEY", "sk-kept-for-grok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-kept-for-grok-too")
+        env = adapters.get_adapter("grok").env()
+        assert env["GROK_API_KEY"] == "sk-kept-for-grok"
+        assert env["ANTHROPIC_API_KEY"] == "sk-kept-for-grok-too"
+
+    def test_adapter_grok_missing_binary_raises_filenotfound(self, adapters, kernel, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda *a, **kw: None)
+        with pytest.raises(FileNotFoundError):
+            adapters.get_adapter("grok").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
 
     def test_adapters_own_no_transport(self):
         """An adapter that runs a subprocess is a layering violation."""
@@ -546,6 +605,21 @@ class TestST004Telemetry:
         )
         assert result["ok"] is False
         assert kernel.providers_used([out]) is None
+
+    def test_telemetry_grok_outcome_has_c53_fields(self, kernel):
+        """Grok invocation through the kernel carries C-53 telemetry fields."""
+        spec = kernel.ProviderSpec("grok", "grok-4.5", EXPECTED_GROK_ARGV)
+        out = kernel.run_provider(
+            spec,
+            cwd=".",
+            timeout=5,
+            runner=lambda *a, **kw: _Completed(0, json.dumps({"verdict": "approve"})),
+        )
+        assert out["terminal"] == kernel.TERMINAL_OK
+        assert out["ok"] is True
+        assert out["provider"] == "grok"
+        assert out["binary"] == FAKE_GROK_BIN
+        assert out["returncode"] == 0
 
     def test_telemetry_disabled_writes_nothing(self, kernel, tmp_path):
         assert kernel.emit_telemetry(_record(kernel), telemetry_dir="", cwd=str(tmp_path)) is None
