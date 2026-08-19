@@ -185,3 +185,43 @@ class TestResizeSync:
         assert elapsed < 0.080, (
             f"drain must cap below 80ms, got {elapsed * 1000:.1f}ms"
         )
+
+
+# ── output_tail(): leitura diagnostica do scrollback ──────────────────────── #
+
+
+def test_output_tail_returns_plain_text(panel):
+    """Tail devolve texto plano, sem ANSI, para o snapshot de recuperacao."""
+    panel._on_chunk("\x1b[32mSucesso\x1b[0m\nlinha dois\n")
+    panel._flush_pyte()
+    tail = panel.output_tail()
+    assert "\x1b" not in tail
+    assert "Sucesso" in tail
+    assert "linha dois" in tail
+
+
+def test_output_tail_respects_max_lines(panel):
+    """Limite de linhas honrado, mantendo a CAUDA (onde vive o erro)."""
+    # `\r\n` como um PTY real emite: sem o CR o pyte nao volta a coluna 0 e
+    # cada linha herda a indentacao da anterior.
+    panel._on_chunk("".join(f"linha {i}\r\n" for i in range(40)))
+    panel._flush_pyte()
+    tail = panel.output_tail(max_lines=3)
+    lines = tail.split("\n")
+    assert len(lines) == 3
+    assert lines[-1] == "linha 39"
+
+
+def test_output_tail_is_read_only(panel):
+    """Chamar o tail nao consome nem limpa o buffer: pode repetir."""
+    panel._on_chunk("estado preservado\n")
+    panel._flush_pyte()
+    first = panel.output_tail()
+    second = panel.output_tail()
+    assert first == second
+    assert "estado preservado" in second
+
+
+def test_output_tail_empty_when_nothing_written(panel):
+    """Terminal virgem devolve string vazia (helper traduz p/ INDISPONIVEL)."""
+    assert panel.output_tail() == ""

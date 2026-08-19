@@ -421,3 +421,99 @@ class Test_runtime_reads_snapshot_only:
             f"loader opened authorial file (C-01) {len(authorial_reads)} times: "
             f"{authorial_reads}"
         )
+
+
+# --- Item 011 / ST002: acessor read-only de mapeamento ---
+
+
+class Test_get_mapped_capabilities:
+    """Item 011: `get_mapped_capabilities` distingue nao-mapeado de indisponivel.
+
+    A API fail-closed (`get_capability`) colapsa os dois casos em
+    `indisponivel` + `nao_mapeado`. O preflight informativo do enqueue precisa
+    da distincao para nao avisar sobre os ~601 comandos fora dos 21 do
+    snapshot. Este acessor NAO pode alterar o veredito fail-closed.
+    """
+
+    def test_mapped_command_returns_non_empty_dict(self) -> None:
+        """Tripla mapeada devolve o dicionario CRU do snapshot."""
+        loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        mapped = loader.get_mapped_capabilities("/auto-flow", "claude", "main")
+        assert isinstance(mapped, dict)
+        assert mapped
+        assert mapped["file_write"] == "disponivel"
+
+    def test_mapped_command_preserves_indisponivel_status(self) -> None:
+        """Status diferente de 'disponivel' chega CRU, sem fail-closed."""
+        loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        mapped = loader.get_mapped_capabilities("/create-task", "codex", "main")
+        assert mapped is not None
+        assert mapped["mcp_access"] == "indisponivel"
+
+    def test_unknown_command_returns_none(self) -> None:
+        """Comando fora da matriz: `None`, nao 'indisponivel'."""
+        loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        assert loader.get_mapped_capabilities("/nonexistent-command-xyz", "claude", "main") is None
+
+    def test_unknown_provider_returns_none(self) -> None:
+        """Provider fora do comando mapeado: `None`."""
+        loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        assert loader.get_mapped_capabilities("/auto-flow", "provider-inexistente", "main") is None
+
+    def test_unknown_role_returns_none(self) -> None:
+        """Role fora do provider mapeado: `None`."""
+        loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        assert loader.get_mapped_capabilities("/auto-flow", "claude", "role-inexistente") is None
+
+    def test_missing_snapshot_returns_none(self, tmp_path: Path) -> None:
+        """Snapshot ausente: `None` (e `get_failure_reason` segue acionavel)."""
+        loader = ProviderCapabilityLoader(tmp_path / "nonexistent-snapshot.json")
+        assert loader.get_mapped_capabilities("/auto-flow", "claude", "main") is None
+        assert loader.get_failure_reason() == "snapshot_ausente"
+
+    @pytest.mark.parametrize(
+        ("command", "provider", "capability", "expected"),
+        [
+            ("/auto-flow", "claude", "file_write", True),
+            ("/create-task", "codex", "mcp_access", False),
+            ("/nonexistent-command-xyz", "claude", "file_write", False),
+        ],
+    )
+    def test_accessor_does_not_change_is_available_verdict(
+        self, command: str, provider: str, capability: str, expected: bool
+    ) -> None:
+        """Acessor no meio do caminho nao muda o veredito fail-closed.
+
+        Comparacao contra um loader de controle com a MESMA sequencia de
+        chamadas menos o acessor. Loader novo por caso porque
+        `_failure_reason` e sticky: uma consulta nao mapeada envenena as
+        seguintes ate `reload()` — comportamento pre-existente de
+        `get_capability`, deliberadamente nao tocado por este item.
+        """
+        control = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        probed = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        probed.get_mapped_capabilities(command, provider, "main")
+
+        control_verdict = control.is_available(command, provider, "main", capability)
+        probed_verdict = probed.is_available(command, provider, "main", capability)
+
+        assert control_verdict is expected
+        assert probed_verdict is control_verdict
+
+    def test_accessor_never_opens_authorial(self) -> None:
+        """C-01 permanece fechado tambem no caminho do acessor."""
+        loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
+        loader.reload()
+        authorial_reads: list[str] = []
+        original_read_text = Path.read_text
+
+        def tracking_read_text(self_path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if self_path.resolve() == LOADER_AUTHORIAL_PATH.resolve():
+                authorial_reads.append(str(self_path))
+            return original_read_text(self_path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", tracking_read_text):
+            for cmd in ["/auto-flow", "/cmd:review", "/nao-existe"]:
+                loader.get_mapped_capabilities(cmd, "claude", "main")
+
+        assert authorial_reads == []

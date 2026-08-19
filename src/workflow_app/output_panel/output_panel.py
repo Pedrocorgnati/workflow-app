@@ -725,6 +725,33 @@ class OutputPanel(QWidget):
         """Chunk from the pipeline runner (separate signal from shell)."""
         self._on_chunk(chunk)
 
+    def output_tail(self, max_lines: int = 40) -> str:
+        """Texto plano das ultimas linhas visiveis do terminal deste canal.
+
+        Fonte do `output_excerpt` do snapshot de recuperacao (ver
+        `metrics_bar.recovery_context`). Le a tela renderizada do pyte, que ja
+        e um grid de caracteres: o retorno sai SEM sequencias ANSI, sem
+        precisar de um de-escaper proprio.
+
+        Read-only por contrato: nao consome buffer, nao mexe em cursor, nao
+        emite sinal. Pode ser chamado a qualquer momento, inclusive com o
+        canal vermelho, e nunca levanta — falha de leitura vira string vazia,
+        que o chamador traduz para `INDISPONIVEL`. Um snapshot de recuperacao
+        nunca pode ser a causa de uma segunda falha.
+        """
+        try:
+            rows = list(self._screen.display)
+        except Exception:  # noqa: BLE001 - diagnostico nunca derruba o app
+            return ""
+        lines = [row.rstrip() for row in rows]
+        while lines and not lines[-1]:
+            lines.pop()
+        while lines and not lines[0]:
+            lines.pop(0)
+        if max_lines > 0 and len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        return "\n".join(lines)
+
     def _flush_pyte(self) -> None:
         if not self._has_pending_render:
             return

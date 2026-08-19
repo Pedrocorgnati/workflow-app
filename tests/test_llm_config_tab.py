@@ -504,6 +504,91 @@ class TestParallelWorkersExclusivity:
         assert not w._use_codex_chk.isChecked()
         assert not w._use_grok_chk.isChecked()
 
+    # -- Item 013 (gap C24): ocupacao dos pares publicada no signal_bus ------ #
+
+    def _capture_occupancy(self, signal_bus, sink):
+        signal_bus.worker_occupancy_changed.connect(
+            lambda t2, t3: sink.append((t2, t3))
+        )
+
+    def test_occupancy_emitted_on_toggle(self, qapp):
+        """Marcar um worker publica a ocupacao do par (todos os 4 toggles)."""
+        from workflow_app.signal_bus import signal_bus
+        w = self._make_widget()
+        seen: list[tuple[str, str]] = []
+        self._capture_occupancy(signal_bus, seen)
+        try:
+            w._use_qwen_chk.setChecked(True)
+            assert seen and seen[-1] == ("qwen", "")
+            w._use_grok_chk.setChecked(True)
+            assert seen[-1] == ("qwen", "grok")
+            w._use_kimi_chk.setChecked(True)  # PW-01 troca qwen -> kimi
+            assert seen[-1] == ("kimi", "grok")
+            w._use_kimi_chk.setChecked(False)
+            assert seen[-1] == ("", "grok")
+        finally:
+            signal_bus.worker_occupancy_changed.disconnect()
+
+    def test_occupancy_emitted_on_restore_outside_blocksignals(self, qapp):
+        """O restore usa blockSignals, entao os toggles NAO rodam no boot.
+
+        Sem um emit proprio, a MetricsBar ficaria cega justamente na sessao
+        recem-aberta - que e quando a auto-recuperacao mais dispara.
+        """
+        from PySide6.QtCore import QSettings
+        from workflow_app.signal_bus import signal_bus
+        stg = QSettings("systemForge", "workflow-app")
+        stg.setValue("worker/t2_selected", "qwen")
+        stg.setValue("worker/t3_selected", "grok")
+        stg.sync()
+        w = self._make_widget()
+        seen: list[tuple[str, str]] = []
+        self._capture_occupancy(signal_bus, seen)
+        try:
+            w._restore_worker_selection()
+            assert not w._use_kimi_chk.isChecked()
+            assert seen and seen[-1] == ("qwen", "grok")
+        finally:
+            signal_bus.worker_occupancy_changed.disconnect()
+            stg.remove("worker/t2_selected")
+            stg.remove("worker/t3_selected")
+            stg.sync()
+
+    def test_resolve_worker_occupancy_empty_pairs(self, qapp):
+        """Par sem worker marcado resolve `""` - vazio, nao "desconhecido"."""
+        w = self._make_widget()
+        for chk in (
+            w._use_kimi_chk,
+            w._use_qwen_chk,
+            w._use_codex_chk,
+            w._use_grok_chk,
+        ):
+            chk.setChecked(False)
+        assert w._resolve_worker_occupancy() == ("", "")
+
+    def test_persist_and_emit_agree(self, qapp):
+        """O que vai para o QSettings e o que vai para o sinal e a MESMA
+        resolucao: duas leituras paralelas dos checkboxes divergiriam."""
+        from PySide6.QtCore import QSettings
+        from workflow_app.signal_bus import signal_bus
+        w = self._make_widget()
+        seen: list[tuple[str, str]] = []
+        self._capture_occupancy(signal_bus, seen)
+        try:
+            w._use_qwen_chk.setChecked(True)
+            w._use_codex_chk.setChecked(True)
+            stg = QSettings("systemForge", "workflow-app")
+            assert seen[-1] == (
+                stg.value("worker/t2_selected"),
+                stg.value("worker/t3_selected"),
+            )
+        finally:
+            signal_bus.worker_occupancy_changed.disconnect()
+            stg = QSettings("systemForge", "workflow-app")
+            stg.remove("worker/t2_selected")
+            stg.remove("worker/t3_selected")
+            stg.sync()
+
     def test_main_worker_same_provider_toast(self, qapp, qtbot):
         from workflow_app.signal_bus import signal_bus
         w = self._make_widget()

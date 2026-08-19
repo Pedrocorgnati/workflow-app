@@ -400,6 +400,28 @@ class CommandItemWidget(QWidget):
         )
         self._interaction_badge.setFixedHeight(18)
 
+        # Dialect badge (item 012 / R-J5) — sinal visual de que ESTA linha sera
+        # SUPRIMIDA no dispatch sob o Main corrente: o dispatcher emite
+        # `listener_helper_pulse` e nada chega ao PTY. O comportamento e correto
+        # e documentado (llm-routing-div.md §14.5), mas era indistinguivel de bug
+        # para quem nao leu a rule — a linha aparecia na fila, o item ficava
+        # amarelo e o terminal nao recebia nada. Zero Silencio: o badge torna
+        # visivel o que ja acontecia em silencio. Ele NAO bloqueia dispatch, NAO
+        # emite toast e NAO muda o pulso (isso seria reabrir C12, fechado pelo
+        # item 011 como "avisa, nao barra" por D4).
+        # Sem emoji (house style): a distincao vem de cor/borda, mesmo padrao do
+        # badge de interacao e de `_apply_exec_style`.
+        self._dialect_badge = QLabel("dialeto")
+        self._dialect_badge.setProperty("testid", "queue-item-dialect-badge")
+        self._dialect_badge.setStyleSheet(
+            "color: #FBBF24; font-size: 9px; font-weight: 600;"
+            " font-family: monospace; padding: 1px 4px;"
+            " border: 1px solid #FBBF24; border-radius: 3px;"
+        )
+        self._dialect_badge.setFixedHeight(18)
+        self._dialect_badge.setVisible(False)
+        layout.addWidget(self._dialect_badge)
+
         # Model badge — construido para preservar API publica (ex.:
         # set_model, testes que leem _model_badge.text()), mas nao
         # renderizado: as badges de model/auto foram removidas dos itens
@@ -534,6 +556,30 @@ class CommandItemWidget(QWidget):
     def dispatch_text(self) -> str:
         """Return the dispatch text (with flags) or fallback to command_text()."""
         return self._dispatch_text if self._dispatch_text is not None else self.command_text()
+
+    def set_dialect_badge(self, visible: bool, tooltip: str = "") -> None:
+        """Liga/desliga o badge de dialeto e aplica o tooltip (item 012 / R-J5).
+
+        Chamado pelo ponto unico de re-render do queue widget
+        (`_refresh_items_live_state`), alimentado pelo predicado PURO
+        `model_effort_equivalence.is_suppressed_directive` — o mesmo predicado
+        que espelha os cinco dispatchers, para que o badge nao possa divergir do
+        que o dispatch realmente faz.
+
+        Idempotente: chamar duas vezes com o mesmo valor nao acumula estado.
+        """
+        self._dialect_badge.setVisible(bool(visible))
+        self._dialect_badge.setToolTip(tooltip or "")
+
+    def is_dialect_badge_visible(self) -> bool:
+        """True quando o badge de dialeto esta visivel (acessor para teste).
+
+        Existe para o teste afirmar sem tocar o widget interno — `isVisible()`
+        do proprio QLabel devolveria False para um item fora de uma janela
+        exibida (QT_QPA_PLATFORM=offscreen), o que confundiria "escondido por
+        decisao" com "escondido por nao ter parent visivel".
+        """
+        return not self._dialect_badge.isHidden()
 
     def set_highlighted(self, highlighted: bool) -> None:
         """Mark this item as the 'current' command (matches queue-last-command)."""
@@ -704,6 +750,26 @@ class CommandItemWidget(QWidget):
     def _on_exec_clicked(self) -> None:
         """Clique no botao unico: recalcula o provider AGORA (criterio de
         rejeicao 8) e roteia ao handler do provider efetivo.
+
+        CONTRATO CANONICO DOS DOIS CAMINHOS (item 012 / D5). "Recalcula AGORA"
+        deixou de ser regra so deste clique e passou a ser o regime UNICO de
+        roteamento do widget. Os tres caminhos de dispatch obedecem ao mesmo
+        estado vivo:
+
+          1. este clique per-item -> `effective_provider()` -> resolver
+             injetado `CommandQueueWidget._resolve_item_provider`;
+          2. o botao de step (`CommandQueueWidget._on_step_btn_clicked`) —
+             SEGUNDO caminho, que ate o item 011 consumia o contrato congelado
+             no enqueue (item 019) e desde o item 012 chama o MESMO
+             `_resolve_item_provider`;
+          3. a seta verde (`CommandQueueWidget._dispatch_green_arrow`), que ja
+             lia os radios ao vivo.
+
+        Nao existe mais snapshot de enqueue: trocar Main LLM, worker ou flag
+        depois de enfileirar re-interpreta o item ja enfileirado, por decisao
+        humana explicita (D5), e o re-render retroativo do label/`dispatch_text`
+        e do badge de dialeto acompanha via
+        `CommandQueueWidget._refresh_items_live_state`.
 
         Sent -> toggle reset (paridade com a seta verde legada). Provider None
         (Desabilitado) -> nao despacha; apenas reafirma o estado cinza."""

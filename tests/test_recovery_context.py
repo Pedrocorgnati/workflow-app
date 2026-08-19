@@ -8,7 +8,9 @@ Contract (TASK 06 of loop 06-01-listener-recovery-command):
 - sanitize channel/reason to [A-Za-z0-9._-]; corrupted channel -> BLOCKED
 - atomic write (temp + os.replace), UTF-8, no overwrite (-2/-3 suffix)
 - first line = disclaimer; minimum fields always present (INDISPONIVEL when
-  absent); output masked {first10}***{last4}
+  absent); output redacted by VALUE FORMAT (secrets out, diagnostico in) —
+  o contrato antigo `{first10}***{last4}` foi revogado em 2026-08-19 porque
+  cegava o agente de recuperacao
 - blacksmith/recovery/ must stay covered by .gitignore
 """
 
@@ -26,8 +28,11 @@ from workflow_app.metrics_bar.recovery_context import (
     UNAVAILABLE,
     RecoveryContext,
     RecoveryContextBlocked,
+    extract_paths,
     llm_for_channel,
+    mask_command,
     mask_output,
+    render_context,
     sanitize_token,
     write_recovery_context,
 )
@@ -94,7 +99,8 @@ def test_minimum_fields_present_with_unavailable_sentinel(tmp_path: Path):
 # ── ASSERT 5: llm_for_channel binding + unmapped -> INDISPONIVEL ──────────── #
 
 
-def test_llm_for_channel_binding(tmp_path: Path):
+def test_legacy_regime_llm_for_channel_binding(tmp_path: Path):
+    """G-2: sem ocupacao propagada, os defaults antigos valem inalterados."""
     assert llm_for_channel("workspace") == "kimi"
     assert llm_for_channel("workspace_xterm") == "codex"
     assert llm_for_channel("interactive") == "claude"
@@ -102,20 +108,117 @@ def test_llm_for_channel_binding(tmp_path: Path):
     assert llm_for_channel("garbage-channel") == UNAVAILABLE
 
 
-# ── ASSERT 6: output excerpt masked as {first10}***{last4} ──────────────── #
+def test_llm_for_channel_uses_occupancy(tmp_path: Path):
+    """G-1: a ocupacao real vence o default do par."""
+    assert llm_for_channel("workspace", t2_llm="qwen") == "qwen"
+    assert llm_for_channel("workspace_xterm", t3_llm="grok") == "grok"
+    # Canal desconhecido segue INDISPONIVEL mesmo com ocupacao presente.
+    assert llm_for_channel("garbage-channel", t2_llm="qwen") == UNAVAILABLE
 
 
-def test_output_excerpt_masked(tmp_path: Path):
+def test_render_context_llm_line_reflects_occupancy(tmp_path: Path):
+    """A linha `- llm:` do snapshot e o artefato que o LLM socorrista le."""
+    def _line(**kw):
+        ctx = RecoveryContext(
+            channel=kw.pop("channel", "workspace"),
+            reason="BLOCKED",
+            autocast_state="on",
+            **kw,
+        )
+        return [
+            ln
+            for ln in render_context(
+                ctx, when=datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+            ).splitlines()
+            if ln.startswith("- llm:")
+        ][0]
+
+    assert _line(t2_llm="qwen") == "- llm: qwen"
+    assert _line(channel="workspace_xterm", t3_llm="grok") == "- llm: grok"
+    # Sem sinal e par vazio caem no default, sempre com a marca visivel.
+    assert _line().startswith("- llm: kimi (fallback:")
+    assert _line(t2_llm="").startswith("- llm: kimi (fallback:")
+    assert _line() != _line(t2_llm="")
+
+
+# ── ASSERT 6: excerpt redige segredo E preserva o diagnostico ───────────── #
+
+
+def test_output_excerpt_redacts_secret_keeps_diagnostic(tmp_path: Path):
+    """O excerto e a unica prova de POR QUE o canal caiu: nao pode virar `***`.
+
+    Contrato revogado (`{first10}***{last4}`) mascarava pelo NOME do campo e
+    entregava `You've hit ***2 AM` ao agente de recuperacao. Agora a redacao e
+    por FORMATO do valor: o token some, a mensagem de erro fica.
+    """
     secret = "sk-ABCDEFGHIJ-very-long-secret-token-WXYZ"
+    excerpt = (
+        "Error: quota excedida ate 2026-08-20T00:34Z\n"
+        f"usando token {secret} no request\n"
+        "ver blacksmith/recovery/context/README.md"
+    )
     target = write_recovery_context(
-        _make(output_excerpt=secret), repo_root=tmp_path, when=_FIXED
+        _make(output_excerpt=excerpt), repo_root=tmp_path, when=_FIXED
     )
     text = target.read_text(encoding="utf-8")
-    assert f"output_excerpt: {secret[:10]}***{secret[-4:]}" in text
-    # raw secret middle must not leak
+    # segredo fora
+    assert secret not in text
     assert "very-long-secret-token" not in text
-    # short snippet fully masked
-    assert mask_output("short") == "***"
+    # diagnostico dentro
+    assert "quota excedida ate 2026-08-20T00:34Z" in text
+    # multi-linha vira bloco literal indentado, sem quebrar a lista `- chave:`
+    assert "- output_excerpt: |" in text
+    assert "    Error: quota excedida" in text
+    # ausencia continua sendo sentinela, nunca omissao
+    assert mask_output(None) == UNAVAILABLE
+    assert mask_output("   ") == UNAVAILABLE
+    # trecho sem segredo passa intacto
+    assert mask_output("short") == "short"
+
+
+def test_output_excerpt_truncates_keeping_tail(tmp_path: Path):
+    """Truncar pelo INICIO: o erro que derrubou o canal vive na cauda."""
+    body = "linha de ruido\n" * 500 + "ERRO FINAL AQUI"
+    out = mask_output(body)
+    assert out.endswith("ERRO FINAL AQUI")
+    assert out.startswith("[... inicio truncado ...]")
+    assert len(out) < len(body)
+
+
+def test_last_command_redacted_single_line(tmp_path: Path):
+    """`last_command` tambem pode carregar segredo (export TOKEN=...)."""
+    secret = "sk-ABCDEFGHIJ-very-long-secret-token-WXYZ"
+    target = write_recovery_context(
+        _make(last_command=f"export TOK={secret}\n/loop:review"),
+        repo_root=tmp_path,
+        when=_FIXED,
+    )
+    text = target.read_text(encoding="utf-8")
+    assert secret not in text
+    assert "export TOK=" in text
+    assert mask_command(None) == UNAVAILABLE
+    # colapsa quebras: last_command e item de lista de UMA linha
+    assert "- last_command: export TOK=[REDACTED] /loop:review" in text
+
+
+def test_extract_paths_order_dedup_and_limit():
+    """Heuristica conservadora, ordem preservada, sem duplicata."""
+    src = (
+        "falhou em blacksmith/recovery/context/x.md e depois "
+        "ai-forge/workflow-app/src/workflow_app/metrics_bar/metrics_bar.py, "
+        "de novo blacksmith/recovery/context/x.md."
+    )
+    paths = extract_paths(src)
+    assert paths == [
+        "blacksmith/recovery/context/x.md",
+        "ai-forge/workflow-app/src/workflow_app/metrics_bar/metrics_bar.py",
+    ]
+    # prosa sem path nao inventa nada
+    assert extract_paths("nenhum caminho aqui") == []
+    assert extract_paths(None) == []
+    # limite respeitado
+    many = " ".join(f"src/a{i}.py" for i in range(30))
+    assert len(extract_paths(many, limit=5)) == 5
 
 
 # ── ASSERT 7: sanitization of channel/reason to [A-Za-z0-9._-] ──────────── #

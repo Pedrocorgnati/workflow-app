@@ -168,6 +168,86 @@ def test_snapshot_content_is_diagnostic(mb, tmp_path, monkeypatch):
     assert "llm: codex" in body  # main_llm tracked into the snapshot
 
 
+# ── Snapshot diagnostico: comando + tail + paths ─────────────────────────── #
+
+
+def test_snapshot_carries_last_command_excerpt_and_paths(
+    mb, tmp_path, monkeypatch
+):
+    """O snapshot precisa dizer QUAL comando caiu e POR QUE.
+
+    Antes deste contrato os tres campos saiam `INDISPONIVEL` e um recovery
+    disparado em sessao fria era cego — proibido pela FASE 2 de
+    /tools:listener-recovery.
+    """
+    monkeypatch.setattr(mb, "_repo_root_path", lambda: tmp_path)
+    mb.set_output_tail_provider(
+        lambda ch: (
+            "Erro ao rodar em blacksmith/loop/x/tasks/items/task-010.md\n"
+            "exit 1"
+        )
+        if ch == "interactive"
+        else ""
+    )
+    mb._signal_bus.run_command_in_terminal.emit(
+        "/loop:iteraction:execute-task --task blacksmith/loop/x/t.md"
+    )
+    captured = _capture_recovery_signal(mb)
+    _force_failed(mb, "interactive", "BLOCKED")
+    mb._fire_recovery_prompt("interactive")
+
+    from pathlib import Path
+
+    body = Path(captured[0][2]).read_text(encoding="utf-8")
+    assert "/loop:iteraction:execute-task --task blacksmith/loop/x/t.md" in body
+    assert "exit 1" in body
+    assert "blacksmith/loop/x/tasks/items/task-010.md" in body
+    assert "INDISPONIVEL" not in body.split("detected_paths:")[0]
+
+
+def test_snapshot_degrades_without_provider(mb, tmp_path, monkeypatch):
+    """Sem provider injetado o comportamento anterior e preservado."""
+    monkeypatch.setattr(mb, "_repo_root_path", lambda: tmp_path)
+    captured = _capture_recovery_signal(mb)
+    _force_failed(mb, "workspace", "BLOCKED")
+    mb._fire_recovery_prompt("workspace")
+
+    from pathlib import Path
+
+    body = Path(captured[0][2]).read_text(encoding="utf-8")
+    assert "output_excerpt: INDISPONIVEL" in body
+    assert "last_command: INDISPONIVEL" in body
+
+
+def test_last_command_is_per_channel(mb):
+    """Comando de um canal nao pode aparecer no snapshot de outro."""
+    mb._signal_bus.run_command_in_terminal.emit("/cmd-t1")
+    mb._signal_bus.run_command_in_workspace_terminal.emit("/cmd-t2")
+    assert mb._last_command["interactive"] == "/cmd-t1"
+    assert mb._last_command["workspace"] == "/cmd-t2"
+    assert "workspace_xterm" not in mb._last_command
+
+
+def test_broken_tail_provider_does_not_break_snapshot(
+    mb, tmp_path, monkeypatch
+):
+    """Provider que explode degrada para INDISPONIVEL, nao derruba o app."""
+
+    def _boom(_ch):
+        raise RuntimeError("terminal morreu")
+
+    monkeypatch.setattr(mb, "_repo_root_path", lambda: tmp_path)
+    mb.set_output_tail_provider(_boom)
+    captured = _capture_recovery_signal(mb)
+    _force_failed(mb, "interactive", "BLOCKED")
+    mb._fire_recovery_prompt("interactive")
+
+    from pathlib import Path
+
+    body = Path(captured[0][2]).read_text(encoding="utf-8")
+    assert "output_excerpt: INDISPONIVEL" in body
+
+
 # ── LLM resolution per channel ───────────────────────────────────────────── #
 
 
@@ -175,9 +255,59 @@ def test_main_llm_changed_caches_for_interactive(mb):
     mb._signal_bus.main_llm_changed.emit("codex")
     assert mb._main_llm == "codex"
     assert mb._llm_for_channel("interactive") == "codex"
-    # Workers are fixed regardless of Main LLM.
+    # G-2 (legacy regime): sem sinal de ocupacao, os pares mantem os defaults
+    # historicos - trocar o Main LLM nunca mexeu nos workers.
     assert mb._llm_for_channel("workspace") == "kimi"
     assert mb._llm_for_channel("workspace_xterm") == "codex"
+
+
+def test_legacy_regime_occupancy_absent_marks_fallback(mb):
+    """Nenhuma emissao de ocupacao = fallback marcado, nunca certeza."""
+    assert mb._t2_llm is None and mb._t3_llm is None
+    src = mb._llm_source_for_channel("workspace")
+    assert src.llm == "kimi" and src.is_fallback
+
+
+def test_worker_occupancy_signal_updates_channels(mb):
+    """G-1: a ocupacao publicada pela fila chega ao resolver da MetricsBar."""
+    mb._signal_bus.worker_occupancy_changed.emit("qwen", "grok")
+    assert mb._t2_llm == "qwen" and mb._t3_llm == "grok"
+    assert mb._llm_for_channel("workspace") == "qwen"
+    assert mb._llm_for_channel("workspace_xterm") == "grok"
+    assert not mb._llm_source_for_channel("workspace").is_fallback
+
+
+def test_worker_occupancy_empty_pair_is_accepted_as_empty(mb):
+    """`""` e ocupacao valida (par vazio), distinta de `None`."""
+    mb._signal_bus.worker_occupancy_changed.emit("", "")
+    assert mb._t2_llm == "" and mb._t3_llm == ""
+    src = mb._llm_source_for_channel("workspace")
+    assert src.llm == "kimi" and src.is_fallback
+    assert "nenhum worker marcado" in src.note
+
+
+def test_worker_occupancy_out_of_roster_is_discarded_with_toast(mb):
+    """Zero Silencio: valor invalido nao sobrescreve cache nem passa calado."""
+    mb._signal_bus.worker_occupancy_changed.emit("qwen", "grok")
+    toasts: list[tuple[str, str]] = []
+    mb._signal_bus.toast_requested.connect(
+        lambda msg, level: toasts.append((msg, level))
+    )
+    mb._signal_bus.worker_occupancy_changed.emit("claude", "grok")
+    assert mb._t2_llm == "qwen"  # cache anterior preservado
+    assert mb._t3_llm == "grok"  # par conforme segue aceito
+    assert len(toasts) == 1
+    assert toasts[0][1] == "warning"
+    assert "T2=" in toasts[0][0]
+
+
+def test_recovery_snapshot_carries_occupancy(mb, tmp_path, monkeypatch):
+    """A ocupacao tem que atravessar ate o snapshot em disco."""
+    monkeypatch.setattr(mb, "_repo_root_path", lambda: tmp_path)
+    mb._signal_bus.worker_occupancy_changed.emit("qwen", "grok")
+    path = mb._build_recovery_snapshot("workspace", "BLOCKED")
+    assert path is not None
+    assert "- llm: qwen" in path.read_text(encoding="utf-8")
 
 
 def test_main_kimi_reason_carried_into_signal(mb, tmp_path, monkeypatch):

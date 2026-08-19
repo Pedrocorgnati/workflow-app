@@ -129,6 +129,51 @@ class ProviderCapabilityLoader:
         """
         return self.get_capability(command, provider, role, capability) == _STATUS_DISPONIVEL
 
+    def get_mapped_capabilities(
+        self,
+        command: str,
+        provider: str,
+        role: str,
+    ) -> dict[str, str] | None:
+        """Mapeamento CRU `{capability: status}` da tripla, ou `None`.
+
+        Acessor **read-only** (item 011). Existe porque a API fail-closed nao
+        distingue "nao mapeado" de "mapeado como indisponivel": `get_capability`
+        devolve `indisponivel` com `_REASON_NAO_MAPEADO` nos dois casos. Quem
+        precisa AVISAR (e nao barrar) sobre capability por comando precisa dessa
+        distincao, senao avisa sobre os ~601 comandos que simplesmente nao estao
+        nos 21 do snapshot.
+
+        Contratos:
+          - `None` quando a tripla nao existe (comando fora da matriz, provider
+            fora do comando, role fora do provider) ou o snapshot esta ausente.
+          - copia rasa do dicionario **como esta no snapshot**, sem normalizacao,
+            sem default, sem fail-closed.
+          - NAO le o arquivo autoral (C-01) e NAO altera `_failure_reason`:
+            `get_capability`/`is_available`/`get_failure_reason` permanecem
+            fail-closed byte-a-byte.
+        """
+        self._load()
+        assert self._data is not None
+
+        matrix = self._data.get("matrix")
+        if not isinstance(matrix, dict):
+            return None
+
+        cmd_data = matrix.get(command)
+        if not isinstance(cmd_data, dict):
+            return None
+
+        provider_data = cmd_data.get(provider)
+        if not isinstance(provider_data, dict):
+            return None
+
+        role_data = provider_data.get(role)
+        if not isinstance(role_data, dict):
+            return None
+
+        return dict(role_data)
+
     def get_failure_reason(self) -> str | None:
         """Motivo do fail-closed quando aplicavel.
 

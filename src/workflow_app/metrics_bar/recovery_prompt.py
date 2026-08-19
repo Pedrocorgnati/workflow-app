@@ -12,13 +12,21 @@ so escalar para relatorio ou pergunta em ultimo caso.
 
 Fonte canonica do fluxo: ai-forge/rules/workflow-app-listeners.md (secao de
 auto-recuperacao) + ai-forge/rules/llm-routing-div.md (canal->LLM).
-Binding canal->LLM: interactive=Main LLM (radio), workspace=Kimi (T2),
-workspace_xterm=Codex (T3).
+Binding canal->LLM: interactive=Main LLM (radio), workspace=worker marcado do
+par T2, workspace_xterm=worker marcado do par T3 - com FALLBACK MARCADO no
+texto quando a ocupacao do par ainda nao chegou. A resolucao nao mora mais
+aqui: delega a `metrics_bar/channel_llm.resolve_channel_llm` (gap C24).
 
 Modulo PURO (sem Qt, sem IO) para ser trivialmente testavel.
 """
 
 from __future__ import annotations
+
+from workflow_app.metrics_bar.channel_llm import (
+    MAIN_ROSTER,
+    ChannelLLM,
+    resolve_channel_llm,
+)
 
 RECOVERY_REASONS: frozenset[str] = frozenset(
     {
@@ -42,26 +50,59 @@ _VALID_CHANNELS: frozenset[str] = frozenset(
 )
 
 
-def llm_for_channel(channel: str, main_llm: str) -> str:
-    """Resolve qual LLM ocupa o canal.
+def llm_for_channel(
+    channel: str,
+    main_llm: str,
+    *,
+    t2_llm: str | None = None,
+    t3_llm: str | None = None,
+) -> str:
+    """Resolve qual LLM ocupa o canal (delega ao resolver unico).
 
-    workspace      -> kimi  (Parallel Worker Kimi, T2)
-    workspace_xterm-> codex (Parallel Worker Codex, T3)
-    interactive    -> Main LLM (radio queue-div-main-llm):
-                      claude|codex|kimi|qwen|grok
+    workspace       -> worker marcado do par T2 (kimi|qwen); sem ocupacao
+                       conhecida, cai no default legado `kimi`.
+    workspace_xterm -> worker marcado do par T3 (codex|grok); sem ocupacao
+                       conhecida, cai no default legado `codex`.
+    interactive     -> Main LLM (radio queue-div-main-llm):
+                       claude|codex|kimi|qwen|grok
+    qualquer outro  -> "claude" (o prompt SEMPRE precisa de um destinatario;
+                       contrato deliberadamente divergente do de
+                       `recovery_context.llm_for_channel`, que devolve
+                       INDISPONIVEL porque o snapshot nunca pode inventar um).
 
-    O roster do canal interactive tem que acompanhar o roster do radio: um Main
-    ausente daqui cai em "claude" e o prompt de recuperacao passa a instruir o
-    LLM errado, sem sinal para o operador.
+    `t2_llm`/`t3_llm` sao keyword-only com default `None` para que os callsites
+    anteriores a C24 continuem compilando - e caiam no fallback DOCUMENTADO em
+    vez de num mapa fixo que mente em silencio. Quem precisa saber se o valor e
+    fallback usa `llm_source_for_channel`.
     """
-    if channel == "workspace":
-        return "kimi"
-    if channel == "workspace_xterm":
-        return "codex"
-    return (
-        main_llm
-        if main_llm in ("claude", "codex", "kimi", "qwen", "grok")
-        else "claude"
+    return resolve_channel_llm(
+        channel,
+        main_llm=main_llm,
+        t2_llm=t2_llm,
+        t3_llm=t3_llm,
+        unmapped="claude",
+    ).llm
+
+
+def llm_source_for_channel(
+    channel: str,
+    main_llm: str,
+    *,
+    t2_llm: str | None = None,
+    t3_llm: str | None = None,
+) -> ChannelLLM:
+    """Igual a `llm_for_channel`, mas devolve o resultado TIPADO.
+
+    Quem monta texto para o operador (cabecalho do prompt, toast, linha
+    `- llm:` do snapshot) precisa distinguir ocupacao viva de default legado -
+    caso contrario o fallback vira certeza fingida (Zero Silencio).
+    """
+    return resolve_channel_llm(
+        channel,
+        main_llm=main_llm,
+        t2_llm=t2_llm,
+        t3_llm=t3_llm,
+        unmapped="claude",
     )
 
 
@@ -144,12 +185,22 @@ _REASON_HINTS: dict[str, str] = {
 
 
 def _ask_clause(llm: str, channel: str) -> str:
-    """Clausula da alternativa PERGUNTAR — mecanismo por LLM."""
+    """Clausula da alternativa PERGUNTAR — mecanismo por LLM.
+
+    Qwen e Grok caem DE PROPOSITO no ramo generico (bloco azul + marcador
+    `>>> PERGUNTA AO OPERADOR <<<`): nenhum dos dois tem `/tools:auq-interview`,
+    que e um slash-command Claude. Registrado explicitamente para que a
+    ausencia deles no ramo `claude` nao pareca omissao de C24.
+    """
     if llm == "claude":
         return (
-            "use /skill:auq-interview (modo inline). Esse comando JA emite o sinal "
-            "azul automaticamente antes de cada pergunta. Aguarde a resposta antes "
-            "de continuar."
+            "rode /tools:auq-interview no proprio terminal, SEM argumento (argumento "
+            "posicional ativa o modo direto, que escreve arquivo; queremos o modo "
+            "inline). Ele JA emite o sinal azul automaticamente antes de cada "
+            "pergunta — nao rode bloco azul manual junto. Leve TODAS as duvidas "
+            "bloqueantes de uma vez (AskUserQuestion aceita ate 4 por chamada). "
+            "NAO execute a FASE FINAL do /tools:auq-interview: ela emite success e "
+            "pintaria o dot de verde antes de a correcao existir."
         )
     return (
         "emita o sinal azul primeiro rodando este bloco bash uma vez:\n"
@@ -168,13 +219,23 @@ def _ask_clause(llm: str, channel: str) -> str:
     )
 
 
-def build_recovery_prompt(*, llm: str, reason: str, channel: str) -> str:
+def build_recovery_prompt(
+    *,
+    llm: str,
+    reason: str,
+    channel: str,
+    llm_source: ChannelLLM | None = None,
+) -> str:
     """Monta o prompt de auto-recuperacao colado no terminal que falhou.
 
     Args:
-        llm: "claude" | "codex" | "kimi" — agente que ocupa o terminal.
+        llm: agente que ocupa o terminal — qualquer slug de `MAIN_ROSTER`
+            ("claude" | "codex" | "kimi" | "qwen" | "grok").
         reason: motivo da falha (ex: BLOCKED, RESSALVAS, VERIFY_FAILED).
         channel: "interactive" | "workspace" | "workspace_xterm".
+        llm_source: resultado tipado de `llm_source_for_channel`, quando o
+            chamador o tem. Fallback marcado prefixa o cabecalho; ausencia do
+            argumento nao inventa marca nenhuma.
 
     Returns:
         Texto unico (multi-linha) pronto para colar no REPL do CLI.
@@ -183,9 +244,15 @@ def build_recovery_prompt(*, llm: str, reason: str, channel: str) -> str:
     """
     if channel not in _VALID_CHANNELS:
         channel = "interactive"
-    if llm not in ("claude", "codex", "kimi"):
+    # Roster completo (inclui qwen e grok). O clamp anterior a
+    # ("claude", "codex", "kimi") era C24 reaparecendo DENTRO do builder: um
+    # Qwen corretamente resolvido no T2 ainda viraria "claude" aqui.
+    if llm not in MAIN_ROSTER:
         llm = "claude"
     reason = (reason or "FAILURE").strip() or "FAILURE"
+    fallback_note = ""
+    if llm_source is not None and llm_source.is_fallback and llm_source.note:
+        fallback_note = f"[{llm_source.note}]\n"
 
     hint = _REASON_HINTS.get(reason, f"Diagnostique a causa da falha ({reason}) e corrija.")
     success_block = _success_notify_block(channel)
@@ -193,7 +260,8 @@ def build_recovery_prompt(*, llm: str, reason: str, channel: str) -> str:
     ask = _ask_clause(llm, channel)
 
     return (
-        f"[AUTO-RECUPERACAO] Canal: {channel} | Falha: {reason}\n"
+        f"{fallback_note}"
+        f"[AUTO-RECUPERACAO] Canal: {channel} | Falha: {reason} | LLM: {llm}\n"
         "O autocast foi pausado. TENTE RESOLVER AGORA SEM PEDIR AO USUARIO.\n"
         "\n"
         f"[CONTEXTO DA FALHA: {reason}]\n"
@@ -218,12 +286,26 @@ def build_recovery_prompt(*, llm: str, reason: str, channel: str) -> str:
         "  - O que o usuario precisa fazer passo a passo para resolver.\n"
         "NAO emita o notify de sucesso (o vermelho permanece ate o usuario agir).\n"
         "\n"
-        "━━━ CAMINHO 3 — PERGUNTAR (ultima instancia) ━━━\n"
-        f"Se precisar de input do usuario antes de agir, {ask}\n"
+        "━━━ CAMINHO 3 — PERGUNTAR (quando a barreira e decisao humana) ━━━\n"
+        "Se NAO conseguir resolver E o motivo for que a correcao depende de uma\n"
+        "resposta ou decisao que so o operador pode dar (escopo, prioridade,\n"
+        "comportamento esperado, valor de configuracao, qual de dois caminhos\n"
+        f"incompativeis seguir), {ask}\n"
+        "\n"
+        "Depois que o operador responder, o ciclo NAO acaba na resposta:\n"
+        "  1. Aplique as correcoes que as respostas destravaram.\n"
+        "  2. Valide (reexecute o gate/teste/condicao que falhou).\n"
+        "  3. Validou -> emita o notify de SUCESSO do Caminho 1 (verde).\n"
+        "  4. Nao validou -> NAO emita sucesso. Resposta obtida nao e correcao\n"
+        "     aplicada; caia para o Caminho 2 (RELATORIO).\n"
         "\n"
         "REGRAS: (1) Prefira o Caminho 1 — resolva sem pedir ajuda. "
         "(2) Zero Assumido: nao invente dados criticos; se tiver duvida sobre "
         "um valor especifico, use o Caminho 3 antes de agir. "
-        "(3) Nao tente religar o autocast manualmente — o notify de SUCESSO "
+        "(3) Barreira TECNICA (credencial, rede, permissao, ferramenta) e "
+        "Caminho 2; barreira de DECISAO HUMANA e Caminho 3 — nao escreva "
+        "relatorio pedindo ao operador que decida algo que ele responderia "
+        "agora no terminal aberto. "
+        "(4) Nao tente religar o autocast manualmente — o notify de SUCESSO "
         "do Caminho 1 ja faz isso automaticamente."
     )

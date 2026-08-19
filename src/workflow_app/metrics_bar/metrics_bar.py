@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -44,14 +45,17 @@ from PySide6.QtWidgets import (
 
 from workflow_app.app_instance import APP_SESSION_ID
 from workflow_app.config.feature_flags import instance_group_route_aware_enabled
+from workflow_app.metrics_bar.channel_llm import T2_ROSTER, T3_ROSTER, ChannelLLM
 from workflow_app.metrics_bar.recovery_context import (
     RecoveryContext,
     RecoveryContextBlocked,
+    extract_paths,
     write_recovery_context,
 )
 from workflow_app.metrics_bar.recovery_prompt import (
     RECOVERY_REASONS,
     llm_for_channel,
+    llm_source_for_channel,
 )
 from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
@@ -1105,13 +1109,23 @@ class MetricsBar(QWidget):
         # ── Red-listener auto-recovery (ai-forge/rules/workflow-app-listeners.md) ──
         # When a dot turns red by a SEMANTIC failure AND autocast was on, wait
         # 2s then paste a recovery prompt into the SAME terminal (with Enter).
-        # _main_llm tracks which CLI occupies T1 (workers are fixed by channel:
-        # T2=kimi, T3=codex). _recovery_timer holds the per-channel 2s timers.
+        # _main_llm tracks which CLI occupies T1. _t2_llm/_t3_llm track which
+        # worker OCUPA cada par (gap C24, 2026-08-19): a premissa antiga de que
+        # "workers sao fixos por canal (T2=kimi, T3=codex)" morreu quando
+        # SF_PARALLEL_WORKERS_V2 expos qwen/grok, e o mapa constante passou a
+        # nomear o LLM errado no snapshot diagnostico. Distincao obrigatoria
+        # (Zero Estados Indefinidos): `None` = o sinal de ocupacao ainda NAO
+        # chegou (consumidor cai em fallback EXPLICITAMENTE marcado), `""` =
+        # chegou e o par esta vazio (nenhum worker marcado) - tambem fallback,
+        # mas com texto proprio. Nunca colapsar os dois em `""`.
+        # _recovery_timer holds the per-channel 2s timers.
         # _recovery_reason carries the failure reason to the timeout callback.
         # _recovery_attempted is the per-failure-streak loop guard: a channel
         # gets at most ONE auto-recovery until it genuinely recovers (green) or
         # the human clicks the dot — preventing an infinite recover→fail loop.
         self._main_llm: str = "claude"
+        self._t2_llm: str | None = None
+        self._t3_llm: str | None = None
         self._recovery_timer: dict[str, QTimer] = {}
         self._recovery_reason: dict[str, str] = {}
         self._recovery_attempted: set[str] = set()
@@ -1121,6 +1135,17 @@ class MetricsBar(QWidget):
         # (a) succeeded), the autocast is re-armed automatically. Discarded on
         # human dot-click (via _on_dot_recovery_reset) to prevent stale re-arms.
         self._autocast_aborted_by_recovery: set[str] = set()
+        # Ultimo comando despachado por canal. Alimentado pelos slots
+        # `_on_command_dispatched_*`, que ja recebem o texto — o dado sempre
+        # esteve passando por aqui, so nao era retido. Sem isso o snapshot de
+        # recuperacao grava `last_command: INDISPONIVEL` e o agente de
+        # recuperacao nao sabe sequer qual comando derrubou o canal.
+        self._last_command: dict[str, str] = {}
+        # Provider opcional de tail de terminal, injetado pela MainWindow (que
+        # e quem detem os OutputPanel). Mantido como callable para a MetricsBar
+        # nao importar painel nenhum: o acoplamento fica na janela, que ja
+        # conhece os dois lados. Ausente -> excerto vira INDISPONIVEL.
+        self._output_tail_provider: Callable[[str], str] | None = None
 
     def _setup_git_overlay(self) -> None:
         """Configure overlay label for git info (bottom-right corner)."""
@@ -1553,6 +1578,9 @@ class MetricsBar(QWidget):
 
         # Main LLM (T1) tracking for the red-listener auto-recovery prompt.
         bus.main_llm_changed.connect(self._on_main_llm_changed)
+        # Ocupacao real dos pares T2/T3 (emissor: CommandQueueWidget). Sem ela
+        # o resolver cai em fallback marcado, nunca em certeza inventada.
+        bus.worker_occupancy_changed.connect(self._on_worker_occupancy_changed)
 
         # Auto-recovery loop guard reset: when a dot leaves a priority state by
         # going green/idle (busy_changed False) OR by a human click that resets
@@ -2653,6 +2681,7 @@ class MetricsBar(QWidget):
         """
         self._bump_command_epoch("interactive")
         self._release_idle_lock("interactive")
+        self._record_dispatched_command("interactive", cmd)
         # Raise the notify-authoritative fence for real commands; helpers
         # (/clear /model /effort, cd, CLI launches) green via their own auto-idle
         # timer and must NOT raise it (they never write a notify). See
@@ -2666,6 +2695,7 @@ class MetricsBar(QWidget):
         """Bound slot — a new workspace command was dispatched."""
         self._bump_command_epoch("workspace")
         self._release_idle_lock("workspace")
+        self._record_dispatched_command("workspace", cmd)
         self._awaiting_notify["workspace"] = not self._is_helper_command(cmd)
         self._dot_workspace.set_busy(True)
         self._maybe_schedule_helper_auto_idle("workspace", cmd)
@@ -2674,6 +2704,7 @@ class MetricsBar(QWidget):
     def _on_command_dispatched_workspace_xterm(self, cmd: str) -> None:
         self._bump_command_epoch("workspace_xterm")
         self._release_idle_lock("workspace_xterm")
+        self._record_dispatched_command("workspace_xterm", cmd)
         self._awaiting_notify["workspace_xterm"] = not self._is_helper_command(cmd)
         self._dot_workspace_xterm.set_busy(True)
         self._maybe_schedule_helper_auto_idle("workspace_xterm", cmd)
@@ -2704,18 +2735,21 @@ class MetricsBar(QWidget):
         if t1:
             self._bump_command_epoch("interactive")
             self._release_idle_lock("interactive")
+            self._record_dispatched_command("interactive", cmd)
             self._awaiting_notify["interactive"] = not is_helper
             self._dot_interactive.set_busy(True)
             self._maybe_schedule_helper_auto_idle("interactive", cmd)
         if t2:
             self._bump_command_epoch("workspace")
             self._release_idle_lock("workspace")
+            self._record_dispatched_command("workspace", cmd)
             self._awaiting_notify["workspace"] = not is_helper
             self._dot_workspace.set_busy(True)
             self._maybe_schedule_helper_auto_idle("workspace", cmd)
         if t3:
             self._bump_command_epoch("workspace_xterm")
             self._release_idle_lock("workspace_xterm")
+            self._record_dispatched_command("workspace_xterm", cmd)
             self._awaiting_notify["workspace_xterm"] = not is_helper
             self._dot_workspace_xterm.set_busy(True)
             self._maybe_schedule_helper_auto_idle("workspace_xterm", cmd)
@@ -2723,6 +2757,7 @@ class MetricsBar(QWidget):
         if not (t1 or t2 or t3):
             self._bump_command_epoch("interactive")
             self._release_idle_lock("interactive")
+            self._record_dispatched_command("interactive", cmd)
             self._awaiting_notify["interactive"] = not is_helper
             self._dot_interactive.set_busy(True)
             self._maybe_schedule_helper_auto_idle("interactive", cmd)
@@ -3011,10 +3046,39 @@ class MetricsBar(QWidget):
     )
 
     def _on_main_llm_changed(self, llm: str) -> None:
-        """Cache which CLI occupies T1 (interactive). Workers are fixed by
-        channel (workspace=kimi, workspace_xterm=codex)."""
+        """Cache which CLI occupies T1 (interactive).
+
+        Os workers T2/T3 NAO vem por aqui: chegam em
+        `_on_worker_occupancy_changed`, porque nao sao fixos por canal desde
+        que `SF_PARALLEL_WORKERS_V2` expos qwen/grok (gap C24).
+        """
         if llm in self._MAIN_LLM_SLUGS:
             self._main_llm = llm
+
+    def _on_worker_occupancy_changed(self, t2_llm: str, t3_llm: str) -> None:
+        """Cache a ocupacao dos pares de worker publicada pela fila.
+
+        Valida contra os rosters antes de aceitar. `""` e valor legitimo (par
+        sem worker marcado). Valor fora do roster e DESCARTADO com toast: um
+        descarte silencioso deixaria o cache anterior valendo como se fosse o
+        atual - exatamente o modo de falha que este pacote existe para matar
+        (Zero Silencio). O par conforme e aceito mesmo quando o outro nao e.
+        """
+        rejeitados: list[str] = []
+        if t2_llm in T2_ROSTER or t2_llm == "":
+            self._t2_llm = t2_llm
+        else:
+            rejeitados.append(f"T2={t2_llm!r}")
+        if t3_llm in T3_ROSTER or t3_llm == "":
+            self._t3_llm = t3_llm
+        else:
+            rejeitados.append(f"T3={t3_llm!r}")
+        if rejeitados:
+            self._signal_bus.toast_requested.emit(
+                "Ocupacao de worker fora do roster descartada "
+                f"({', '.join(rejeitados)}); mantida a ocupacao anterior.",
+                "warning",
+            )
 
     def _on_dot_recovery_reset(self, channel: str, busy: bool) -> None:
         """Clear the auto-recovery loop guard when a channel genuinely leaves a
@@ -3037,8 +3101,58 @@ class MetricsBar(QWidget):
             self._fail_reason.pop(channel, None)
             self._fail_since.pop(channel, None)
 
+    def _record_dispatched_command(self, channel: str, cmd: str) -> None:
+        """Retem o ultimo comando despachado no canal (para o snapshot).
+
+        Guarda apenas a primeira linha e no maximo 500 chars: o que interessa
+        ao agente de recuperacao e a identidade do comando, nao um heredoc
+        inteiro colado no terminal. Diagnostico nunca derruba o app, entao a
+        entrada vazia simplesmente nao substitui a anterior."""
+        text = (cmd or "").strip()
+        if not text:
+            return
+        first_line = text.splitlines()[0].strip()
+        if len(first_line) > 500:
+            first_line = first_line[:500] + " [...]"
+        self._last_command[channel] = first_line
+
+    def set_output_tail_provider(
+        self, provider: Callable[[str], str] | None
+    ) -> None:
+        """Injeta o provedor de tail de terminal por canal (MainWindow).
+
+        Assinatura: `provider(channel) -> str` (texto plano, ja sem ANSI).
+        Mantido opcional: sem provider o snapshot degrada para
+        `output_excerpt: INDISPONIVEL`, que e exatamente o comportamento
+        anterior — nenhum teste existente que constroi a MetricsBar isolada
+        precisa saber deste canal."""
+        self._output_tail_provider = provider
+
+    def _output_tail_for(self, channel: str) -> str:
+        """Tail do canal via provider injetado; string vazia se ausente/falho."""
+        provider = self._output_tail_provider
+        if provider is None:
+            return ""
+        try:
+            return provider(channel) or ""
+        except Exception:  # noqa: BLE001 - diagnostico nunca derruba o app
+            return ""
+
     def _llm_for_channel(self, channel: str) -> str:
-        return llm_for_channel(channel, self._main_llm)
+        return llm_for_channel(
+            channel, self._main_llm, t2_llm=self._t2_llm, t3_llm=self._t3_llm
+        )
+
+    def _llm_source_for_channel(self, channel: str) -> ChannelLLM:
+        """Igual a `_llm_for_channel`, mas preservando a PROCEDENCIA.
+
+        Quem so precisa do nome usa o metodo acima; quem precisa dizer ao
+        humano que aquele nome e um chute (toast, cabecalho do prompt) usa
+        este e le `.is_fallback` / `.note`.
+        """
+        return llm_source_for_channel(
+            channel, self._main_llm, t2_llm=self._t2_llm, t3_llm=self._t3_llm
+        )
 
     def _schedule_recovery_prompt(self, channel: str, reason: str) -> None:
         """Arm the 2s single-shot timer that fires the recovery prompt."""
@@ -3062,20 +3176,30 @@ class MetricsBar(QWidget):
     def _build_recovery_snapshot(self, channel: str, reason: str) -> "Path | None":
         """Materializa o snapshot diagnostico da tentativa (TASK 05).
 
-        Snapshot minimo por design: MetricsBar nao retem scrollback nem o
-        ultimo comando por canal, entao passamos apenas os campos que temos
-        (canal, reason, autocast_state, main_llm); o helper preenche os demais
-        com `INDISPONIVEL`. Nunca aborta por falta de scrollback. Qualquer
-        falha real de IO (ou canal corrompido) retorna None — o chamador
-        decide nao emitir um sinal sem `context_file` valido."""
+        Preenche os quatro campos sempre disponiveis (canal, reason,
+        autocast_state, main_llm) mais os tres diagnosticos: `last_command`
+        vem do cache alimentado pelos slots de dispatch, `output_excerpt` do
+        provider de tail injetado pela MainWindow e `detected_paths` da
+        varredura de ambos. Campo que nao resolve vira `INDISPONIVEL` no
+        helper — degradar e permitido, mentir nao. Nunca aborta por falta de
+        scrollback. Qualquer falha real de IO (ou canal corrompido) retorna
+        None — o chamador decide nao emitir um sinal sem `context_file`
+        valido."""
         repo_root = self._repo_root_path()
         if repo_root is None:
             return None
+        last_command = self._last_command.get(channel) or None
+        tail = self._output_tail_for(channel) or None
         ctx = RecoveryContext(
             channel=channel,
             reason=reason,
             autocast_state="on" if self._btn_autocast.isChecked() else "off",
             main_llm=self._main_llm,
+            last_command=last_command,
+            output_excerpt=tail,
+            detected_paths=extract_paths(last_command, tail),
+            t2_llm=self._t2_llm,
+            t3_llm=self._t3_llm,
         )
         try:
             return write_recovery_context(ctx, repo_root=repo_root)
@@ -3115,7 +3239,12 @@ class MetricsBar(QWidget):
         # Mark BEFORE emitting so a re-failure of the recovery itself is
         # loop-guarded (the channel stays red until the human steps in).
         self._recovery_attempted.add(channel)
-        llm = self._llm_for_channel(channel)
+        llm_source = self._llm_source_for_channel(channel)
+        llm = llm_source.llm
+        if llm_source.is_fallback and llm_source.note:
+            # O humano precisa saber que o nome do LLM no toast e inferido, e
+            # nao a ocupacao observada (Zero Silencio).
+            llm = f"{llm_source.llm} - {llm_source.note}"
         context_file = self._build_recovery_snapshot(channel, reason)
         if context_file is None:
             # Sem context_file valido nao ha como emitir um sinal conforme o

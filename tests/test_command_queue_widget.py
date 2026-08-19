@@ -27,6 +27,9 @@ from workflow_app.command_queue.command_item_widget import (
     render_with_mcp_flags,
 )
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+from workflow_app.command_queue.model_effort_equivalence import (
+    is_suppressed_directive,
+)
 from workflow_app.command_queue.provider_router import Provider, _PROVIDER_FAMILIES
 from workflow_app.config.feature_flags import llm_config_v2_flag_name
 from workflow_app.domain import (
@@ -1184,10 +1187,10 @@ class TestCodexLlmRouting:
     ):
         """Main trocado DEPOIS do enqueue: `/model opus` nao existe no Codex.
 
-        Alcancavel pelo CLIQUE per-item, que le o radio ao vivo. O caminho
-        `_on_step_btn_clicked` nao chega aqui: ele usa o `FrozenContract`
-        (item 019) e continua tratando o item como Claude, despachando raw ao
-        T1 — que e o comportamento certo para uma linha em dialeto Claude."""
+        Item 012 (D5): alcancavel pelos TRES caminhos, porque todos leem o
+        radio ao vivo. `_on_step_btn_clicked` deixou de consultar o contrato
+        congelado do item 019 e passou a suprimir a diretiva pelo mesmo criterio
+        do clique per-item; o badge de dialeto e o aviso visual da supressao."""
         emitted_t1: list[str] = []
         pulses: list[str] = []
         signal_bus.run_command_in_terminal.connect(emitted_t1.append)
@@ -3089,13 +3092,14 @@ class TestStepPathInvokesProviderRouter:
     def test_classify_provider_called_with_routing_state(self, widget, real_spec):
         """O step path chama classify_provider com um RoutingState montado a
         partir dos checkboxes de worker e do Main LLM (nunca route-toggles).
-        Item 019: o RoutingState vem do contrato congelado no enqueue."""
+        Item 012 (D5): o RoutingState e montado AO VIVO por
+        `_resolve_item_provider`, o mesmo resolver do clique per-item."""
         from unittest.mock import patch
 
         from workflow_app.command_queue.provider_router import Provider, RoutingState
 
-        # Item 019: setar ANTES do load_pipeline (enqueue) para que o frozen
-        # contract capture o estado correto.
+        # Item 012: a ordem deixou de importar (o estado e lido no clique),
+        # mas setar antes do load_pipeline mantem o teste legivel.
         widget._use_kimi_chk.setChecked(True)
         if getattr(widget, "_use_codex_chk", None) is not None:
             widget._use_codex_chk.setChecked(False)
@@ -3120,8 +3124,9 @@ class TestStepPathInvokesProviderRouter:
         assert widget._last_classified_provider == Provider.KIMI
 
     def test_routing_state_reflects_codex_worker_and_main_llm(self, widget, real_spec, monkeypatch):
-        """codex_worker_enabled e main_llm refletem o estado da queue no enqueue.
-        Item 019: o RoutingState vem do contrato congelado no enqueue."""
+        """codex_worker_enabled e main_llm refletem o estado VIVO da queue.
+        Item 012 (D5): lido no dispatch por `_resolve_item_provider`, nao
+        congelado no enqueue."""
         from unittest.mock import patch
 
         from workflow_app.command_queue.provider_router import Provider, RoutingState
@@ -3130,8 +3135,7 @@ class TestStepPathInvokesProviderRouter:
                 getattr(widget, "_force_kimi_chk", None) is None:
             pytest.skip("widget sem checkboxes de worker codex / main kimi")
 
-        # Item 019: setar ANTES do load_pipeline (enqueue) para que o frozen
-        # contract capture o estado correto.
+        # Item 012: a ordem deixou de importar (o estado e lido no clique).
         widget._use_kimi_chk.setChecked(False)
         widget._use_codex_chk.setChecked(True)
         widget._force_kimi_chk.setChecked(True)  # Main LLM = kimi
@@ -5600,130 +5604,359 @@ class TestMapParity:
         assert "grok" in self._dest_keys()
 
 
-# ── Item 019: frozen contract at enqueue ────────────────────────────────── #
+# ── Item 012 (D5): estado vivo como regime unico de dispatch ───────────── #
 
 
-class TestFrozenContractAtEnqueue:
-    """Item 019: o contrato de execucao (Main LLM, flags, provider) e congelado
-    no enqueue. Trocas de Main entre enqueue e dispatch nao alteram o item."""
+class TestLiveStateAtDispatch:
+    """Item 019 revogado pelo item 012 (D5): o estado vivo e regime unico.
 
-    def test_frozen_contract_captured_at_enqueue(self, qapp, qtbot):
-        """Cada item recebe um FrozenContract com o estado atual no enqueue."""
-        from workflow_app.command_queue.command_queue_widget import FrozenContract
+    O contrato congelado no enqueue (`FrozenContract` + o dicionario
+    `id(item) -> contrato`) foi REMOVIDO, nao gateado. Os tres caminhos de
+    dispatch — clique per-item, botao de step e seta verde — leem a UI no
+    momento do clique. Trocar Main LLM, worker ou flag depois de enfileirar
+    re-interpreta o item ja enfileirado, por decisao humana explicita.
+
+    Cada teste abaixo e o sucessor 1-para-1 de um teste do item 019, com o
+    sinal invertido: o que antes afirmava "congelou" agora afirma "vive".
+    """
+
+    def test_no_contract_cache_exists(self, qapp, qtbot):
+        """Sucessor de `test_frozen_contract_captured_at_enqueue`.
+
+        O enqueue NAO captura contrato nenhum: nem a dataclass, nem o cache
+        keyed por `id(item)`, nem o reader publico. C16 fechado por remocao do
+        mecanismo — nao ha kill-switch a consultar."""
+        import workflow_app.command_queue.command_queue_widget as cqw
+
+        assert not hasattr(cqw, "FrozenContract"), (
+            "FrozenContract foi removido pelo item 012; reintroduzi-la "
+            "reabriria os dois regimes de roteamento (C14)."
+        )
 
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w.show()
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
 
-        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
-        w.load_pipeline(specs)
+        assert not hasattr(w, "_frozen_contracts")
+        assert not hasattr(w, "get_frozen_contract")
+        assert not hasattr(w, "_capture_frozen_contract")
 
-        item = w._items[0]
-        fc = w.get_frozen_contract(item)
-        assert fc is not None, "FrozenContract deve ser capturado no enqueue"
-        assert isinstance(fc, FrozenContract)
-        assert fc.main_llm == "claude"
-        assert fc.kimi_worker_enabled is False
-        assert fc.codex_worker_enabled is False
-        assert fc.active_flags == ()
-        assert fc.resolved_provider == Provider.CLAUDE
+    def test_main_llm_change_is_observed_by_queue(self, qapp, qtbot):
+        """Sucessor de `test_frozen_contract_survives_main_llm_change`.
 
-    def test_frozen_contract_survives_main_llm_change(self, qapp, qtbot):
-        """Troca de Main LLM apos enqueue NAO altera o FrozenContract."""
+        Sinal invertido: a troca de Main DEPOIS do enqueue e observada pela
+        fila ja montada — o resolver responde o Main novo e o re-render
+        retroativo (`_refresh_items_live_state`) reavalia os itens que ja
+        estavam la."""
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w.show()
 
-        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
-        w.load_pipeline(specs)
-        item = w._items[0]
+        # `/model opus` e diretiva de dialeto Claude: sob Main Codex ela e
+        # suprimida no dispatch, entao o badge e o observavel da troca.
+        w.load_pipeline([
+            CommandSpec("/model opus", ModelName.OPUS, position=1),
+            CommandSpec("/prd-create", ModelName.OPUS, position=2),
+        ])
+        assert w._resolve_interactive_main_llm() == "claude"
+        assert w._items[0].is_dialect_badge_visible() is False
 
-        fc_before = w.get_frozen_contract(item)
-        assert fc_before.main_llm == "claude"
+        w._main_codex_radio.setChecked(True)
 
-        # Muda Main LLM para codex
-        if getattr(w, "_main_codex_radio", None):
-            w._main_codex_radio.setChecked(True)
-
-        # Contract congelado NAO mudou
-        fc_after = w.get_frozen_contract(item)
-        assert fc_after is fc_before, "FrozenContract e imutavel (frozen dataclass)"
-        assert fc_after.main_llm == "claude"
-
-        # Main LLM atual mudou, mas o contract nao
         assert w._resolve_interactive_main_llm() == "codex"
-        assert w.get_frozen_contract(item).main_llm == "claude"
+        assert w._items[0].is_dialect_badge_visible() is True, (
+            "item enfileirado ANTES da troca tem que ser reavaliado (D5)"
+        )
+        assert w._items[1].is_dialect_badge_visible() is False
 
-    def test_frozen_contract_main_change_dispatch_uses_frozen(
-        self, qapp, qtbot
-    ):
-        """Dispatch consome o contrato congelado, nao o estado atual da UI.
+    def test_dispatch_uses_live_main_llm(self, qapp, qtbot):
+        """Sucessor de `test_frozen_contract_main_change_dispatch_uses_frozen`.
 
-        Cobre o caso: item enfileirado sob Claude, Main muda para Codex antes
-        do dispatch. O _on_step_btn_clicked deve usar main_llm=claude (frozen),
-        nao codex (UI atual).
-        """
+        Item enfileirado sob Claude, Main girado para Codex antes do dispatch:
+        o step tem que despachar no formato CODEX (estado vivo), nunca raw ao
+        T1 no formato Claude."""
         from unittest.mock import MagicMock
 
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w.show()
 
-        specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
-        w.load_pipeline(specs)
-        item = w._items[0]
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        assert w._resolve_interactive_main_llm() == "claude"
 
-        # Congelou sob Claude
-        fc = w.get_frozen_contract(item)
-        assert fc.main_llm == "claude"
-        assert fc.resolved_provider == Provider.CLAUDE
-
-        # Muda Main para codex
-        if getattr(w, "_main_codex_radio", None):
-            w._main_codex_radio.setChecked(True)
+        w._main_codex_radio.setChecked(True)
         assert w._resolve_interactive_main_llm() == "codex"
 
-        # Espiona o signal via slot conectado
-        emitted: list[str] = []
-        signal_bus.run_command_in_terminal.connect(
-            lambda cmd: emitted.append(cmd)
+        emitted_t1: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        try:
+            w._orch_preflight_main_credential = MagicMock(return_value=None)
+            w._dispatch_codex_command = MagicMock(return_value=True)
+            w._on_run_command = MagicMock()
+            w._items[0]._mark_as_sent = MagicMock()
+
+            w._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+
+        assert w._dispatch_codex_command.called, (
+            "Main vivo = codex: o step tem que usar a esteira Codex."
         )
+        assert w._dispatch_codex_command.call_args.kwargs.get("to_t1") is True
+        assert emitted_t1 == [], (
+            "nada pode ir raw ao T1 no formato Claude sob Main Codex."
+        )
+        # O preflight ORCH tambem tem que olhar a conta VIVA (item 018 + D5).
+        assert w._orch_preflight_main_credential.call_args.args[0] == "codex"
 
-        # Mock _on_run_command para evitar efeitos colaterais
-        w._on_run_command = MagicMock()
-        item._mark_as_sent = MagicMock()
+    def test_flag_toggle_is_retroactive(self, qapp, qtbot):
+        """Sucessor de `test_frozen_contract_flags_frozen`.
 
-        # Forca o step (dispatch)
-        w._on_step_btn_clicked()
+        Sinal invertido (C15): ligar `--kimi` depois do enqueue re-renderiza o
+        item ja enfileirado e o sufixo despachado acompanha o label."""
+        from unittest.mock import MagicMock
 
-        # O dispatch deve ter usado Claude (frozen), nao Codex (UI atual).
-        # Sob Claude main, o comando vai raw para T1 (sem transformacao).
-        assert len(emitted) > 0, "run_command_in_terminal deve ter sido emitido"
-        # O comando emitido NAO deve ser o formato Codex (que adiciona
-        # prefixo executor). Deve ser o comando raw Claude.
-        assert "/prd-create" in emitted[0]
-
-    def test_frozen_contract_flags_frozen(self, qapp, qtbot):
-        """Troca de flags --kimi/--codex apos enqueue nao altera o contract."""
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w.show()
 
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        assert "--kimi" not in w._items[0].dispatch_text()
+
+        if getattr(w, "_flag_kimi_chk", None) is None:
+            pytest.skip("widget sem checkbox de flag --kimi")
+        w._flag_kimi_chk.setChecked(True)
+
+        assert "--kimi" in w._items[0].dispatch_text(), (
+            "o label do item ja enfileirado tem que refletir a flag nova."
+        )
+
+        emitted_t1: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted_t1.append)
+        try:
+            w._orch_preflight_main_credential = MagicMock(return_value=None)
+            w._on_run_command = MagicMock()
+            w._items[0]._mark_as_sent = MagicMock()
+            w._on_step_btn_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted_t1.append)
+
+        assert emitted_t1 and "--kimi" in emitted_t1[0], (
+            "o texto despachado tem que bater com o label (sem divergencia)."
+        )
+
+    def test_no_leak_on_widget_address_reuse(self, qapp, qtbot):
+        """O vazamento estrutural do item 019 morreu por construcao.
+
+        O cache era `dict[int, FrozenContract]` keyed por `id(item)`, com uma
+        escrita e ZERO `del`/`pop`/`clear`: depois de `deleteLater()` o CPython
+        reusa o endereco e o item NOVO herdava o contrato do item MORTO. Aqui a
+        fila e recarregada varias vezes (forcando reuso de endereco) e o
+        dispatch continua obedecendo ao Main vivo, nao ao Main de quando o
+        endereco foi usado pela primeira vez."""
+        import gc
+        from unittest.mock import MagicMock
+
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+
+        seen_ids: set[int] = set()
+        for _ in range(6):
+            w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+            seen_ids.add(id(w._items[0]))
+            gc.collect()
+
+        # Nenhum atributo do widget guarda estado keyed por id(item).
+        for attr in vars(w):
+            value = getattr(w, attr)
+            if isinstance(value, dict) and value:
+                assert not all(isinstance(k, int) for k in value), (
+                    f"{attr} parece um cache keyed por id(); "
+                    "o item 012 removeu esse padrao."
+                )
+
+        w._main_codex_radio.setChecked(True)
+        w._orch_preflight_main_credential = MagicMock(return_value=None)
+        w._dispatch_codex_command = MagicMock(return_value=True)
+        w._items[0]._mark_as_sent = MagicMock()
+        w._on_step_btn_clicked()
+
+        assert w._dispatch_codex_command.called, (
+            "o item recarregado obedece ao Main vivo, nao a residuo de endereco."
+        )
+
+    def test_click_and_step_share_one_regime(self, qapp, qtbot):
+        """Regime UNICO: clique per-item e step despacham identico.
+
+        Depois de trocar o Main pos-enqueue, os dois caminhos tem que produzir a
+        MESMA chamada de dispatch. Ate o item 011 divergiam por construcao (um
+        lia a UI, o outro o contrato congelado)."""
+        from unittest.mock import MagicMock
+
         specs = [CommandSpec("/prd-create", ModelName.OPUS, position=1)]
+
+        def _dispatch_via(path: str) -> tuple:
+            w = CommandQueueWidget()
+            qtbot.addWidget(w)
+            w.show()
+            w.load_pipeline(list(specs))
+            w._main_codex_radio.setChecked(True)
+            w._orch_preflight_main_credential = MagicMock(return_value=None)
+            w._dispatch_codex_command = MagicMock(return_value=True)
+            w._on_run_command = MagicMock()
+            w._items[0]._mark_as_sent = MagicMock()
+            if path == "step":
+                w._on_step_btn_clicked()
+            else:
+                w._items[0]._on_exec_clicked()
+            assert w._dispatch_codex_command.called, f"{path} nao despachou"
+            call = w._dispatch_codex_command.call_args
+            return (call.args, dict(call.kwargs))
+
+        step_call = _dispatch_via("step")
+        click_call = _dispatch_via("click")
+
+        assert step_call[0] == click_call[0], (
+            "step e clique tem que despachar o MESMO texto de comando."
+        )
+        assert step_call[1].get("to_t1") is True
+        assert click_call[1].get("to_t1") is True
+
+    def test_dialect_badge_both_legs(self, qapp, qtbot):
+        """Badge de dialeto (mitigacao de R-J5): avisa, nao barra (D4/C12).
+
+        Perna 1 — diretiva suprimida sob Main nao-Claude fica visivel com
+        tooltip. Perna 2 — comando comum e Main Claude ficam sem badge. Voltar
+        o Main para Claude apaga o badge (re-render retroativo)."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+
+        w.load_pipeline([
+            CommandSpec("/effort high", ModelName.OPUS, position=1),
+            CommandSpec("/prd-create", ModelName.OPUS, position=2),
+        ])
+
+        # Perna 2 sob Main Claude: nenhum badge. `/effort high` e diretiva
+        # LEGITIMA do Claude (o predicado devolve False), entao o badge apagado
+        # aqui e o comportamento correto — nao o efeito colateral de o badge
+        # nunca ter sido computado. Quem prova esse segundo caso e
+        # `test_dialect_badge_lights_at_enqueue_under_main_claude`.
+        assert w._items[0].is_dialect_badge_visible() is False
+        assert w._items[1].is_dialect_badge_visible() is False
+
+        w._main_codex_radio.setChecked(True)
+
+        # Perna 1: a diretiva ganha badge + tooltip explicando a supressao.
+        assert w._items[0].is_dialect_badge_visible() is True
+        tooltip = w._items[0]._dialect_badge.toolTip()
+        assert "suprimida" in tooltip and "codex" in tooltip
+        # Perna 2: comando comum segue sem badge.
+        assert w._items[1].is_dialect_badge_visible() is False
+
+        # O badge NAO barra o dispatch (C12 continua fechado como "avisa").
+        assert w._items[0].is_pending_run() is True
+
+        w._main_claude_radio.setChecked(True)
+        assert w._items[0].is_dialect_badge_visible() is False, (
+            "voltar para Claude tem que apagar o badge (re-render retroativo)."
+        )
+
+    def test_dialect_badge_lights_at_enqueue_under_main_claude(self, qapp, qtbot):
+        """Perna Main Claude do predicado, no ENQUEUE (item 012, finding F1/F3).
+
+        `is_suppressed_directive` devolve True sob Main Claude para residuo em
+        dialeto ESTRANGEIRO (`/model sol high`, `/reasoning yes`) — o cenario
+        R-J5 de fila salva sob outro Main e restaurada aqui. O badge tem que
+        acender ja no `load_pipeline`, sem depender de o operador trocar um
+        radio depois; caso contrario a unica mitigacao de UI de R-J5 nao existe
+        no momento em que o operador olha a fila.
+
+        O teste anterior usava `/effort high`, que NAO e suprimida sob Claude:
+        os asserts `is False` passavam vacuamente e mascaravam o badge nunca
+        ser computado no enqueue.
+        """
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        w._main_claude_radio.setChecked(True)
+
+        specs = [
+            CommandSpec("/model sol high", ModelName.OPUS, position=1),
+            CommandSpec("/reasoning yes", ModelName.OPUS, position=2),
+            CommandSpec("/effort high", ModelName.OPUS, position=3),
+            CommandSpec("/prd-create", ModelName.OPUS, position=4),
+        ]
         w.load_pipeline(specs)
-        item = w._items[0]
 
-        fc_before = w.get_frozen_contract(item)
-        assert fc_before.active_flags == ()
+        predicate = [
+            is_suppressed_directive(it.get_spec().name, "claude") for it in w._items
+        ]
+        badge = [it.is_dialect_badge_visible() for it in w._items]
+        assert predicate == [True, True, False, False]
+        assert badge == predicate, (
+            "badge tem que espelhar o predicado JA no enqueue: "
+            f"predicado={predicate} badge={badge}"
+        )
 
-        # Ativa --kimi flag
-        if getattr(w, "_flag_kimi_chk", None):
-            w._flag_kimi_chk.setChecked(True)
+        # Tooltip nomeia o Main sob o qual a linha morre.
+        tooltip = w._items[0]._dialect_badge.toolTip()
+        assert "suprimida" in tooltip and "claude" in tooltip
+        # Avisa, nao barra (C12/D4).
+        assert w._items[0].is_pending_run() is True
 
-        # Contract congelado NAO mudou
-        fc_after = w.get_frozen_contract(item)
-        assert fc_after.active_flags == ()
-        assert fc_after is fc_before
+    def test_dialect_badge_lights_on_add_command(self, qapp, qtbot):
+        """`add_command` tambem computa o estado vivo (item 012, finding F1).
+
+        `add_command` NAO passa por `adapt_specs_to_main`, entao e o caminho
+        onde uma diretiva chega inteira na fila sob Main nao-Claude. Sem o
+        re-render no enqueue o item nasce sem badge.
+        """
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        w._main_codex_radio.setChecked(True)
+
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+        w.add_command(CommandSpec("/model opus", ModelName.OPUS, position=2))
+
+        predicate = [
+            is_suppressed_directive(it.get_spec().name, "codex") for it in w._items
+        ]
+        badge = [it.is_dialect_badge_visible() for it in w._items]
+        assert predicate == [False, True]
+        assert badge == predicate, (
+            f"add_command tem que re-renderizar: predicado={predicate} badge={badge}"
+        )
+
+    def test_main_kimi_radio_rerenders_items(self, qapp, qtbot):
+        """`_on_force_kimi_toggled` re-renderiza (item 012, finding F2).
+
+        O radio Main Kimi (`_force_kimi_chk` e alias de `_main_kimi_radio`) era
+        o unico handler do eixo Main sem o ponto unico de re-render. A omissao
+        ficava mascarada porque desmarcar o radio anterior dispara o handler
+        daquele radio. Aqui o handler e chamado DIRETO, isolando o sitio.
+        """
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        w._main_claude_radio.setChecked(True)
+        w.load_pipeline([CommandSpec("/effort high", ModelName.OPUS, position=1)])
+        assert w._items[0].is_dialect_badge_visible() is False
+
+        # Marca o radio Kimi sem passar pelo sinal do radio anterior.
+        w._force_kimi_chk.blockSignals(True)
+        w._force_kimi_chk.setChecked(True)
+        w._force_kimi_chk.blockSignals(False)
+        w._on_force_kimi_toggled(True)
+
+        assert is_suppressed_directive("/effort high", "kimi") is True
+        assert w._items[0].is_dialect_badge_visible() is True, (
+            "o handler do radio Main Kimi tem que chamar o ponto unico de "
+            "re-render, sem depender do handler do radio anterior."
+        )
 
 
 class TestSnapshotUnderTranslation:
@@ -5989,35 +6222,39 @@ class TestMainLlmVariantRadios:
         finally:
             stg.remove("main_llm/selected")
 
-    def test_frozen_contract_carries_variant(self, widget, _v2):
-        """ST005: o snapshot do enqueue leva family + variante."""
+    def test_live_pair_carries_variant(self, widget, _v2):
+        """Item 012 (D5): a leitura VIVA leva family + variante.
+
+        Sucessor de `test_frozen_contract_carries_variant`: o snapshot de
+        enqueue foi removido, entao o leitor canonico da variante passou a ser
+        `_resolve_interactive_main_llm_pair()`, chamado no momento do uso."""
         widget._main_opus_radio.setChecked(True)
-        fc = widget._capture_frozen_contract(
+        family, variant = widget._resolve_interactive_main_llm_pair()
+        assert family == "claude"
+        assert variant == "opus"
+        assert widget._resolve_item_provider(
             CommandSpec("/prd-create", ModelName.OPUS, position=1)
-        )
-        assert fc.main_llm == "claude"
-        assert fc.main_llm_variant == "opus"
-        assert fc.resolved_provider is Provider.CLAUDE
+        ) is Provider.CLAUDE
 
         widget._main_claude_radio.setChecked(True)
-        fc_family = widget._capture_frozen_contract(
-            CommandSpec("/prd-create", ModelName.OPUS, position=1)
-        )
-        assert fc_family.main_llm == "claude"
-        assert fc_family.main_llm_variant is None
+        family_bare, variant_bare = widget._resolve_interactive_main_llm_pair()
+        assert family_bare == "claude"
+        assert variant_bare is None
 
-    def test_frozen_contract_variant_defaults_to_none(self):
-        """Default preserva o comportamento pre-item-004 em todo call site."""
-        from workflow_app.command_queue.command_queue_widget import FrozenContract
+    def test_live_pair_variant_is_none_for_bare_family(self, widget, _v2):
+        """Family nua devolve `variant=None` — comportamento pre-item-004.
 
-        fc = FrozenContract(
-            main_llm="claude",
-            kimi_worker_enabled=False,
-            codex_worker_enabled=False,
-            active_flags=(),
-            resolved_provider=Provider.CLAUDE,
-        )
-        assert fc.main_llm_variant is None
+        Sucessor de `test_frozen_contract_variant_defaults_to_none`: sem
+        dataclass a construir, a afirmacao passa a ser sobre o resolver vivo,
+        que e quem todo call site usa desde o item 012."""
+        for slug in ("claude", "codex", "qwen", "grok"):
+            radio = (widget._main_radio_map or {}).get(slug)
+            if radio is None:
+                continue
+            radio.setChecked(True)
+            family, variant = widget._resolve_interactive_main_llm_pair()
+            assert family == slug
+            assert variant is None
 
     def test_variant_radios_hidden_in_legacy_regime(self, qapp, qtbot):
         """Regime legado: nenhum radio novo no eixo Main.

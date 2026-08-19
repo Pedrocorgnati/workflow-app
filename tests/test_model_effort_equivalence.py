@@ -25,6 +25,7 @@ from workflow_app.command_queue.model_effort_equivalence import (
     is_directive_line,
     is_foreign_directive,
     is_native_directive,
+    is_suppressed_directive,
 )
 from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 
@@ -290,3 +291,62 @@ class TestSpecFieldsSurvive:
         out = adapt_specs_to_main([_spec("/model opus"), kept], "codex")
         assert out == [kept]
         assert out[0] is kept
+
+
+class TestIsSuppressedDirective:
+    """Item 012 (R-J5): o predicado que o badge de dialeto consome.
+
+    Ele NAO decide dispatch — espelha o que os cinco dispatchers ja fazem, para
+    que o aviso da UI diga a mesma verdade que o terminal. Por isso cada caso
+    abaixo esta amarrado ao guard equivalente do dispatcher.
+    """
+
+    @pytest.mark.parametrize(
+        "main", sorted(PROVIDERS_WITHOUT_MODEL_DIRECTIVES)
+    )
+    @pytest.mark.parametrize(
+        "name", ["/model opus", "/model sonnet", "/effort high", "/effort max"]
+    )
+    def test_non_claude_main_suppresses_every_directive(self, main, name):
+        """Main nao-Claude fecha em TODA diretiva (`is_directive_line`)."""
+        assert is_suppressed_directive(name, main) is True
+        assert is_directive_line(name) is True
+
+    @pytest.mark.parametrize(
+        "main", ["claude", *sorted(PROVIDERS_WITHOUT_MODEL_DIRECTIVES)]
+    )
+    @pytest.mark.parametrize("name", ["/prd-create", "/qa:trace --module 1", "/clear"])
+    def test_non_directive_is_never_suppressed(self, main, name):
+        """Comando comum (e `/clear`, que todo CLI entende) nunca some."""
+        assert is_suppressed_directive(name, main) is False
+
+    @pytest.mark.parametrize(
+        "name", ["/model opus", "/model haiku", "/effort high", "/effort max"]
+    )
+    def test_claude_main_keeps_legitimate_directives(self, name):
+        """Main Claude e fail-open: diretiva legitima NAO e suprimida."""
+        assert is_suppressed_directive(name, "claude") is False
+
+    @pytest.mark.parametrize(
+        "name", ["/model sol high", "/model spark low", "/model k3", "/reasoning yes"]
+    )
+    def test_claude_main_suppresses_proven_foreign_residue(self, name):
+        """Main Claude suprime SO o residuo comprovado (`is_foreign_directive`)."""
+        assert is_suppressed_directive(name, "claude") is True
+        assert is_foreign_directive(name) is True
+
+    @pytest.mark.parametrize("main", ["", None, "   ", "gpt-9"])
+    def test_unknown_main_falls_back_to_directive_line(self, main):
+        """Main desconhecido/vazio nao e Claude: usa o guard fechado.
+
+        Assimetria deliberada com `adapt_specs_to_main` (que e fail-open para
+        Main desconhecido): aqui o retorno so acende um badge de aviso, nunca
+        suprime nada — errar para o lado de avisar demais e barato, e o dispatch
+        segue sendo a autoridade."""
+        assert is_suppressed_directive("/model opus", main) is True
+        assert is_suppressed_directive("/prd-create", main) is False
+
+    def test_case_and_whitespace_are_normalized(self):
+        """`  /MODEL Opus ` sob ` Codex ` e a mesma linha que `/model opus`."""
+        assert is_suppressed_directive("  /MODEL Opus ", "  CODEX ") is True
+        assert is_suppressed_directive("/Reasoning Yes", "Claude") is True

@@ -58,6 +58,7 @@ from workflow_app.command_queue.model_effort_equivalence import (
     adapt_specs_to_main,
     is_directive_line,
     is_foreign_directive,
+    is_suppressed_directive,
 )
 from workflow_app.command_queue.provider_router import (
     Provider,
@@ -65,6 +66,7 @@ from workflow_app.command_queue.provider_router import (
     classify_provider,
 )
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
+from workflow_app.provider_capability_loader import get_loader as get_capability_loader
 from workflow_app.metrics_bar.recovery_prompt import RECOVERY_REASONS
 from workflow_app.domain import (
     CommandSpec,
@@ -864,31 +866,6 @@ class RenderedInsertion:
     listener_channel: str | None = None
 
 
-@dataclass(frozen=True)
-class FrozenContract:
-    """Snapshot do contrato de execucao de um item no momento do enqueue.
-
-    Item 019: congela Main LLM, flags de worker, sufixo de flags MCP e
-    provider resolvido para que trocas de configuracao entre enqueue e
-    dispatch nao alterem o item ja enfileirado. O dispatch consome este
-    snapshot, nunca o estado atual da UI.
-    """
-
-    main_llm: str
-    kimi_worker_enabled: bool
-    codex_worker_enabled: bool
-    active_flags: tuple[str, ...]
-    resolved_provider: Provider
-    qwen_worker_enabled: bool = False
-    grok_worker_enabled: bool = False
-    #: Item 004 (C6/ST005): variante de modelo do Main LLM no momento do
-    #: enqueue (`opus`, `sonnet`, `k3`) ou `None` quando o operador escolheu a
-    #: family nua. `main_llm` continua sendo SEMPRE a family — MF-01 proibe
-    #: variante virar provider, e `resolved_provider` deriva da family.
-    #: Default `None` = comportamento identico ao de antes do item 004 para
-    #: todo call site que constroi o contrato sem este campo.
-    main_llm_variant: str | None = None
-
 
 class CommandQueueWidget(QWidget):
     """Right sidebar showing the pipeline command queue."""
@@ -906,12 +883,6 @@ class CommandQueueWidget(QWidget):
         )
 
         self._items: list[CommandItemWidget] = []
-        # Item 019: contrato congelado por item (id(item) -> FrozenContract).
-        # Capturado no _make_item (enqueue), consumido no _on_step_btn_clicked
-        # (dispatch). Garante que trocas de Main LLM / flags entre enqueue e
-        # dispatch nao reinterpretam itens ja enfileirados.
-        self._frozen_contracts: dict[int, FrozenContract] = {}
-
         # Auto-loop (main-command-queue-auto-loop-btn, main_window): quando
         # ligado, o verde autoritativo do T1 rearma a fila — toda seta unica
         # ambar (item enviado) volta a verde/pendente. Só dispara com a fila
@@ -3691,6 +3662,12 @@ class CommandQueueWidget(QWidget):
 
         # Item 020: restaurar selecao de worker da sessao anterior.
         self._restore_worker_selection()
+        # ST003.3 (C24, belt-and-suspenders): hoje a MetricsBar e construida
+        # ANTES do CommandQueueWidget (main_window.py), entao o emit do restore
+        # acima chega. O singleShot(0) - idioma ja usado neste arquivo - garante
+        # que uma reordenacao futura da construcao nao volte a deixar a
+        # MetricsBar cega EM SILENCIO. Emissao dupla e inofensiva.
+        QTimer.singleShot(0, self._emit_worker_occupancy)
 
         main_layout.addWidget(play_bar)
 
@@ -8341,7 +8318,49 @@ class CommandQueueWidget(QWidget):
             item.set_highlighted(item.command_text() == cmd_text)
 
     def load_pipeline(self, specs: list[CommandSpec]) -> None:
-        """Populate the queue with CommandSpec objects."""
+        """Popula a fila com `CommandSpec` — funil unico de enfileiramento.
+
+        (a) A funcao e `-> None` e **destroi a fila existente** (`self._items`)
+        antes de remontar; nenhum dos 4 callsites trata retorno
+        (`main_window.py:8859` em `_on_pipeline_ready`, `main_window.py:9465` em
+        `_refresh_queue_ui`, `command_queue_widget.py:1112` na pipeline Daily
+        Loop, e `restore_queue_snapshot` aqui mesmo).
+
+        (b) Os dois preflights do topo (credencial ORCH do Main e capability por
+        comando) sao **informativos por decisao explicita (D4)**: emitem toast
+        `warning` e seguem. Rodam ANTES da destruicao da fila e ANTES de
+        `adapt_specs_to_main` justamente para que o operador possa trocar o Main
+        sem ter uma fila a meio caminho, e para que o aviso descreva a fila que
+        ele pediu — sob Main nao-Claude a traducao remove as linhas
+        `/model`/`/effort` e muda o tamanho da lista.
+
+        (c) O fail-closed real NAO esta aqui: e o guard de dispatch em
+        `_on_step_btn_clicked`, que faz `return` e avalia o Main VIVO
+        (`_resolve_interactive_main_llm()`). Item 012 (D5) revogou o
+        congelamento do item 019: nao existe mais contrato de enqueue, e o
+        radio corrente e a unica autoridade do dispatch.
+
+        (d) Callsite perigoso documentado: `restore_queue_snapshot` (`:11054`,
+        chamada em `:11167`) tambem passa por aqui, entao restaurar um snapshot
+        dispara os mesmos avisos.
+        """
+        # Item 011 (C12): preflight no TOPO, acima de `self._items.clear()` e de
+        # `adapt_specs_to_main`. Ele **avisa e nao barra** — D4 decidiu manter o
+        # preflight informativo, porque `load_pipeline` e `-> None` e destroi a
+        # fila antes de qualquer validacao: um `return` precoce ainda deixaria
+        # `_on_pipeline_ready` emitindo `pipeline_created` e o toast de sucesso
+        # "Pipeline carregado: N comandos" sobre uma fila que nao existe.
+        # Quem de fato barra e o guard de dispatch em `_on_step_btn_clicked`,
+        # que avalia o Main vivo (item 012 / D5).
+        # Fila vazia nao avisa (comportamento preservado).
+        if specs:
+            _orch_err = self._orch_preflight_main_credential()
+            if _orch_err is not None:
+                signal_bus.toast_requested.emit(_orch_err, "warning")
+            _cap_err = self._capability_preflight_specs(specs)
+            if _cap_err is not None:
+                signal_bus.toast_requested.emit(_cap_err, "warning")
+
         # Onda 4: clear DCP context — the new pipeline isn't (yet) backed by
         # a SPECIFIC-FLOW.json. The DCP handler will re-arm
         # _current_dcp_flow_path AFTER this signal returns, so DCP-sourced
@@ -8365,10 +8384,14 @@ class CommandQueueWidget(QWidget):
         # linhas `/model`/`/effort` somem, porque nenhum dos CLIs nao-Claude tem
         # diretiva textual equivalente (C27, evidencia em
         # `model_effort_equivalence`). A leitura acontece AQUI, no enqueue, e
-        # nao no dispatch: trocar o Main depois de carregar a fila NAO reescreve
-        # as linhas ja renderizadas, pelo mesmo motivo que o FrozenContract
-        # existe — o operador precisa poder ler na tela exatamente o que vai ser
-        # colado.
+        # nao no dispatch: `adapt_specs_to_main` REMOVE linhas (D-C27-2, item
+        # 002), e remocao nao e reversivel por re-render. Item 012 (D5) tornou o
+        # estado vivo o regime unico do DISPATCH, mas a composicao da LISTA
+        # continua sendo decidida no enqueue — trocar o Main depois de carregar
+        # nao ressuscita linha removida nem apaga linha ja materializada. O que
+        # o item 012 re-renderiza retroativamente e o sufixo de flags, o
+        # `dispatch_text` e o badge de dialeto (ver `_refresh_items_live_state`),
+        # nunca a composicao da fila.
         specs = adapt_specs_to_main(specs, self._resolve_interactive_main_llm())
 
         for spec in specs:
@@ -8387,18 +8410,17 @@ class CommandQueueWidget(QWidget):
 
         self._empty_widget.setVisible(False)
         self._list_widget.setVisible(True)
+        # Estado vivo no ENQUEUE (item 012, finding F1 do review-executed):
+        # `_refresh_items_live_state` e o unico sitio que chama
+        # `set_dialect_badge`. Sem esta chamada, uma fila carregada ou
+        # RESTAURADA ja contendo residuo em dialeto estrangeiro (`/model sol
+        # high`, `/reasoning yes`) nasce com o badge apagado, e a mitigacao de
+        # R-J5 so acende se o operador por acaso trocar um radio de Main
+        # depois — exatamente o cenario que o badge existe para cobrir.
+        # O metodo recomputa do zero (idempotente), entao a chamada e segura.
+        self._refresh_items_live_state()
         self._emit_progress_metrics()
         self._update_save_btn_state()
-
-        # Item 018: o preflight ORCH barra **no enqueue**, com motivo. Este e o
-        # ponto onde o operador ainda pode trocar o Main sem ter uma fila a meio
-        # caminho. O guard equivalente em `_on_step_btn_clicked` permanece como
-        # backstop fail-closed (a credencial pode sumir depois do enqueue), mas
-        # nao e mais o primeiro lugar onde o problema aparece.
-        if specs:
-            _orch_err = self._orch_preflight_main_credential()
-            if _orch_err is not None:
-                signal_bus.toast_requested.emit(_orch_err, "warning")
 
     def load_commands(self, commands: list[CommandSpec]) -> None:
         """Alias for load_pipeline() — called via signal pipeline_created."""
@@ -8422,6 +8444,11 @@ class CommandQueueWidget(QWidget):
 
         self._empty_widget.setVisible(False)
         self._list_widget.setVisible(True)
+        # Estado vivo no ENQUEUE (item 012, finding F1). `add_command` NAO passa
+        # por `adapt_specs_to_main`, entao e o caminho onde uma diretiva
+        # suprimida sob Main nao-Claude chega inteira na fila: sem o re-render
+        # o item nasce sem badge.
+        self._refresh_items_live_state()
         self._emit_progress_metrics()
 
     def _on_inline_add_clicked(self) -> None:
@@ -8771,58 +8798,14 @@ class CommandQueueWidget(QWidget):
                 active_flags=_active_flags,
             )
             item.set_dispatch_text(_full_dispatch)
-        # Item 019: congelar o contrato de execucao no enqueue. O snapshot
-        # captura Main LLM, workers, flags e provider resolvido ANTES de
-        # qualquer mutacao posterior da UI. O dispatch consome este snapshot.
-        self._frozen_contracts[id(item)] = self._capture_frozen_contract(spec)
+        # Item 012 (D5, revoga o item 019): NAO existe mais contrato congelado a
+        # capturar aqui. O dispatch (step, clique per-item e seta verde) le o
+        # estado vivo da UI no momento do clique. Como nao ha cache indexado por
+        # `id(item)`, o vazamento por reuso de endereco do CPython (item morto ->
+        # `deleteLater()` sem `del` no dicionario -> item novo herdando o
+        # contrato do morto) morre POR CONSTRUCAO: `load_pipeline`, `clear_queue`
+        # e `_on_remove_requested` nao tem mais estado paralelo a purgar.
         return item
-
-    def _capture_frozen_contract(self, spec: CommandSpec) -> FrozenContract:
-        """Snapshot do estado de roteamento atual (item 019 + item 020)."""
-        _kimi_on = bool(
-            getattr(self, "_use_kimi_chk", None) is not None
-            and self._use_kimi_chk.isChecked()
-        )
-        _codex_on = bool(
-            getattr(self, "_use_codex_chk", None) is not None
-            and self._use_codex_chk.isChecked()
-        )
-        _qwen_on = bool(
-            getattr(self, "_use_qwen_chk", None) is not None
-            and self._use_qwen_chk.isChecked()
-        )
-        _grok_on = bool(
-            getattr(self, "_use_grok_chk", None) is not None
-            and self._use_grok_chk.isChecked()
-        )
-        # Item 004 (ST005): uma unica leitura do eixo Main, ja em
-        # `(family, variant)`. `RoutingState.main_llm` e `resolved_provider`
-        # continuam recebendo a FAMILY — `classify_provider` raciocina em
-        # provider e `provider_router.py` esta congelado neste item.
-        _main_family, _main_variant = self._resolve_interactive_main_llm_pair()
-        return FrozenContract(
-            main_llm=_main_family,
-            kimi_worker_enabled=_kimi_on,
-            codex_worker_enabled=_codex_on,
-            active_flags=tuple(self._active_mcp_flags()),
-            resolved_provider=classify_provider(
-                spec,
-                RoutingState(
-                    kimi_worker_enabled=_kimi_on,
-                    codex_worker_enabled=_codex_on,
-                    main_llm=_main_family,
-                    qwen_worker_enabled=_qwen_on,
-                    grok_worker_enabled=_grok_on,
-                ),
-            ),
-            qwen_worker_enabled=_qwen_on,
-            grok_worker_enabled=_grok_on,
-            main_llm_variant=_main_variant,
-        )
-
-    def get_frozen_contract(self, item: CommandItemWidget) -> FrozenContract | None:
-        """Acessor do contrato congelado de um item (para testes e diagnostico)."""
-        return self._frozen_contracts.get(id(item))
 
     def _on_single_button_codex_dispatch(
         self, item: CommandItemWidget, cmd_text: str
@@ -8981,6 +8964,56 @@ class CommandQueueWidget(QWidget):
             "main_llm/selected", slug
         )
 
+    def _capability_preflight_specs(self, specs: list[CommandSpec]) -> str | None:
+        """Item 011 (C11/C12): capability por comando sob o Main corrente.
+
+        AVISA, nao barra (decisao humana D4). Retorna `None` quando nao ha nada
+        a dizer, ou UMA mensagem agregada — nunca uma por comando: aviso
+        repetido 40 vezes e ruido, e ruido esconde sinal.
+
+        Puro em relacao a fila: nao le nem escreve `self._items`. Recebe as
+        specs na forma **recebida** (dialeto Claude, ANTES de
+        `adapt_specs_to_main`), porque sob Main nao-Claude a traducao remove as
+        linhas `/model`/`/effort` e muda o tamanho da lista — avisar depois
+        descreveria uma fila que o operador nunca montou.
+
+        Silencioso para comando fora dos 21 do snapshot: `None` de
+        `get_mapped_capabilities` significa "nao mapeado", nao "indisponivel".
+        """
+        family = self._resolve_interactive_main_llm()
+        loader = get_capability_loader()
+
+        if loader.get_failure_reason() == "snapshot_ausente":
+            return "Capability preflight indisponivel: snapshot_ausente (aviso, nao barra)."
+
+        missing: list[tuple[str, str]] = []
+        for spec in specs:
+            name = getattr(spec, "name", "") or ""
+            if getattr(spec, "kind", "slash") == "local-action":
+                continue
+            if is_directive_line(name):
+                continue
+            slug = self._command_head(name)
+            if not slug or slug == "/clear":
+                continue
+            mapped = loader.get_mapped_capabilities(slug, family, "main")
+            if mapped is None:
+                continue
+            for capability, status in mapped.items():
+                if status != "disponivel":
+                    missing.append((slug, capability))
+
+        if not missing:
+            return None
+
+        examples = ", ".join(f"{slug}:{cap}" for slug, cap in missing[:3])
+        overflow = len(missing) - 3
+        suffix = f" (+{overflow})" if overflow > 0 else ""
+        return (
+            f"Capability preflight (aviso, nao barra): {len(missing)} item(ns) "
+            f"sem capability sob Main '{family}': {examples}{suffix}"
+        )
+
     def _orch_preflight_main_credential(self, main_llm: str | None = None) -> str | None:
         """Item 018: preflight de credencial do Main LLM antes do enqueue.
 
@@ -8988,13 +9021,15 @@ class CommandQueueWidget(QWidget):
         esta disponivel no ambiente. Retorna ``None`` quando OK, ou uma
         mensagem de erro quando a credencial esta ausente.
 
-        ``main_llm`` permite avaliar um Main **explicito** em vez do estado
-        atual da UI. O dispatch passa o Main do contrato congelado no enqueue
-        (item 019): um item enfileirado sob Claude tem que ser checado contra
-        a credencial do Claude mesmo que o operador tenha girado o radio para
-        Codex depois de enfileirar. Sem o parametro, cair no estado vivo faria
-        o preflight reinterpretar item ja congelado — que e exatamente o que o
-        contrato do item 019 proibe.
+        ``main_llm`` permite avaliar um Main **explicito** em vez de reler a UI
+        aqui dentro. Item 012 (D5, revoga o item 019): o dispatch passa o Main
+        **VIVO** (`_resolve_interactive_main_llm()`), porque e contra essa conta
+        que o comando vai de fato rodar — girar o radio para Codex depois de
+        enfileirar muda o destino real do item, entao checar a credencial de um
+        Main congelado avisaria sobre a conta errada. O parametro permanece
+        explicito (em vez de o metodo reler a UI sozinho) para manter uma unica
+        fonte do Main por dispatch: quem decide o roteamento e quem decide o
+        preflight leem o mesmo valor, no mesmo instante.
 
         **Fontes de verdade (PF-01, source.md §10.13).** Credencial de provider
         e **ORCH**: quem le e o agente/CLI, nao a aplicacao entregue. Por isso
@@ -9260,9 +9295,18 @@ class CommandQueueWidget(QWidget):
         )
 
     def _on_force_kimi_toggled(self, checked: bool) -> None:
-        """Main LLM Kimi preserves the old force-Kimi routing behavior."""
+        """Main LLM Kimi preserves the old force-Kimi routing behavior.
+
+        Item 012, finding F2: este e o handler do radio Main Kimi
+        (`_force_kimi_chk` e alias de `_main_kimi_radio`) e era o UNICO do eixo
+        Main sem o ponto unico de re-render. A omissao ficava mascarada porque
+        desmarcar o radio anterior dispara o handler daquele radio, que
+        re-renderiza — a mesma forma da omissao em `_on_main_claude_toggled`
+        que este item corrigiu.
+        """
         self._refresh_kimi_btn_visibility()
         self._refresh_flag_checkboxes_state()
+        self._refresh_items_live_state()
         if checked:
             signal_bus.main_llm_changed.emit("kimi")
 
@@ -9297,9 +9341,15 @@ class CommandQueueWidget(QWidget):
         self._persist_worker_selection()
 
     def _on_main_codex_toggled(self, checked: bool) -> None:
-        """Hook kept explicit for symmetry with Main Kimi."""
+        """Hook kept explicit for symmetry with Main Kimi.
+
+        Item 012 (D5): re-renderiza os itens ja enfileirados. Trocar o Main muda
+        o provider efetivo, logo muda o sufixo de flags, o `dispatch_text` e o
+        badge de dialeto que o dispatch vivo vai consumir.
+        """
         self._refresh_kimi_btn_visibility()
         self._refresh_flag_checkboxes_state()
+        self._refresh_items_live_state()
         if checked:
             signal_bus.main_llm_changed.emit("codex")
 
@@ -9307,23 +9357,41 @@ class CommandQueueWidget(QWidget):
         """Main LLM Claude is the default raw-dispatch path (T1 interactive).
 
         Emits main_llm_changed so MetricsBar can phrase the red-listener
-        auto-recovery prompt for Claude (uses /skill:auq-interview on the
-        ask path). See ai-forge/rules/llm-routing-div.md."""
+        auto-recovery prompt for Claude (uses /tools:auq-interview on the
+        ask path). See ai-forge/rules/llm-routing-div.md.
+
+        Item 012 (D5): passa a chamar `_refresh_kimi_btn_visibility()` — que os
+        outros tres handlers do eixo Main ja chamavam e este NAO chamava — e o
+        ponto unico de re-render. Sob o regime congelado a omissao era inocua
+        (o step lia o contrato); sob o regime vivo era divergencia real.
+        """
+        self._refresh_kimi_btn_visibility()
         self._refresh_flag_checkboxes_state()
+        self._refresh_items_live_state()
         if checked:
             signal_bus.main_llm_changed.emit("claude")
 
     def _on_main_qwen_toggled(self, checked: bool) -> None:
-        """Main LLM Qwen: dispatch via compiled path (D-32, item 007)."""
+        """Main LLM Qwen: dispatch via compiled path (D-32, item 007).
+
+        Item 012 (D5): re-renderiza os itens ja enfileirados (sufixo, dispatch
+        text e badge de dialeto seguem o Main vivo).
+        """
         self._refresh_kimi_btn_visibility()
         self._refresh_flag_checkboxes_state()
+        self._refresh_items_live_state()
         if checked:
             signal_bus.main_llm_changed.emit("qwen")
 
     def _on_main_grok_toggled(self, checked: bool) -> None:
-        """Main LLM Grok: dispatch via provider bridge (D-30, item 026)."""
+        """Main LLM Grok: dispatch via provider bridge (D-30, item 026).
+
+        Item 012 (D5): re-renderiza os itens ja enfileirados (sufixo, dispatch
+        text e badge de dialeto seguem o Main vivo).
+        """
         self._refresh_kimi_btn_visibility()
         self._refresh_flag_checkboxes_state()
+        self._refresh_items_live_state()
         if checked:
             signal_bus.main_llm_changed.emit("grok")
 
@@ -9343,13 +9411,19 @@ class CommandQueueWidget(QWidget):
         Emitir `opus` para eles seria descartar a selecao em silencio em 3 dos
         4 e travar o cache no 4o. Emitir a family mantem os 4 corretos: quem
         roteia por provider recebe provider. A variante nao vaza para roster
-        nenhum — ela vive no `FrozenContract` (ST005) e em
-        `_resolve_interactive_main_llm_pair()`. Inflar os 4 rosters com os
-        slugs de variante e trabalho de outro item (C13 fecha a lista de
-        radios; o roster externo permanece o eixo provider).
+        nenhum — desde o item 012 (D5) ela vive SOMENTE em
+        `_resolve_interactive_main_llm_pair()`, leitor canonico sobrevivente
+        (o contrato congelado do item 019, que a espelhava, foi removido).
+        Inflar os 4 rosters com os slugs de variante e trabalho de outro item
+        (C13 fecha a lista de radios; o roster externo permanece o eixo
+        provider).
+
+        Item 012 (D5): re-renderiza os itens ja enfileirados, como os outros
+        quatro handlers do eixo Main.
         """
         self._refresh_kimi_btn_visibility()
         self._refresh_flag_checkboxes_state()
+        self._refresh_items_live_state()
         if checked:
             family, _variant = _MAIN_LLM_VARIANTS.get(slug, ("claude", None))
             signal_bus.main_llm_changed.emit(family)
@@ -9416,27 +9490,72 @@ class CommandQueueWidget(QWidget):
                 "warning",
             )
 
+    def _resolve_worker_occupancy(self) -> tuple[str, str]:
+        """Resolve a ocupacao real dos dois pares de worker: ``(t2, t3)``.
+
+        Precedencia por par (a mesma que ja vigorava no persist):
+        ``kimi`` senao ``qwen`` senao ``""`` no T2; ``codex`` senao ``grok``
+        senao ``""`` no T3. ``""`` significa PAR VAZIO (nenhum worker
+        marcado), estado legitimo e distinto de "desconhecido".
+
+        Ponto UNICO de leitura dos quatro checkboxes para fins de ocupacao.
+        Duas resolucoes lado a lado divergem com o tempo, e este metodo existe
+        justamente porque uma copia divergiu: os modulos de recuperacao
+        carregavam um mapa constante `workspace=kimi`/`workspace_xterm=codex`
+        que passou a mentir quando `SF_PARALLEL_WORKERS_V2` expos qwen/grok
+        (gap C24). `_persist_worker_selection` e `_emit_worker_occupancy` sao
+        os dois consumidores.
+        """
+        def _on(name: str) -> bool:
+            chk = getattr(self, name, None)
+            return bool(chk is not None and chk.isChecked())
+
+        if _on("_use_kimi_chk"):
+            t2 = "kimi"
+        elif _on("_use_qwen_chk"):
+            t2 = "qwen"
+        else:
+            t2 = ""
+        if _on("_use_codex_chk"):
+            t3 = "codex"
+        elif _on("_use_grok_chk"):
+            t3 = "grok"
+        else:
+            t3 = ""
+        return t2, t3
+
+    def _emit_worker_occupancy(self) -> None:
+        """Publica a ocupacao dos pares no `signal_bus` (emissor UNICO).
+
+        Consumido por `MetricsBar._on_worker_occupancy_changed`, que a usa
+        para nomear o LLM certo no snapshot diagnostico e no toast da
+        auto-recuperacao. Emissao repetida e inofensiva: o consumidor apenas
+        escreve cache.
+        """
+        t2, t3 = self._resolve_worker_occupancy()
+        signal_bus.worker_occupancy_changed.emit(t2, t3)
+
     def _persist_worker_selection(self) -> None:
         """Item 020: salva selecao de worker no QSettings.
 
         Persiste qual provider esta marcado em cada terminal (T2/T3).
         Chave: ``worker/t2_selected`` e ``worker/t3_selected``.
+
+        Item 013 (C24): a resolucao saiu daqui para `_resolve_worker_occupancy`
+        e a mesma ocupacao persistida e emitida no `signal_bus` - persistir sem
+        emitir deixaria o MetricsBar com a ocupacao anterior ate o proximo
+        boot.
         """
         stg = QSettings("systemForge", "workflow-app")
-        if self._use_kimi_chk.isChecked():
-            t2 = "kimi"
-        elif self._use_qwen_chk.isChecked():
-            t2 = "qwen"
-        else:
-            t2 = ""
-        if self._use_codex_chk.isChecked():
-            t3 = "codex"
-        elif self._use_grok_chk.isChecked():
-            t3 = "grok"
-        else:
-            t3 = ""
+        t2, t3 = self._resolve_worker_occupancy()
         stg.setValue("worker/t2_selected", t2)
         stg.setValue("worker/t3_selected", t3)
+        # ST003.1 (toggle): os quatro handlers `_on_use_*_toggled` ja chamam
+        # este metodo, entao um emit aqui cobre os quatro sem quatro edicoes.
+        # A troca PW-01 tambem fica coberta: o handler do checkbox recem-marcado
+        # roda DEPOIS da desmarcacao do par (que usa blockSignals), entao o
+        # consumidor observa o estado final, nunca um `("", "")` intermediario.
+        self._emit_worker_occupancy()
 
     def _restore_worker_selection(self) -> None:
         """Item 020: restaura selecao de worker do QSettings.
@@ -9462,6 +9581,13 @@ class CommandQueueWidget(QWidget):
             chk.blockSignals(True)
             chk.setChecked(t3 == name)
             chk.blockSignals(False)
+
+        # ST003.2 (C24): emitir FORA do blockSignals. `blockSignals` silencia
+        # os sinais dos QCheckBox, entao os handlers `_on_use_*_toggled` NAO
+        # rodam no restore - um emit pendurado so neles deixaria o MetricsBar
+        # com ocupacao desconhecida ate o primeiro clique, isto e, exatamente
+        # na sessao recem-aberta, que e quando a auto-recuperacao mais dispara.
+        self._emit_worker_occupancy()
 
     def _refresh_kimi_btn_visibility(self) -> None:
         """Aplica regra de visibilidade da seta de worker per-item + recolore.
@@ -9498,6 +9624,17 @@ class CommandQueueWidget(QWidget):
         Idempotente: o sufixo e sempre recomputado do zero a partir de spec.name
         via render_with_mcp_flags, entao toggles repetidos nunca acumulam nem
         duplicam flags. Espelha os handlers _on_use_*_toggled do eixo-worker.
+
+        Item 012 (D5) — CONTRATO AFIRMADO, nao efeito colateral tolerado: o
+        re-render RETROATIVO do label e do `dispatch_text` de itens JA
+        enfileirados e o comportamento DESEJADO. Ate o item 011 ele era gap
+        (C15) porque convivia com o contrato congelado do item 019, e as duas
+        metades diziam coisas diferentes: o label mostrava a flag nova e o step
+        despachava a flag velha. Removido o congelamento, o step passou a ler
+        `_active_mcp_flags()` vivo — label e dispatch voltaram a concordar, e
+        C15 fechou por INVERSAO DE SINAL. Este handler NAO foi revogado nem
+        alterado: so o contrato que ele cumpre mudou de "tolerado" para
+        "afirmado e testado" (`test_flag_toggle_is_retroactive`).
 
         Item 021: tambem espelha o estado no FlagsPanel (aba LLM Config).
         """
@@ -9640,6 +9777,38 @@ class CommandQueueWidget(QWidget):
                 active_flags=active_flags,
             )
             item.set_dispatch_text(full_dispatch)
+
+    def _refresh_items_live_state(self) -> None:
+        """Ponto UNICO de re-render dos itens ja enfileirados (item 012 / D5).
+
+        Sob o regime de estado vivo, tudo que a UI mostra num item enfileirado
+        tem que ser funcao do estado corrente — nao do estado do enqueue. Este
+        metodo e o unico lugar que reafirma isso, e ele delega:
+
+          - sufixo de flags + `dispatch_text` -> `_refresh_flag_suffix()`
+            (chamado, NAO duplicado: o objetivo e UM ponto de re-render, nao
+            dois lacos que divergem na proxima mudanca);
+          - badge de dialeto -> `is_suppressed_directive` (predicado PURO, o
+            mesmo que espelha os cinco dispatchers).
+
+        Idempotente: `_refresh_flag_suffix` recomputa o sufixo do zero a partir
+        de `spec.name` (I1 — `spec.name` nunca e mutado), e o badge e um
+        `setVisible` booleano. Toggles repetidos nao acumulam.
+
+        Fila vazia = no-op (o laco nao itera).
+        """
+        self._refresh_flag_suffix()
+        main_llm = self._resolve_interactive_main_llm()
+        for item in self._items:
+            spec = item.get_spec()
+            suppressed = is_suppressed_directive(spec.name, main_llm)
+            tooltip = (
+                f"Diretiva nao suportada pelo Main {main_llm}: sera suprimida "
+                "no dispatch (pulso de listener), nada chega ao terminal."
+                if suppressed
+                else ""
+            )
+            item.set_dialect_badge(suppressed, tooltip)
 
     def _refresh_flag_checkboxes_state(self) -> None:
         """Atualiza enabled/tooltip das checkboxes de flag (item 021).
@@ -10754,11 +10923,15 @@ class CommandQueueWidget(QWidget):
         return True
 
     def _qwen_runtime_available(self) -> bool:
-        """ST005: Check if Qwen runtime is healthy for dispatch.
+        """ST005: placeholder de health check do runtime Qwen no dispatch.
 
-        Uses ProviderCapabilityLoader for static check; dynamic health
-        check is a placeholder that returns True (daemon health monitoring
-        is outside this item's scope — item 010 will add runtime probes).
+        Item 011: a docstring anterior afirmava consumir `ProviderCapabilityLoader`
+        para um check estatico. O corpo sempre foi `return True` e o loader nunca
+        foi importado aqui — a afirmacao era falsa. Isto e, hoje, um placeholder
+        que sempre autoriza: nao ha check estatico nem probe de daemon. Mudar o
+        corpo altera comportamento de dispatch Qwen e esta fora do escopo do item
+        011 (que so avisa); quem consome capability e o preflight informativo de
+        `load_pipeline`.
         """
         return True
 
@@ -10788,6 +10961,13 @@ class CommandQueueWidget(QWidget):
         """Handler unico para `item.run_in_terminal_requested` (provider efetivo
         Claude/T1). Retorna True quando publicou de fato (fix D-1: o slot
         `_on_single_button_green_dispatch` so marca enviado em True).
+
+        Item 012 (D5): este caminho DEIXOU DE SER o unico caminho vivo. Ele
+        sempre leu `_main_*_radio.isChecked()` no momento do dispatch; desde o
+        item 012 o botao de step (`_on_step_btn_clicked`) faz o mesmo, e o
+        contrato congelado do item 019 foi removido. A paridade entre os tres
+        caminhos (clique per-item, step, seta verde) passou a ser por
+        construcao, nao por coincidencia de implementacao.
 
         `/clear` (fix D-2): tratado PRIMEIRO, independente do Main LLM — vai raw
         para o T1 (Claude, Codex e Kimi entendem `/clear` inalterado) e espelha
@@ -11397,6 +11577,27 @@ class CommandQueueWidget(QWidget):
     def _on_step_btn_clicked(self) -> None:
         """Run the next pending item once and stop. Manual step-by-step.
 
+        ESTADO VIVO, REGIME UNICO (item 012 / D5). Este caminho le a UI no
+        momento do clique, identico ao clique per-item
+        (`CommandItemWidget._on_exec_clicked`, criterio de rejeicao 8 de
+        `single-arrow-multifunction.md`, que e o contrato canonico dos dois) e a
+        seta verde (`_dispatch_green_arrow`). Os cinco pontos que ate o item 011
+        consumiam o contrato congelado do item 019 passaram a ler vivo:
+
+          1. preflight ORCH   -> `_resolve_interactive_main_llm()`
+          2. RoutingState     -> `_resolve_item_provider(spec)` (mesmo resolver
+                                 injetado no clique per-item)
+          3. espelho /clear   -> os quatro checkboxes de worker
+          4. eixo Main-LLM    -> `_resolve_interactive_main_llm()`
+          5. `active_flags`   -> `_active_mcp_flags()`
+
+        C16 FECHADO POR REMOCAO DO MECANISMO, nao por implantacao de switch: nao
+        existe congelamento a gatear, entao `SF_MAIN_PROVIDERS_V2` NAO ganha
+        essa responsabilidade e nenhum kill-switch novo foi criado. O
+        dicionario `id(item) -> contrato` foi removido junto, e com ele o
+        vazamento por reuso de endereco do CPython (ver comentario no final de
+        `_make_item`).
+
         Dispatches EVERY pending item to the terminal — including queue
         helpers (/clear, /model X, /effort Y). The dispatcher uses
         run_command_in_terminal (Claude) or run_command_in_workspace_terminal
@@ -11414,12 +11615,12 @@ class CommandQueueWidget(QWidget):
             return
 
         # Item 018: preflight ORCH — barra se a credencial do Main LLM estiver
-        # ausente. Item 019: o Main avaliado aqui e o do contrato congelado no
-        # enqueue, nao o do radio atual — trocar de Main depois de enfileirar
-        # nao pode mudar contra qual credencial o item ja enfileirado e checado.
-        _fc_preflight = self.get_frozen_contract(next_item)
+        # ausente. Item 012 (D5, revoga o item 019): a credencial checada e a do
+        # Main VIVO, porque e contra ela que o dispatch vai rodar. Trocar de Main
+        # depois de enfileirar muda o destino real do item ja enfileirado, entao
+        # checar a credencial do Main congelado avisaria sobre a conta errada.
         _orch_err = self._orch_preflight_main_credential(
-            _fc_preflight.main_llm if _fc_preflight is not None else None
+            self._resolve_interactive_main_llm()
         )
         if _orch_err is not None:
             signal_bus.toast_requested.emit(_orch_err, "warning")
@@ -11468,39 +11669,14 @@ class CommandQueueWidget(QWidget):
         # Kimi legado usava is_kimi_compatible isolado e divergia do clique para
         # itens kimi_eligible-only).
         #
-        # Item 019: usa o contrato congelado no enqueue quando disponivel.
-        # O snapshot garante que trocas de Main LLM / flags entre enqueue e
-        # dispatch nao reinterpretam o item ja enfileirado. RoutingState e
-        # montado a partir do frozen contract (nao da UI live); classify_provider
-        # continua sendo invocado (paridade com testes que fazem patch).
-        _fc = self.get_frozen_contract(next_item)
-        if _fc is not None:
-            routing_state = RoutingState(
-                kimi_worker_enabled=_fc.kimi_worker_enabled,
-                codex_worker_enabled=_fc.codex_worker_enabled,
-                main_llm=_fc.main_llm,
-                qwen_worker_enabled=getattr(_fc, "qwen_worker_enabled", False),
-                grok_worker_enabled=getattr(_fc, "grok_worker_enabled", False),
-            )
-            self._last_classified_provider = classify_provider(spec, routing_state)
-        else:
-            routing_state = RoutingState(
-                kimi_worker_enabled=self._use_kimi_chk.isChecked(),
-                codex_worker_enabled=bool(
-                    getattr(self, "_use_codex_chk", None) is not None
-                    and self._use_codex_chk.isChecked()
-                ),
-                main_llm=self._resolve_interactive_main_llm(),
-                qwen_worker_enabled=bool(
-                    getattr(self, "_use_qwen_chk", None) is not None
-                    and self._use_qwen_chk.isChecked()
-                ),
-                grok_worker_enabled=bool(
-                    getattr(self, "_use_grok_chk", None) is not None
-                    and self._use_grok_chk.isChecked()
-                ),
-            )
-            self._last_classified_provider = classify_provider(spec, routing_state)
+        # Item 012 (D5, revoga o item 019): o step deriva o provider do MESMO
+        # resolver que o clique per-item usa (`_resolve_item_provider`, injetado
+        # em cada CommandItemWidget como `provider_resolver`). Paridade step ==
+        # clique por CONSTRUCAO, nao por coincidencia: uma unica funcao monta o
+        # RoutingState a partir dos quatro checkboxes de worker vivos + Main vivo
+        # e invoca `classify_provider` (no mesmo modulo, entao o patch dos testes
+        # continua pegando). Nao ha mais contrato congelado a consultar.
+        self._last_classified_provider = self._resolve_item_provider(spec)
 
         # ── Regra de capacidade exclusiva: GERACAO DE IMAGEM ──────────────── #
         # Enforce mecanico (progress.md "Capacidade exclusiva"): so o Codex gera
@@ -11561,20 +11737,22 @@ class CommandQueueWidget(QWidget):
         # sessions. T1 always receives /clear raw (Claude, Codex and Kimi all
         # understand /clear unchanged); the active worker terminal mirrors it
         # so both contexts reset together.
-        # Item 019: usa frozen contract para /clear mirror (workers congelados).
+        # Item 012 (D5, revoga o item 019): o espelho le os workers VIVOS. Ligar
+        # um worker depois de enfileirar um /clear passa a espelhar o /clear —
+        # sob o contrato congelado nao espelhava.
         # Item 020: estendido para qwen (T2) e grok (T3).
-        _fc_kimi = _fc.kimi_worker_enabled if _fc else self._use_kimi_chk.isChecked()
-        _fc_codex = _fc.codex_worker_enabled if _fc else self._use_codex_chk.isChecked()
-        _fc_qwen = getattr(_fc, "qwen_worker_enabled", False) if _fc else bool(
+        _kimi_on = self._use_kimi_chk.isChecked()
+        _codex_on = self._use_codex_chk.isChecked()
+        _qwen_on = bool(
             getattr(self, "_use_qwen_chk", None) is not None
             and self._use_qwen_chk.isChecked()
         )
-        _fc_grok = getattr(_fc, "grok_worker_enabled", False) if _fc else bool(
+        _grok_on = bool(
             getattr(self, "_use_grok_chk", None) is not None
             and self._use_grok_chk.isChecked()
         )
-        _t2_active = _fc_kimi or _fc_qwen
-        _t3_active = _fc_codex or _fc_grok
+        _t2_active = _kimi_on or _qwen_on
+        _t3_active = _codex_on or _grok_on
         clear_both = (
             cmd_head == "/clear"
             and (_t2_active or _t3_active)
@@ -11632,23 +11810,25 @@ class CommandQueueWidget(QWidget):
         # ── Main-LLM axis ─────────────────────────────────────────────── #
         # No worker claimed this command → dispatch to T1 in the Main LLM's
         # own format.
-        # Item 019: usa frozen main_llm quando disponivel (contrato congelado
-        # no enqueue). A troca de Main LLM entre enqueue e dispatch nao altera
-        # o formato de dispatch do item ja enfileirado.
-        _frozen_main = _fc.main_llm if _fc else self._resolve_interactive_main_llm()
-        if _frozen_main == "codex":
+        # Item 012 (D5, revoga o item 019): le o radio VIVO. A troca de Main LLM
+        # entre enqueue e dispatch ALTERA, por decisao humana explicita, o
+        # formato de dispatch do item ja enfileirado — o estado vivo da UI e a
+        # unica fonte do dispatch. Esta e a linha que faz o step convergir com
+        # `_dispatch_green_arrow`, que ja lia `_main_*_radio.isChecked()`.
+        _main = self._resolve_interactive_main_llm()
+        if _main == "codex":
             if self._dispatch_codex_command(cmd_text, to_t1=True):
                 next_item._mark_as_sent()
             return
-        if _frozen_main == "kimi":
+        if _main == "kimi":
             if self._dispatch_kimi_main_command(cmd_text):
                 next_item._mark_as_sent()
             return
-        if _frozen_main == "qwen":
+        if _main == "qwen":
             if self._dispatch_qwen_main_command(cmd_text):
                 next_item._mark_as_sent()
             return
-        if _frozen_main == "grok":
+        if _main == "grok":
             # Sem esta branch, Main=Grok caia no dispatch raw de Claude logo
             # abaixo: o comando ia para T1 no formato do Claude enquanto o
             # radio marcado dizia Grok. `_dispatch_green_arrow` ja roteava
@@ -11663,8 +11843,10 @@ class CommandQueueWidget(QWidget):
         # per-item run/copy e mass copy (caminho 4). classify_provider ja
         # rodou e _last_classified_provider e CLAUDE neste ramo — o worker
         # axis e as esteiras Main Codex/Kimi retornaram ANTES.
-        # Item 019: usa frozen active_flags quando disponivel.
-        active_flags = list(_fc.active_flags) if _fc else self._active_mcp_flags()
+        # Item 012 (D5, revoga o item 019): le as flags VIVAS. O sufixo que o
+        # step despacha passa a ser o mesmo que o label do item mostra depois de
+        # um toggle — sob o contrato congelado os dois divergiam.
+        active_flags = self._active_mcp_flags()
         cmd_text_t1 = command_text_with_flags(
             spec,
             provider=self._last_classified_provider,

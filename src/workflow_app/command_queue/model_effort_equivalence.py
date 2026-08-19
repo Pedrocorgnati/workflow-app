@@ -174,6 +174,30 @@ def is_foreign_directive(name: str) -> bool:
     return False
 
 
+def is_suppressed_directive(name: str, main_llm: str) -> bool:
+    """True se `name` sera suprimida (pulso, nada no PTY) sob `main_llm`.
+
+    Item 012 (R-J5): predicado PURO que espelha EXATAMENTE o que os cinco
+    dispatchers ja fazem, para que o badge de dialeto da UI diga a MESMA
+    verdade que o dispatch. Um `if` duplicado dentro do widget divergiria dos
+    dispatchers na proxima mudanca de dialeto; um predicado unico nao pode.
+
+    Mapa dos dispatchers:
+      - `main_llm == "claude"` -> `_dispatch_green_arrow` / caminho raw do T1
+        guardam com `is_foreign_directive` (fail-open: so residuo comprovado);
+      - qualquer outro Main (`codex`, `kimi`, `qwen`, `grok`) -> os quatro
+        `_dispatch_*_main_command` guardam com `is_directive_line` (fecha em
+        toda diretiva, porque nenhum CLI nao-Claude tem equivalente textual).
+
+    Nao decide nada e nao bloqueia nada: e leitura pura, consumida pelo badge
+    (Zero Silencio) e por teste. O dispatch continua sendo a autoridade.
+    """
+    main = (main_llm or "").strip().lower()
+    if main == "claude":
+        return is_foreign_directive(name)
+    return is_directive_line(name)
+
+
 def adapt_specs_to_main(
     specs: list[CommandSpec], main_llm: str
 ) -> list[CommandSpec]:

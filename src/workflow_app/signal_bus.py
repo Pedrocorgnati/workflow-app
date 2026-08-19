@@ -192,10 +192,30 @@ class SignalBus(QObject):
     # Emitted whenever the Main LLM radio (queue-div-main-llm) changes.
     # Lets MetricsBar know which CLI occupies T1 (interactive) so the
     # red-listener auto-recovery prompt is phrased for the right agent.
-    # Values: "claude" | "codex" | "kimi" | "qwen". Workers are fixed by channel
-    # (T2/workspace=kimi, T3/workspace_xterm=codex) so only T1 needs a signal.
+    # Values: "claude" | "codex" | "kimi" | "qwen" | "grok".
+    # T2/T3 NAO sao fixos por canal (revogado 2026-08-19, gap C24): a ocupacao
+    # real dos pares trafega no sinal `worker_occupancy_changed` logo abaixo.
     # See ai-forge/rules/llm-routing-div.md.
-    main_llm_changed = Signal(str)           # "claude" | "codex" | "kimi" | "qwen"
+    main_llm_changed = Signal(str)           # "claude" | "codex" | "kimi" | "qwen" | "grok"
+
+    # --- Worker occupancy routing (CommandQueueWidget → MetricsBar) ---
+    # Emitido sempre que a ocupacao real dos pares de worker muda (toggle de
+    # checkbox, troca PW-01, restore do QSettings, boot). Fecha o gap C24: sem
+    # este canal os modulos de recuperacao carregavam um mapa constante
+    # (workspace=kimi, workspace_xterm=codex) que mente em duas das quatro
+    # combinacoes possiveis sob SF_PARALLEL_WORKERS_V2=1.
+    #
+    # Contrato:
+    #   - t2_llm em {"kimi", "qwen", ""}; t3_llm em {"codex", "grok", ""}.
+    #   - "" significa PAR SEM WORKER MARCADO (estado legitimo), nunca
+    #     "desconhecido".
+    #   - "Desconhecido" NAO trafega no sinal: e a AUSENCIA de emissao, e o
+    #     consumidor a representa com None (ver MetricsBar._t2_llm/_t3_llm).
+    #   - Emissor unico: CommandQueueWidget._emit_worker_occupancy.
+    #   - Consumidor: MetricsBar._on_worker_occupancy_changed (cacheia e
+    #     alimenta metrics_bar/channel_llm.resolve_channel_llm).
+    # See ai-forge/rules/llm-routing-div.md secao 8.
+    worker_occupancy_changed = Signal(str, str)  # t2_llm, t3_llm
 
     # --- Remote Server (workflow-mobile feature) ---
     # Emitted when user toggles the remote mode button (True=start, False=stop)

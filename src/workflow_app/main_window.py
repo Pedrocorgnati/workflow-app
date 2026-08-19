@@ -1761,6 +1761,14 @@ class MainWindow(QMainWindow):
         self._workspace_terminal_splitter.setSizes([1, 0])
         self._update_t3_arrow_icon()
 
+        # Os tres OutputPanel existem a partir daqui: liga a MetricsBar ao
+        # scrollback deles. A barra nao importa painel nenhum — quem conhece
+        # os dois lados e esta janela, entao o acoplamento fica aqui, e o
+        # snapshot de recuperacao deixa de gravar `output_excerpt:
+        # INDISPONIVEL` (um recovery cego e proibido pelo contrato de
+        # /tools:listener-recovery).
+        self._metrics_bar.set_output_tail_provider(self._output_tail_for_channel)
+
         workspace_layout.addWidget(self._workspace_terminal_splitter, stretch=1)
         workspace_layout.addWidget(
             self._build_terminal_notes_footer("terminal-workspace-notes")
@@ -8668,6 +8676,25 @@ class MainWindow(QMainWindow):
             splitter.setSizes([first, second])
         else:
             splitter.setSizes([total, 0])
+
+    def _output_tail_for_channel(self, channel: str) -> str:
+        """Tail plano do terminal do canal, para o snapshot de recuperacao.
+
+        Read-only por contrato: nao consome, nao limpa e nao muta buffer
+        nenhum. Canal desconhecido ou painel ainda nao construido devolve
+        string vazia, que o helper de snapshot traduz para `INDISPONIVEL`.
+        """
+        panel = {
+            "interactive": getattr(self, "_output_panel", None),
+            "workspace": getattr(self, "_workspace_panel", None),
+            "workspace_xterm": getattr(self, "_workspace_panel_xterm", None),
+        }.get(channel)
+        if panel is None:
+            return ""
+        try:
+            return panel.output_tail()
+        except Exception:  # noqa: BLE001 - diagnostico nunca derruba o app
+            return ""
 
     def _update_t3_arrow_icon(self) -> None:
         if not hasattr(self, "_t3_arrow_btn"):
