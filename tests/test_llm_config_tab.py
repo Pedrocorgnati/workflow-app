@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,21 @@ import pytest
 _WORKFLOW_APP_ROOT = Path(__file__).resolve().parents[1]
 
 _FLAG_NAME = "SF_LLM_CONFIG_V2"
+
+# Item 005 do loop 08-17-systemforge-multillm-gaps-refactor: o gate da matriz
+# Thinking/Execution foi MOVIDO do global `SF_LLM_CONFIG_V2` para este
+# kill-switch dedicado (`feature_flags._MCP_THINK_EXEC_V2_FLAG`, lido em
+# `main_window` por `mcp_think_exec_v2_enabled()`). Armar apenas o global
+# devolve um probe sem nenhum botao TE — era exatamente esse o defeito destes
+# testes depois do item 005.
+_TE_FLAG_NAME = "SF_MCP_THINK_EXEC_V2"
+
+# Regime "V2 ligado" como o operador o ve: aba LLM Config nova (global) MAIS a
+# matriz Thinking/Execution (dedicado). Os dois viajam juntos nestes testes,
+# entao a assercao de legado ausente e a de persona filter presente convivem no
+# mesmo probe.
+_TE_FLAGS_ON: dict[str, str] = {_FLAG_NAME: "1", _TE_FLAG_NAME: "1"}
+_TE_FLAGS_OFF: dict[str, str] = {_FLAG_NAME: "0", _TE_FLAG_NAME: "0"}
 
 # Probe que verifica a estrutura do selector e da aba LLM Config.
 # Roda em subprocesso com o ambiente montado pelo teste.
@@ -505,17 +521,93 @@ class TestParallelWorkersExclusivity:
 # Item 021: FlagsPanel e conjunto fechado de flags suportadas
 # ---------------------------------------------------------------------------
 
+_LLM_FLAGS_V2_FLAG = "SF_LLM_FLAGS_V2"
+
+# Conjunto vigente por regime do kill-switch (item 005 do loop
+# 08-17-systemforge-multillm-gaps-refactor). Ausente/off = roster legado da
+# tabela C26; "1" = os 7 literais canonicos.
+_LEGACY_FLAG_LITERALS = {"--codex", "--kimi"}
+_V2_FLAG_LITERALS = {
+    "--opus",
+    "--sonnet",
+    "--codex",
+    "--kimi",
+    "--kimi-k3",
+    "--qwen",
+    "--grok",
+}
+
+
+@contextmanager
+def _llm_flags_regime(v2_enabled: bool):
+    """Executa o bloco sob o regime pedido de `SF_LLM_FLAGS_V2`.
+
+    O kill-switch e boot-frozen: `feature_flags` le `os.environ` uma unica vez,
+    no import. Trocar de regime dentro do processo exige reload em ordem de
+    dependencia (`feature_flags` -> `llm_flags` -> `flags_panel`), porque
+    `llm_flags` deriva o conjunto vigente no corpo do modulo e o `FlagsPanel`
+    congela `_FLAG_ORDER` a partir dele no import.
+
+    Afirmar 7 literais sem armar a flag e o defeito que estes testes tinham:
+    o default do processo e o regime LEGADO (2 literais), entao a assercao
+    descrevia um regime que nao estava vigente. O `finally` devolve o processo
+    ao regime herdado do ambiente para nao contaminar os testes seguintes.
+    """
+    import importlib
+
+    import workflow_app.config.feature_flags as ff_mod
+    import workflow_app.config.llm_flags as lf_mod
+    import workflow_app.llm_config.flags_panel as fp_mod
+
+    previous = os.environ.get(_LLM_FLAGS_V2_FLAG)
+    if v2_enabled:
+        os.environ[_LLM_FLAGS_V2_FLAG] = "1"
+    else:
+        os.environ.pop(_LLM_FLAGS_V2_FLAG, None)
+
+    def _reload_chain():
+        importlib.reload(ff_mod)
+        importlib.reload(lf_mod)
+        importlib.reload(fp_mod)
+
+    try:
+        _reload_chain()
+        yield fp_mod
+    finally:
+        if previous is None:
+            os.environ.pop(_LLM_FLAGS_V2_FLAG, None)
+        else:
+            os.environ[_LLM_FLAGS_V2_FLAG] = previous
+        _reload_chain()
+
+
 class TestFlagsPanelSupportedFlags:
     """Testes do FlagsPanel (aba LLM Config) e do conjunto fechado."""
 
-    def test_supported_flags_count_is_seven(self):
-        from workflow_app.config.llm_flags import _SUPPORTED_MCP_FLAGS
-        assert len(_SUPPORTED_MCP_FLAGS) == 7
+    @pytest.mark.parametrize(
+        ("v2_enabled", "expected"),
+        [
+            pytest.param(False, _LEGACY_FLAG_LITERALS, id="legado"),
+            pytest.param(True, _V2_FLAG_LITERALS, id="v2"),
+        ],
+    )
+    def test_supported_flags_match_kill_switch_regime(self, v2_enabled, expected):
+        """O conjunto fechado e funcao do regime, nao uma constante de 7.
 
-    def test_supported_flags_literals(self):
-        from workflow_app.config.llm_flags import _SUPPORTED_MCP_FLAGS
-        expected = {"--opus", "--sonnet", "--codex", "--kimi", "--kimi-k3", "--qwen", "--grok"}
-        assert _SUPPORTED_MCP_FLAGS == expected
+        Os dois regimes ficam travados aqui de proposito: afirmar so o v2
+        deixava o regime default (legado) sem cobertura, que foi como o
+        conjunto pode encolher para 2 literais sem nenhum teste reclamar.
+        """
+        with _llm_flags_regime(v2_enabled):
+            # `importlib.reload` reaproveita o mesmo objeto de modulo, entao o
+            # import comum ja enxerga o conjunto recomputado.
+            import workflow_app.config.llm_flags as lf_mod
+
+            assert lf_mod._SUPPORTED_MCP_FLAGS == expected
+            assert len(lf_mod._SUPPORTED_MCP_FLAGS) == len(expected)
+            # Paridade derivada: ordem canonica e conjunto descrevem os mesmos
+            # literais em QUALQUER regime.
+            assert frozenset(lf_mod._FLAG_CANONICAL_ORDER) == lf_mod._SUPPORTED_MCP_FLAGS
 
     def test_flags_panel_has_exactly_supported_flags(self, qapp):
         from workflow_app.llm_config.flags_panel import FlagsPanel
@@ -531,8 +623,17 @@ class TestFlagsPanelSupportedFlags:
         assert ui_flags == _SUPPORTED_MCP_FLAGS
 
     def test_incompatible_flag_is_disabled_with_tooltip(self, qapp):
-        from workflow_app.llm_config.flags_panel import FlagsPanel
-        panel = FlagsPanel()
+        """Matriz de incompatibilidade sob o regime v2 (7 literais).
+
+        O corpo enumera `--kimi-k3`, `--qwen`, `--grok`, `--opus` e `--sonnet`,
+        que so existem no roster v2. Sem armar o kill-switch o painel nasce com
+        os 2 literais legados e a enumeracao estourava KeyError.
+        """
+        with _llm_flags_regime(True) as fp_mod:
+            self._assert_incompatibility_matrix(fp_mod.FlagsPanel())
+
+    @staticmethod
+    def _assert_incompatibility_matrix(panel):
         # Main claude: todas habilitadas.
         panel.set_main_llm("claude")
         for flag, chk in panel._checkboxes.items():
@@ -597,7 +698,9 @@ class TestFlagsPanelSupportedFlags:
                     f"{flag} nao deveria cair pelo kill-switch sob Main Claude"
                 )
 
-            # Main nao-Claude: as sete caem, com motivo visivel (C-57).
+            # Main nao-Claude: TODAS as flags do roster vigente caem, com
+            # motivo visivel (C-57). Sao 7 sob SF_LLM_FLAGS_V2=1 e 2 no
+            # regime legado; a assercao itera o painel para nao fixar numero.
             for main in ("kimi", "codex", "qwen", "grok"):
                 panel.set_main_llm(main)
                 for flag, chk in panel._checkboxes.items():
@@ -612,8 +715,13 @@ class TestFlagsPanelSupportedFlags:
             importlib.reload(fp_mod)
 
     def test_flags_panel_survives_rerun_after_main_change(self, qapp):
-        from workflow_app.llm_config.flags_panel import FlagsPanel
-        panel = FlagsPanel()
+        """Transicoes de Main sob o regime v2 (o corpo cita `--qwen`)."""
+        with _llm_flags_regime(True) as fp_mod:
+            panel = fp_mod.FlagsPanel()
+            self._assert_rerun_after_main_change(panel)
+
+    @staticmethod
+    def _assert_rerun_after_main_change(panel):
         # Claude -> Kimi -> Claude: estado correto em cada transicao.
         panel.set_main_llm("claude")
         assert all(chk.isEnabled() for chk in panel._checkboxes.values())
@@ -628,6 +736,35 @@ class TestFlagsPanelSupportedFlags:
         # caiu por auto-proxy: estado de disable nunca pode ficar grudado.
         panel.set_main_llm("claude")
         assert all(chk.isEnabled() for chk in panel._checkboxes.values())
+
+    def test_flags_panel_under_legacy_regime_exposes_only_legacy_flags(self, qapp):
+        """Regime legado: o painel expoe SO `--codex` e `--kimi`.
+
+        Este e o regime default do processo (kill-switch ausente), e ate aqui
+        ele nao tinha nenhuma cobertura de painel: os testes existentes so
+        descreviam o roster v2. As regras de disable continuam valendo sobre o
+        conjunto reduzido, incluindo o auto-proxy C-43/R-40 do `--codex` sob
+        Main Kimi.
+        """
+        with _llm_flags_regime(False) as fp_mod:
+            panel = fp_mod.FlagsPanel()
+            assert set(panel._checkboxes) == _LEGACY_FLAG_LITERALS
+
+            panel.set_main_llm("claude")
+            assert all(chk.isEnabled() for chk in panel._checkboxes.values())
+
+            panel.set_main_llm("kimi")
+            assert not panel._checkboxes["--kimi"].isEnabled()
+            assert not panel._checkboxes["--codex"].isEnabled()
+            assert "auto-proxy" in panel._checkboxes["--codex"].toolTip().lower()
+
+            panel.set_main_llm("codex")
+            assert not panel._checkboxes["--codex"].isEnabled()
+            assert panel._checkboxes["--kimi"].isEnabled()
+
+            # A volta a Claude reabilita tudo tambem no roster reduzido.
+            panel.set_main_llm("claude")
+            assert all(chk.isEnabled() for chk in panel._checkboxes.values())
 
     def test_checked_flags_returns_selected(self, qapp):
         from workflow_app.llm_config.flags_panel import FlagsPanel
@@ -727,8 +864,11 @@ def _run_te_probe(env_override: dict[str, str] | None = None) -> dict:
     env["QT_QPA_PLATFORM"] = "offscreen"
     if env_override:
         env.update(env_override)
-    if env_override is None or _FLAG_NAME not in env_override:
-        env.pop(_FLAG_NAME, None)
+    # Sanear os DOIS kill-switches: o ambiente herdado nao pode decidir o regime
+    # (o gate da matriz TE mora em _TE_FLAG_NAME desde o item 005).
+    for flag in (_FLAG_NAME, _TE_FLAG_NAME):
+        if env_override is None or flag not in env_override:
+            env.pop(flag, None)
 
     result = subprocess.run(
         [sys.executable, "-c", _TE_PROBE],
@@ -747,11 +887,11 @@ def _run_te_probe(env_override: dict[str, str] | None = None) -> dict:
 
 
 class TestThinkingExecutionFlagEnabled:
-    """Item 023: Thinking/Execution split with SF_LLM_CONFIG_V2=1."""
+    """Item 023: Thinking/Execution split com os kill-switches V2 armados."""
 
     def test_thinking_group_has_3_buttons(self):
         """C-14: Thinking group has exactly 3 provider buttons."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-thinking",
             "output-mcp-action-thinking-claude",
@@ -764,7 +904,7 @@ class TestThinkingExecutionFlagEnabled:
 
     def test_execution_group_has_5_buttons(self):
         """C-14: Execution group has exactly 5 provider buttons."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-execution",
             "output-mcp-action-execution-claude",
@@ -779,7 +919,7 @@ class TestThinkingExecutionFlagEnabled:
 
     def test_fixed_commands_in_te_commands(self):
         """C-14: Each button has a fixed command independent of Main LLM."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         cmds = data["te_commands"]
         assert cmds.get("output-mcp-action-thinking-claude") == (
             "claude --model opus --effort high"
@@ -796,7 +936,7 @@ class TestThinkingExecutionFlagEnabled:
 
     def test_no_legacy_skill_pills_in_commands(self):
         """C-15: Old skill CLI pills are NOT in the command map."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         all_cmds = list(data["te_commands"].values())
         for old in (
             "/skill:claude", "/skill:codex", "/skill:dual",
@@ -808,21 +948,21 @@ class TestThinkingExecutionFlagEnabled:
 
     def test_no_legacy_buttons_when_flag_enabled(self):
         """Kill-switch: legacy Main/Parallel/Dual absent when flag=1."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         assert not data["has_legacy_main"]
         assert not data["has_legacy_parallel"]
         assert not data["has_legacy_dual"]
 
     def test_persona_filter_bar_exists(self):
         """C-16: output-mcp-persona-filter-bar exists with flag=1."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         assert data["has_persona_filter"], (
             "output-mcp-persona-filter-bar should exist with flag=1"
         )
 
     def test_persona_checkboxes_have_categories(self):
         """C-16: MCP persona checkboxes have persona_category property."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         cats = data["persona_cats"]
         assert len(cats) == 16, f"Expected 16 personas, got {len(cats)}"
         assert cats["output-mcp-persona-search-in"] == "Research"
@@ -838,7 +978,7 @@ class TestThinkingExecutionClaudeLocal:
 
     def test_thinking_claude_command_has_model_and_effort(self):
         """C-59: Thinking Claude = 'claude --model opus --effort high'."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         cmd = data["te_commands"].get("output-mcp-action-thinking-claude", "")
         assert "claude" in cmd
         assert "--model opus" in cmd
@@ -846,7 +986,7 @@ class TestThinkingExecutionClaudeLocal:
 
     def test_execution_claude_command_has_model_and_effort(self):
         """C-59: Execution Claude = 'claude --model sonnet --effort standard'."""
-        data = _run_te_probe({_FLAG_NAME: "1"})
+        data = _run_te_probe(_TE_FLAGS_ON)
         cmd = data["te_commands"].get("output-mcp-action-execution-claude", "")
         assert "claude" in cmd
         assert "--model sonnet" in cmd
@@ -856,7 +996,7 @@ class TestThinkingExecutionClaudeLocal:
         """C-59: Claude commands work with empty shell environment."""
         env = os.environ.copy()
         env["QT_QPA_PLATFORM"] = "offscreen"
-        env[_FLAG_NAME] = "1"
+        env.update(_TE_FLAGS_ON)
         env.pop("HOME", None)
         env.pop("ZDOTDIR", None)
         env.pop("XDG_CONFIG_HOME", None)
@@ -880,7 +1020,7 @@ class TestThinkingExecutionClaudeLocal:
 
 
 class TestThinkingExecutionFlagAbsent:
-    """Kill-switch: flag absent = legacy layout (G3)."""
+    """Kill-switch: ambos ausentes = legacy layout (G3)."""
 
     def test_legacy_buttons_present_when_flag_absent(self):
         """Flag absent: Main/Parallel/Dual present, no Thinking/Execution."""
@@ -898,11 +1038,11 @@ class TestThinkingExecutionFlagAbsent:
 
 
 class TestThinkingExecutionFlagOff:
-    """Kill-switch: flag='0' = legacy layout (G3)."""
+    """Kill-switch: ambos em '0' = legacy layout (G3)."""
 
     def test_legacy_buttons_present_when_flag_off(self):
         """Flag='0': Main/Parallel/Dual present, no Thinking/Execution."""
-        data = _run_te_probe({_FLAG_NAME: "0"})
+        data = _run_te_probe(_TE_FLAGS_OFF)
         assert data["has_legacy_main"]
         assert data["has_legacy_parallel"]
         assert data["has_legacy_dual"]
@@ -911,7 +1051,7 @@ class TestThinkingExecutionFlagOff:
 
     def test_persona_filter_absent_when_flag_off(self):
         """Flag='0': persona filter bar does NOT exist."""
-        data = _run_te_probe({_FLAG_NAME: "0"})
+        data = _run_te_probe(_TE_FLAGS_OFF)
         assert not data["has_persona_filter"]
 
 
