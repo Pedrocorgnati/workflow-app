@@ -151,7 +151,9 @@ class GrokSpikeSession:
         cli = _resolve_cli()
         _validate_auth()
 
-        params = _kernel.SpecParams(prompt="", grok_model=self.model)
+        params = _kernel.SpecParams(
+            prompt="", grok_model=self.model, resolved_binary=cli
+        )
         adapter = _adapters.get_adapter("grok")
 
         outcome = _kernel.invoke_provider(
@@ -227,7 +229,7 @@ def _resolve_cli() -> str:
     """Retorna o path do CLI grok ou levanta GrokSpikeCLINotFound."""
     for candidate in _GROK_CLI_CANDIDATES:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+            return os.path.abspath(candidate)
     raise GrokSpikeCLINotFound(
         "CLI grok nao encontrado em ~/.local/bin/grok nem no PATH"
     )

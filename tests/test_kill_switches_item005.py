@@ -23,8 +23,7 @@ import pytest
 
 _WORKFLOW_APP_ROOT = Path(__file__).resolve().parents[1]
 
-# Switches entregues pelo item 005. `SF_MCP_WRAPPERS_V2` NAO esta na lista:
-# ver `test_mcp_wrappers_switch_was_not_created_inert`.
+# Switches entregues pelo item 005, todos boot-frozen e fail-closed.
 _ITEM_005_SWITCHES: tuple[tuple[str, str], ...] = (
     ("SF_MAIN_PROVIDERS_V2", "main_providers_v2"),
     ("SF_PARALLEL_WORKERS_V2", "parallel_workers_v2"),
@@ -175,28 +174,53 @@ def test_switches_are_not_reexported_in_config_package():
 import workflow_app.config as c
 print(json.dumps({"leaked": sorted(
     n for n in dir(c)
-    if n.startswith(("main_providers_v2", "parallel_workers_v2", "mcp_think_exec_v2"))
+    if n.startswith((
+        "main_providers_v2", "parallel_workers_v2", "mcp_think_exec_v2",
+    ))
 )}))
 '''
     got = _run_probe(probe, {})
     assert got["leaked"] == [], got
 
 
-def test_mcp_wrappers_switch_was_not_created_inert():
-    """R-H1: switch sem comportamento gateado e defeito, nao entrega.
+_TE_COMMANDS_PROBE = '''import json
+import os
 
-    Nao existe em `src/` camada de wrappers para `SF_MCP_WRAPPERS_V2` gatear
-    (A005-8) e a decisao D-005-2 segue sem resposta. Enquanto isso, o literal
-    so pode aparecer em comentario (o registro no inventario KS-01), nunca como
-    ponto de leitura.
-    """
-    flag = "SF_MCP_WRAPPERS_V2"
-    reads = []
-    for path in sorted((_WORKFLOW_APP_ROOT / "src").rglob("*.py")):
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if flag in line and not line.strip().startswith("#"):
-                reads.append((path.name, lineno, line.strip()))
-    assert reads == [], f"{flag} foi criado sem gate real (R-H1): {reads}"
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtWidgets import QApplication, QPushButton
+from workflow_app.main_window import MainWindow
+
+app = QApplication.instance() or QApplication([])
+window = MainWindow()
+commands = {
+    str(button.property("testid")): str(button.property("te_command"))
+    for button in window.findChildren(QPushButton)
+    if button.property("te_command")
+}
+print(json.dumps(commands, sort_keys=True))
+window.close()
+'''
+
+
+@pytest.mark.parametrize("raw", [None, "0", "TRUE", "1"])
+def test_thinking_kimi_always_uses_k3_when_think_exec_enabled(raw: str | None):
+    """O botao Thinking `kimi-k3` publica sempre o wrapper K3."""
+    got = _run_probe(
+        _TE_COMMANDS_PROBE,
+        {"SF_MCP_THINK_EXEC_V2": "1", "SF_MCP_WRAPPERS_V2": raw},
+    )
+    assert got["output-mcp-action-thinking-kimi"] == "/mcp:kimi-k3"
+    assert got["output-mcp-action-execution-kimi"] == "/mcp:kimi"
+
+
+def test_removed_mcp_wrappers_flag_does_not_materialize_think_exec_row_by_itself():
+    """A env removida nao materializa a matriz Thinking/Execution sozinha."""
+    got = _run_probe(
+        _TE_COMMANDS_PROBE,
+        {"SF_MCP_THINK_EXEC_V2": None, "SF_MCP_WRAPPERS_V2": "1"},
+    )
+    assert "output-mcp-action-thinking-kimi" not in got
+    assert "output-mcp-action-execution-kimi" not in got
 
 
 # ======================================================================
@@ -231,17 +255,21 @@ def test_llm_flags_v2_absent_closes_set_to_two_literals():
 
 
 def test_llm_flags_v2_on_opens_the_seven_canonical_literals():
-    """Com o switch ligado, os 7 literais canonicos na ordem canonica."""
+    """Com o switch ligado, os literais thinking/execution na ordem canonica."""
     got = _run_probe(_FLAGS_SET_PROBE, {"SF_LLM_FLAGS_V2": "1"})
     assert got["order"] == [
-        "--opus", "--sonnet", "--codex", "--kimi", "--kimi-k3", "--qwen", "--grok",
+        "--fable", "--opus", "--codex-ultra", "--kimi-k3", "--grok-xhigh",
+        "--grok", "--sonnet", "--kimi", "--qwen", "--codex",
     ], got
     assert got["by_terminal"] == {
-        "T1": ["--codex", "--grok", "--kimi", "--kimi-k3", "--opus", "--qwen", "--sonnet"],
-        "T2": ["--kimi", "--qwen"],
-        "T3": ["--codex", "--grok"],
+        "T1": [
+            "--codex", "--codex-ultra", "--fable", "--grok", "--grok-xhigh",
+            "--kimi", "--kimi-k3", "--opus", "--qwen", "--sonnet",
+        ],
+        "T2": ["--kimi", "--kimi-k3", "--qwen"],
+        "T3": ["--codex", "--codex-ultra", "--grok", "--grok-xhigh"],
     }, got
-    assert len(got["redundant"]) == 5, got
+    assert len(got["redundant"]) == 7, got
 
 
 def test_llm_flags_module_stays_qt_free():
@@ -303,8 +331,10 @@ def test_main_providers_gate_moved_off_the_global_switch():
 
 def test_main_providers_gate_opens_the_four_slugs():
     got = _run_probe(_WIDGET_PROBE, {"SF_MAIN_PROVIDERS_V2": "1"})
-    for slug in ("claude", "codex", "kimi", "qwen", "opus", "sonnet", "kimi-k3"):
+    for slug in ("claude", "codex", "kimi", "qwen"):
         assert got["main_hidden"][slug] is False, (slug, got["main_hidden"])
+    for slug in ("opus", "sonnet", "kimi-k3"):
+        assert got["main_hidden"][slug] is True, (slug, got["main_hidden"])
 
 
 def test_grok_radio_stays_under_its_own_switch():

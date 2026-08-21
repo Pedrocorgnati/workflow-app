@@ -141,9 +141,12 @@ printf '%s\\n%s\\n' "$systemforge_root" "$corgly_root"
 def test_all_slugs_render_for_kimi_and_codex() -> None:
     for _rel, slash in COMMANDS:
         kimi = CommandQueueWidget.render_for_llm(slash, "kimi", mode="insert")
+        qwen = CommandQueueWidget.render_for_llm(slash, "qwen", mode="insert")
         codex = CommandQueueWidget.render_for_llm(slash, "codex", mode="insert")
         assert kimi.text == f"/skill:slash-executor {slash}"
         assert kimi.abort_reason is None
+        assert qwen.text == f"/slash-executor {slash}"
+        assert qwen.abort_reason is None
         assert codex.text is not None and f"Command: {slash}" in codex.text
         assert codex.abort_reason is None
 

@@ -1,8 +1,9 @@
 """
-CriticalErrorModal — Blocking modal for critical startup errors (module-08/TASK-2).
+CriticalErrorModal — Blocking modal for SDK readiness errors (module-08/TASK-2).
 
-Displayed when claude-agent-sdk is missing or Claude CLI is not authenticated.
-The only available button closes the application.
+Displayed only by flows that explicitly require claude-agent-sdk readiness.
+Application startup must not use this modal because the embedded terminals are
+the recovery path for CLI login and repair.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ _COLOR_ERROR = "#EF4444"
 
 class CriticalErrorModal(QDialog):
     """
-    Blocking modal for critical startup errors (SDK absent / not authenticated).
+    Blocking modal for SDK readiness errors (SDK absent / not authenticated).
 
     On close, terminates the application via sys.exit(1).
 

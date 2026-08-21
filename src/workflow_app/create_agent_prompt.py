@@ -149,17 +149,18 @@ Procedimento obrigatorio:
 """
 
 _MCP_BLOCK: Final[str] = """\
-- Destino MCP selecionado. Implante dentro de data-testid="output-toolbar-mcp"
-  um QPushButton real, checkable, com altura 22 px, StrongFocus,
-  accessibleName/tooltip, estado unchecked neutro #27272A, estado checked verde
-  #16A34A e testid output-mcp-agent-{slug}. Integre-o a mesma composicao usada por
-  Main MCP, Parallel e Dual. Quando ativo, acrescente uma unica diretiva da
-  persona; quando inativo, nao altere o prompt. Preserve ordem deterministica,
-  provider selecionado e todos os seletores existentes.
-  Nao substitua este requisito por QCheckBox. Registre o spec numa unica fonte
+- Destino MCP selecionado. Implante dentro de data-testid="output-mcp-persona-checkboxes"
+  (setor output-toolbar-mcp) um QCheckBox real, StrongFocus, accessibleName/tooltip,
+  estado unchecked neutro #27272A, estado checked verde #16A34A e testid
+  output-mcp-agent-{slug}. Nao crie data-testid="output-mcp-agent-buttons": aquele
+  container foi absorvido pelos checkboxes. Integre-o a mesma composicao usada por
+  Main MCP, Parallel, Dual, Thinking e Execution. Quando ativo, acrescente uma
+  unica diretiva da persona; quando inativo, nao altere o prompt. Preserve ordem
+  deterministica (prefixo curado na frente, suplementos no fim), provider
+  selecionado e todos os seletores existentes. Registre o spec numa unica fonte
   persistente reconstruida por _build_mcp_column(), para o controle sobreviver
   ao restart. Se output-mcp-agent-{slug} ja existir, nao duplique: valide ou
-  atualize o spec existente. Teste estado ativo/inativo nas tres acoes.
+  atualize o spec existente. Teste estado ativo/inativo nas acoes MCP.
 """
 
 _BRAINSTORM_BLOCK: Final[str] = """\

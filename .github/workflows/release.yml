@@ -40,7 +40,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Install PyInstaller
-        run: uv run pip install pyinstaller
+        run: uv pip install pyinstaller
 
       # PySide6 on Linux needs system libs
       - name: Install system libs (Linux only)
@@ -50,8 +50,12 @@ jobs:
       - name: Build executavel
         run: |
           uv run pyinstaller \
+            --clean \
+            --noconfirm \
             --onefile \
             --name workflow-app \
+            --add-data "assets:workflow_app/assets" \
+            --collect-data workflow_app \
             --hidden-import PySide6.QtCore \
             --hidden-import PySide6.QtWidgets \
             --hidden-import PySide6.QtGui \

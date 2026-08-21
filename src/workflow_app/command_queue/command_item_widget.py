@@ -52,11 +52,16 @@ _STATUS_SYMBOL: dict[CommandStatus, str] = {
 
 # Botao unico adaptavel (source.md secao 9): cor/tooltip/destino derivam do
 # provider efetivo. Pares (cor, cor_hover) por provider.
+#
+# A cor segue o TERMINAL, nao a identidade do LLM: T2 (familia Kimi|Qwen) e
+# sempre azul (`single-arrow-multifunction.md` seta azul). Qwen nao ganha cor
+# propria — Parallel Worker Qwen ocupa o mesmo T2 do Kimi.
+_T2_BLUE: tuple[str, str] = ("#3B82F6", "#93C5FD")  # azul -> T2 (Kimi e Qwen)
 _PROVIDER_BTN_STYLE: dict[Provider, tuple[str, str]] = {
     Provider.CLAUDE: ("#22C55E", "#86EFAC"),  # verde  -> T1
-    Provider.KIMI:   ("#3B82F6", "#93C5FD"),  # azul   -> T2
+    Provider.KIMI:   _T2_BLUE,                # azul   -> T2
     Provider.CODEX:  ("#A855F7", "#D8B4FE"),  # roxo   -> T3
-    Provider.QWEN:   ("#F59E0B", "#FCD34D"),  # ambar  -> T2-qwen
+    Provider.QWEN:   _T2_BLUE,                # azul   -> T2 (mesmo terminal do Kimi)
     Provider.GROK:   ("#EF4444", "#FCA5A5"),  # vermelho -> T3-grok
 }
 _PROVIDER_LABEL: dict[Provider, str] = {
@@ -631,10 +636,13 @@ class CommandItemWidget(QWidget):
         self.run_in_terminal_requested.emit(self.dispatch_text())
 
     def _on_kimi_clicked(self) -> None:
-        """Send Kimi-adapted prompt to the workspace terminal and mark as sent.
+        """Send the T2 (workspace) payload and mark as sent.
 
-        Does NOT trigger the Claude (interactive) terminal — the green arrow
-        becomes amber as if it had been run, so play-next skips it.
+        Handler canonico da seta azul: cobre o par T2 inteiro (Worker Kimi e
+        Worker Qwen). A adaptacao e Kimi-dialect (`adapt_to_kimi` -> `/skill:`);
+        `_dispatch_blue_arrow` reescreve para `/slash-executor` quando a
+        ocupacao do T2 e `qwen`. Nao dispara o T1 (interactive) — a seta vira
+        ambar como se tivesse rodado, e o play-next pula o item.
         """
         if self._is_sent:
             return
@@ -772,7 +780,11 @@ class CommandItemWidget(QWidget):
         `CommandQueueWidget._refresh_items_live_state`.
 
         Sent -> toggle reset (paridade com a seta verde legada). Provider None
-        (Desabilitado) -> nao despacha; apenas reafirma o estado cinza."""
+        (Desabilitado) -> nao despacha; apenas reafirma o estado cinza.
+
+        Roteamento do clique: `KIMI` e `QWEN` (familia T2, seta azul) ->
+        `_on_kimi_clicked`; `CODEX` -> `_on_codex_clicked`; `CLAUDE` (e
+        default, inclusive Grok-as-Main via verde) -> `_on_run_clicked`."""
         if self._is_sent:
             self.reset_to_pending()
             return
@@ -788,7 +800,10 @@ class CommandItemWidget(QWidget):
         if prov is None:
             self.refresh_provider()  # garante cinza/disabled + tooltip
             return
-        if prov is Provider.KIMI:
+        # Familia T2 (Kimi|Qwen) compartilha a seta azul e o handler. Sem o
+        # ramo QWEN o clique caia no else verde/T1 enquanto o step ja ia a T2
+        # via `_on_kimi_clicked` — divergencia clique vs step.
+        if prov in (Provider.KIMI, Provider.QWEN):
             self._on_kimi_clicked()
         elif prov is Provider.CODEX:
             self._on_codex_clicked()
@@ -828,8 +843,9 @@ class CommandItemWidget(QWidget):
         self._run_btn.setText("▶")
         self._run_btn.setEnabled(True)
         # Recolore conforme o provider efetivo (verde Claude por default; azul
-        # Kimi / roxo Codex se um worker estiver ativo). refresh_provider ja faz
-        # o unpolish/polish, espelhando o que _mark_as_sent fazia para o ambar.
+        # T2 Kimi/Qwen / roxo Codex se um worker estiver ativo). refresh_provider
+        # ja faz o unpolish/polish, espelhando o que _mark_as_sent fazia para o
+        # ambar.
         self.refresh_provider()
         self.set_status(CommandStatus.PENDENTE)
         if was_sent:

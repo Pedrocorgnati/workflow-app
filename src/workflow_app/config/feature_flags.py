@@ -66,26 +66,16 @@ from typing import Final
 #     | 7 | SF_PARALLEL_WORKERS_V2                   | opt-in     | boot-frozen | workers = `kimi` (T2) e `codex` (T3), 2 no total                  |
 #     | 8 | SF_LLM_FLAGS_V2                          | opt-in     | boot-frozen | conjunto fechado de 2 literais: `--codex` e `--kimi`              |
 #     | 9 | SF_MCP_THINK_EXEC_V2                     | opt-in     | boot-frozen | action row legada Main MCP / Parallel / Dual (sem TE-01)          |
-#     |10 | SF_MCP_WRAPPERS_V2                       | (n/a)      | (n/a)       | NAO CRIADO — ver nota abaixo                                      |
+#     |10 | removido: wrappers Kimi por variante     | -          | -           | Thinking Kimi sempre publica `/mcp:kimi-k3`                       |
 #
 #     Contagem MEDIDA nesta tabela (item 006 do loop
-#     08-17-systemforge-multillm-gaps-refactor, gap C7): 10 linhas numeradas e
-#     9 switches VIVOS. A diferenca e a linha 10, que registra um switch NAO
-#     CRIADO (ver nota abaixo). A linha do switch proprio do Router V2 (item
+#     08-17-systemforge-multillm-gaps-refactor, gap C7): 9 switches VIVOS. A linha
+#     do switch proprio do Router V2 (item
 #     010) foi RETIRADA — nao marcada como legada — junto com a remocao daquele
-#     regime em `command_queue/provider_router.py`, e as linhas seguintes foram
-#     renumeradas sem deixar lacuna. O nome da variavel morta nao e repetido
-#     aqui de proposito: ele so sobrevive no guard de remocao em
-#     `tests/test_provider_router.py`, para que uma busca por ocorrencia viva no
-#     `src/` volte vazia.
-#
-#     Linha 10 (`SF_MCP_WRAPPERS_V2`): o switch NAO existe neste modulo e nao
-#     foi criado pelo item 005. Nao ha, em `src/`, camada de wrappers que ele
-#     possa gatear (A005-8), e a decisao D-005-2 — onde exatamente o gate
-#     entraria — segue sem resposta. Criar a constante sem comportamento
-#     gateado produziria um switch inerte, que e exatamente o defeito R-H1 que
-#     o item 005 existe para nao cometer. A linha fica no inventario como
-#     registro do que falta, nunca como declaracao de que o switch existe.
+#     regime em `command_queue/provider_router.py`. O switch dedicado aos
+#     wrappers Kimi tambem saiu do codigo vivo: a matriz Thinking/Execution
+#     agora tem contrato fixo, e o botao `kimi-k3` nao pode degradar para
+#     `/mcp:kimi` por kill-switch.
 #
 #     `SF_MODEL_EFFORT_EQUIV` NAO consta nesta tabela: foi removido pelo item
 #     002 (D-C27-2) e nao e membro vivo de familia nenhuma.
@@ -100,20 +90,15 @@ from typing import Final
 #     proposta futura de `SF_FLAG_PARITY_V2` deve ser recusada apontando para
 #     este paragrafo e para o switch que ja cobre o caso.
 #
-# (d) REVOGACAO DA CLAUSULA GLOBAL DO DOCSTRING DE MODULO — PENDENTE
+# (d) FAMILIAS DE LEITURA - D-005-1 RESOLVIDA POR REMOCAO
 #
-#     Bloqueada pela decisao D-005-1 (sem resposta). O docstring de modulo
-#     declara contrato boot-frozen para o modulo INTEIRO e trata leitura
-#     per-call como anti-pattern. Revogar essa clausula so faz sentido se a
-#     familia hot-read tiver ao menos um membro declarado — e hoje ela tem
-#     zero, porque seu unico candidato historico (`SF_MODEL_EFFORT_EQUIV`) foi
-#     removido pelo item 002. As alternativas em aberto (lista de admissao
-#     vazia, familia hot-read registrada como historico revogado, ou
-#     reclassificacao de um switch existente) sao decisao, nao inferencia.
-#     Ate D-005-1 ser respondida, o docstring de modulo permanece intocado e
-#     valido: os 9 switches vivos da tabela acima sao, sem excecao,
-#     boot-frozen, entao a clausula global descreve corretamente o estado atual
-#     do modulo. Esta alinea NAO afrouxa nada de forma generica.
+#     A familia `boot-frozen` e ativa e contem todos os 9 switches vivos da
+#     tabela. A familia `hot-read` permanece reconhecida para classificacao
+#     futura, mas sua lista ativa e vazia. Seu unico candidato historico,
+#     `SF_MODEL_EFFORT_EQUIV`, foi removido pelo item 002 por D-C27-2. Nenhum
+#     switch vivo foi reclassificado apenas para preencher a familia vazia.
+#     O docstring global continua valido: toda leitura viva deste modulo ocorre
+#     no boot e permanece congelada durante o processo.
 #
 #
 # (e) DECISOES ABERTAS RESTANTES — o que ficou fora e por que
@@ -512,7 +497,7 @@ def llm_flags_v2_enabled() -> bool:
 # ── Kill-switch: par Thinking/Execution do dispatch MCP (C26 / item 005) ── #
 # Item 005 do mesmo loop. Ausente = caminho unico legado
 # (action row Main MCP / Parallel / Dual). Somente "1" liga a matriz
-# `_TE_COMMANDS` com 3 pastilhas Thinking e 5 Execution (TE-01).
+# `_TE_COMMANDS` com 5 pastilhas Thinking e 5 Execution (TE-01).
 # Antes do item 005 esse bloco estava gateado pelo global
 # `SF_LLM_CONFIG_V2`; o gate foi MOVIDO para ca, nao duplicado.
 _MCP_THINK_EXEC_V2_FLAG: Final[str] = "SF_MCP_THINK_EXEC_V2"

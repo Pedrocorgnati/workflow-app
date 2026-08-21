@@ -48,11 +48,23 @@ class TestRenderForLlm:
         assert r.text == MISSING_CMD
         assert r.abort_reason is None
 
-    def test_kimi_real_command_is_skill_adaptation(self):
+    def test_kimi_real_command_is_skill_slash_executor(self):
         r = R(REAL_CMD, "kimi")
         assert r.abort_reason is None
-        assert r.text is not None and r.text.startswith("/skill:")
-        assert "cmd:whitelist" in r.text
+        assert r.text == f"/skill:slash-executor {REAL_CMD}"
+
+    def test_qwen_real_command_is_native_slash_executor(self):
+        r = R(REAL_CMD, "qwen")
+        assert r.abort_reason is None
+        assert r.text == f"/slash-executor {REAL_CMD}"
+
+    def test_grok_real_command_is_native_slash_executor_with_runtime(self):
+        r = R(REAL_CMD, "grok")
+        assert r.abort_reason is None
+        assert r.text == (
+            f"/slash-executor --delegation-runtime=grok {REAL_CMD}"
+        )
+        assert r.text != REAL_CMD
 
     def test_codex_real_command_builds_simulated_prompt(self):
         r = R(REAL_CMD, "codex")
@@ -61,8 +73,9 @@ class TestRenderForLlm:
         assert r.text != REAL_CMD
         assert "whitelist" in r.text.lower()
 
-    def test_kimi_missing_command_aborts(self):
-        r = R(MISSING_CMD, "kimi")
+    @pytest.mark.parametrize("llm", ["kimi", "qwen", "grok"])
+    def test_skill_runtime_missing_command_aborts(self, llm):
+        r = R(MISSING_CMD, llm)
         assert r.text is None
         assert r.abort_reason and "nao encontrado" in r.abort_reason
 
@@ -80,6 +93,18 @@ class TestRenderForLlm:
         assert r.abort_reason is None
         assert r.text is not None and r.text.startswith("/skill:slash-executor /goal")
 
+    def test_goal_custom_prompt_qwen_slash_executor(self):
+        r = R(GOAL, "qwen")
+        assert r.abort_reason is None
+        assert r.text is not None and r.text.startswith("/slash-executor /goal")
+
+    def test_goal_custom_prompt_grok_slash_executor(self):
+        r = R(GOAL, "grok")
+        assert r.abort_reason is None
+        assert r.text is not None and r.text.startswith(
+            "/slash-executor --delegation-runtime=grok /goal"
+        )
+
     def test_goal_custom_prompt_codex_builds_prompt(self):
         r = R(GOAL, "codex")
         assert r.abort_reason is None
@@ -90,8 +115,9 @@ class TestRenderForLlm:
         assert r.text is None
         assert r.abort_reason and "/skill:" in r.abort_reason
 
-    def test_skill_kimi_raw(self):
-        r = R("/skill:dual", "kimi")
+    @pytest.mark.parametrize("llm", ["kimi", "qwen"])
+    def test_skill_runtime_raw(self, llm):
+        r = R("/skill:dual", llm)
         assert r.text == "/skill:dual"
         assert r.abort_reason is None
 
@@ -99,7 +125,15 @@ class TestRenderForLlm:
         r = R("/skill:dual", "claude")
         assert r.text == "/skill:dual"
 
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen"])
+    def test_skill_leftover_rewritten_for_grok(self):
+        r = R("/skill:slash-executor /cmd:whitelist", "grok")
+        assert r.abort_reason is None
+        assert r.text == (
+            "/slash-executor --delegation-runtime=grok /cmd:whitelist"
+        )
+        assert "/skill:" not in (r.text or "")
+
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen", "grok"])
     def test_clear_raw_all_llms(self, llm):
         r = R("/clear", llm)
         assert r.text == "/clear"
@@ -109,27 +143,27 @@ class TestRenderForLlm:
         assert R("/model opus", "claude").text == "/model opus"
         assert R("/effort high", "claude").text == "/effort high"
 
-    @pytest.mark.parametrize("llm", ["kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["kimi", "codex", "qwen", "grok"])
     def test_model_effort_insert_mode_aborts_non_claude_d8(self, llm):
         r = R("/model opus", llm, mode="insert")
         assert r.text is None
         assert r.helper_pulse is False
         assert r.abort_reason
 
-    @pytest.mark.parametrize("llm", ["kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["kimi", "codex", "qwen", "grok"])
     def test_model_effort_dispatch_mode_pulses_non_claude_d8(self, llm):
         r = R("/effort high", llm, mode="dispatch")
         assert r.text is None
         assert r.helper_pulse is True
         assert r.abort_reason is None
 
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen"])
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen", "grok"])
     def test_path_passthrough(self, llm):
         r = R("ai-forge/MCP/agents/x.md", llm)
         assert r.text == "ai-forge/MCP/agents/x.md"
         assert r.abort_reason is None
 
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen"])
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen", "grok"])
     def test_free_text_passthrough(self, llm):
         r = R("Leia o arquivo e implemente", llm)
         assert r.text == "Leia o arquivo e implemente"
@@ -138,14 +172,29 @@ class TestRenderForLlm:
     def test_idempotent_same_inputs(self):
         # frozen dataclass -> value equality
         assert R(REAL_CMD, "kimi") == R(REAL_CMD, "kimi")
+        assert R(REAL_CMD, "qwen") == R(REAL_CMD, "qwen")
+        assert R(REAL_CMD, "grok") == R(REAL_CMD, "grok")
 
-    def test_qwen_slash_aborts_instead_of_raw_fallback(self):
+    def test_qwen_slash_uses_native_slash_executor(self):
         rendered = R("/corgly:class-review", "qwen", mode="insert")
-        assert rendered.text is None
-        assert rendered.abort_reason and "Qwen" in rendered.abort_reason
+        kimi = R("/corgly:class-review", "kimi", mode="insert")
+        assert rendered.abort_reason is None
+        assert rendered.text == "/slash-executor /corgly:class-review"
+        assert kimi.text == "/skill:slash-executor /corgly:class-review"
+
+    def test_grok_slash_uses_native_slash_executor_with_runtime(self):
+        rendered = R("/corgly:class-review", "grok", mode="insert")
+        kimi = R("/corgly:class-review", "kimi", mode="insert")
+        qwen = R("/corgly:class-review", "qwen", mode="insert")
+        assert rendered.abort_reason is None
+        assert rendered.text == (
+            "/slash-executor --delegation-runtime=grok /corgly:class-review"
+        )
+        assert kimi.text == "/skill:slash-executor /corgly:class-review"
+        assert qwen.text == "/slash-executor /corgly:class-review"
 
     @pytest.mark.parametrize("cmd", [REAL_CMD, GOAL])
-    @pytest.mark.parametrize("llm", ["kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["kimi", "codex", "qwen", "grok"])
     def test_no_wf_channel_override_assignment_in_text(self, cmd, llm):
         # Invariant (§8.1): never PREFIX/INJECT a channel-override ASSIGNMENT
         # (WF_CHANNEL_OVERRIDE=<value>) into the pasted text. The Codex simulated
@@ -159,7 +208,7 @@ class TestRenderForLlm:
         "cmd",
         [REAL_CMD, MISSING_CMD, GOAL, "/skill:dual", "/clear", "path/x", "free text"],
     )
-    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex"])
+    @pytest.mark.parametrize("llm", ["claude", "kimi", "codex", "qwen", "grok"])
     def test_invariant_exclusivity_of_return(self, cmd, llm):
         r = R(cmd, llm)
         # never both set
@@ -181,15 +230,24 @@ class TestCharacterization:
         assert captured == []
 
     @pytest.mark.parametrize("cmd", [REAL_CMD, GOAL, "/clear", "texto livre"])
-    def test_renderer_matches_kimi_dispatcher(self, qapp, qtbot, cmd):
-        """Parity golden: render_for_llm(mode=dispatch) == _dispatch_kimi_main_command
-        emit, for the non-divergent first-token classes (gate for the gated Task 11)."""
+    @pytest.mark.parametrize(
+        "llm,dispatch",
+        [
+            ("kimi", "_dispatch_kimi_main_command"),
+            ("qwen", "_dispatch_qwen_main_command"),
+            ("grok", "_dispatch_grok_main_command"),
+        ],
+    )
+    def test_renderer_matches_skill_runtime_dispatcher(self, qapp, qtbot, cmd, llm, dispatch):
+        """Parity golden: render_for_llm(mode=dispatch) == skill-runtime dispatcher
+        emit (Kimi uses /skill:slash-executor; Qwen uses /slash-executor;
+        Grok uses /slash-executor --delegation-runtime=grok)."""
         cq = CommandQueueWidget()
         qtbot.addWidget(cq)
         emitted: list = []
         signal_bus.run_command_in_terminal.connect(lambda t: emitted.append(t))
-        cq._dispatch_kimi_main_command(cmd)
-        rendered = CommandQueueWidget.render_for_llm(cmd, "kimi", mode="dispatch")
+        getattr(cq, dispatch)(cmd)
+        rendered = CommandQueueWidget.render_for_llm(cmd, llm, mode="dispatch")
         assert rendered.text is not None
         assert emitted and emitted[-1] == rendered.text
 
@@ -217,9 +275,15 @@ def _new_window(qtbot):
 
 
 def _set_route(win, *, t1, t2, t3):
-    win._chk_route_t1.setChecked(t1)
-    win._chk_route_t2.setChecked(t2)
-    win._chk_route_t3.setChecked(t3)
+    radios = (win._chk_route_t1, win._chk_route_t2, win._chk_route_t3)
+    states = (t1, t2, t3)
+    if sum(states) == 1:
+        radios[states.index(True)].setChecked(True)
+        return
+    win._terminal_route_group.setExclusive(False)
+    for radio, checked in zip(radios, states, strict=True):
+        radio.setChecked(checked)
+    win._terminal_route_group.setExclusive(True)
 
 
 def _capture(signal):
@@ -296,20 +360,33 @@ class TestPublishInsertionLlmAware:
         assert "Command: /corgly:class-review" in sent_t3[0][0]
         assert sent_t3[0][1] is False
 
-    def test_qwen_render_abort_is_atomic_across_routes(self, qapp, qtbot):
+    def test_qwen_t1_pastes_slash_executor_like_kimi(self, qapp, qtbot):
         win = _new_window(qtbot)
-        _set_route(win, t1=True, t2=True, t3=False)
+        _set_route(win, t1=True, t2=False, t3=False)
         win._command_queue._main_qwen_radio.setVisible(True)
         win._command_queue._main_qwen_radio.setChecked(True)
-        sent_t1 = _capture(signal_bus.paste_text_in_terminal)
-        sent_t2 = _capture(signal_bus.paste_text_in_workspace_terminal)
-        toasts = _capture(signal_bus.toast_requested)
-        ok = win._publish_insertion_llm_aware("/corgly:class-review")
-        assert ok is False
-        assert sent_t1 == []
-        assert sent_t2 == []
-        assert len(toasts) == 1
-        assert "T1" in toasts[0][0] and "Qwen" in toasts[0][0]
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        try:
+            ok = win._publish_insertion_llm_aware(REAL_CMD)
+            assert ok is True
+            assert pastes[-1][0] == f"/slash-executor {REAL_CMD}"
+        finally:
+            win._modal_check_timer.stop()
+
+    def test_grok_t1_pastes_slash_executor_with_runtime(self, qapp, qtbot):
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_grok_radio.setVisible(True)
+        win._command_queue._main_grok_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        try:
+            ok = win._publish_insertion_llm_aware(REAL_CMD)
+            assert ok is True
+            assert pastes[-1][0] == (
+                f"/slash-executor --delegation-runtime=grok {REAL_CMD}"
+            )
+        finally:
+            win._modal_check_timer.stop()
 
     def test_sink_failure_isolated_after_successful_render(self, qapp, qtbot, monkeypatch):
         win = _new_window(qtbot)

@@ -14,6 +14,23 @@ _RULES_SHORTCUT_FLAG = "SF_LLM_FLAGS_RULES_V2"
 _RULES_SHORTCUT_PATH = "ai-forge/rules/llm-flags.md"
 
 
+def _assert_stretch_between(layout, left, right) -> None:
+    """Garante space-between: spacer expansivel entre os dois widgets."""
+    left_idx = layout.indexOf(left)
+    right_idx = layout.indexOf(right)
+    assert 0 <= left_idx < right_idx
+    stretch_between = [
+        i
+        for i in range(left_idx + 1, right_idx)
+        if layout.itemAt(i) is not None
+        and layout.itemAt(i).spacerItem() is not None
+        and layout.stretch(i) > 0
+    ]
+    assert stretch_between, (
+        f"esperado stretch entre indices {left_idx} e {right_idx}"
+    )
+
+
 _RULES_SHORTCUT_PROBE = r'''import json
 import os
 import tempfile
@@ -180,8 +197,19 @@ def test_main_window_title(qapp):
     assert "SystemForge Desktop" in window.windowTitle()
 
 
-def test_clear_button_in_actions_row_empties_queue(qapp):
-    """O botao Clear vive na linha de acoes e esvazia o queue-command-list."""
+def test_main_does_not_block_startup_on_sdk_auth():
+    """Startup nao pode bloquear o terminal embutido usado para login do CLI."""
+    import inspect
+
+    from workflow_app import main_window
+
+    source = inspect.getsource(main_window.main)
+    assert "ensure_sdk_ready" not in source
+    assert "CriticalErrorModal.show_and_exit" not in source
+
+
+def test_clear_button_in_template_row_empties_queue(qapp):
+    """O botao Clear vive na row queue-template-label e esvazia a fila."""
     from PySide6.QtWidgets import QPushButton
 
     from workflow_app.main_window import MainWindow
@@ -192,16 +220,26 @@ def test_clear_button_in_actions_row_empties_queue(qapp):
         b for b in window.findChildren(QPushButton)
         if b.property("testid") == "main-command-queue-clear-btn"
     )
-    assert btn.text() == "Clear"
+    copy_btn = next(
+        b for b in window.findChildren(QPushButton)
+        if b.property("testid") == "queue-btn-copy-commands"
+    )
+    assert btn.text() == ""
+    assert btn.width() == copy_btn.width() == 22
+    assert btn.height() == copy_btn.height() == 22
+    assert btn.styleSheet() == copy_btn.styleSheet()
 
-    # O botao deve viver fora do bloco de anexos, em uma linha de acoes.
-    # Caminhamos a cadeia de parents — evitamos findChildren(QWidget), que
-    # materializa wrappers de todos os widgets e corrompe o teardown do
-    # conftest (_cleanup_qt_widgets) com segfault no shiboken6.delete.
+    # Chip no canto direito da row do queue-template-label.
+    template_label = window._command_queue._template_label
+    assert template_label.property("testid") == "queue-template-label"
+    assert btn.parentWidget() is window._command_queue._template_row
+    assert copy_btn.parentWidget() is window._command_queue._template_row
+    assert template_label.parentWidget() is window._command_queue._template_row
+
     ancestor = btn.parentWidget()
     while ancestor is not None and ancestor.property("testid") != "main-command-queue-actions-row":
         ancestor = ancestor.parentWidget()
-    assert ancestor is not None, "Botao Clear nao esta dentro do main-command-queue-actions-row"
+    assert ancestor is None, "Botao Clear nao deve continuar na actions-row"
 
     ancestor = btn.parentWidget()
     while ancestor is not None and ancestor.property("testid") != "main-command-queue-pill-row":
@@ -225,8 +263,33 @@ def test_clear_button_in_actions_row_empties_queue(qapp):
     assert window._command_queue.get_queue_snapshot() == []
 
 
-def test_auto_loop_button_in_actions_row_mirrors_queue_state(qapp):
-    """O botao auto-loop vive ao lado do Clear e espelha o estado na fila.
+def test_copy_commands_button_lives_in_template_row(qapp):
+    """O copy da fila fica na row queue-template-label, fora da linha de autocast."""
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+
+    btn = next(
+        b for b in window.findChildren(QPushButton)
+        if b.property("testid") == "queue-btn-copy-commands"
+    )
+    assert btn.parentWidget() is window._command_queue._template_row
+
+    ancestor = btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "main-command-queue-actions-row":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is None, "copy commands nao deve continuar na actions-row"
+
+    ancestor = btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "queue-btn-play-next-container":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is None, "copy commands nao deve ficar na linha de play/autocast"
+
+
+def test_auto_loop_button_in_play_container_mirrors_queue_state(qapp):
+    """O botao auto-loop vive na linha 2 do play container e espelha a fila.
 
     Regras: ai-forge/rules/single-arrow-multifunction.md §9.
     """
@@ -240,21 +303,39 @@ def test_auto_loop_button_in_actions_row_mirrors_queue_state(qapp):
         b for b in window.findChildren(QPushButton)
         if b.property("testid") == "main-command-queue-auto-loop-btn"
     )
-    assert btn.text() == "auto-loop"
+    assert btn.text() == ""
     assert btn.isCheckable()
+    assert btn.width() == btn.height() == 28
+    assert "#C2410C" in btn.styleSheet()
     assert not btn.isChecked(), "auto-loop nasce desligado (opt-in explicito)"
 
-    # Mesma linha de acoes do Clear (parentWidget walk — nunca findChildren).
+    ancestor = btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "queue-btn-play-next-container":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None, "auto-loop nao esta dentro do queue-btn-play-next-container"
+
     ancestor = btn.parentWidget()
     while ancestor is not None and ancestor.property("testid") != "main-command-queue-actions-row":
         ancestor = ancestor.parentWidget()
-    assert ancestor is not None, "auto-loop nao esta dentro do main-command-queue-actions-row"
+    assert ancestor is None, "auto-loop nao deve continuar dentro do main-command-queue-actions-row"
 
     assert window._command_queue.is_auto_loop_enabled() is False
     btn.setChecked(True)
     assert window._command_queue.is_auto_loop_enabled() is True
+    assert window._auto_loop_timer.isActive() is True
+
+    # Giro sem pulso: o pixmap do icone permanece 16x16 mesmo em 45°,
+    # onde QPixmap.transformed() inflaria o bounding box.
+    from PySide6.QtCore import QSize
+    window._auto_loop_rotation = 45 - 8
+    window._rotate_auto_loop_icon()
+    sizes = btn.icon().availableSizes()
+    assert sizes, "icone rotacionado precisa expor o pixmap do canvas"
+    assert all(s == QSize(16, 16) for s in sizes), sizes
+
     btn.setChecked(False)
     assert window._command_queue.is_auto_loop_enabled() is False
+    assert window._auto_loop_timer.isActive() is False
 
 
 def test_attachment_pills_have_distinct_semantic_slots(qapp):
@@ -337,6 +418,95 @@ def test_header_path_buttons_use_typed_project_and_loop_slots(qapp, tmp_path, mo
     btn("queue-btn-loop-path").click()
     assert qapp.clipboard().text() == str(loop_json)
     assert published[-1] == str(loop_json)
+    app_state.clear_all()
+
+
+def test_json_clone_buttons_use_typed_project_and_loop_slots(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QPushButton
+
+    from workflow_app.config.app_state import app_state
+    from workflow_app.config.config_parser import PipelineConfig
+    from workflow_app.main_window import MainWindow
+
+    project_json = tmp_path / "project" / ".claude" / "project.json"
+    loop_json = tmp_path / "loop" / "_LOOP-CONFIG.json"
+    project_json.parent.mkdir(parents=True)
+    loop_json.parent.mkdir(parents=True)
+    project_json.write_text("{}", encoding="utf-8")
+    loop_json.write_text("{}", encoding="utf-8")
+    app_state.clear_all()
+    app_state.set_project_config(
+        PipelineConfig(
+            config_path=str(project_json),
+            project_name="project",
+            brief_root="brief",
+            docs_root="docs",
+            wbs_root="wbs",
+            workspace_root="workspace",
+        )
+    )
+    app_state.set_loop_config(
+        PipelineConfig(
+            config_path=str(loop_json),
+            project_name="loop",
+            brief_root="",
+            docs_root="",
+            wbs_root="",
+            workspace_root="",
+            raw={"kind": "daily-loop", "daily_loop": {"slug": "loop"}},
+        )
+    )
+
+    opened: list[str] = []
+
+    class FakeDialog:
+        def __init__(self, path, parent=None):
+            opened.append(str(path))
+
+        def setWindowTitle(self, title):
+            self.title = title
+
+        def exec(self):
+            return 1
+
+    monkeypatch.setattr(
+        "workflow_app.widgets.brainstorm_md_reader_dialog.BrainstormMdReaderDialog",
+        FakeDialog,
+    )
+
+    window = MainWindow()
+
+    def btn(testid: str):
+        return next(
+            b for b in window.findChildren(QPushButton)
+            if b.property("testid") == testid
+        )
+
+    project_copy = btn("project-copy-path")
+    project_reader = btn("project-reader-open")
+    project_select = btn("metrics-btn-proj-select")
+    project_layout = window._attachments_project_row.layout()
+    assert project_layout.indexOf(project_select) < project_layout.indexOf(project_copy)
+    assert project_layout.indexOf(project_copy) < project_layout.indexOf(project_reader)
+    _assert_stretch_between(project_layout, project_select, project_copy)
+
+    loop_copy = btn("loop-copy-path")
+    loop_reader = btn("loop-reader-open")
+    loop_select = btn("metrics-btn-loop-select")
+    loop_layout = window._attachments_loop_row.layout()
+    assert loop_layout.indexOf(loop_select) < loop_layout.indexOf(loop_copy)
+    assert loop_layout.indexOf(loop_copy) < loop_layout.indexOf(loop_reader)
+    _assert_stretch_between(loop_layout, loop_select, loop_copy)
+
+    qapp.clipboard().clear()
+    project_copy.click()
+    assert qapp.clipboard().text() == str(project_json)
+    loop_copy.click()
+    assert qapp.clipboard().text() == str(loop_json)
+
+    project_reader.click()
+    loop_reader.click()
+    assert opened == [str(project_json), str(loop_json)]
     app_state.clear_all()
 
 

@@ -164,8 +164,8 @@ def test_copy_path_button_copies_selected_md_path(qapp, monkeypatch, tmp_path, r
     assert info_toasts == ["Path do .md copiado para a area de transferencia."]
 
 
-def test_reader_button_sits_between_copy_and_config_buttons(qapp):
-    """Botao olho fica entre copiar path e configuracao no row do picker."""
+def test_reader_button_sits_after_copy_and_config_lives_in_brainstorm_utils(qapp):
+    """Botao olho fica no picker; gear vive na coluna utils da aba Brainstorm."""
     from workflow_app.main_window import MainWindow
 
     window = MainWindow()
@@ -178,7 +178,29 @@ def test_reader_button_sits_between_copy_and_config_buttons(qapp):
 
     assert reader_btn.width() == 24
     assert reader_btn.height() == 24
-    assert layout.indexOf(copy_btn) < layout.indexOf(reader_btn) < layout.indexOf(gear_btn)
+    assert layout.indexOf(copy_btn) < layout.indexOf(reader_btn)
+    assert layout.indexOf(gear_btn) == -1
+    md_idx = layout.indexOf(window._brainstorm_md_btn)
+    copy_idx = layout.indexOf(copy_btn)
+    assert 0 <= md_idx < copy_idx
+    stretch_between = [
+        i
+        for i in range(md_idx + 1, copy_idx)
+        if layout.itemAt(i) is not None
+        and layout.itemAt(i).spacerItem() is not None
+        and layout.stretch(i) > 0
+    ]
+    assert stretch_between, "brainstorm-md-picker precisa de space-between contra copiar/ver"
+
+    ancestor = gear_btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "queue-subtab-insertions-brainstorm-utils":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None
+
+    ancestor = gear_btn.parentWidget()
+    while ancestor is not None and ancestor.property("testid") != "output-toolbar-brainstorm":
+        ancestor = ancestor.parentWidget()
+    assert ancestor is not None
 
 
 def test_reader_button_without_selection_emits_warning(qapp, request):

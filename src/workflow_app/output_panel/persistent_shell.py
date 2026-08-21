@@ -19,7 +19,8 @@ import subprocess
 import sys
 import termios
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QSocketNotifier, Signal
 
@@ -28,6 +29,71 @@ logger = logging.getLogger(__name__)
 _SHELL = os.environ.get("SHELL", "/bin/bash")
 
 DEBUG_RAW_PTY = os.environ.get("WORKFLOW_APP_DEBUG_PTY", "") == "1"
+
+
+def linux_descendant_exec_basenames(root_pid: int) -> frozenset[str]:
+    """Basenames of descendant processes of ``root_pid`` (Linux ``/proc``).
+
+    The root pid itself (the PTY shell) is omitted: callers look for the
+    CLI hosted *inside* the shell (``grok``, ``codex``, ...). Unreadable
+    ``/proc`` entries are skipped. Returns empty on non-Linux or if the
+    pid has already exited.
+    """
+    if root_pid <= 0:
+        return frozenset()
+    seen: set[int] = set()
+    queue = [root_pid]
+    names: set[str] = set()
+    proc_root = Path("/proc")
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        task_dir = proc_root / str(pid) / "task"
+        try:
+            tid_dirs = list(task_dir.iterdir())
+        except OSError:
+            tid_dirs = []
+        for tid_dir in tid_dirs:
+            try:
+                text = (tid_dir / "children").read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for token in text.split():
+                try:
+                    child = int(token)
+                except ValueError:
+                    continue
+                if child not in seen:
+                    queue.append(child)
+        if pid == root_pid:
+            continue
+        try:
+            comm = (proc_root / str(pid) / "comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            comm = ""
+        if comm:
+            names.add(comm)
+        try:
+            raw = (proc_root / str(pid) / "cmdline").read_bytes().split(b"\x00")[0]
+            exe = Path(raw.decode("utf-8", "replace")).name
+        except OSError:
+            exe = ""
+        if exe:
+            names.add(exe)
+    return frozenset(names)
+
+
+def cli_name_in_exec_basenames(cli: str, names: Iterable[str]) -> bool:
+    """True when ``cli`` matches a process basename (exact, case-insensitive)."""
+    needle = (cli or "").strip().lower()
+    if not needle:
+        return False
+    for raw in names:
+        if Path(str(raw)).name.lower() == needle:
+            return True
+    return False
 
 
 class PersistentShell(QObject):
@@ -170,6 +236,25 @@ class PersistentShell(QObject):
                 os.killpg(pgid, signal.SIGWINCH)
             except (ProcessLookupError, PermissionError):
                 pass
+
+    def pid(self) -> int | None:
+        """PID of the live PTY shell, or None if it is not running."""
+        if self._proc is None:
+            return None
+        if self._proc.poll() is not None:
+            return None
+        return self._proc.pid
+
+    def descendant_exec_basenames(self) -> frozenset[str]:
+        """Basenames of processes running *inside* this PTY session."""
+        current = self.pid()
+        if current is None:
+            return frozenset()
+        return linux_descendant_exec_basenames(current)
+
+    def hosts_cli(self, cli: str) -> bool:
+        """True when a descendant of this PTY matches the CLI basename."""
+        return cli_name_in_exec_basenames(cli, self.descendant_exec_basenames())
 
     def terminate(self) -> None:
         if self._notifier:

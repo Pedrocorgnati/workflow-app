@@ -15,8 +15,6 @@ Para "error", "warning" e "warn": toast inclui botao de copiar a mensagem.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -27,6 +25,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from workflow_app.runtime_paths import workflow_app_assets_dir
 
 MAX_ACTIVE_TOASTS = 5
 _TOAST_SPACING = 8   # px between stacked toasts
@@ -51,7 +51,7 @@ def _load_copy_icon() -> QIcon | None:
         from PySide6.QtSvg import QSvgRenderer
     except ImportError:
         return None
-    svg_path = Path(__file__).resolve().parents[3] / "assets" / "copy.svg"
+    svg_path = workflow_app_assets_dir() / "copy.svg"
     if not svg_path.is_file():
         return None
     try:

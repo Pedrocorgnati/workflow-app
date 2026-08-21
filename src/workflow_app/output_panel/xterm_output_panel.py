@@ -1,7 +1,6 @@
 import os
 import shutil
 import time
-from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtWebChannel import QWebChannel
@@ -9,12 +8,14 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from workflow_app.app_instance import APP_SESSION_ID
-from .output_panel import _FATAL_PATTERNS, _find_systemforge_root
-from .persistent_shell import PersistentShell
+from workflow_app.runtime_paths import workflow_app_assets_dir
 from workflow_app.signal_bus import signal_bus
 from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
-ASSETS_DIR = Path(__file__).resolve().parents[3] / "assets" / "xterm"
+from .output_panel import _FATAL_PATTERNS, _find_systemforge_root
+from .persistent_shell import PersistentShell
+
+ASSETS_DIR = workflow_app_assets_dir() / "xterm"
 
 
 def _resolve_zsh() -> str:

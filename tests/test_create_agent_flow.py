@@ -25,9 +25,15 @@ def _new_window(qtbot):
 
 
 def _set_route(win, *, t1: bool, t2: bool, t3: bool) -> None:
-    win._chk_route_t1.setChecked(t1)
-    win._chk_route_t2.setChecked(t2)
-    win._chk_route_t3.setChecked(t3)
+    radios = (win._chk_route_t1, win._chk_route_t2, win._chk_route_t3)
+    states = (t1, t2, t3)
+    if sum(states) == 1:
+        radios[states.index(True)].setChecked(True)
+        return
+    win._terminal_route_group.setExclusive(False)
+    for radio, checked in zip(radios, states, strict=True):
+        radio.setChecked(checked)
+    win._terminal_route_group.setExclusive(True)
 
 
 def _create_button(win):

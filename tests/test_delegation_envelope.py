@@ -41,6 +41,21 @@ class TestSplitExecutorFlags:
         assert runtime is None
         assert recovery is False
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "  /blog:init-strategy   --foo  bar  ",
+            "\t/blog:init-strategy --foo\tbar\t",
+            "/blog:init-strategy\n--foo  bar\n",
+        ],
+    )
+    def test_no_flags_preserves_every_byte(self, text: str) -> None:
+        """C-35 inclui whitespace nao canonico, nao so o happy path."""
+        clean, runtime, recovery = CommandQueueWidget._split_executor_flags(text)
+        assert clean == text
+        assert runtime is None
+        assert recovery is False
+
     def test_only_intra_flag_unchanged(self) -> None:
         text = "/loop:iteraction:execute-task --task path.md --kimi"
         clean, runtime, recovery = CommandQueueWidget._split_executor_flags(text)
@@ -91,6 +106,13 @@ class TestSplitExecutorFlags:
         clean, runtime, recovery = CommandQueueWidget._split_executor_flags(text)
         assert clean == "  /foo --bar"
         assert runtime == "grok"
+
+    def test_target_whitespace_preserved_after_executor_flags(self) -> None:
+        text = "  --recovery-mode   --delegation-runtime=codex  /foo   --bar\tbaz  "
+        clean, runtime, recovery = CommandQueueWidget._split_executor_flags(text)
+        assert clean == "  /foo   --bar\tbaz  "
+        assert runtime == "codex"
+        assert recovery is True
 
 
 class TestIntraCommandFlags:
@@ -175,13 +197,16 @@ class TestIntraCommandFlagsPerRegime:
     def test_v2_regime_seven_literals(self) -> None:
         got = _run_literals_probe("1")
         assert got["literals"] == [
+            "--fable",
             "--opus",
-            "--sonnet",
-            "--codex",
-            "--kimi",
+            "--codex-ultra",
             "--kimi-k3",
-            "--qwen",
+            "--grok-xhigh",
             "--grok",
+            "--sonnet",
+            "--kimi",
+            "--qwen",
+            "--codex",
         ], got
         # Ordem de aparicao no comando, nao a ordem canonica do modulo.
         assert got["envelope_all"] == [

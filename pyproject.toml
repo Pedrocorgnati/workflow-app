@@ -35,6 +35,9 @@ workflow-app = "workflow_app.main:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/workflow_app"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"assets" = "workflow_app/assets"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 cache_dir = ".cache/.pytest_cache"

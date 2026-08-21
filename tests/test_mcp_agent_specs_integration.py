@@ -16,14 +16,25 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtWidgets import QCheckBox, QPushButton, QRadioButton, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QRadioButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from workflow_app import agent_integration_specs as specs_mod
 from workflow_app.agent_integration_specs import (
     AgentIntegrationSpecError,
     McpAgentSpec,
 )
-from workflow_app.config.feature_flags import llm_config_v2_enabled
+from workflow_app.config.feature_flags import (
+    llm_config_v2_enabled,
+    mcp_think_exec_v2_enabled,
+)
 from workflow_app.signal_bus import signal_bus
 
 # Item 023 do loop 08-11 troca a action row do setor MCP SOMENTE atras de
@@ -32,7 +43,7 @@ from workflow_app.signal_bus import signal_bus
 # com matriz FIXA por botao (TE-01, main_window.py `_TE_COMMANDS`). O contrato
 # coberto AQUI — materializacao das specs suplementares e composicao do prompt —
 # nao depende dessa moldura, entao o ancora e os pares (acao, comando base) sao
-# derivados da flag em vez de hardcoded: `thinking-codex` publica exatamente o
+# derivados da flag em vez de hardcoded: `execution-codex` publica exatamente o
 # mesmo `/mcp:codex` que o `Main MCP` legado sob Main Claude. Fica pulado apenas
 # o caso que afirma a semantica legada de "o Main LLM escolhe o comando", que
 # sob a flag deixou de existir; esse lado esta travado em
@@ -41,18 +52,20 @@ from workflow_app.signal_bus import signal_bus
 _LLM_CONFIG_V2 = llm_config_v2_enabled()
 
 _ANCHOR_ACTION = (
-    "output-mcp-action-thinking-codex" if _LLM_CONFIG_V2 else "output-mcp-action-main"
+    "output-mcp-action-thinking-codex-ultra" if _LLM_CONFIG_V2 else "output-mcp-action-main"
 )
 _ACTION_TESTIDS = (
     (
-        "output-mcp-action-thinking-claude",
-        "output-mcp-action-thinking-codex",
+        "output-mcp-action-thinking-fable",
+        "output-mcp-action-thinking-opus",
+        "output-mcp-action-thinking-codex-ultra",
         "output-mcp-action-thinking-kimi",
-        "output-mcp-action-execution-claude",
-        "output-mcp-action-execution-codex",
-        "output-mcp-action-execution-kimi",
+        "output-mcp-action-thinking-grok-xhigh",
         "output-mcp-action-execution-grok",
+        "output-mcp-action-execution-sonnet",
+        "output-mcp-action-execution-kimi",
         "output-mcp-action-execution-qwen",
+        "output-mcp-action-execution-codex",
     )
     if _LLM_CONFIG_V2
     else (
@@ -63,11 +76,10 @@ _ACTION_TESTIDS = (
 )
 # Tres acoes por lado, cada uma com o comando base que ela publica: no legado o
 # trio Main/Parallel/Dual sob Main Claude; sob a flag, o trio equivalente da
-# matriz fixa. Os botoes Grok/Qwen ficam de fora de proposito — nascem
-# desabilitados (MCP server nao registrado) e nao publicam nada.
+# matriz fixa. Grok/Qwen em Execution publicam `/mcp:grok` e `/mcp:qwen`.
 _ACTION_BASE_PAIRS = (
     [
-        ("output-mcp-action-thinking-codex", "/mcp:codex"),
+        ("output-mcp-action-thinking-codex-ultra", "/mcp:codex-ultra"),
         ("output-mcp-action-thinking-kimi", "/mcp:kimi-k3"),
         ("output-mcp-action-execution-kimi", "/mcp:kimi"),
     ]
@@ -206,23 +218,32 @@ def _set_main_llm(win, provider_id: str) -> None:
 
 
 def _set_route(win, *, t1: bool, t2: bool, t3: bool) -> None:
-    win._chk_route_t1.setChecked(t1)
-    win._chk_route_t2.setChecked(t2)
-    win._chk_route_t3.setChecked(t3)
+    radios = (win._chk_route_t1, win._chk_route_t2, win._chk_route_t3)
+    states = (t1, t2, t3)
+    if sum(states) == 1:
+        radios[states.index(True)].setChecked(True)
+        return
+    win._terminal_route_group.setExclusive(False)
+    for radio, checked in zip(radios, states, strict=True):
+        radio.setChecked(checked)
+    win._terminal_route_group.setExclusive(True)
 
 
-def _by_testid(root: QWidget, testid: str, widget_type=QPushButton):
+def _by_testid(root: QWidget, testid: str, widget_type=None):
     """Busca por testid restrita a um tipo concreto de widget.
 
     Nunca usar `QWidget` aqui: materializar wrappers de TODOS os QWidget de uma
     MainWindow corrompe o teardown do PySide6 (ver nota em
     test_main_window_terminal_routes.py). Para chegar num container, subir pelo
     `parentWidget()` de um leaf conhecido.
+    Sem `widget_type`, tenta QPushButton e QCheckBox (acoes MCP vs personas).
     """
-    assert widget_type is not QWidget, "use _row_of/_mcp_column_of para containers"
-    for widget in root.findChildren(widget_type):
-        if widget.property("testid") == testid:
-            return widget
+    types = (widget_type,) if widget_type is not None else (QPushButton, QCheckBox)
+    assert QWidget not in types, "use _row_of/_mcp_column_of para containers"
+    for concrete in types:
+        for widget in root.findChildren(concrete):
+            if widget.property("testid") == testid:
+                return widget
     raise AssertionError(f"widget nao encontrado: {testid}")
 
 
@@ -256,11 +277,11 @@ def _mcp_column_of(win) -> QWidget:
     return node
 
 
-def _agent_buttons(root: QWidget) -> list[QPushButton]:
+def _agent_buttons(root: QWidget) -> list[QCheckBox]:
     return [
-        btn
-        for btn in root.findChildren(QPushButton)
-        if str(btn.property("testid") or "").startswith("output-mcp-agent-")
+        chk
+        for chk in root.findChildren(QCheckBox)
+        if str(chk.property("testid") or "").startswith("output-mcp-agent-")
     ]
 
 
@@ -319,16 +340,15 @@ def test_agente_persistente_materializa_contrato_visual(
     column = _mcp_column_of(win)
     btn = _by_testid(column, f"output-mcp-agent-{agent_slug}")
 
-    assert isinstance(btn, QPushButton)
-    assert not isinstance(btn, QCheckBox)
+    assert isinstance(btn, QCheckBox)
     assert btn.isCheckable()
     assert not btn.isChecked()
-    assert btn.height() == 22
     assert btn.focusPolicy() == Qt.FocusPolicy.StrongFocus
     assert btn.toolTip() == directive
     assert btn.accessibleName()
     assert "#27272A" in btn.styleSheet()
     assert "#16A34A" in btn.styleSheet()
+    assert _row_of(btn).property("testid") == "output-mcp-persona-checkboxes"
 
 
 @pytest.mark.parametrize(("action_testid", "base"), _ACTION_BASE_PAIRS)
@@ -389,21 +409,17 @@ def test_agente_preserva_o_provider_selecionado(
 # ── Materializacao: botao real, checkable, com contrato visual ──────────────
 
 
-def test_spec_vira_qpushbutton_real_checkable_com_persona_prompt(win, monkeypatch):
+def test_spec_vira_checkbox_em_persona_checkboxes(win, monkeypatch):
     monkeypatch.setattr(specs_mod, "mcp_agent_specs", lambda: (_spec(),))
     column = _rebuild_column(win)
 
     btn = _by_testid(column, "output-mcp-agent-hardening-suplementar")
-    assert isinstance(btn, QPushButton)
-    assert not isinstance(btn, QCheckBox)
+    assert isinstance(btn, QCheckBox)
     assert btn.isCheckable()
     assert not btn.isChecked()
     assert btn.text() == "hardening+"
     assert btn.property("persona_prompt") == _HARDENING_DIRECTIVE
     assert btn.property("agent_slug") == "hardening-suplementar"
-    assert btn.minimumHeight() == 22
-    assert btn.maximumHeight() == 22
-    assert btn.height() == 22
     assert btn.toolTip() == _HARDENING_DIRECTIVE
     assert btn.accessibleName()
 
@@ -414,22 +430,126 @@ def test_botao_suplementar_vive_dentro_de_output_toolbar_mcp(win, monkeypatch):
 
     assert column.property("testid") == "output-toolbar-mcp"
     btn = _by_testid(column, "output-mcp-agent-hardening-suplementar")
-    assert _row_of(btn).property("testid") == "output-mcp-agent-buttons"
+    assert _row_of(btn).property("testid") == "output-mcp-persona-checkboxes"
+    assert not any(
+        w.property("testid") == "output-mcp-agent-buttons"
+        for w in column.findChildren(QWidget)
+    )
+
+
+# Item 015: as 16 personas curadas da secao MCPs, na ORDEM da tupla
+# `persona_specs` de `_build_mcp_column()`. A ordem e contrato de
+# `_compose_mcp_text`, que concatena os prompts marcados nesta sequencia.
+_CURATED_PERSONA_TESTIDS = [
+    "output-mcp-persona-search-in",
+    "output-mcp-persona-search-out",
+    "output-mcp-persona-search-forge",
+    "output-mcp-persona-controversial",
+    "output-mcp-persona-hardening",
+    "output-mcp-persona-criar-task",
+    "output-mcp-persona-revisar-task",
+    "output-mcp-persona-executor",
+    "output-mcp-persona-rev-exec",
+    "output-mcp-persona-revisar-qa",
+    "output-mcp-persona-code-debugger",
+    "output-mcp-persona-delegador",
+    "output-mcp-persona-scaffolds-blueprints-updater",
+    "output-mcp-persona-questioner",
+    "output-mcp-persona-ux-ui",
+    "output-mcp-persona-performance-engineer",
+]
 
 
 def test_controles_existentes_continuam_intactos(win, monkeypatch):
+    """Item 015: as personas curadas sao travadas por IDENTIDADE e ORDEM.
+
+    Substituicao de contrato: a assercao anterior era `len(...) == 16`, contagem
+    nua. Ela nao protege a UI, porque um filtro por exclusao do sufixo `-rules`
+    tambem devolve 16 personas, mas 12 dos 16 slugs sao outros. O que importa e
+    quais personas aparecem e em que ordem: a ordem da tupla `persona_specs` e a
+    ordem de composicao de `_compose_mcp_text`, entao reordenar muda o prompt
+    colado. Lista, nao set, exatamente por isso.
+    """
     monkeypatch.setattr(specs_mod, "mcp_agent_specs", lambda: (_spec(),))
     column = _rebuild_column(win)
 
-    assert len(win._mcp_persona_checkboxes) == 16
+    rendered = [chk.property("testid") for chk in win._mcp_persona_checkboxes]
+    assert rendered[: len(_CURATED_PERSONA_TESTIDS)] == _CURATED_PERSONA_TESTIDS
+    assert len(rendered) >= len(_CURATED_PERSONA_TESTIDS)
     for action_testid in _ACTION_TESTIDS:
         assert _by_testid(column, action_testid)
     # A tab bar interna (`output-mcp-tab-mcps` / `-brainstorm`) morreu em
     # 2026-07-27: as duas sub-abas viraram secoes de primeiro nivel do
     # `output-toolbar-section-selector`, entao a coluna nao tem mais nivel de
     # aba proprio.
-    rendered = {btn.property("testid") for btn in column.findChildren(QPushButton)}
-    assert not {"output-mcp-tab-mcps", "output-mcp-tab-brainstorm"} & rendered
+    rendered_btns = {btn.property("testid") for btn in column.findChildren(QPushButton)}
+    assert not {"output-mcp-tab-mcps", "output-mcp-tab-brainstorm"} & rendered_btns
+    assert not any(
+        w.property("testid") == "output-mcp-agent-buttons"
+        for w in column.findChildren(QWidget)
+    )
+
+
+def test_extras_da_aba_agentes_entram_depois_do_prefixo_curado(win, monkeypatch):
+    """Personas de output-toolbar-agentes que nao estao nas 16 curadas
+    aparecem no fim de output-mcp-persona-checkboxes, sem reordenar o prefixo.
+    """
+    monkeypatch.setattr(specs_mod, "mcp_agent_specs", lambda: ())
+    column = _rebuild_column(win)
+    rendered = [chk.property("testid") for chk in win._mcp_persona_checkboxes]
+    assert rendered[: len(_CURATED_PERSONA_TESTIDS)] == _CURATED_PERSONA_TESTIDS
+    scanned = {slug for slug, _rel in win._scan_persona_files()}
+    extra_ids = rendered[len(_CURATED_PERSONA_TESTIDS) :]
+    assert extra_ids, "esperava extras da aba Agentes depois das 16 curadas"
+    for testid in extra_ids:
+        assert str(testid).startswith("output-mcp-persona-")
+        slug = str(testid)[len("output-mcp-persona-") :]
+        assert slug in scanned
+    row = _row_of(_by_testid(column, "output-mcp-persona-search-in", QCheckBox))
+    assert row.property("testid") == "output-mcp-persona-checkboxes"
+
+
+@pytest.mark.skipif(
+    not mcp_think_exec_v2_enabled(),
+    reason="colunas Thinking/Execution so existem com SF_MCP_THINK_EXEC_V2=1",
+)
+def test_thinking_execution_sao_colunas_a_direita_estilo_main_llm(win):
+    """Thinking e Execution: label em cima, canto direito, estilo queue-div-main-llm."""
+    column = _mcp_column_of(win)
+
+    def _group_of(leaf_testid: str, group_testid: str) -> QWidget:
+        node = _by_testid(column, leaf_testid).parentWidget()
+        while node is not None and node.property("testid") != group_testid:
+            node = node.parentWidget()
+        assert node is not None, group_testid
+        return node
+
+    thinking = _group_of(
+        "output-mcp-action-thinking-opus", "output-mcp-action-thinking"
+    )
+    execution = _group_of(
+        "output-mcp-action-execution-sonnet", "output-mcp-action-execution"
+    )
+    assert isinstance(thinking.layout(), QVBoxLayout)
+    assert isinstance(execution.layout(), QVBoxLayout)
+    th_label = thinking.layout().itemAt(0).widget()
+    ex_label = execution.layout().itemAt(0).widget()
+    assert isinstance(th_label, QLabel)
+    assert isinstance(ex_label, QLabel)
+    assert th_label.text() == "Thinking"
+    assert ex_label.text() == "Execution"
+
+    col_layout = column.layout()
+    assert isinstance(col_layout, QHBoxLayout)
+    last = col_layout.itemAt(col_layout.count() - 1).widget()
+    action_row = _action_row_of(_by_testid(column, _ANCHOR_ACTION))
+    assert last is action_row
+    assert thinking.parentWidget() is action_row
+    assert execution.parentWidget() is action_row
+    personas = _row_of(_by_testid(column, "output-mcp-persona-search-in", QCheckBox))
+    personas_idx = col_layout.indexOf(personas.parentWidget())
+    action_idx = col_layout.indexOf(action_row)
+    assert 0 <= personas_idx < action_idx
 
 
 # ── Composicao: so entra o que esta ativo ───────────────────────────────────
@@ -529,7 +649,7 @@ def test_ordem_entre_suplementos_segue_o_registry(win, monkeypatch):
     ]
 
 
-def test_suplementos_ficam_entre_personas_e_action_row(win, monkeypatch):
+def test_suplementos_vivem_no_mesmo_container_de_personas(win, monkeypatch):
     monkeypatch.setattr(specs_mod, "mcp_agent_specs", lambda: (_spec(),))
     column = _rebuild_column(win)
 
@@ -538,22 +658,22 @@ def test_suplementos_ficam_entre_personas_e_action_row(win, monkeypatch):
         _by_testid(column, "output-mcp-persona-performance-engineer", QCheckBox)
     )
     action_row = _action_row_of(_by_testid(column, _ANCHOR_ACTION))
-    # Refactor 07-27: container unico de personas (nao ha mais `-2/-3/-4`).
+    assert persona_row is agent_row
     assert persona_row.property("testid") == "output-mcp-persona-checkboxes"
     assert action_row.property("testid") == "output-mcp-action-row"
-    page_layout = agent_row.parentWidget().layout()
-    order = [page_layout.itemAt(i).widget() for i in range(page_layout.count())]
-
-    assert order.index(persona_row) < order.index(agent_row) < order.index(action_row)
+    assert action_row is not persona_row
+    rendered = [
+        chk.property("testid") for chk in win._mcp_persona_checkboxes
+    ]
+    assert rendered[0] == "output-mcp-persona-search-in"
+    assert rendered[-1] == "output-mcp-agent-hardening-suplementar"
 
 
 def test_specs_vivem_num_flow_unico_com_quebra_por_largura(win, monkeypatch):
     """Contrato responsivo: um container so, quebra ditada pela largura.
 
-    Antes existiam linhas fixas de 4 botoes (`output-mcp-agent-buttons-2`).
-    Agora todos os agentes moram em `output-mcp-agent-buttons`, que usa
-    `ResponsiveButtonFlowLayout` sem teto de linhas: cada botao tem a largura
-    do proprio label e a quantidade por linha cresce com a janela.
+    `output-mcp-agent-buttons` foi absorvido por `output-mcp-persona-checkboxes`.
+    Specs suplementares moram no mesmo flow das personas, no fim da sequencia.
     """
     monkeypatch.setattr(
         specs_mod,
@@ -567,12 +687,18 @@ def test_specs_vivem_num_flow_unico_com_quebra_por_largura(win, monkeypatch):
         f"output-mcp-agent-agente-{i}" for i in range(5)
     ]
     assert {_row_of(btn).property("testid") for btn in buttons} == {
-        "output-mcp-agent-buttons"
+        "output-mcp-persona-checkboxes"
     }
 
     container = _row_of(buttons[0])
-    assert _rendered_lines(container, buttons, 110) == 2
-    assert _rendered_lines(container, buttons, 400) == 1
+    all_chks = [
+        chk
+        for chk in container.findChildren(QCheckBox)
+        if chk.property("testid")
+    ]
+    assert _rendered_lines(container, all_chks, 260) > _rendered_lines(
+        container, all_chks, 900
+    )
 
 
 def test_gap_vertical_entre_linhas_de_agentes_e_de_1px(win, monkeypatch):
@@ -584,10 +710,15 @@ def test_gap_vertical_entre_linhas_de_agentes_e_de_1px(win, monkeypatch):
     column = _rebuild_column(win)
     buttons = _agent_buttons(column)
     container = _row_of(buttons[0])
+    all_chks = [
+        chk
+        for chk in container.findChildren(QCheckBox)
+        if chk.property("testid")
+    ]
 
-    assert _rendered_lines(container, buttons, 110) == 2
-    tops = sorted({btn.geometry().y() for btn in buttons})
-    heights = {btn.geometry().height() for btn in buttons}
+    assert _rendered_lines(container, all_chks, 110) >= 2
+    tops = sorted({chk.geometry().y() for chk in all_chks})
+    heights = {chk.geometry().height() for chk in all_chks}
 
     assert len(heights) == 1
     assert tops[1] - tops[0] == heights.pop() + 1
@@ -611,7 +742,13 @@ def test_personas_vivem_num_flow_unico_com_largura_do_label(win):
         if str(chk.property("testid") or "").startswith("output-mcp-persona-")
     ]
 
-    assert len(personas) == 16
+    curated = [
+        chk
+        for chk in personas
+        if chk.property("testid") in _CURATED_PERSONA_TESTIDS
+    ]
+    assert [chk.property("testid") for chk in curated] == _CURATED_PERSONA_TESTIDS
+    assert len(personas) >= 16
     assert {_row_of(chk).property("testid") for chk in personas} == {
         "output-mcp-persona-checkboxes"
     }

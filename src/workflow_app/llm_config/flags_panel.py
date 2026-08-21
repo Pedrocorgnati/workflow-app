@@ -1,11 +1,11 @@
-"""FlagsPanel — painel de flags MCP na aba LLM Config (item 021).
+"""FlagsPanel — painel de flags MCP na aba LLM Routing (item 021).
 
-7 checkboxes (um por literal canonico), com logica de disable/tooltip
+Checkboxes (um por literal canonico), com logica de disable/tooltip
 quando a flag e incompativel com o Main corrente (C-57 e C-43).
 
-Layout: grade 2xN (default 4 colunas) — 7 checkboxes numa unica linha
-esticariam `queue-div-flag` alem da largura util da aba. O escopo (source.md
-:1192) autoriza explicitamente a grade e proibe girar a orientacao da secao.
+Layout: duas colunas rotuladas — thinking (raciocinio mais poderoso) e
+execution (runtime de terminal). A capacidade NAO vive em
+`queue-div-main-llm`.
 """
 
 from __future__ import annotations
@@ -22,17 +22,21 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.config.llm_flags import (
+    _EXECUTION_FLAG_ORDER,
     _FLAG_CANONICAL_ORDER,
     _FLAG_LITERAL_TO_MAIN,
     _FLAGS_BY_TERMINAL,
     _REDUNDANT_FLAG_MAINS,
+    _THINKING_FLAG_ORDER,
 )
 
-# Ordem estavel dos checkboxes na UI (canonica, source.md:1266).
+# Ordem estavel dos checkboxes na UI (canonica).
 _FLAG_ORDER: list[str] = list(_FLAG_CANONICAL_ORDER)
 
-# Colunas da grade 2xN. 4 colunas -> 2 linhas (4 + 3).
-_GRID_COLUMNS = 4
+_COLUMN_LABEL_QSS = (
+    "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
+    "  letter-spacing: 0.5px; background: transparent; border: none; }"
+)
 
 # Tooltip default para flags habilitadas.
 _DEFAULT_TOOLTIP = (
@@ -70,7 +74,7 @@ def _terminals_for_flag(flag: str) -> str:
 
 
 class FlagsPanel(QWidget):
-    """Painel com 7 checkboxes de flag MCP na aba LLM Config.
+    """Painel de flags MCP na aba LLM Config (thinking / execution).
 
     Sinal ``flags_changed`` e emitido quando qualquer checkbox muda de estado.
     """
@@ -106,23 +110,40 @@ class FlagsPanel(QWidget):
         grid_host.setStyleSheet("background: transparent; border: none;")
         grid = QGridLayout(grid_host)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(8)
+        grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(2)
 
-        for idx, flag in enumerate(_FLAG_ORDER):
+        thinking_lbl = QLabel("thinking")
+        thinking_lbl.setProperty("testid", "queue-div-flag-thinking")
+        thinking_lbl.setStyleSheet(_COLUMN_LABEL_QSS)
+        execution_lbl = QLabel("execution")
+        execution_lbl.setProperty("testid", "queue-div-flag-execution")
+        execution_lbl.setStyleSheet(_COLUMN_LABEL_QSS)
+        grid.addWidget(thinking_lbl, 0, 0)
+        grid.addWidget(execution_lbl, 0, 1)
+
+        thinking_flags = [f for f in _THINKING_FLAG_ORDER if f in _FLAG_ORDER]
+        execution_flags = [f for f in _EXECUTION_FLAG_ORDER if f in _FLAG_ORDER]
+
+        def _add_flag_checkbox(flag: str, row: int, column: int) -> None:
             chk = QCheckBox(flag)
             testid = f"queue-chk-flag-{flag.lstrip('-')}"
             chk.setProperty("testid", testid)
             chk.setToolTip(_DEFAULT_TOOLTIP.format(flag=flag))
             chk.toggled.connect(self._on_checkbox_toggled)
-            grid.addWidget(chk, idx // _GRID_COLUMNS, idx % _GRID_COLUMNS)
+            grid.addWidget(chk, row, column)
             self._checkboxes[flag] = chk
+
+        for idx, flag in enumerate(thinking_flags):
+            _add_flag_checkbox(flag, idx + 1, 0)
+        for idx, flag in enumerate(execution_flags):
+            _add_flag_checkbox(flag, idx + 1, 1)
 
         outer.addWidget(grid_host)
         outer.addStretch(1)
 
         # Estado inicial coerente com o Main persistido e com o kill-switch:
-        # sem esta chamada o painel nascia com as 7 habilitadas ate o operador
+        # sem esta chamada o painel nascia com todas habilitadas ate o operador
         # girar o radio de Main pela primeira vez (gap A4 do item 021).
         if main_llm_resolver is not None:
             self.refresh()
@@ -163,12 +184,13 @@ class FlagsPanel(QWidget):
             apenas sob Main **nao-Claude** (source.md:444). Sob Main Claude o
             kill-switch nao tem efeito: nao existe delegacao non-Claude a
             frear quando o proprio Main ja e Claude.
-          - Main claude: todas habilitadas.
+          - Main claude: todas habilitadas (variantes de raciocinio nao
+            redundam o CLI do T1).
           - Main kimi: --kimi e --kimi-k3 disabled (redundantes) e --codex
             disabled por auto-proxy (C-43/R-40).
-          - Main codex: --codex disabled (redundante).
+          - Main codex: --codex e --codex-ultra disabled (redundantes).
           - Main qwen: --qwen disabled (redundante).
-          - Main grok: --grok disabled (redundante).
+          - Main grok: --grok e --grok-xhigh disabled (redundantes).
         """
         from workflow_app.config import delegation_flags_nonclaude_enabled
 
@@ -182,7 +204,7 @@ class FlagsPanel(QWidget):
             return
 
         for flag, chk in self._checkboxes.items():
-            if flag == "--codex" and slug == "kimi":
+            if flag in {"--codex", "--codex-ultra"} and slug == "kimi":
                 chk.setEnabled(False)
                 chk.setToolTip(_KIMI_AUTOPROXY_TOOLTIP)
                 continue

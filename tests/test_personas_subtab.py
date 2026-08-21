@@ -432,20 +432,51 @@ def test_personas_config_label_override_applies_to_button(qtbot, monkeypatch):
             _settings.setValue("personas/label_overrides", _prev)
 
 
-def test_prompts_gear_lives_in_prompts_subtab_not_corner(qtbot):
+def test_prompts_gear_lives_in_prompts_utils_div_not_flow_or_corner(qtbot):
+    """O gear de prompts fica na coluna utils do canto, como personas-utils."""
+    from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout
+    from PySide6.QtCore import Qt
+
     win = _new_window(qtbot)
+    cq = win._command_queue
 
-    # Nao e mais cornerWidget compartilhado das sub-abas.
-    assert win._command_queue._insertions_subtabs.cornerWidget() is None
+    assert cq._insertions_subtabs.cornerWidget() is None
 
-    # Vive como widget do flow da sub-aba PROMPTS.
-    layout = win._command_queue._subtab_prompts_layout
-    tids = [
+    flow_tids = [
         layout.itemAt(i).widget().property("testid")
+        for layout in (cq._subtab_prompts_layout,)
         for i in range(layout.count())
         if layout.itemAt(i).widget() is not None
     ]
-    assert "toolbar-prompts-config-gear" in tids
+    assert "toolbar-prompts-config-gear" not in flow_tids
+
+    div = cq.prompts_utils_div
+    assert div is cq._prompts_utils_div
+    assert div.property("testid") == "queue-subtab-insertions-prompts-utils"
+    assert isinstance(div.layout(), QVBoxLayout)
+
+    tids = [
+        div.layout().itemAt(i).widget().property("testid")
+        for i in range(div.layout().count())
+        if div.layout().itemAt(i).widget() is not None
+    ]
+    assert tids == ["toolbar-prompts-config-gear"]
+
+    prompts_tab = div.parentWidget()
+    assert prompts_tab.property("testid") == "queue-subtab-insertions-prompts"
+    row = prompts_tab.layout()
+    assert isinstance(row, QHBoxLayout)
+    assert row.itemAt(row.count() - 1).widget() is div
+    assert row.stretch(row.count() - 1) == 0
+    assert row.itemAt(row.count() - 1).alignment() & Qt.AlignmentFlag.AlignRight
+
+    assert div.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
+    assert div.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+    assert div.sizeHint().width() < 60
+
+    gear = _button_by_testid(win, "toolbar-prompts-config-gear")
+    assert gear.width() == _PERSONAS_UTIL_BTN_SIZE
+    assert gear.height() == _PERSONAS_UTIL_BTN_SIZE
 
 
 def _subtab_testids(win, attr: str) -> list[str]:

@@ -822,21 +822,16 @@ class TestForceKimi:
         assert emitted_interactive == []
         assert pulses == ["interactive", "interactive"]
 
-    def test_suppressed_directive_never_feeds_the_model_effort_row(
+    def test_suppressed_directive_does_not_restore_model_effort_row(
         self, force_kimi_widget, model_effort_specs
     ):
-        """A row `queue-model-effort-row` so mostra o que REALMENTE rodou.
-
-        Diretiva suprimida (fila em dialeto Claude, Main trocado para Kimi
-        depois do enqueue) nao chega ao PTY, entao a row precisa continuar em
-        `—`. Escrever `/model: opus` aqui seria a mentira original do C27 com
-        outro rosto: o operador leria um modelo que o Kimi nunca recebeu."""
+        """A antiga UI de model/effort nao deve voltar via diretiva suprimida."""
         force_kimi_widget.load_pipeline(model_effort_specs)
         force_kimi_widget._force_kimi_chk.setChecked(True)
         force_kimi_widget._items[0]._on_run_clicked()
         force_kimi_widget._items[1]._on_run_clicked()
-        assert force_kimi_widget._last_model_label.text() == "/model: —"
-        assert force_kimi_widget._last_effort_label.text() == "/effort: —"
+        assert not hasattr(force_kimi_widget, "_last_model_label")
+        assert not hasattr(force_kimi_widget, "_last_effort_label")
 
     # ---- /clear vai SO para interactive ---------------------------------
 
@@ -977,6 +972,54 @@ class TestForceKimi:
         )
         assert f("") == ""
         assert f("prompt livre sem barra") == "prompt livre sem barra"
+
+    def test_qwen_slash_executor_invocation_is_native_without_skill_prefix(self):
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        f = CommandQueueWidget._build_qwen_slash_executor_invocation
+        assert f("/create-task") == "/slash-executor /create-task"
+        assert f("/blog:init-strategy --x y") == (
+            "/slash-executor /blog:init-strategy --x y"
+        )
+        assert f("/slash-executor /daily") == "/slash-executor /daily"
+        assert f("/skill:slash-executor /daily") == "/slash-executor /daily"
+        assert f("/skill:create-task") == "/skill:create-task"
+        assert f("prompt livre sem barra") == "prompt livre sem barra"
+        assert f(
+            "/tools:listener-recovery --channel interactive --reason BLOCKED",
+            recovery_mode=True,
+        ) == (
+            "/slash-executor --recovery-mode /tools:listener-recovery "
+            "--channel interactive --reason BLOCKED"
+        )
+
+    def test_grok_slash_executor_invocation_injects_delegation_runtime(self):
+        from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+        f = CommandQueueWidget._build_grok_slash_executor_invocation
+        assert f("/create-task") == (
+            "/slash-executor --delegation-runtime=grok /create-task"
+        )
+        assert f("/blog:init-strategy --x y") == (
+            "/slash-executor --delegation-runtime=grok /blog:init-strategy --x y"
+        )
+        assert f("/slash-executor /daily") == "/slash-executor /daily"
+        assert f("/slash-executor --delegation-runtime=grok /daily") == (
+            "/slash-executor --delegation-runtime=grok /daily"
+        )
+        assert f("/skill:slash-executor /daily") == (
+            "/slash-executor --delegation-runtime=grok /daily"
+        )
+        assert f("/skill:create-task") == (
+            "/slash-executor --delegation-runtime=grok /create-task"
+        )
+        assert f("prompt livre sem barra") == "prompt livre sem barra"
+        assert f(
+            "/tools:listener-recovery --channel interactive --reason BLOCKED",
+            recovery_mode=True,
+        ) == (
+            "/slash-executor --delegation-runtime=grok --recovery-mode "
+            "/tools:listener-recovery --channel interactive --reason BLOCKED"
+        )
+        assert "--recovery-mode" not in f("/create-task", recovery_mode=True)
 
     # ---- Main LLM radio exclusivity ------------------------------------
 
@@ -3916,6 +3959,79 @@ class TestSingleButtonDispatchFailureConditions:
         assert t1 == ["/clear"], "/clear raw ao T1 (Kimi main entende /clear)"
         assert t2 == ["/clear"], "/clear espelhado ao Worker Kimi/T2 sob Main Kimi"
 
+    def test_qwen_worker_click_routes_to_t2_blue_arrow(self, disp_widget):
+        """Clique per-item com Worker Qwen vai a T2 (kimi_blue_arrow_dispatched),
+        nao a T1. Fecha a divergencia: `_on_exec_clicked` roteava QWEN ao else
+        verde enquanto o step ja chamava `_on_kimi_clicked`."""
+        disp_widget._main_claude_radio.setChecked(True)
+        disp_widget._use_kimi_chk.setChecked(False)
+        disp_widget._use_qwen_chk.setChecked(True)
+        disp_widget.load_pipeline(
+            [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+        )
+        item = disp_widget._items[0]
+        assert item.effective_provider() is Provider.QWEN
+        assert "#3B82F6" in item._exec_btn.styleSheet(), (
+            "seta Qwen deve ser azul T2, nao ambar"
+        )
+        t1: list[str] = []
+        blue: list[tuple[str, int]] = []
+
+        def _blue(prompt: str, delay: int) -> None:
+            blue.append((prompt, delay))
+
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+        try:
+            item._on_exec_clicked()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+        assert t1 == [], "clique Qwen NAO pode ir ao T1 (divergencia seta azul)"
+        assert len(blue) == 1
+        prompt, delay = blue[0]
+        assert prompt.startswith("/slash-executor"), (
+            "ocupacao T2=qwen reescreve /skill: para /slash-executor nativo"
+        )
+        assert "/skill:" not in prompt
+        assert delay == 1000
+        assert item.is_pending_run() is False
+
+    def test_qwen_worker_step_and_click_agree_on_t2(self, disp_widget):
+        """Step e clique per-item com Worker Qwen despacham o mesmo destino T2
+        (seta azul). Paridade exigida por single-arrow-multifunction.md §4."""
+        def _run(path: str) -> list[str]:
+            disp_widget._main_claude_radio.setChecked(True)
+            disp_widget._use_kimi_chk.setChecked(False)
+            disp_widget._use_qwen_chk.setChecked(True)
+            disp_widget.load_pipeline(
+                [CommandSpec("/qa:prep", ModelName.SONNET, position=1)]
+            )
+            t1: list[str] = []
+            blue: list[str] = []
+
+            def _blue(prompt: str, delay: int) -> None:
+                blue.append(prompt)
+
+            signal_bus.run_command_in_terminal.connect(t1.append)
+            signal_bus.kimi_blue_arrow_dispatched.connect(_blue)
+            try:
+                if path == "step":
+                    disp_widget._on_step_btn_clicked()
+                else:
+                    disp_widget._items[0]._on_exec_clicked()
+            finally:
+                signal_bus.run_command_in_terminal.disconnect(t1.append)
+                signal_bus.kimi_blue_arrow_dispatched.disconnect(_blue)
+            assert t1 == [], f"{path}: Qwen worker nao pode ir a T1"
+            assert len(blue) == 1, f"{path}: esperado um dispatch azul T2"
+            return blue
+
+        step_blue = _run("step")
+        click_blue = _run("click")
+        assert step_blue == click_blue
+        assert step_blue[0].startswith("/slash-executor")
+
     # ---- Regra capacidade exclusiva (image-gen) — enforce mecanico ---------- #
     def test_image_gen_command_refused_in_step_without_codex_worker(self, disp_widget):
         """So o Codex gera imagem: um comando de image-gen (/pictures-create)
@@ -5245,16 +5361,34 @@ class TestQwenMainLane:
         assert llm_for_channel("interactive", "qwen") == "qwen"
 
     def test_dispatch_qwen_main_command_sends_to_terminal(self, widget):
-        """ST003: top-level command under Main Qwen dispatches to terminal."""
+        """Main Qwen publishes native `/slash-executor`, not `/skill:` and not PromptCompiler."""
         emitted = []
         signal_bus.run_command_in_terminal.connect(emitted.append)
         try:
             widget._main_qwen_radio.setChecked(True)
-            result = widget._dispatch_qwen_main_command("/help")
+            result = widget._dispatch_qwen_main_command("/create-task")
             assert result is True
-            assert len(emitted) >= 1
+            assert emitted == ["/slash-executor /create-task"]
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted.append)
+
+    def test_dispatch_qwen_native_slash_executor_payload(self, widget):
+        """Main Qwen emits `/slash-executor`; Main Kimi keeps `/skill:slash-executor`."""
+        kimi_emitted: list[str] = []
+        qwen_emitted: list[str] = []
+        cmd = "/blog:init-strategy --x y"
+        signal_bus.run_command_in_terminal.connect(kimi_emitted.append)
+        try:
+            widget._dispatch_kimi_main_command(cmd)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(kimi_emitted.append)
+        signal_bus.run_command_in_terminal.connect(qwen_emitted.append)
+        try:
+            widget._dispatch_qwen_main_command(cmd)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(qwen_emitted.append)
+        assert kimi_emitted == ["/skill:slash-executor /blog:init-strategy --x y"]
+        assert qwen_emitted == ["/slash-executor /blog:init-strategy --x y"]
 
     def test_dispatch_qwen_model_directive_pulses(self, widget):
         """ST003: /model under Main Qwen pulses listener without sending."""
@@ -5271,6 +5405,222 @@ class TestQwenMainLane:
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted.append)
             signal_bus.listener_helper_pulse.disconnect(pulsed.append)
+
+    def test_dispatch_grok_main_command_sends_native_slash_executor(self, widget):
+        """Main Grok publishes `/slash-executor --delegation-runtime=grok`, never raw."""
+        emitted = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            widget._main_grok_radio.setChecked(True)
+            result = widget._dispatch_grok_main_command("/create-task")
+            assert result is True
+            assert emitted == [
+                "/slash-executor --delegation-runtime=grok /create-task"
+            ]
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+
+    def test_dispatch_grok_namespaced_and_top_level_go_through_executor(self, widget):
+        emitted: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            assert widget._dispatch_grok_main_command("/qa:trace") is True
+            assert widget._dispatch_grok_main_command("/adr-create") is True
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+        assert emitted == [
+            "/slash-executor --delegation-runtime=grok /qa:trace",
+            "/slash-executor --delegation-runtime=grok /adr-create",
+        ]
+
+    def test_dispatch_grok_leftover_skill_prefix_rewritten(self, widget):
+        emitted: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            ok = widget._dispatch_grok_main_command("/skill:slash-executor /daily")
+            assert ok is True
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+        assert emitted == [
+            "/slash-executor --delegation-runtime=grok /daily"
+        ]
+        assert not any("/skill:" in item for item in emitted)
+
+    def test_dispatch_grok_native_slash_executor_is_idempotent(self, widget):
+        emitted: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            ok = widget._dispatch_grok_main_command("/slash-executor /daily")
+            assert ok is True
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+        assert emitted == ["/slash-executor /daily"]
+
+    def test_dispatch_grok_clear_goes_raw(self, widget):
+        emitted: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            ok = widget._dispatch_grok_main_command("/clear")
+            assert ok is True
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+        assert emitted == ["/clear"]
+
+    def test_dispatch_grok_model_directive_pulses(self, widget):
+        emitted: list[str] = []
+        pulsed: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        signal_bus.listener_helper_pulse.connect(pulsed.append)
+        try:
+            result = widget._dispatch_grok_main_command("/model opus")
+            assert result is True
+            assert emitted == []
+            assert "interactive" in pulsed
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+            signal_bus.listener_helper_pulse.disconnect(pulsed.append)
+
+    def test_dispatch_grok_missing_command_aborts_with_toast(self, widget):
+        toasts: list[tuple[str, str]] = []
+        emitted: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            result = widget._dispatch_grok_main_command(
+                "/comando-que-nao-existe-xyz"
+            )
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+        assert result is False
+        assert emitted == []
+        assert any("nao encontrado" in m for m, _ in toasts)
+
+    def test_dispatch_grok_worker_t3_uses_native_not_codex_envelope(self, widget):
+        """Worker T3 Grok cola `/slash-executor`, nao o envelope Codex."""
+        t1: list[str] = []
+        t3: list[str] = []
+        signal_bus.run_command_in_terminal.connect(t1.append)
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        widget._use_grok_chk.setChecked(True)
+        try:
+            ok = widget._dispatch_grok_main_command("/create-task", to_t1=False)
+            assert ok is True
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(t1.append)
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert t1 == []
+        assert t3 == [
+            "/slash-executor --delegation-runtime=grok /create-task"
+        ]
+        assert not any(
+            "Use the SystemForge slash-command executor rules" in item
+            for item in t3
+        )
+
+    def test_dispatch_grok_worker_t3_aborts_when_pty_has_no_grok(
+        self, widget, monkeypatch
+    ):
+        """Occupancy grok NAO basta: PTY inspectavel sem processo grok aborta."""
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        widget._use_grok_chk.setChecked(True)
+        monkeypatch.setattr(widget, "_t3_pty_hosts_cli", lambda cli: False)
+        try:
+            ok = widget._dispatch_grok_main_command("/create-task", to_t1=False)
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert ok is False
+        assert t3 == []
+        assert any("CLI ausente" in m or "processo grok" in m for m, _ in toasts)
+
+    def test_dispatch_grok_worker_t3_proceeds_when_pty_hosts_grok(
+        self, widget, monkeypatch
+    ):
+        t3: list[str] = []
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        widget._use_grok_chk.setChecked(True)
+        monkeypatch.setattr(widget, "_t3_pty_hosts_cli", lambda cli: True)
+        try:
+            ok = widget._dispatch_grok_main_command("/create-task", to_t1=False)
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert ok is True
+        assert t3 == [
+            "/slash-executor --delegation-runtime=grok /create-task"
+        ]
+
+    def test_t3_pty_hosts_cli_none_without_panel(self, widget):
+        """Sem MainWindow/T3, a inspecao devolve None (unit tests headless)."""
+        assert widget._find_t3_output_panel() is None
+        assert widget._t3_pty_hosts_cli("grok") is None
+
+    def test_dispatch_grok_worker_t3_aborts_when_occupancy_is_not_grok(
+        self, widget
+    ):
+        toasts: list[tuple[str, str]] = []
+        t3: list[str] = []
+        signal_bus.toast_requested.connect(lambda m, k: toasts.append((m, k)))
+        signal_bus.run_command_in_workspace_xterm.connect(t3.append)
+        try:
+            ok = widget._dispatch_grok_main_command("/create-task", to_t1=False)
+        finally:
+            signal_bus.run_command_in_workspace_xterm.disconnect(t3.append)
+        assert ok is False
+        assert t3 == []
+        assert any("grok" in m.lower() for m, _ in toasts)
+
+
+class TestGrokT3PtyProcessInspect:
+    """Helpers de inspecao /proc do PTY T3 (pendencia da revisao de execucao)."""
+
+    def test_cli_name_matches_exact_basename(self):
+        from workflow_app.output_panel.persistent_shell import (
+            cli_name_in_exec_basenames,
+        )
+
+        assert cli_name_in_exec_basenames("grok", {"grok", "zsh"}) is True
+        assert cli_name_in_exec_basenames("grok", {"/home/pedro/.local/bin/grok"}) is True
+        assert cli_name_in_exec_basenames("grok", {"codex", "zsh"}) is False
+        assert cli_name_in_exec_basenames("grok", set()) is False
+
+    def test_linux_descendant_exec_basenames_sees_child(self):
+        import subprocess
+        import sys
+        import time
+
+        from workflow_app.output_panel.persistent_shell import (
+            linux_descendant_exec_basenames,
+        )
+
+        # Root pid is omitted. bash -c sleep execs and disappears; keep a
+        # parent alive (python) so sleep is a real descendant, like zsh->grok.
+        inner = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, time; subprocess.Popen(['sleep', '20']); time.sleep(20)",
+            ],
+            start_new_session=True,
+        )
+        try:
+            names: set[str] = set()
+            for _ in range(40):
+                names = set(linux_descendant_exec_basenames(inner.pid))
+                if "sleep" in names:
+                    break
+                time.sleep(0.05)
+            assert "sleep" in names
+        finally:
+            import os
+            import signal
+
+            try:
+                os.killpg(inner.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                inner.kill()
+            inner.wait()
 
 
 # ──────────────── delegation_flags_nonclaude kill-switch (item 012) ── #
@@ -5824,6 +6174,50 @@ class TestLiveStateAtDispatch:
         assert step_call[1].get("to_t1") is True
         assert click_call[1].get("to_t1") is True
 
+    @pytest.mark.parametrize(
+        ("radio_attr", "dispatcher_attr", "flag_attr", "flag_literal"),
+        [
+            ("_main_codex_radio", "_dispatch_codex_command", "_flag_kimi_chk", "--kimi"),
+            ("_main_kimi_radio", "_dispatch_kimi_main_command", "_flag_codex_chk", "--codex"),
+            ("_main_qwen_radio", "_dispatch_qwen_main_command", "_flag_kimi_chk", "--kimi"),
+            ("_main_grok_radio", "_dispatch_grok_main_command", "_flag_kimi_chk", "--kimi"),
+        ],
+    )
+    def test_step_preserves_live_flag_for_each_non_claude_main(
+        self,
+        qapp,
+        qtbot,
+        radio_attr: str,
+        dispatcher_attr: str,
+        flag_attr: str,
+        flag_literal: str,
+    ):
+        """A matriz 13.3 exige sufixo nos quatro Mains T1 nao-Claude."""
+        from unittest.mock import MagicMock
+
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        w.load_pipeline([CommandSpec("/prd-create", ModelName.OPUS, position=1)])
+
+        getattr(w, radio_attr).setChecked(True)
+        flag_checkbox = getattr(w, flag_attr)
+        flag_checkbox.setEnabled(True)
+        flag_checkbox.setChecked(True)
+        assert flag_literal in w._items[0].dispatch_text()
+
+        w._orch_preflight_main_credential = MagicMock(return_value=None)
+        dispatcher = MagicMock(return_value=True)
+        setattr(w, dispatcher_attr, dispatcher)
+        w._items[0]._mark_as_sent = MagicMock()
+
+        w._on_step_btn_clicked()
+
+        dispatcher.assert_called_once()
+        dispatched = dispatcher.call_args.args[0]
+        assert dispatched == w._items[0].dispatch_text()
+        assert flag_literal in dispatched
+
     def test_dialect_badge_both_legs(self, qapp, qtbot):
         """Badge de dialeto (mitigacao de R-J5): avisa, nao barra (D4/C12).
 
@@ -5957,6 +6351,91 @@ class TestLiveStateAtDispatch:
             "o handler do radio Main Kimi tem que chamar o ponto unico de "
             "re-render, sem depender do handler do radio anterior."
         )
+
+    def test_dialect_badge_restore_uses_load_pipeline(self, qapp, qtbot):
+        """Restore publico cria os itens pelo load real com badge imediato."""
+        saved = CommandQueueWidget()
+        qtbot.addWidget(saved)
+        saved.show()
+        saved._main_claude_radio.setChecked(True)
+        saved.load_pipeline([
+            CommandSpec("/model sol high", ModelName.OPUS, position=1),
+            CommandSpec("/reasoning yes", ModelName.OPUS, position=2),
+            CommandSpec("/effort high", ModelName.OPUS, position=3),
+            CommandSpec("/prd-create", ModelName.OPUS, position=4),
+        ])
+        snapshot = saved.get_queue_snapshot()
+
+        restored = CommandQueueWidget()
+        qtbot.addWidget(restored)
+        restored.show()
+        restored._main_claude_radio.setChecked(True)
+        with patch.object(
+            restored, "load_pipeline", wraps=restored.load_pipeline
+        ) as load_pipeline:
+            restored.restore_queue_snapshot(snapshot)
+        load_pipeline.assert_called_once()
+
+        names = [item.get_spec().name for item in restored._items]
+        predicate = [
+            is_suppressed_directive(name, "claude") for name in names
+        ]
+        badges = [item.is_dialect_badge_visible() for item in restored._items]
+        assert names == [
+            "/model sol high", "/reasoning yes", "/effort high", "/prd-create",
+        ]
+        assert predicate == [True, True, False, False]
+        assert badges == predicate
+        for item, suppressed in zip(restored._items, predicate, strict=True):
+            tooltip = item._dialect_badge.toolTip()
+            if suppressed:
+                assert "suprimida" in tooltip.lower()
+                assert "claude" in tooltip.lower()
+            else:
+                assert tooltip == ""
+            assert item.is_pending_run() is True
+
+    def test_dialect_badge_refresh_is_idempotent(self, qapp, qtbot):
+        """Re-render repetido nao altera spec, dispatch, badge nem tooltip."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        w.show()
+        w._main_claude_radio.setChecked(True)
+        w.load_pipeline([
+            CommandSpec("/model sol high", ModelName.OPUS, position=1),
+            CommandSpec("/effort high", ModelName.OPUS, position=2),
+            CommandSpec("/prd-create", ModelName.OPUS, position=3),
+        ])
+
+        def photograph() -> list[tuple[str, str, bool, str]]:
+            main = w._resolve_interactive_main_llm()
+            result = []
+            for item in w._items:
+                visible = item.is_dialect_badge_visible()
+                assert visible == is_suppressed_directive(item.get_spec().name, main)
+                result.append((
+                    item.get_spec().name,
+                    item.dispatch_text(),
+                    visible,
+                    item._dialect_badge.toolTip(),
+                ))
+            return result
+
+        initial = photograph()
+        w._refresh_items_live_state()
+        first = photograph()
+        w._refresh_items_live_state()
+        second = photograph()
+        assert initial == first == second
+
+        w._main_codex_radio.setChecked(True)
+        after_main_change = photograph()
+        w._refresh_items_live_state()
+        after_first_refresh = photograph()
+        w._refresh_items_live_state()
+        after_second_refresh = photograph()
+        assert after_main_change == after_first_refresh == after_second_refresh
+        assert [row[0] for row in after_main_change] == [row[0] for row in initial]
 
 
 class TestSnapshotUnderTranslation:
@@ -6119,13 +6598,11 @@ class TestMainLlmVariantRadios:
         assert widget._main_sonnet_radio.property("testid") == "queue-radio-main-sonnet"
         assert widget._main_kimi_k3_radio.property("testid") == "queue-radio-main-kimi-k3"
 
-    def test_variant_radios_are_selectable(self, widget, _v2):
-        """Selecionaveis de verdade: nao ocultos, habilitados, no grupo exclusivo.
+    def test_variant_radios_are_hidden_from_main_llm(self, widget, _v2):
+        """Variantes de raciocinio sairam do Main LLM (CLI do terminal).
 
-        O oraculo e `isHidden()` (flag explicito de `setVisible(False)`), nao
-        `isVisible()`: `_llm_box` so ganha parent quando o `MainWindow` o
-        reparenteia para a `OutputToolbar`, entao com o widget standalone
-        NENHUM radio do eixo Main e `isVisible()` — nem os cinco antigos.
+        Continuam no grupo exclusivo (testids C6) mas ocultas: a capacidade
+        vive em `queue-div-flag`.
         """
         for radio in (
             widget._main_opus_radio,
@@ -6134,10 +6611,7 @@ class TestMainLlmVariantRadios:
         ):
             testid = radio.property("testid")
             assert radio in widget._main_llm_group.buttons(), testid
-            assert radio.isHidden() is False, testid
-            assert radio.isEnabled(), testid
-            radio.setChecked(True)
-            assert radio.isChecked(), testid
+            assert radio.isHidden() is True, testid
 
     def test_selecting_variant_unchecks_the_others(self, widget, _v2):
         """Exclusividade: variante e family disputam o MESMO eixo."""
@@ -6272,9 +6746,9 @@ class TestMainLlmVariantRadios:
         w = CommandQueueWidget()
         qtbot.addWidget(w)
         w.show()
-        for slug in ("qwen", "opus", "sonnet", "kimi-k3"):
-            radio = w._main_radio_map[slug]
-            assert radio.isHidden() is not main_providers_v2_enabled(), slug
+        for slug in ("opus", "sonnet", "kimi-k3"):
+            assert w._main_radio_map[slug].isHidden() is True, slug
+        assert w._main_radio_map["qwen"].isHidden() is not main_providers_v2_enabled()
         # Nenhum dos 3 slugs de provider legado muda de regime.
         for slug in ("claude", "codex", "kimi"):
             assert w._main_radio_map[slug].isHidden() is False, slug

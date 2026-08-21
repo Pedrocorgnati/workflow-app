@@ -38,6 +38,7 @@ Usage (Qt long-lock with heartbeat)::
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import sys
 from types import ModuleType
@@ -47,23 +48,48 @@ class LockBridgeError(RuntimeError):
     """Raised when the bridge cannot locate `_lib/atomic_write.py` / `_lib/lock.py`."""
 
 
-def _find_systemforge_root() -> pathlib.Path:
-    """Walk up from this file to find the SystemForge repo root.
+def _is_systemforge_root(candidate: pathlib.Path) -> bool:
+    return (
+        (candidate / ".claude" / "commands").is_dir()
+        and (candidate / "CLAUDE.md").is_file()
+    )
 
-    Mirrors `workflow_app/sdk/process_runner.py:_find_systemforge_root`:
-    look for a directory that has both `.claude/commands/` and `CLAUDE.md`.
+
+def _find_systemforge_root() -> pathlib.Path:
+    """Find the SystemForge repo from source or a frozen executable.
+
+    PyInstaller onefile extracts modules below ``sys._MEIPASS``, so ``__file__``
+    no longer points into the checkout. In frozen mode the real executable and
+    the launch cwd are authoritative fallback anchors. ``SYSTEMFORGE_ROOT`` is
+    an explicit escape hatch for an executable installed outside the checkout.
     """
-    candidate = pathlib.Path(__file__).resolve().parent
-    while candidate != candidate.parent:
-        if (
-            (candidate / ".claude" / "commands").is_dir()
-            and (candidate / "CLAUDE.md").is_file()
-        ):
-            return candidate
-        candidate = candidate.parent
+    file_anchor = pathlib.Path(__file__).resolve().parent
+    executable_anchor = pathlib.Path(sys.executable).resolve().parent
+    cwd_anchor = pathlib.Path.cwd().resolve()
+    env_root = os.environ.get("SYSTEMFORGE_ROOT", "").strip()
+
+    anchors: list[pathlib.Path] = []
+    if env_root:
+        anchors.append(pathlib.Path(env_root).expanduser().resolve())
+    if getattr(sys, "frozen", False):
+        anchors.extend((executable_anchor, cwd_anchor, file_anchor))
+    else:
+        anchors.extend((file_anchor, cwd_anchor, executable_anchor))
+
+    seen: set[pathlib.Path] = set()
+    for anchor in anchors:
+        candidate = anchor
+        while candidate not in seen:
+            seen.add(candidate)
+            if _is_systemforge_root(candidate):
+                return candidate
+            if candidate == candidate.parent:
+                break
+            candidate = candidate.parent
+
     raise LockBridgeError(
-        "SystemForge root nao encontrado a partir de "
-        f"{pathlib.Path(__file__).resolve()}. "
+        "SystemForge root nao encontrado a partir das ancoras "
+        f"{', '.join(str(anchor) for anchor in anchors)}. "
         "lock_bridge.py exige que .claude/commands/ e CLAUDE.md existam no repo."
     )
 

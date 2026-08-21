@@ -10,7 +10,7 @@ Fonte canonica do binding: `ai-forge/rules/llm-routing-div.md` secao 2.
 
 Por que este modulo existe (gap C24, 2026-08-19). `recovery_prompt.py` e
 `recovery_context.py` carregavam, cada um, uma COPIA do mapa constante
-`workspace -> kimi` / `workspace_xterm -> codex`. Sob `SF_PARALLEL_WORKERS_V2`
+`workspace -> kimi` / `workspace_xterm -> codex`. Sob o roster expandido
 desligado o mapa esta certo por construcao (os checkboxes qwen/grok sao
 desmarcados E escondidos), mas com o kill-switch ligado ele mente em duas das
 quatro combinacoes - e mente exatamente no `--context-file` do

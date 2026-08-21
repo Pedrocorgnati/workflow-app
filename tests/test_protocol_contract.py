@@ -256,16 +256,17 @@ def test_payload_as_null_rejected():
         WsEnvelope.from_dict(env)
 
 
-# ── Delegação semântica — congruência entre 3 documentos (item 011) ─────────
+# ── Delegação semântica — congruência entre 4 documentos (item 011 + Grok) ──
 #
-# Os três documentos de roteamento multi-LLM devem declarar o mesmo
-# vocabulário normativo de delegação. Este teste lê os três e falha se
+# Os documentos de roteamento multi-LLM devem declarar o mesmo
+# vocabulário normativo de delegação. Este teste lê todos e falha se
 # qualquer termo normativo estiver ausente em algum deles.
 #
 # Documentos:
 #   1. ai-forge/rules/llm-routing-div.md
 #   2. ai-forge/MCP/agents/executor-de-slash-commands-rules.md
 #   3. .agents/skills/slash-executor.md
+#   4. .grok/commands/slash-executor.md
 
 import pathlib
 
@@ -275,6 +276,7 @@ _DELEGATION_DOCS = [
     _REPO_ROOT / "ai-forge" / "rules" / "llm-routing-div.md",
     _REPO_ROOT / "ai-forge" / "MCP" / "agents" / "executor-de-slash-commands-rules.md",
     _REPO_ROOT / ".agents" / "skills" / "slash-executor.md",
+    _REPO_ROOT / ".grok" / "commands" / "slash-executor.md",
 ]
 
 # Termos normativos que TODOS os três documentos devem conter.
@@ -301,7 +303,7 @@ def _read_doc(path: pathlib.Path) -> str:
 
 
 def test_delegation_docs_all_exist():
-    """Os três documentos de delegação devem existir no repo."""
+    """Os documentos de delegação devem existir no repo."""
     for doc_path in _DELEGATION_DOCS:
         assert doc_path.exists(), f"Documento ausente: {doc_path}"
 
@@ -310,7 +312,7 @@ def test_delegation_congruence_all_docs_share_normative_terms():
     """Cada documento de delegação deve conter todos os termos normativos.
 
     Falha se qualquer termo normativo estiver ausente em qualquer documento.
-    Este teste prova que os três contratos continuam alinhados.
+    Este teste prova que os contratos continuam alinhados.
     """
     failures = []
     for doc_path in _DELEGATION_DOCS:
@@ -333,3 +335,16 @@ def test_delegation_executor_kimi_has_delegation_mode_clause():
     """O executor Kimi deve declarar a cláusula <DELEGATION_MODE>."""
     content = _read_doc(_DELEGATION_DOCS[2])
     assert "DELEGATION_MODE" in content, "slash-executor.md missing <DELEGATION_MODE>"
+
+
+def test_delegation_executor_grok_has_delegation_mode_clause():
+    """O executor Grok deve declarar a cláusula <DELEGATION_MODE>."""
+    content = _read_doc(_DELEGATION_DOCS[3])
+    assert "DELEGATION_MODE" in content, (
+        ".grok/commands/slash-executor.md missing <DELEGATION_MODE>"
+    )
+    lowered = content.lower()
+    for term in ("delegate", "inline", "fallback-inline", "multi-llm-routing"):
+        assert term in lowered, (
+            f".grok/commands/slash-executor.md missing '{term}'"
+        )

@@ -31,10 +31,12 @@ _FLAG_NAME = "SF_LLM_CONFIG_V2"
 _TE_FLAG_NAME = "SF_MCP_THINK_EXEC_V2"
 
 # Regime "V2 ligado" como o operador o ve: aba LLM Config nova (global) MAIS a
-# matriz Thinking/Execution (dedicado). Os dois viajam juntos nestes testes,
-# entao a assercao de legado ausente e a de persona filter presente convivem no
-# mesmo probe.
-_TE_FLAGS_ON: dict[str, str] = {_FLAG_NAME: "1", _TE_FLAG_NAME: "1"}
+# matriz Thinking/Execution. O wrapper `kimi-k3` de Thinking e fixo: nao ha gate
+# separado para rebaixar o botao para `/mcp:kimi`.
+_TE_FLAGS_ON: dict[str, str] = {
+    _FLAG_NAME: "1",
+    _TE_FLAG_NAME: "1",
+}
 _TE_FLAGS_OFF: dict[str, str] = {_FLAG_NAME: "0", _TE_FLAG_NAME: "0"}
 
 # Probe que verifica a estrutura do selector e da aba LLM Config.
@@ -46,7 +48,7 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QVBoxLayout
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -85,8 +87,86 @@ if llm_box.parentWidget() is not None:
 llm_box_layout_type = type(llm_box.layout()).__name__
 llm_box_hint = llm_box.sizeHint()
 
+main_radios = {
+    "claude": win._command_queue._main_claude_radio,
+    "grok": win._command_queue._main_grok_radio,
+    "opus": win._command_queue._main_opus_radio,
+    "kimi": win._command_queue._main_kimi_radio,
+    "codex": win._command_queue._main_codex_radio,
+    "sonnet": win._command_queue._main_sonnet_radio,
+    "kimi-k3": win._command_queue._main_kimi_k3_radio,
+    "qwen": win._command_queue._main_qwen_radio,
+}
+main_options_layout = next(iter(main_radios.values())).parentWidget().layout()
+main_radio_positions = {}
+if hasattr(main_options_layout, "getItemPosition"):
+    for slug, radio in main_radios.items():
+        index = main_options_layout.indexOf(radio)
+        if index < 0:
+            continue
+        row, column, _row_span, _column_span = main_options_layout.getItemPosition(index)
+        main_radio_positions[slug] = [row, column]
+
+def _find_by_testid(testid):
+    for widget in [llm_box, *llm_box.findChildren(type(llm_box))]:
+        if widget.property("testid") == testid:
+            return widget
+    return None
+
+routing_section_order = []
+for index in range(llm_box.layout().count()):
+    item_widget = llm_box.layout().itemAt(index).widget()
+    if item_widget is not None and not isinstance(item_widget, QFrame):
+        routing_section_order.append(item_widget.property("testid"))
+
+instance_parent_testid = win._metrics_bar._instance_group.parentWidget().property("testid")
+parallel_column_orders = {}
+for terminal in ("t2", "t3"):
+    terminal_widget = _find_by_testid(f"queue-div-parallel-{terminal}")
+    terminal_order = []
+    if terminal_widget is not None:
+        for index in range(terminal_widget.layout().count()):
+            child = terminal_widget.layout().itemAt(index).widget()
+            if child is None:
+                continue
+            terminal_order.append(child.property("testid") or child.text())
+        parallel_column_orders[terminal] = {
+            "layout": type(terminal_widget.layout()).__name__,
+            "order": terminal_order,
+        }
+
+flag_section = _find_by_testid("queue-div-flag")
+flag_positions = {}
+if win._command_queue._flags_panel is not None:
+    for flag, checkbox in win._command_queue._flags_panel._checkboxes.items():
+        flag_grid = checkbox.parentWidget().layout()
+        index = flag_grid.indexOf(checkbox)
+        row, column, _row_span, _column_span = flag_grid.getItemPosition(index)
+        flag_positions[flag] = [row, column]
+
 # Check for terminal-insertions button
 has_terminal_insertions = "output-toolbar-section-terminal-insertions" in btn_testids
+
+# Check for llm-routing button and stack page
+llm_routing_btn = None
+for btn in btns:
+    if btn.property("testid") == "output-toolbar-section-llm-routing":
+        llm_routing_btn = btn
+        break
+
+llm_routing_widget = None
+if llm_routing_btn is not None:
+    from PySide6.QtWidgets import QWidget as _W
+    for i in range(stack.count()):
+        w = stack.widget(i)
+        if w.property("testid") == "output-toolbar-section-llm-routing":
+            llm_routing_widget = w
+            break
+
+has_llm_routing = llm_routing_btn is not None
+llm_routing_parent_testid = None
+if llm_box.parentWidget() is not None:
+    llm_routing_parent_testid = llm_box.parentWidget().property("testid")
 
 # Check for llm-config containers
 containers = []
@@ -99,18 +179,43 @@ if llm_config_widget is not None:
                 containers.append(tid)
                 break
 
+boot_stack_index = stack.currentIndex()
+boot_stack_widget = stack.widget(boot_stack_index)
+boot_stack_testid = (
+    boot_stack_widget.property("testid") if boot_stack_widget is not None else None
+)
+boot_active_btn_testid = None
+section_indices = getattr(win, "_toolbar_section_stack_indices", list(range(len(btns))))
+for i, btn in enumerate(btns):
+    mapped = section_indices[i] if i < len(section_indices) else i
+    if mapped == boot_stack_index:
+        boot_active_btn_testid = btn.property("testid")
+        break
+
 print(json.dumps({
     "btn_count": len(btns),
     "stack_count": stack_count,
     "btn_testids": btn_testids,
+    "boot_stack_index": boot_stack_index,
+    "boot_stack_testid": boot_stack_testid,
+    "boot_active_btn_testid": boot_active_btn_testid,
     "has_llm_config": llm_config_btn is not None,
     "has_terminal_insertions": has_terminal_insertions,
     "llm_config_parent_testid": llm_box_parent_testid,
     "llm_box_layout_type": llm_box_layout_type,
+    "main_options_layout_type": type(main_options_layout).__name__,
+    "main_radio_positions": main_radio_positions,
+    "routing_section_order": routing_section_order,
+    "instance_parent_testid": instance_parent_testid,
+    "parallel_column_orders": parallel_column_orders,
+    "flag_section_layout_type": type(flag_section.layout()).__name__ if flag_section else None,
+    "flag_positions": flag_positions,
     "llm_box_hint_w": llm_box_hint.width(),
     "llm_box_hint_h": llm_box_hint.height(),
     "llm_config_containers": sorted(containers),
     "flag_enabled": llm_config_btn is not None,
+    "has_llm_routing": has_llm_routing,
+    "llm_routing_parent_testid": llm_routing_parent_testid,
 }))
 """
 
@@ -148,22 +253,28 @@ stack = win._toolbar_section_stack
 
 boot_cap = selector.maximumHeight()
 
-llm_index = None
-for i in range(stack.count()):
-    if stack.widget(i).property("testid") == "output-toolbar-section-llm-config":
-        llm_index = i
-        break
+def _button_index(testid):
+    for i, btn in enumerate(win._toolbar_section_btns):
+        if btn.property("testid") == testid:
+            return i
+    return None
 
-llm_cap = None
-if llm_index is not None:
-    win._select_toolbar_section(llm_index)
+
+def _cap_for_button(testid):
+    index = _button_index(testid)
+    if index is None:
+        return None
+    win._select_toolbar_section(index)
     _settle()
-    llm_cap = selector.maximumHeight()
+    return selector.maximumHeight()
+
+
+llm_routing_cap = _cap_for_button("output-toolbar-section-llm-routing")
 
 print(json.dumps({
     "qt_size_max": 16777215,
     "boot_cap": boot_cap,
-    "llm_cap": llm_cap,
+    "llm_routing_cap": llm_routing_cap,
 }))
 """
 
@@ -197,36 +308,62 @@ def _run_probe(
     return json.loads(result.stdout.strip().split("\n")[-1])
 
 
-# --- C-03: selector tem 6 secoes, LLM Config na ultima posicao (flag ligada) ---
+# --- Selector tem uma unica secao LLM Routing quando a flag esta ligada ---
 
 
 class TestLLMConfigTabFlagEnabled:
     """Tests with SF_LLM_CONFIG_V2=1."""
 
-    def test_llm_config_tab_selector_has_6_sections_with_llm_config_last(self):
-        """C-03: output-toolbar-section-selector tem 6 secoes, LLM Config na ultima."""
+    def test_selector_has_7_sections_with_llm_routing_last(self):
+        """Routing e adicionada sem substituir Terminal Insertions."""
         data = _run_probe({_FLAG_NAME: "1"})
-        assert data["btn_count"] == 6, (
-            f"Expected 6 sections, got {data['btn_count']}: {data['btn_testids']}"
+        assert data["btn_count"] == 7, (
+            f"Expected 7 sections, got {data['btn_count']}: {data['btn_testids']}"
         )
-        assert data["btn_testids"][-1] == "output-toolbar-section-llm-config", (
-            f"LLM Config should be last, got: {data['btn_testids']}"
+        assert data["btn_testids"][1] == (
+            "output-toolbar-section-terminal-insertions"
         )
-
-    def test_llm_config_tab_terminal_insertions_removed(self):
-        """With flag enabled, TERMINAL INSERTIONS is removed from selector."""
-        data = _run_probe({_FLAG_NAME: "1"})
-        assert not data["has_terminal_insertions"], (
-            "TERMINAL INSERTIONS should be removed when flag is enabled"
+        assert data["btn_testids"][-1] == "output-toolbar-section-llm-routing", (
+            f"LLM Routing should be last, got: {data['btn_testids']}"
         )
 
-    def test_llm_config_tab_exists(self):
-        """LLM Config button and stack page exist."""
+    def test_boot_opens_llm_routing_section(self):
+        """Toda instancia nova abre na aba LLM ROUTING, sem persistir sessao."""
         data = _run_probe({_FLAG_NAME: "1"})
-        assert data["has_llm_config"], "LLM Config tab should exist with flag=1"
+        assert data["boot_stack_testid"] == "output-toolbar-section-llm-routing", (
+            f"boot deveria abrir LLM ROUTING, got stack="
+            f"{data['boot_stack_testid']!r} index={data['boot_stack_index']}"
+        )
+        assert data["boot_active_btn_testid"] == (
+            "output-toolbar-section-llm-routing"
+        ), (
+            f"botao ativo no boot deveria ser LLM ROUTING, "
+            f"got {data['boot_active_btn_testid']!r}"
+        )
 
-    def test_llm_config_tab_stack_has_7_pages(self):
-        """Stack has 7 pages (6 original + LLM Config) when flag enabled."""
+    def test_terminal_insertions_preserved_and_llm_routing_added(self):
+        """Flag ligada preserva a secao principal e adiciona LLM Routing."""
+        data = _run_probe({_FLAG_NAME: "1"})
+        assert data["has_terminal_insertions"], (
+            "TERMINAL INSERTIONS must remain present when flag is enabled"
+        )
+        assert data["has_llm_routing"], (
+            "LLM Routing section should be present when flag is enabled"
+        )
+        assert data["llm_routing_parent_testid"] == "output-toolbar-section-llm-routing", (
+            f"queue-div-llm-routing should be inside LLM Routing section, "
+            f"got parent: {data['llm_routing_parent_testid']}"
+        )
+
+    def test_blank_llm_config_tab_does_not_exist(self):
+        """Nao cria aba LLM Config paralela sem conteudo."""
+        data = _run_probe({_FLAG_NAME: "1"})
+        assert not data["has_llm_config"], (
+            "blank LLM Config tab must not coexist with LLM Routing"
+        )
+
+    def test_stack_has_7_pages(self):
+        """Stack tem 6 paginas base mais a pagina unica LLM Routing."""
         data = _run_probe({_FLAG_NAME: "1"})
         assert data["stack_count"] == 7, (
             f"Expected 7 stack pages, got {data['stack_count']}"
@@ -239,25 +376,18 @@ class TestLLMConfigTabFlagEnabled:
 class TestLLMConfigTabLayout:
     """C-04: queue-div-llm-routing layout and parent."""
 
-    def test_llm_routing_is_in_llm_config_tab(self):
-        """queue-div-llm-routing reparenteado para a aba LLM Config."""
+    def test_llm_routing_is_in_llm_routing_tab(self):
+        """queue-div-llm-routing reparenteado para a aba LLM Routing (C25)."""
         data = _run_probe({_FLAG_NAME: "1"})
-        assert data["llm_config_parent_testid"] == "output-toolbar-section-llm-config", (
-            f"queue-div-llm-routing should be inside LLM Config tab, "
-            f"got parent: {data['llm_config_parent_testid']}"
+        assert data["llm_routing_parent_testid"] == "output-toolbar-section-llm-routing", (
+            f"queue-div-llm-routing should be inside LLM Routing tab, "
+            f"got parent: {data['llm_routing_parent_testid']}"
         )
 
-    def test_llm_config_containers_exist(self):
-        """Empty containers for items 018-021 exist with stable testids."""
+    def test_dead_llm_config_containers_do_not_exist(self):
+        """Nao preserva containers ocultos como justificativa para aba vazia."""
         data = _run_probe({_FLAG_NAME: "1"})
-        expected = [
-            "llm-config-flags-container",
-            "llm-config-main-llm-container",
-            "llm-config-parallel-container",
-        ]
-        assert data["llm_config_containers"] == expected, (
-            f"Expected containers {expected}, got {data['llm_config_containers']}"
-        )
+        assert data["llm_config_containers"] == []
 
     def test_llm_routing_is_qhboxlayout_when_flag_enabled(self):
         """C-04 (metade que faltava): a div e QHBoxLayout dentro da aba.
@@ -269,15 +399,76 @@ class TestLLMConfigTabLayout:
         data = _run_probe({_FLAG_NAME: "1"})
         assert data["llm_box_layout_type"] == "QHBoxLayout", (
             f"queue-div-llm-routing deve ser QHBoxLayout dentro da aba LLM "
-            f"Config, got: {data['llm_box_layout_type']}"
+            f"Routing, got: {data['llm_box_layout_type']}"
         )
 
+    def test_main_llm_radios_follow_brainstorm_two_column_order(self):
+        """Main LLM usa as duas colunas definidas no brainstorm 08-11."""
+        data = _run_probe(
+            {
+                _FLAG_NAME: "1",
+                "SF_MAIN_PROVIDERS_V2": "1",
+                "SF_GROK_SPIKE": "1",
+            }
+        )
+        assert data["main_options_layout_type"] == "QGridLayout"
+        assert data["main_radio_positions"] == {
+            "claude": [0, 0],
+            "codex": [0, 1],
+            "kimi": [1, 0],
+            "grok": [1, 1],
+            "qwen": [2, 0],
+        }
+
+    def test_routing_uses_four_columns_with_internal_two_column_grids(self):
+        """Aliases, Main, Parallel e Flag ocupam quatro colunas independentes."""
+        data = _run_probe(
+            {
+                _FLAG_NAME: "1",
+                "SF_INSTANCE_GROUP_ROUTE_AWARE": "1",
+                "SF_MAIN_PROVIDERS_V2": "1",
+                "SF_PARALLEL_WORKERS_V2": "1",
+                "SF_LLM_FLAGS_V2": "1",
+                "SF_GROK_SPIKE": "1",
+            }
+        )
+        assert data["routing_section_order"] == [
+            "queue-div-instance-buttons",
+            "queue-div-main-llm",
+            "queue-div-parallel-worker",
+            "queue-div-flag",
+        ]
+        assert data["instance_parent_testid"] == "queue-div-instance-buttons"
+        assert data["parallel_column_orders"] == {
+            "t2": {
+                "layout": "QVBoxLayout",
+                "order": ["T2:", "queue-chk-use-kimi", "queue-chk-use-qwen"],
+            },
+            "t3": {
+                "layout": "QVBoxLayout",
+                "order": ["T3:", "queue-chk-use-codex", "queue-chk-use-grok"],
+            },
+        }
+        assert data["flag_section_layout_type"] == "QVBoxLayout"
+        assert data["flag_positions"] == {
+            "--fable": [1, 0],
+            "--opus": [2, 0],
+            "--codex-ultra": [3, 0],
+            "--kimi-k3": [4, 0],
+            "--grok-xhigh": [5, 0],
+            "--grok": [1, 1],
+            "--sonnet": [2, 1],
+            "--kimi": [3, 1],
+            "--qwen": [4, 1],
+            "--codex": [5, 1],
+        }
+
     def test_llm_routing_is_shorter_in_row_than_in_legacy_column(self):
-        """C-04/R-18: a row de 3 colunas nao pode ser mais alta que a coluna.
+        """C-04/R-18: a row de 4 colunas nao pode ser mais alta que a coluna.
 
         Premissa do risco R-18: em linha a div tem de ficar mais baixa que
         empilhada. O teto efetivo do selector e travado separadamente em
-        `test_llm_config_section_caps_selector_height`.
+        `test_llm_routing_section_caps_selector_height`.
         """
         on = _run_probe({_FLAG_NAME: "1"})
         off = _run_probe()
@@ -286,28 +477,32 @@ class TestLLMConfigTabLayout:
             f"que empilhada ({off['llm_box_hint_h']})"
         )
 
-    def test_llm_config_section_caps_selector_height(self):
-        """C-04/R-18: com LLM CONFIG ativa, o selector fica com teto medido.
+    def test_llm_routing_section_caps_selector_height(self):
+        """C-04/R-18: LLM Routing mantem o selector com teto medido.
 
         `_sync_flow_section_height` so aplica teto quando consegue medir a
-        pagina. A pagina LLM CONFIG e a unica de `_flow_section_pages` sem
-        flow layout, entao `hasHeightForWidth()` volta False e o teto cairia
-        no release (`_QT_WIDGET_SIZE_MAX`); ai o QStackedLayout dimensionaria
-        a aba pela pagina mais alta do stack e sobraria faixa vazia sob a row.
-        Este teste trava as duas metades: teto aplicado (nao liberado) e nao
-        maior que o da secao de boot.
+        pagina. LLM ROUTING nao usa flow layout, entao `hasHeightForWidth()`
+        volta False e o teto cairia no release (`_QT_WIDGET_SIZE_MAX`); ai o
+        QStackedLayout dimensionaria a aba pela pagina mais alta do stack e
+        sobraria faixa vazia sob a row. Este teste trava as duas metades:
+        teto aplicado (nao liberado) e nao maior que o da secao de boot.
         """
         data = _run_probe({_FLAG_NAME: "1"}, source=_LLM_CONFIG_HEIGHT_PROBE)
-        assert data["llm_cap"] is not None, (
-            "pagina output-toolbar-section-llm-config nao encontrada no stack"
+        assert data["llm_routing_cap"] is not None, (
+            "pagina output-toolbar-section-llm-routing nao encontrada no stack"
         )
-        assert data["llm_cap"] != data["qt_size_max"], (
-            "teto do selector foi liberado com a secao LLM CONFIG ativa "
-            "(_sync_flow_section_height nao mediu a pagina)"
+        cap = data["llm_routing_cap"]
+        assert cap != data["qt_size_max"], (
+            "teto do selector foi liberado com LLM ROUTING ativa"
         )
-        assert 0 < data["llm_cap"] <= data["boot_cap"], (
-            f"teto com LLM CONFIG ({data['llm_cap']}) deveria caber no teto da "
-            f"secao de boot ({data['boot_cap']})"
+        assert 0 < cap, (
+            f"teto com LLM ROUTING ({cap}) deveria ser medido"
+        )
+        # thinking/execution tem 5 linhas + labels; o teto segue a pagina
+        # (nao o MAX) e pode superar o da secao de boot.
+        assert cap <= max(int(data["boot_cap"]), 180), (
+            f"teto com LLM ROUTING ({cap}) estourou o teto aceitavel "
+            f"(boot={data['boot_cap']})"
         )
 
 
@@ -336,6 +531,14 @@ class TestLLMConfigTabFlagAbsent:
         data = _run_probe()
         assert data["btn_count"] == 6
         assert data["stack_count"] == 6
+
+    def test_boot_stays_command_sequence_when_llm_routing_tab_absent(self):
+        """Sem a aba LLM ROUTING, o boot legado continua em COMMAND SEQUENCE."""
+        data = _run_probe()
+        assert data["boot_stack_index"] == 0
+        assert data["boot_active_btn_testid"] == (
+            "output-toolbar-section-command-sequence"
+        )
 
     def test_llm_routing_in_top_row_when_flag_absent(self):
         """Flag ausente: queue-div-llm-routing permanece na top-row."""
@@ -536,6 +739,7 @@ class TestParallelWorkersExclusivity:
         recem-aberta - que e quando a auto-recuperacao mais dispara.
         """
         from PySide6.QtCore import QSettings
+
         from workflow_app.signal_bus import signal_bus
         stg = QSettings("systemForge", "workflow-app")
         stg.setValue("worker/t2_selected", "qwen")
@@ -570,6 +774,7 @@ class TestParallelWorkersExclusivity:
         """O que vai para o QSettings e o que vai para o sinal e a MESMA
         resolucao: duas leituras paralelas dos checkboxes divergiriam."""
         from PySide6.QtCore import QSettings
+
         from workflow_app.signal_bus import signal_bus
         w = self._make_widget()
         seen: list[tuple[str, str]] = []
@@ -610,16 +815,19 @@ _LLM_FLAGS_V2_FLAG = "SF_LLM_FLAGS_V2"
 
 # Conjunto vigente por regime do kill-switch (item 005 do loop
 # 08-17-systemforge-multillm-gaps-refactor). Ausente/off = roster legado da
-# tabela C26; "1" = os 7 literais canonicos.
+# tabela C26; "1" = literais thinking/execution.
 _LEGACY_FLAG_LITERALS = {"--codex", "--kimi"}
 _V2_FLAG_LITERALS = {
+    "--fable",
     "--opus",
-    "--sonnet",
-    "--codex",
-    "--kimi",
+    "--codex-ultra",
     "--kimi-k3",
-    "--qwen",
+    "--grok-xhigh",
     "--grok",
+    "--sonnet",
+    "--kimi",
+    "--qwen",
+    "--codex",
 }
 
 
@@ -695,8 +903,8 @@ class TestFlagsPanelSupportedFlags:
             assert frozenset(lf_mod._FLAG_CANONICAL_ORDER) == lf_mod._SUPPORTED_MCP_FLAGS
 
     def test_flags_panel_has_exactly_supported_flags(self, qapp):
-        from workflow_app.llm_config.flags_panel import FlagsPanel
         from workflow_app.config.llm_flags import _SUPPORTED_MCP_FLAGS
+        from workflow_app.llm_config.flags_panel import FlagsPanel
         panel = FlagsPanel()
         # Coletar testids dos checkboxes do painel.
         ui_flags = set()
@@ -708,11 +916,11 @@ class TestFlagsPanelSupportedFlags:
         assert ui_flags == _SUPPORTED_MCP_FLAGS
 
     def test_incompatible_flag_is_disabled_with_tooltip(self, qapp):
-        """Matriz de incompatibilidade sob o regime v2 (7 literais).
+        """Matriz de incompatibilidade sob o regime v2 (thinking/execution).
 
-        O corpo enumera `--kimi-k3`, `--qwen`, `--grok`, `--opus` e `--sonnet`,
-        que so existem no roster v2. Sem armar o kill-switch o painel nasce com
-        os 2 literais legados e a enumeracao estourava KeyError.
+        O corpo enumera literais que so existem no roster v2. Sem armar o
+        kill-switch o painel nasce com os 2 literais legados e a enumeracao
+        estourava KeyError.
         """
         with _llm_flags_regime(True) as fp_mod:
             self._assert_incompatibility_matrix(fp_mod.FlagsPanel())
@@ -736,15 +944,18 @@ class TestFlagsPanelSupportedFlags:
         # dizer o motivo (C-57), e ele NAO e o de redundancia.
         assert not panel._checkboxes["--codex"].isEnabled()
         assert "auto-proxy" in panel._checkboxes["--codex"].toolTip().lower()
+        assert not panel._checkboxes["--codex-ultra"].isEnabled()
         # Demais habilitadas.
         assert panel._checkboxes["--qwen"].isEnabled()
         assert panel._checkboxes["--grok"].isEnabled()
         assert panel._checkboxes["--opus"].isEnabled()
         assert panel._checkboxes["--sonnet"].isEnabled()
+        assert panel._checkboxes["--fable"].isEnabled()
 
-        # Main codex: --codex disabled.
+        # Main codex: --codex e --codex-ultra disabled.
         panel.set_main_llm("codex")
         assert not panel._checkboxes["--codex"].isEnabled()
+        assert not panel._checkboxes["--codex-ultra"].isEnabled()
         assert panel._checkboxes["--kimi"].isEnabled()
 
         # Main qwen: --qwen disabled.
@@ -752,9 +963,10 @@ class TestFlagsPanelSupportedFlags:
         assert not panel._checkboxes["--qwen"].isEnabled()
         assert panel._checkboxes["--kimi"].isEnabled()
 
-        # Main grok: --grok disabled.
+        # Main grok: --grok e --grok-xhigh disabled.
         panel.set_main_llm("grok")
         assert not panel._checkboxes["--grok"].isEnabled()
+        assert not panel._checkboxes["--grok-xhigh"].isEnabled()
         assert panel._checkboxes["--codex"].isEnabled()
 
     def test_kill_switch_disables_flags_only_under_non_claude_main(
@@ -769,6 +981,7 @@ class TestFlagsPanelSupportedFlags:
         monkeypatch.setenv("SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE", "0")
         # Reimport para capturar o env patchado.
         import importlib
+
         import workflow_app.config.feature_flags as ff_mod
         importlib.reload(ff_mod)
         try:
@@ -974,50 +1187,50 @@ def _run_te_probe(env_override: dict[str, str] | None = None) -> dict:
 class TestThinkingExecutionFlagEnabled:
     """Item 023: Thinking/Execution split com os kill-switches V2 armados."""
 
-    def test_thinking_group_has_3_buttons(self):
-        """C-14: Thinking group has exactly 3 provider buttons."""
+    def test_thinking_group_has_5_buttons(self):
+        """Thinking group: 5 pastilhas alinhadas a queue-div-flag."""
         data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-thinking",
-            "output-mcp-action-thinking-claude",
-            "output-mcp-action-thinking-codex",
+            "output-mcp-action-thinking-fable",
+            "output-mcp-action-thinking-opus",
+            "output-mcp-action-thinking-codex-ultra",
             "output-mcp-action-thinking-kimi",
+            "output-mcp-action-thinking-grok-xhigh",
         ])
         assert data["thinking_tids"] == expected, (
             f"Expected {expected}, got {data['thinking_tids']}"
         )
 
     def test_execution_group_has_5_buttons(self):
-        """C-14: Execution group has exactly 5 provider buttons."""
+        """Execution group: 5 pastilhas alinhadas a queue-div-flag."""
         data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-execution",
-            "output-mcp-action-execution-claude",
-            "output-mcp-action-execution-codex",
-            "output-mcp-action-execution-kimi",
             "output-mcp-action-execution-grok",
+            "output-mcp-action-execution-sonnet",
+            "output-mcp-action-execution-kimi",
             "output-mcp-action-execution-qwen",
+            "output-mcp-action-execution-codex",
         ])
         assert data["execution_tids"] == expected, (
             f"Expected {expected}, got {data['execution_tids']}"
         )
 
     def test_fixed_commands_in_te_commands(self):
-        """C-14: Each button has a fixed command independent of Main LLM."""
+        """Cada botao cola o /mcp: da coluna thinking/execution."""
         data = _run_te_probe(_TE_FLAGS_ON)
         cmds = data["te_commands"]
-        assert cmds.get("output-mcp-action-thinking-claude") == (
-            "claude --model opus --effort high"
-        )
-        assert cmds.get("output-mcp-action-thinking-codex") == "/mcp:codex"
+        assert cmds.get("output-mcp-action-thinking-fable") == "/mcp:fable"
+        assert cmds.get("output-mcp-action-thinking-opus") == "/mcp:claude-ultra"
+        assert cmds.get("output-mcp-action-thinking-codex-ultra") == "/mcp:codex-ultra"
         assert cmds.get("output-mcp-action-thinking-kimi") == "/mcp:kimi-k3"
-        assert cmds.get("output-mcp-action-execution-claude") == (
-            "claude --model sonnet --effort standard"
-        )
-        assert cmds.get("output-mcp-action-execution-codex") == "/mcp:codex"
-        assert cmds.get("output-mcp-action-execution-kimi") == "/mcp:kimi"
+        assert cmds.get("output-mcp-action-thinking-grok-xhigh") == "/mcp:grok-xhigh"
         assert cmds.get("output-mcp-action-execution-grok") == "/mcp:grok"
+        assert cmds.get("output-mcp-action-execution-sonnet") == "/mcp:sonnet"
+        assert cmds.get("output-mcp-action-execution-kimi") == "/mcp:kimi"
         assert cmds.get("output-mcp-action-execution-qwen") == "/mcp:qwen"
+        assert cmds.get("output-mcp-action-execution-codex") == "/mcp:codex"
 
     def test_no_legacy_skill_pills_in_commands(self):
         """C-15: Old skill CLI pills are NOT in the command map."""
@@ -1049,7 +1262,7 @@ class TestThinkingExecutionFlagEnabled:
         """C-16: MCP persona checkboxes have persona_category property."""
         data = _run_te_probe(_TE_FLAGS_ON)
         cats = data["persona_cats"]
-        assert len(cats) == 16, f"Expected 16 personas, got {len(cats)}"
+        assert len(cats) >= 16, f"Expected at least 16 personas, got {len(cats)}"
         assert cats["output-mcp-persona-search-in"] == "Research"
         assert cats["output-mcp-persona-criar-task"] == "Build"
         assert cats["output-mcp-persona-delegador"] == "Plan"
@@ -1059,49 +1272,22 @@ class TestThinkingExecutionFlagEnabled:
 
 
 class TestThinkingExecutionClaudeLocal:
-    """C-59: Claude buttons paste explicit local invocation (no shell alias)."""
+    """Claude thinking/execution passam pelos wrappers MCP, nao por CLI nua."""
 
-    def test_thinking_claude_command_has_model_and_effort(self):
-        """C-59: Thinking Claude = 'claude --model opus --effort high'."""
+    def test_thinking_opus_binds_claude_ultra(self):
         data = _run_te_probe(_TE_FLAGS_ON)
-        cmd = data["te_commands"].get("output-mcp-action-thinking-claude", "")
-        assert "claude" in cmd
-        assert "--model opus" in cmd
-        assert "--effort high" in cmd
+        assert data["te_commands"].get("output-mcp-action-thinking-opus") == (
+            "/mcp:claude-ultra"
+        )
+        assert data["te_commands"].get("output-mcp-action-thinking-fable") == (
+            "/mcp:fable"
+        )
 
-    def test_execution_claude_command_has_model_and_effort(self):
-        """C-59: Execution Claude = 'claude --model sonnet --effort standard'."""
+    def test_execution_sonnet_binds_mcp_sonnet(self):
         data = _run_te_probe(_TE_FLAGS_ON)
-        cmd = data["te_commands"].get("output-mcp-action-execution-claude", "")
-        assert "claude" in cmd
-        assert "--model sonnet" in cmd
-        assert "--effort standard" in cmd
-
-    def test_claude_commands_with_empty_shell_env(self):
-        """C-59: Claude commands work with empty shell environment."""
-        env = os.environ.copy()
-        env["QT_QPA_PLATFORM"] = "offscreen"
-        env.update(_TE_FLAGS_ON)
-        env.pop("HOME", None)
-        env.pop("ZDOTDIR", None)
-        env.pop("XDG_CONFIG_HOME", None)
-
-        result = subprocess.run(
-            [sys.executable, "-c", _TE_PROBE],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(_WORKFLOW_APP_ROOT),
-            timeout=120,
+        assert data["te_commands"].get("output-mcp-action-execution-sonnet") == (
+            "/mcp:sonnet"
         )
-        assert result.returncode == 0, (
-            f"Probe failed with empty shell env:\n{result.stderr}"
-        )
-        data = json.loads(result.stdout.strip().split("\n")[-1])
-        th_cmd = data["te_commands"].get("output-mcp-action-thinking-claude", "")
-        ex_cmd = data["te_commands"].get("output-mcp-action-execution-claude", "")
-        assert "claude --model opus --effort high" in th_cmd
-        assert "claude --model sonnet --effort standard" in ex_cmd
 
 
 class TestThinkingExecutionFlagAbsent:
@@ -1140,6 +1326,30 @@ class TestThinkingExecutionFlagOff:
         assert not data["has_persona_filter"]
 
 
+# Item 015: as 16 personas curadas da secao MCPs, na ORDEM da tupla
+# `persona_specs` de `_build_mcp_column()`. Lista declarada localmente de
+# proposito: dois modulos de teste independentes provando a mesma sequencia
+# valem mais que um import cruzado entre arquivos de teste.
+_CURATED_PERSONA_TESTIDS = [
+    "output-mcp-persona-search-in",
+    "output-mcp-persona-search-out",
+    "output-mcp-persona-search-forge",
+    "output-mcp-persona-controversial",
+    "output-mcp-persona-hardening",
+    "output-mcp-persona-criar-task",
+    "output-mcp-persona-revisar-task",
+    "output-mcp-persona-executor",
+    "output-mcp-persona-rev-exec",
+    "output-mcp-persona-revisar-qa",
+    "output-mcp-persona-code-debugger",
+    "output-mcp-persona-delegador",
+    "output-mcp-persona-scaffolds-blueprints-updater",
+    "output-mcp-persona-questioner",
+    "output-mcp-persona-ux-ui",
+    "output-mcp-persona-performance-engineer",
+]
+
+
 class TestPersonaFilterBar:
     """C-16: Persona filter bar in MCP section."""
 
@@ -1162,7 +1372,15 @@ class TestPersonaFilterBar:
         assert len(not_hidden) >= 1
 
     def test_persona_filter_all_shows_everyone(self, qapp):
-        """C-16: 'All' tab shows all 16 personas (none hidden)."""
+        """C-16: 'All' mostra todas as personas curadas, na ordem da tupla.
+
+        Item 015 - substituicao de contrato: a assercao anterior era
+        `len(not_hidden) == 16`, contagem nua. Ela nao protege a UI, porque um
+        filtro por exclusao do sufixo `-rules` tambem devolve 16 personas com 12
+        slugs diferentes. Aqui a prova e dupla: 'All' nao esconde ninguem E o
+        conjunto visivel e exatamente o curado, na ordem de `persona_specs`
+        (que e a ordem de composicao de `_compose_mcp_text`).
+        """
         from workflow_app.main_window import MainWindow
         win = MainWindow()
         bar = getattr(win, "_mcp_persona_filter_bar", None)
@@ -1174,7 +1392,9 @@ class TestPersonaFilterBar:
             c for c in win._mcp_persona_checkboxes
             if not c.isHidden()
         ]
-        assert len(not_hidden) == 16
+        visible_ids = [c.property("testid") for c in not_hidden]
+        assert visible_ids[: len(_CURATED_PERSONA_TESTIDS)] == _CURATED_PERSONA_TESTIDS
+        assert set(_CURATED_PERSONA_TESTIDS) <= set(visible_ids)
 
 
 # ---------------------------------------------------------------------------

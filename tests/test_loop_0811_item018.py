@@ -84,24 +84,16 @@ class TestMainRadioExistence:
         assert w._main_kimi_k3_radio.property("testid") == "queue-radio-main-kimi-k3"
 
     def test_variant_radios_visibility_follows_gate(self, qtbot):
-        """Regime declarado: `SF_LLM_CONFIG_V2` liga/desliga os 3 de variante.
-
-        `llm_config_v2_enabled()` e boot-frozen, entao este teste le a flag
-        efetiva do processo em vez de fingir os dois regimes. Rodando a suite
-        com a flag e sem ela (as duas invocacoes do bloco `## Verificacao` da
-        task 004) exercita os dois lados.
+        """Variantes de raciocinio ficam ocultas no Main LLM (CLI do terminal).
         """
-        from workflow_app.config import llm_config_v2_enabled
-
         w = CommandQueueWidget()
         qtbot.addWidget(w)
-        expected_hidden = not llm_config_v2_enabled()
         for radio in (
             w._main_opus_radio,
             w._main_sonnet_radio,
             w._main_kimi_k3_radio,
         ):
-            assert radio.isHidden() is expected_hidden, radio.property("testid")
+            assert radio.isHidden() is True, radio.property("testid")
         # Regime legado: nenhum radio NOVO visivel — o eixo Main volta a ser
         # exatamente o roster de provider de antes do item 004.
         assert w._main_claude_radio.isHidden() is False

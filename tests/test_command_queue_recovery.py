@@ -2,12 +2,14 @@
 
 Loop 06-01-listener-recovery-command, TASK 08 (handler-dispatch-command-queue).
 
-Cobre os 5 casos de roteamento do handler `_on_request_recovery_command`:
+Cobre os casos de roteamento do handler `_on_request_recovery_command`:
   - T1 interactive + Claude -> slash cru (run_command_in_terminal)
   - T1 interactive + Codex  -> _build_codex_slash_executor_prompt(interactive)
-  - T1 interactive + Kimi   -> /skill:slash-executor + slash cru
+  - T1 interactive + Kimi -> /skill:slash-executor + slash cru
+  - T1 interactive + Qwen -> /slash-executor + slash cru
+  - T1 interactive + Grok -> /slash-executor --delegation-runtime=grok + slash
   - T2 workspace            -> Kimi blue-arrow (kimi_blue_arrow_dispatched)
-  - T3 workspace_xterm      -> _build_codex_slash_executor_prompt(workspace_xterm)
+  - T3 workspace_xterm      -> Codex envelope (default) OU Grok nativo
 
 Mais o gate do aceite: o builder PURO `build_recovery_prompt` NUNCA retorna
 string iniciada por `/tools:listener-recovery` (o roteamento vive no handler,
@@ -151,6 +153,36 @@ class TestRecoveryDispatchRouting:
         assert rec.xterm == []
         assert rec.kimi_blue == []
 
+    def test_t1_interactive_qwen_slash_executor(self, widget, rec, ctx_file):
+        """T1 Qwen: prefixa /slash-executor (sem /skill:) + flag --recovery-mode."""
+        widget._main_qwen_radio.setChecked(True)
+        widget._on_request_recovery_command("interactive", "RESSALVAS", ctx_file)
+
+        assert len(rec.interactive) == 1
+        payload = rec.interactive[0]
+        assert payload == (
+            f"/slash-executor --recovery-mode /tools:listener-recovery "
+            f"--channel interactive --reason RESSALVAS --context-file {ctx_file}"
+        )
+        assert rec.xterm == []
+        assert rec.kimi_blue == []
+
+    def test_t1_interactive_grok_slash_executor(self, widget, rec, ctx_file):
+        """T1 Grok: `/slash-executor --delegation-runtime=grok --recovery-mode`."""
+        widget._main_grok_radio.setChecked(True)
+        widget._on_request_recovery_command("interactive", "RESSALVAS", ctx_file)
+
+        assert len(rec.interactive) == 1
+        payload = rec.interactive[0]
+        assert payload == (
+            f"/slash-executor --delegation-runtime=grok --recovery-mode "
+            f"/tools:listener-recovery --channel interactive "
+            f"--reason RESSALVAS --context-file {ctx_file}"
+        )
+        assert rec.xterm == []
+        assert rec.kimi_blue == []
+        assert "Use the SystemForge slash-command executor rules" not in payload
+
     def test_t2_workspace_kimi_blue_arrow(self, widget, rec, ctx_file):
         """T2 workspace: dispara a seta azul do Kimi (kimi_blue_arrow_dispatched).
 
@@ -192,6 +224,34 @@ class TestRecoveryDispatchRouting:
         assert "Recovery finalization contract" in payload
         assert rec.interactive == []
         assert rec.kimi_blue == []
+
+    def test_t3_workspace_xterm_grok_native_executor(self, widget, rec, ctx_file):
+        """T3 Grok: mesmo executor nativo do Main, nao envelope Codex."""
+        widget._use_grok_chk.setChecked(True)
+        widget._on_request_recovery_command("workspace_xterm", "TIMEOUT", ctx_file)
+
+        assert len(rec.xterm) == 1
+        payload = rec.xterm[0]
+        assert payload == (
+            f"/slash-executor --delegation-runtime=grok --recovery-mode "
+            f"/tools:listener-recovery --channel workspace_xterm "
+            f"--reason TIMEOUT --context-file {ctx_file}"
+        )
+        assert "Use the SystemForge slash-command executor rules" not in payload
+        assert rec.interactive == []
+        assert rec.kimi_blue == []
+
+    def test_t3_workspace_xterm_grok_aborts_when_pty_has_no_grok(
+        self, widget, rec, ctx_file, monkeypatch
+    ):
+        """Recovery T3 Grok nao cola no zsh/Codex: PTY sem processo grok aborta."""
+        widget._use_grok_chk.setChecked(True)
+        monkeypatch.setattr(widget, "_t3_pty_hosts_cli", lambda cli: False)
+        widget._on_request_recovery_command("workspace_xterm", "TIMEOUT", ctx_file)
+        assert rec.xterm == []
+        assert rec.interactive == []
+        assert rec.force_failed == [("workspace_xterm", "BLOCKED")]
+        assert any("processo grok" in m for m, _ in rec.toast)
 
 
 class TestRecoveryModeExplicitSignaling:
@@ -303,6 +363,48 @@ class TestRecoveryModeExplicitSignaling:
         assert len(rec.interactive) == 1
         assert rec.interactive[0].startswith(
             "/skill:slash-executor --recovery-mode /tools:listener-recovery"
+        )
+
+    def test_qwen_main_dispatch_of_recovery_slug_gets_flag(
+        self, widget, rec, ctx_file
+    ):
+        """Defesa-em-profundidade: o slug de recovery como item NORMAL de fila
+        sob Main Qwen tambem recebe o flag --recovery-mode (paridade com Kimi)."""
+        base = (
+            "/tools:listener-recovery --channel interactive --reason BLOCKED "
+            f"--context-file {ctx_file}"
+        )
+        ok = widget._dispatch_qwen_main_command(base)
+        assert ok is True
+        assert len(rec.interactive) == 1
+        assert rec.interactive[0].startswith(
+            "/slash-executor --recovery-mode /tools:listener-recovery"
+        )
+
+    def test_grok_main_dispatch_of_recovery_slug_gets_flag(
+        self, widget, rec, ctx_file
+    ):
+        """Defesa-em-profundidade: slug de recovery como item NORMAL de fila
+        sob Main Grok tambem recebe --delegation-runtime=grok e --recovery-mode."""
+        base = (
+            "/tools:listener-recovery --channel interactive --reason BLOCKED "
+            f"--context-file {ctx_file}"
+        )
+        ok = widget._dispatch_grok_main_command(base)
+        assert ok is True
+        assert len(rec.interactive) == 1
+        assert rec.interactive[0].startswith(
+            "/slash-executor --delegation-runtime=grok --recovery-mode "
+            "/tools:listener-recovery"
+        )
+
+    def test_grok_builder_recovery_flag_only_for_recovery_slug(self):
+        out = CommandQueueWidget._build_grok_slash_executor_invocation(
+            "/qa:prep --module 3", recovery_mode=True
+        )
+        assert "--recovery-mode" not in out
+        assert out == (
+            "/slash-executor --delegation-runtime=grok /qa:prep --module 3"
         )
 
 

@@ -39,10 +39,9 @@ def _subtab_widgets(win):
 
 
 def _button_by_testid(win, testid: str) -> QPushButton:
-    for widget in _subtab_widgets(win):
-        if widget.property("testid") == testid:
-            assert isinstance(widget, QPushButton)
-            return widget
+    for btn in win.findChildren(QPushButton):
+        if btn.property("testid") == testid:
+            return btn
     raise AssertionError(f"botao {testid} nao encontrado")
 
 

@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import pytest
 
-from workflow_app.command_queue.command_item_widget import CommandItemWidget
+from workflow_app.command_queue.command_item_widget import (
+    CommandItemWidget,
+    _PROVIDER_BTN_STYLE,
+    _T2_BLUE,
+)
+from workflow_app.command_queue.provider_router import Provider
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -313,3 +318,51 @@ class TestDispatchText:
         clipboard = QApplication.clipboard()
         if clipboard:
             assert clipboard.text() == "/prd-create --kimi"
+
+
+class TestQwenWorkerBlueArrow:
+    """Parallel Worker Qwen reusa a seta azul T2 (Kimi).
+
+    Contrato: `single-arrow-multifunction.md` — cor = terminal, nao identidade
+    do LLM. Qwen ocupa o T2, entao pinta azul e o clique vai a
+    `_on_kimi_clicked` (nunca ao verde/T1).
+    """
+
+    def _qwen_item(self, qtbot) -> CommandItemWidget:
+        spec = CommandSpec("/qa:prep", ModelName.SONNET, position=0)
+        item = CommandItemWidget(
+            spec, provider_resolver=lambda _s: Provider.QWEN
+        )
+        qtbot.addWidget(item)
+        item.refresh_provider()
+        return item
+
+    def test_qwen_and_kimi_share_t2_blue(self):
+        """Qwen e Kimi pintam a mesma cor azul do T2."""
+        assert _PROVIDER_BTN_STYLE[Provider.QWEN] == _T2_BLUE
+        assert _PROVIDER_BTN_STYLE[Provider.KIMI] == _T2_BLUE
+        assert _PROVIDER_BTN_STYLE[Provider.QWEN] == _PROVIDER_BTN_STYLE[Provider.KIMI]
+
+    def test_qwen_provider_paints_blue(self, qtbot):
+        item = self._qwen_item(qtbot)
+        assert "#3B82F6" in item._exec_btn.styleSheet()
+        assert "Qwen worker" in item._exec_btn.toolTip()
+        assert "T2" in item._exec_btn.toolTip()
+
+    def test_qwen_click_emits_kimi_terminal_signal_not_t1(self, qtbot):
+        """Clique com provider QWEN vai a T2 (run_in_kimi_terminal_requested),
+        nunca a T1 (run_in_terminal_requested). Sem este ramo o else verde
+        engolia o clique e divergia do step."""
+        item = self._qwen_item(qtbot)
+        t2: list[str] = []
+        t1: list[str] = []
+        t3: list[str] = []
+        item.run_in_kimi_terminal_requested.connect(t2.append)
+        item.run_in_terminal_requested.connect(t1.append)
+        item.run_in_codex_terminal_requested.connect(t3.append)
+        item._on_exec_clicked()
+        assert len(t2) == 1, "Qwen worker deve emitir o signal da seta azul"
+        assert t2[0].startswith("/skill:qa:prep")
+        assert t1 == [], "Qwen worker NAO pode cair no verde/T1"
+        assert t3 == [], "Qwen worker NAO vai a T3"
+        assert item.is_pending_run() is False

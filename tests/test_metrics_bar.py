@@ -21,6 +21,26 @@ def bar(qapp):
 # ── Initial state ────────────────────────────────────────────────────────── #
 
 
+def test_boot_does_not_spawn_orphan_abrir_window(qapp):
+    """_proj_open_btn.show() sem parent abria uma janela 1:1 no boot."""
+    from PySide6.QtWidgets import QApplication, QPushButton
+
+    before = {id(w) for w in QApplication.topLevelWidgets()}
+    bar = MetricsBar()
+    orphans = [
+        w
+        for w in QApplication.topLevelWidgets()
+        if id(w) not in before
+        and w is not bar
+        and isinstance(w, QPushButton)
+        and w.text() == "Abrir"
+    ]
+    assert orphans == []
+    assert bar._proj_open_btn.parent() is bar
+    assert bar._proj_open_btn.isHidden()
+    assert not bar._proj_open_btn.isWindow()
+
+
 def test_tokens_label_hidden_on_init(bar):
     """Token label is hidden until tokens arrive."""
     assert bar._lbl_tokens.isHidden()
@@ -423,7 +443,18 @@ class TestMetricsBarProjectPill:
         bar._apply_project_loaded("my-project")
         assert bar._proj_select_btn.isHidden()
         assert not bar._loop_select_btn.isHidden()
-        assert not bar._proj_open_btn.isHidden()
+
+    def test_proj_open_btn_never_becomes_top_level_window(self, bar):
+        """metrics-btn-proj-open saiu da UI em 2026-08-20.
+
+        show() num QPushButton sem parent abre uma janela orfa 1:1 no boot
+        (o 'Abrir' extra que aparecia ao lado da instancia real).
+        """
+        bar._apply_project_empty()
+        bar._apply_project_loaded("my-project")
+        assert bar._proj_open_btn.parent() is bar
+        assert bar._proj_open_btn.isHidden()
+        assert not bar._proj_open_btn.isWindow()
 
 
 class TestMetricsBarLoopPill:
@@ -1737,6 +1768,80 @@ class Test_instance_group_route_aware:
         )
 
 
+# ── Item 014: grid de instancias expandido (C18) ─────────────────────────── #
+
+
+class Test_instance_grid_expanded:
+    """Grid 2 colunas com todos os aliases canonicos habilitados."""
+
+    def test_canonical_names_derived_from_helper_commands(self):
+        """Invariante mecanica: nenhum botao entra sem isencao de early-exit."""
+        from workflow_app.metrics_bar.metrics_bar import _CANONICAL_INSTANCE_NAMES
+        from workflow_app.terminal_helpers import HELPER_COMMANDS
+
+        assert set(_CANONICAL_INSTANCE_NAMES) <= set(HELPER_COMMANDS)
+
+    def test_flags_excluded_from_canonical_names(self):
+        """sonnet e kimi-k3 ficam fora do eixo de instancias."""
+        from workflow_app.metrics_bar.metrics_bar import _CANONICAL_INSTANCE_NAMES
+
+        assert "sonnet" not in _CANONICAL_INSTANCE_NAMES
+        assert "kimi-k3" not in _CANONICAL_INSTANCE_NAMES
+
+    def test_instance_group_is_grid_layout_with_two_columns(self, bar):
+        """Layout do instance-group e QGridLayout com 2 colunas."""
+        from PySide6.QtWidgets import QGridLayout
+
+        layout = bar._instance_group.layout()
+        assert isinstance(layout, QGridLayout)
+        assert bar._instance_btns
+        for i, btn in enumerate(bar._instance_btns):
+            assert layout.itemAtPosition(i // 2, i % 2) is not None
+
+    def test_all_instance_buttons_enabled(self, bar):
+        """Nenhum botao pode estar disabled (mataria drag-and-drop)."""
+        assert all(btn.isEnabled() for btn in bar._instance_btns)
+
+    def test_on_instance_clicked_emits_toast_for_unavailable_alias(self, bar):
+        """Alias nao canonico dispara toast em vez de sinal."""
+        bar._on_instance_clicked(0, "alias-inexistente")
+
+        bar._signal_bus.toast_requested.emit.assert_called_once_with(
+            "Instancia 'alias-inexistente' nao disponivel na barra.", "error"
+        )
+        bar._signal_bus.run_command_route_aware.emit.assert_not_called()
+        bar._signal_bus.run_command_in_terminal.emit.assert_not_called()
+        bar._signal_bus.run_command_in_workspace_terminal.emit.assert_not_called()
+        bar._signal_bus.run_command_in_workspace_xterm.emit.assert_not_called()
+
+    def test_legacy_codex_high_emits_codex_high(self, bar):
+        """codex-high emite no workspace xterm (mesmo canal de codex)."""
+        bar._on_instance_clicked(3, "codex-high")
+
+        bar._signal_bus.run_command_in_workspace_xterm.emit.assert_called_with(
+            "codex-high"
+        )
+
+    def test_legacy_qwened_emits_workspace(self, bar):
+        """qwened emite no workspace terminal (par T2)."""
+        bar._on_instance_clicked(4, "qwened")
+
+        bar._signal_bus.run_command_in_workspace_terminal.emit.assert_called_with(
+            "qwened"
+        )
+
+    def test_qwened_button_label_is_qwen(self, bar):
+        """instance-group mostra o rotulo `qwen` no botao cujo alias e qwened."""
+        btn = next(b for b in bar._instance_btns if b._instance_name == "qwened")
+        assert btn.text() == "qwen"
+
+    def test_legacy_grokd_emits_workspace_xterm(self, bar):
+        """grokd emite no workspace xterm (par T3)."""
+        bar._on_instance_clicked(5, "grokd")
+
+        bar._signal_bus.run_command_in_workspace_xterm.emit.assert_called_with("grokd")
+
+
 # ── Item 024: QSettings migration (C-19) ────────────────────────────────── #
 
 
@@ -1772,8 +1877,12 @@ class Test_qsettings_migration:
         # Chamar _load_instance_order triggera a migracao.
         result = bar._load_instance_order()
 
-        # Ordem preservada (reconciliada com canonico).
-        assert result == custom_order
+        # Ordem preservada (reconciliada com canonico): aliases canonicos novos
+        # sao anexados ao final sem perturbar a ordem do usuario.
+        expected = custom_order + [
+            n for n in _CANONICAL_INSTANCE_NAMES if n not in custom_order
+        ]
+        assert result == expected
 
         # Schema version gravado como 2.
         sv = settings.value(_INSTANCE_SCHEMA_VERSION_KEY, None)
@@ -1785,15 +1894,16 @@ class Test_qsettings_migration:
         decoded = json.loads(raw)
         assert isinstance(decoded, dict)
         assert decoded["schema_version"] == 2
-        assert decoded["order"] == custom_order
+        assert decoded["order"] == expected
 
     def test_v2_to_v2_idempotent(self, qapp):
-        """v2→v2 e no-op: nenhuma mudanca na ordem nem re-escrita."""
+        """v2→v2 e no-op: nenhuma mudanca no payload armazenado."""
         import json
         import tempfile
         from PySide6.QtCore import QSettings
         from workflow_app.signal_bus import SignalBus
         from workflow_app.metrics_bar.metrics_bar import (
+            _CANONICAL_INSTANCE_NAMES,
             _INSTANCE_ORDER_SETTINGS_KEY,
             _INSTANCE_SCHEMA_VERSION_KEY,
             _INSTANCE_SCHEMA_VERSION_CURRENT,
@@ -1816,7 +1926,12 @@ class Test_qsettings_migration:
         bar._instance_order_settings = settings
 
         result = bar._load_instance_order()
-        assert result == ["kimid", "codex", "clauded"]
+        # Runtime result e reconciliado com o canonico (aliases novos sao
+        # anexados), mas o payload armazenado permanece inalterado.
+        expected = v2_payload["order"] + [
+            n for n in _CANONICAL_INSTANCE_NAMES if n not in v2_payload["order"]
+        ]
+        assert result == expected
 
         # Verificar que o payload nao mudou (idempotencia).
         raw = settings.value(_INSTANCE_ORDER_SETTINGS_KEY, None)

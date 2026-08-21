@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
+import workflow_app.llm_config.grok_spike as grok_spike
 from workflow_app.config.feature_flags import grok_spike_enabled
 from workflow_app.llm_config.grok_spike import (
     GrokSpikeAuthError,
@@ -117,6 +119,46 @@ class TestGrokSpikeCLI:
         patched = _env_with_cli_on_path(env, "/usr/local/bin/grok")
         assert patched is env
         assert patched["PATH"] == "/usr/local/bin:/usr/bin"
+
+    def test_session_and_adapter_use_same_cli_when_local_bin_is_outside_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Spike, adapter e runner convergem para o executavel ja validado."""
+        local_bin = tmp_path / ".local" / "bin"
+        local_bin.mkdir(parents=True)
+        fake_cli = local_bin / "grok"
+        fake_cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_cli.chmod(0o755)
+
+        empty_path = tmp_path / "empty-path"
+        empty_path.mkdir()
+        monkeypatch.setenv("PATH", str(empty_path))
+        monkeypatch.setenv("GROK_API_KEY", "test-key-boundary")
+        monkeypatch.setattr(grok_spike, "_GROK_CLI_CANDIDATES", [str(fake_cli)])
+        monkeypatch.setattr(grok_spike, "grok_spike_enabled", lambda: True)
+
+        captured: dict[str, object] = {}
+
+        def capture_transport(spec, *, cwd, timeout, env, runner=None):
+            captured.update(spec=spec, cwd=cwd, timeout=timeout, env=dict(env))
+            return {"ok": True, "terminal": "ok"}
+
+        monkeypatch.setattr(grok_spike._kernel, "run_provider", capture_transport)
+
+        resolved = _resolve_cli()
+        session = GrokSpikeSession()
+        session.open()
+        try:
+            spec = captured["spec"]
+            runner_env = captured["env"]
+            assert resolved == str(fake_cli)
+            assert spec.command[0] == resolved
+            assert str(local_bin) not in str(empty_path).split(os.pathsep)
+            assert runner_env["PATH"].split(os.pathsep).count(str(local_bin)) == 1
+            assert shutil.which("grok", path=runner_env["PATH"]) == resolved
+            assert os.environ["PATH"] == str(empty_path)
+        finally:
+            session.close()
 
 
 # ── Live integration (exige credencial) ──────────────────────────────────────

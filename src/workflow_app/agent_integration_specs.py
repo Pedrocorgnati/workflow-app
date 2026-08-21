@@ -13,6 +13,18 @@ Contratos (AGENT-TASK-006 do loop 07-24-criacao-agentes):
 1. Fonte unica: `_build_mcp_column()`, `_build_brainstorm_page()` e
    `_rebuild_brainstorm_grid()` consomem estas mesmas specs. Listas paralelas em
    `main_window.py` sao proibidas.
+
+   EXCECAO UNICA (decisao D7 do loop 08-17-systemforge-multillm-gaps-refactor,
+   item 015): a tupla `persona_specs` dentro de `_build_mcp_column()`, que carrega
+   as 16 personas curadas da secao MCPs com `(label, testid, prompt, category)`.
+   Ela sobrevive a esta clausula por dois motivos: (a) a ORDEM da tupla e a ordem
+   de composicao de `_compose_mcp_text` (os prompts marcados sao concatenados
+   nessa sequencia), entao a lista carrega semantica que um registry declarativo
+   perderia; (b) locus cross-repo, o mesmo argumento da clausula 2 contra arquivo
+   de dados: `ai-forge/workflow-app` e repositorio git proprio e
+   `_systemforge_root()` (= `parents[4]`) so resolve dentro do monorepo, logo
+   dado externo produziria seletor vazio num clone isolado. A excecao NAO
+   autoriza listas paralelas novas: qualquer outra volta a cair na proibicao.
 2. Persistencia em codigo: as specs vivem neste modulo (editado por
    `/mcp:create-agent`), portanto sobrevivem a rebuild da grade e a restart do
    app sem depender de estado de widget.
@@ -228,9 +240,9 @@ def _validate_target_terminal(value: object) -> str | None:
 class McpAgentSpec:
     """Integracao suplementar no setor MCP (`output-toolbar-mcp`).
 
-    Materializa um QPushButton checkable com testid `output-mcp-agent-{slug}`
-    cujo `persona_prompt` entra na composicao das TRES acoes existentes
-    (Main MCP, Parallel, Dual) somente quando marcado.
+    Materializa um QCheckBox em `output-mcp-persona-checkboxes` com testid
+    `output-mcp-agent-{slug}` cujo `persona_prompt` entra na composicao das
+    acoes MCP (Main/Parallel/Dual ou Thinking/Execution) somente quando marcado.
     """
 
     slug: str

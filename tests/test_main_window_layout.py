@@ -109,6 +109,29 @@ def test_command_queue_has_autocast_buttons(app):
     assert _find_by_testid(cq, "schedule-autocast-btn") is not None
 
 
+def test_dual_status_section_renders_in_datatest_main_mode(app):
+    """A coluna progress/listeners tem testid e aparece no modo DataTest Main."""
+    from PySide6.QtWidgets import QLabel
+
+    from workflow_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.resize(1280, 720)
+    win.show()
+    app.processEvents()
+
+    status = _find_widget_by_testid(win, "dual-status-section")
+    assert status is not None
+    win._on_datatest_mode_changed("main")
+
+    overlay_texts = {
+        label.text()
+        for label in win.findChildren(QLabel)
+        if label.property("_is_testid_overlay")
+    }
+    assert "dual-status-section" in overlay_texts
+
+
 def test_output_toolbar_left_splits_insertions_controls(app):
     """Refactor output-toolbar-left/center: as abas primarias (Workflow/LOOPs/
     Auxiliar) ficam no header output-toolbar-left; o bloco insertions-controls
@@ -133,6 +156,16 @@ def test_output_toolbar_left_splits_insertions_controls(app):
     assert primary.property("testid") == "output-toolbar-left-primary-tabs"
     for tab in win._command_queue._sec_tabs[:3]:
         assert tab.parentWidget() is primary
+    visual = [
+        win._command_queue._tab_bar_layout.itemAt(i).widget().property("testid")
+        for i in range(win._command_queue._tab_bar_layout.count())
+        if win._command_queue._tab_bar_layout.itemAt(i).widget() is not None
+    ]
+    assert visual == [
+        "queue-tab-loops",
+        "queue-tab-workflow",
+        "queue-tab-auxiliar",
+    ]
 
     # insertions-controls NAO vive mais dentro do queue-div-llm-routing.
     insertions = win._command_queue.insertions_bar
@@ -162,7 +195,32 @@ def test_output_toolbar_left_splits_insertions_controls(app):
     assert center_layout.count() == 1
     assert center_layout.itemAt(0).widget() is content
 
+    # Moldura do left igual a do center: fundo, borda e padding 4 uniforme.
+    # Abas primarias a esquerda, tamanho natural (sem stretch, sem barra 38px).
+    left = win._command_queue.header_widget
+    assert left.property("testid") == "output-toolbar-left"
+    assert "#1E1E21" in left.styleSheet()
+    assert "#1E1E21" in center.styleSheet()
+    assert "border: 1px solid #3F3F46" in left.styleSheet()
+    assert "border-radius: 6px" in left.styleSheet()
+    left_m = left.layout().contentsMargins()
+    center_m = center.layout().contentsMargins()
+    assert (
+        left_m.left(), left_m.top(), left_m.right(), left_m.bottom()
+    ) == (
+        center_m.left(), center_m.top(), center_m.right(), center_m.bottom()
+    )
+    assert (left_m.left(), left_m.top(), left_m.right(), left_m.bottom()) == (4, 4, 4, 4)
+    tab_row = primary.parentWidget()
+    assert tab_row is not None
+    assert tab_row.minimumHeight() != 38
+    assert tab_row.maximumHeight() != 38
+    tab_bar_layout = win._command_queue._tab_bar_layout
+    for tab in win._command_queue._sec_tabs[:3]:
+        assert tab_bar_layout.stretch(tab_bar_layout.indexOf(tab)) == 0
 
+
+@_skip_under_llm_config_v2
 def test_llm_routing_sections_are_vertical_label_over_controls(app):
     """queue-div-llm-routing: TRES secoes, label sempre no indice 0.
 
@@ -284,7 +342,8 @@ def test_output_toolbar_header_is_single_row_with_section_selector(app):
     assert personas.property("testid") == "queue-subtab-insertions-personas"
     assert personas.parentWidget() is stack.widget(2)
 
-    # Boot fixo em COMMAND SEQUENCE (D14) e troca de pagina pelo clique.
+    # Layout legado: boot em COMMAND SEQUENCE (aba LLM ROUTING nao existe).
+    # Com SF_LLM_CONFIG_V2 o boot e LLM ROUTING (test_llm_config_tab.py).
     assert stack.currentIndex() == 0
     for i in range(1, 6):
         btns[i].click()
@@ -457,6 +516,7 @@ def test_mcps_e_brainstorm_sao_secoes_de_primeiro_nivel(app):
     for action_id in ("main", "parallel", "dual"):
         assert _find_by_testid(mcps_column, f"output-mcp-action-{action_id}")
     assert _find_widget_by_testid(mcps_column, "output-mcp-persona-checkboxes")
+    assert _find_widget_by_testid(mcps_column, "output-mcp-agent-buttons") is None
 
     brainstorm_btn.click()
     brainstorm_column = stack.currentWidget()

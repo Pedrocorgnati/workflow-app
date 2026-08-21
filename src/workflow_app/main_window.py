@@ -37,6 +37,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QFontMetrics, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -48,7 +49,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -63,6 +66,7 @@ from workflow_app.command_queue.command_queue_widget import (
     _SECTION_BTN_STYLE,
     _TAB_ACTIVE_STYLE,
     _TAB_INACTIVE_STYLE,
+    _apply_template_icon_chip,
     PERSONA_FILTER_ALL_LABEL,
     PERSONA_FILTER_CATEGORIES,
     PERSONA_FILTER_DEFAULT,
@@ -83,10 +87,14 @@ from workflow_app.config.feature_flags import (
     llm_flags_rules_v2_enabled,
     mcp_think_exec_v2_enabled,
 )
+from workflow_app.delivery.lock_bridge import (
+    _find_systemforge_root as _find_delivery_systemforge_root,
+)
 from workflow_app.domain import CommandSpec
 from workflow_app.errors import ConfigError
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 from workflow_app.output_panel.output_panel import OutputPanel
+from workflow_app.runtime_paths import workflow_app_assets_dir
 from workflow_app.services.delivery_reader import DeliveryReader
 from workflow_app.services.lock_service import LockService
 from workflow_app.signal_bus import signal_bus
@@ -120,12 +128,12 @@ if TYPE_CHECKING:  # import Qt-free: so entra na analise estatica de tipos
 
 @dataclass(frozen=True)
 class TerminalRouteSnapshot:
-    """Immutable capture of terminal route checkboxes + Notes at a point in time.
+    """Immutable capture of terminal route radios + Notes at a point in time.
 
     Capture once (e.g. dialog open) and pass into ``_publish_to_terminal_report``
     so dispatch never re-reads widgets mid-flight.
 
-    Os checkboxes de rota vivem no header de cada terminal desde
+    Os radios de rota vivem no header de cada terminal desde
     07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2); antes ficavam
     juntos no bloco `terminal-route-toggles`, ja dissolvido. ``notes_t2`` foi
     removido no mesmo trabalho (I1.3) porque o checkbox `terminal-notes-t2`
@@ -213,22 +221,35 @@ _MAIN_LLM_LABELS: dict[str, str] = {
 }
 _MAIN_LLM_SLUGS: frozenset[str] = frozenset(_MAIN_LLM_LABELS)
 
-# Indices das secoes de `output-toolbar-section-stack`. TODAS as seis tem
-# conteudo de flow responsivo (altura real != sizeHint) e todas passam pelo teto
+# Indices das secoes de `output-toolbar-section-stack`.
+# de secao tem conteudo de flow responsivo (altura real != sizeHint) e todas passam pelo teto
 # de `_sync_flow_section_height()` desde 2026-07-27 — antes so as duas ultimas
 # eram medidas, e as tres primeiras herdavam a altura da pagina mais alta do
 # stack. Ordem de `_build_toolbar_section_selector`
 # desde 2026-07-27: 0=command sequence, 1=terminal insertions, 2=agentes,
 # 3=mcps, 4=brainstorm. A antiga secao unica `MCP & BRAINSTORM` (index 2) foi
 # dissolvida: suas duas sub-abas viraram secoes de primeiro nivel, nas duas
-# ultimas posicoes. Consumidos por `_sync_flow_section_height()`.
+# ultimas posicoes. LLM Routing entra no indice 6 quando
+# SF_LLM_CONFIG_V2 esta ativo. Consumidos por `_sync_flow_section_height()`.
 _TOOLBAR_SECTION_COMMAND_SEQUENCE = 0
 _TOOLBAR_SECTION_TERMINAL_INSERTIONS = 1
 _TOOLBAR_SECTION_AGENTES = 2
 _TOOLBAR_SECTION_MCPS = 3
 _TOOLBAR_SECTION_BRAINSTORM = 4
 _TOOLBAR_SECTION_CORGLY = 5
-_TOOLBAR_SECTION_LLM_CONFIG = 6
+_TOOLBAR_SECTION_LLM_ROUTING = 6
+
+
+def _initial_toolbar_section_index() -> int:
+    """Aba inicial de toda instancia nova, sem persistencia entre sessoes.
+
+    LLM ROUTING quando `SF_LLM_CONFIG_V2` expoe a pagina. No layout legado a
+    div de routing ja vive na top-row, entao o fallback e COMMAND SEQUENCE.
+    """
+    if llm_config_v2_enabled():
+        return _TOOLBAR_SECTION_LLM_ROUTING
+    return _TOOLBAR_SECTION_COMMAND_SEQUENCE
+
 
 # `QWIDGETSIZE_MAX` do Qt (nao exposto pelo PySide6): valor de "sem teto" que
 # `QWidget.setMaximumHeight` reconhece. Usado por `_sync_flow_section_height()`
@@ -236,13 +257,23 @@ _TOOLBAR_SECTION_LLM_CONFIG = 6
 _QT_WIDGET_SIZE_MAX = 16777215
 
 
-# QSS canonico dos checkboxes de rota de terminal (terminal-route-t1/t2/t3) e do
-# checkbox de Notes do T1 (terminal-notes-t1). Promovido de local de
+# QSS dos radios de rota de terminal (terminal-route-t1/t2/t3). Cada controle
+# vive no header do terminal correspondente, mas os tres pertencem ao mesmo
+# QButtonGroup exclusivo.
+_TERMINAL_ROUTE_RADIO_STYLE = (
+    "QRadioButton { color: #FAFAFA; font-size: 11px; font-weight: 600;"
+    "  background: transparent; border: none; padding: 0; }"
+    "QRadioButton::indicator { width: 16px; height: 16px; }"
+    "QRadioButton::indicator:unchecked { background-color: #3F3F46;"
+    "  border: 1px solid #52525B; border-radius: 8px; }"
+    "QRadioButton::indicator:checked { background-color: #3B82F6;"
+    "  border: 1px solid #93C5FD; border-radius: 8px; }"
+    "QRadioButton::indicator:hover { border-color: #BFDBFE; }"
+)
+
+# QSS do checkbox independente de Notes do T1. Promovido de local de
 # `_build_output_toolbar` para module-level em
-# 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2): os checkboxes deixaram
-# de morar num bloco unico e passaram a ser montados por builders distintos
-# (header do T1, barra do T2, barra CODEX do T3, footer de notas do T1), que
-# precisam do MESMO estilo. Espelha queue-div-use-kimi.
+# 07-27-workflow-app-header-toggles-llm-unico.
 _TERMINAL_ROUTE_CHK_STYLE = (
     "QCheckBox { color: #FAFAFA; font-size: 11px; font-weight: 600;"
     "  background: transparent; border: none; padding: 0; }"
@@ -341,9 +372,13 @@ _SEED_TARGET_TERMINAL_RUNTIME_SENTINEL = "depende-do-radio"
 logger = logging.getLogger(__name__)
 
 # ── Directory shortcuts for the Workspace terminal label bar ─────────────── #
-# main_window.py lives at: .../systemForge/ai-forge/workflow-app/src/workflow_app/
-_WORKFLOW_APP_DIR = str(Path(__file__).resolve().parents[2])  # .../ai-forge/workflow-app
-_SYSTEMFORGE_DIR  = str(Path(__file__).resolve().parents[4])  # .../systemForge
+# No source checkout these paths also match the old fixed-parent calculation.
+# In a PyInstaller onefile build, __file__ points below sys._MEIPASS, so derive
+# both shortcuts from the bridge resolver that understands frozen executables.
+_SYSTEMFORGE_PATH = _find_delivery_systemforge_root()
+_WORKFLOW_APP_DIR = str(_SYSTEMFORGE_PATH / "ai-forge" / "workflow-app")
+_SYSTEMFORGE_DIR = str(_SYSTEMFORGE_PATH)
+_ASSETS_DIR = workflow_app_assets_dir()
 
 # Task 7 (loop 05-13-workflow-app-layout-2): prompt longo literal embutido,
 # preservado byte-a-byte (sha256 d70879ea1e07618ae5ad26f024558c232dde70e5f587c5f8416a3064ab90787e)
@@ -944,8 +979,10 @@ RESUMO FINAL
 
 _DATATEST_FILTERED_IDS = frozenset({
     "metrics-project-pill",
+    "dual-status-section",
     "progress-section",
     "listeners-frame",
+    "main-command-queue",
     "queue-btn-play-next-container",
     "queue-command-list",
     "output-toolbar-left",
@@ -1027,6 +1064,7 @@ class DualStatusSection(QWidget):
     def __init__(self, *, progress_section, listeners_frame, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("DualStatusSection")
+        self.setProperty("testid", "dual-status-section")
         from PySide6.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._progress_section = progress_section
@@ -1211,19 +1249,15 @@ class MainWindow(QMainWindow):
         self._command_queue.setProperty("testid", "main-command-queue")
 
         # Botao Clear — esvazia o queue-command-list desta instancia.
-        # Vive na linha de acoes da fila (nao no MetricsBar nem no bloco de
-        # anexos) porque depende diretamente de self._command_queue.
-        # Estilo vermelho para sinalizar acao destrutiva, diferenciando dos
-        # botoes ambar de selecao de JSON.
-        self._clear_queue_btn = QPushButton("Clear")
+        # Chip 1:1 com queue-btn-copy-commands (22x22), icone minimize cinza.
+        # Vive no canto direito da row queue-template-label.
+        self._clear_queue_btn = QPushButton()
         self._clear_queue_btn.setProperty("testid", "main-command-queue-clear-btn")
         self._clear_queue_btn.setToolTip("Esvaziar a fila (queue-command-list) desta janela")
-        self._clear_queue_btn.setFixedHeight(28)
-        self._clear_queue_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #F87171; border: 1px solid #F87171;"
-            "  border-radius: 5px; font-size: 11px; font-weight: 600; padding: 0 12px; }"
-            "QPushButton:hover { background: rgba(248, 113, 113, 0.12); }"
+        _minimize_icon = self._load_tinted_svg_icon(
+            _ASSETS_DIR / "minimize.svg", "#A1A1AA"
         )
+        _apply_template_icon_chip(self._clear_queue_btn, _minimize_icon, "–")
         self._clear_queue_btn.clicked.connect(self._on_clear_queue_clicked)
 
         # Botao auto-loop — toggle que rearma a fila quando o listener do T1
@@ -1232,27 +1266,54 @@ class MainWindow(QMainWindow):
         # pode rodar de novo do item 1 (com o autocast ligado, roda sozinha em
         # loop). Estado vive aqui (botao = fonte da verdade) e e espelhado no
         # CommandQueueWidget via set_auto_loop_enabled.
-        # Aparencia espelha o autocast-btn da play bar (azul; vermelho quando
-        # ligado), com a altura 28 da linha de acoes.
+        # Aparencia: bg laranja escuro, sem texto, icone de loop, formato 1:1.
+        # Quando selecionado, o icone gira (animacao via QTimer).
         # Regras: ai-forge/rules/single-arrow-multifunction.md §9.
-        self._auto_loop_btn = QPushButton("auto-loop")
+        self._auto_loop_btn = QPushButton()
         self._auto_loop_btn.setProperty("testid", "main-command-queue-auto-loop-btn")
         self._auto_loop_btn.setCheckable(True)
+        self._auto_loop_btn.setFixedSize(28, 28)
+        self._auto_loop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_loop_btn.setToolTip(
             "Auto-loop: quando o listener do T1 (interactive) fica verde e a fila "
             "acabou, toda seta ambar volta a verde e a fila pode rodar de novo"
         )
-        self._auto_loop_btn.setFixedHeight(28)
-        self._auto_loop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._auto_loop_btn.setStyleSheet(
-            "QPushButton { background-color: #1E3A8A; color: #FAFAFA;"
-            "  border: 1px solid #3B82F6; border-radius: 5px;"
-            "  font-size: 11px; font-weight: 700; padding: 0 12px; }"
-            "QPushButton:hover { background-color: #1D4ED8; }"
-            "QPushButton:checked { background-color: #DC2626; border-color: #EF4444; }"
-            "QPushButton:checked:hover { background-color: #B91C1C; }"
+        # icone de loop (refresh.svg)
+        self._auto_loop_icon = self._load_tinted_svg_icon(
+            _ASSETS_DIR / "loop.svg", "#FAFAFA"
         )
-        self._auto_loop_btn.toggled.connect(self._on_auto_loop_toggled)
+        if self._auto_loop_icon is not None:
+            self._auto_loop_btn.setIcon(self._auto_loop_icon)
+            self._auto_loop_btn.setIconSize(QSize(16, 16))
+        self._auto_loop_btn.setStyleSheet(
+            "QPushButton { background-color: #C2410C; border: 1px solid #EA580C;"
+            "  border-radius: 5px; padding: 4px; }"
+            "QPushButton:hover { background-color: #9A3412; }"
+            "QPushButton:checked { background-color: #C2410C; border-color: #F97316; }"
+        )
+        # Animacao de giro quando selecionado (tamanho fixo — sem pulso).
+        self._auto_loop_rotation = 0
+        self._auto_loop_timer = QTimer(self)
+        self._auto_loop_timer.setInterval(60)
+        self._auto_loop_timer.timeout.connect(self._rotate_auto_loop_icon)
+
+        def _on_auto_loop_toggled_with_animation(checked: bool) -> None:
+            if checked:
+                self._auto_loop_timer.start()
+            else:
+                self._auto_loop_timer.stop()
+                self._auto_loop_rotation = 0
+                # Reset icon rotation
+                if self._auto_loop_icon is not None:
+                    self._auto_loop_btn.setIcon(self._auto_loop_icon)
+            self._on_auto_loop_toggled(checked)
+
+        self._auto_loop_btn.toggled.connect(_on_auto_loop_toggled_with_animation)
+
+        # Adiciona auto_loop_btn na linha 2 do queue-btn-play-next-container
+        self._command_queue._play_row_bottom.addWidget(
+            self._auto_loop_btn, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
 
         # Bloco semantico de anexos como first div inside command queue.
         # Widgets are reparented from MetricsBar (state machine stays in MetricsBar).
@@ -1281,11 +1342,38 @@ class MainWindow(QMainWindow):
         for _w in (
             self._metrics_bar._project_pill,
             self._metrics_bar._feature_name_input,
-            self._metrics_bar._proj_open_btn,
-            self._metrics_bar._proj_select_btn,
         ):
             _project_row_layout.addWidget(_w)
+
+        # Clone dos botões brainstorm-md-copy-path e brainstorm-md-reader-open
+        # para o JSON de projeto (2026-08-20). Ficam depois do seletor
+        # principal para operar sobre o JSON vinculado a esse slot.
+        _proj_copy_btn = QPushButton()
+        _proj_copy_btn.setProperty("testid", "project-copy-path")
+        _proj_copy_btn.setFixedSize(24, 24)
+        _proj_copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _proj_copy_btn.setToolTip("Copiar path do project.json selecionado")
+        copy_icon_path = _ASSETS_DIR / "copy.svg"
+        self._set_centered_svg_icon(_proj_copy_btn, copy_icon_path, 12, "⎘")
+        _proj_copy_btn.setStyleSheet(_GEAR_QSS)
+        _proj_copy_btn.clicked.connect(self._copy_project_json_path)
+
+        _proj_reader_btn = QPushButton()
+        _proj_reader_btn.setProperty("testid", "project-reader-open")
+        _proj_reader_btn.setFixedSize(24, 24)
+        _proj_reader_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _proj_reader_btn.setToolTip("Abrir leitor/editor do project.json selecionado")
+        eye_icon_path = _ASSETS_DIR / "eye.svg"
+        self._set_centered_svg_icon(_proj_reader_btn, eye_icon_path, 13, "1:1")
+        _proj_reader_btn.setStyleSheet(_GEAR_QSS)
+        _proj_reader_btn.clicked.connect(self._open_project_json_reader)
+
+        # metrics-btn-proj-open eliminado da UI (2026-08-20), logica mantida
+        # space-between: Projeto/pill a esquerda, copiar+ver a direita.
+        _project_row_layout.addWidget(self._metrics_bar._proj_select_btn)
         _project_row_layout.addStretch(1)
+        _project_row_layout.addWidget(_proj_copy_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        _project_row_layout.addWidget(_proj_reader_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._attachments_loop_row = QWidget()
         self._attachments_loop_row.setProperty("testid", "attachments-loop-row")
@@ -1295,10 +1383,35 @@ class MainWindow(QMainWindow):
         _loop_row_layout.setSpacing(5)
         for _w in (
             self._metrics_bar._loop_pill,
-            self._metrics_bar._loop_select_btn,
         ):
             _loop_row_layout.addWidget(_w)
+
+        # Clone dos botões brainstorm-md-copy-path e brainstorm-md-reader-open
+        # para o JSON de loop (2026-08-20). Ficam depois do seletor
+        # principal para operar sobre o JSON vinculado a esse slot.
+        _loop_copy_btn = QPushButton()
+        _loop_copy_btn.setProperty("testid", "loop-copy-path")
+        _loop_copy_btn.setFixedSize(24, 24)
+        _loop_copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _loop_copy_btn.setToolTip("Copiar path do _LOOP-CONFIG.json selecionado")
+        self._set_centered_svg_icon(_loop_copy_btn, copy_icon_path, 12, "⎘")
+        _loop_copy_btn.setStyleSheet(_GEAR_QSS)
+        _loop_copy_btn.clicked.connect(self._copy_loop_json_path)
+
+        _loop_reader_btn = QPushButton()
+        _loop_reader_btn.setProperty("testid", "loop-reader-open")
+        _loop_reader_btn.setFixedSize(24, 24)
+        _loop_reader_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _loop_reader_btn.setToolTip("Abrir leitor/editor do _LOOP-CONFIG.json selecionado")
+        self._set_centered_svg_icon(_loop_reader_btn, eye_icon_path, 13, "1:1")
+        _loop_reader_btn.setStyleSheet(_GEAR_QSS)
+        _loop_reader_btn.clicked.connect(self._open_loop_json_reader)
+
+        # space-between: Loop/pill a esquerda, copiar+ver a direita.
+        _loop_row_layout.addWidget(self._metrics_bar._loop_select_btn)
         _loop_row_layout.addStretch(1)
+        _loop_row_layout.addWidget(_loop_copy_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        _loop_row_layout.addWidget(_loop_reader_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._attachments_brainstorm_row = QWidget()
         self._attachments_brainstorm_row.setProperty("testid", "attachments-brainstorm-row")
@@ -1317,15 +1430,16 @@ class MainWindow(QMainWindow):
         _actions_row.setProperty("testid", "main-command-queue-actions-row")
         _actions_row.setStyleSheet("background: transparent; border: none;")
         _actions_row_layout = QHBoxLayout(_actions_row)
-        _actions_row_layout.setContentsMargins(8, 0, 8, 6)
+        _actions_row_layout.setContentsMargins(0, 0, 0, 0)
         _actions_row_layout.setSpacing(5)
-        _actions_row_layout.addWidget(self._clear_queue_btn)
-        _actions_row_layout.addWidget(self._auto_loop_btn)
+        # Clear e copy foram para o canto direito de queue-template-label.
+        # auto_loop_btn vive em queue-btn-play-next-container (linha 2).
         # Park hidden nav buttons here so MetricsBar is fully decoupled
         for _btn in (self._metrics_bar._btn_workflow, self._metrics_bar._btn_comandos):
             _actions_row_layout.addWidget(_btn)
             _btn.hide()
         _actions_row_layout.addStretch(1)
+        self._actions_row = _actions_row
 
         # Window label — etiqueta livre para identificar visualmente esta
         # janela quando varias instancias do workflow-app rodam em paralelo.
@@ -1348,8 +1462,20 @@ class MainWindow(QMainWindow):
         # que pill_row fique como primeiro item do main-command-queue (acima
         # de dual-status-section que sera inserido em idx 1 por _build_output_toolbar).
         self._command_queue.layout().insertWidget(0, self._window_label)
-        self._command_queue.layout().insertWidget(0, _actions_row)
         self._command_queue.layout().insertWidget(0, _pill_row)
+
+        # Clear + copy no canto direito da row queue-template-label: o label
+        # (stretch) ocupa o restante da largura. Ordem: label | clear | copy.
+        _template_layout = self._command_queue._template_row.layout()
+        _template_layout.insertWidget(
+            1,
+            self._clear_queue_btn,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        # Mover _actions_row para dentro do play_bar (abaixo do queue-btn-play-next-container)
+        self._command_queue._play_bar.layout().addWidget(self._actions_row)
 
         # MetricsBar no longer has visible children — hide it.
         self._metrics_bar.hide()
@@ -1470,66 +1596,45 @@ class MainWindow(QMainWindow):
         _section_stack.addWidget(_brainstorm_column)                  # 4 = brainstorm
         _section_stack.addWidget(_corgly_column)                      # 5 = corgly
 
-        # Item 017: aba LLM Config (kill-switch SF_LLM_CONFIG_V2).
-        # Flag ligada: TERMINAL INSERTIONS sai do stack, LLM CONFIG entra na
-        # ultima posicao (indice 6). Flag desligada: stack inalterado.
-        _llm_config_widget = None
+        # SF_LLM_CONFIG_V2 adiciona uma unica pagina LLM Routing ao fim do
+        # seletor. TERMINAL INSERTIONS permanece na posicao original (indice 1).
+        # Nao existe uma pagina LLM Config vazia em paralelo.
+        _llm_routing_widget = None
         if llm_config_v2_enabled():
-            _llm_config_widget = QWidget()
-            _llm_config_widget.setObjectName("OutputToolbarLLMConfig")
-            _llm_config_widget.setProperty("testid", "output-toolbar-section-llm-config")
-            _llm_config_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            _llm_config_widget.setStyleSheet(
-                "QWidget#OutputToolbarLLMConfig { background-color: #1E1E21;"
-                "  border: 1px solid #3F3F46; border-radius: 6px; }"
-            )
-            _llm_config_layout = QHBoxLayout(_llm_config_widget)
-            _llm_config_layout.setContentsMargins(4, 4, 4, 4)
-            _llm_config_layout.setSpacing(6)
-            # Reparenteia queue-div-llm-routing da top-row para esta aba (C-04).
-            # Sob a flag a div ja e QHBoxLayout (as tres secoes lado a lado),
-            # entao ela entra com a largura natural: `stretch=1` a esticaria
-            # para 1/4 da row e espalharia as secoes com folga no meio.
-            _llm_config_layout.addWidget(
-                self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
-            )
-            # Containers de compatibilidade dos itens 018-021 (testids
-            # estaveis). Os TRES ficam vazios: as tres secoes (Main | Parallel
-            # | Flag) vivem DENTRO de `queue-div-llm-routing`, que ja e a row
-            # canonica do escopo (source.md:1189). Instanciar conteudo aqui era
-            # o que produzia "parte dentro da div, parte fora" — o FlagsPanel
-            # do item 021 nascia como IRMAO da div em vez de morar dentro de
-            # `queue-div-flag`.
-            #
-            # Eles permanecem filhos reais (nao sao deletados) porque
-            # test_llm_config_tab.py os procura via findChildren, mas entram
-            # ocultos: um QWidget vazio visivel ainda consome o spacing de 6px
-            # do QHBoxLayout tres vezes, o que empurrava a div para a esquerda
-            # e abria faixa morta a direita.
-            _llm_config_containers = []
-            for _tid in (
-                "llm-config-main-llm-container",
-                "llm-config-parallel-container",
-                "llm-config-flags-container",
-            ):
-                _c = QWidget(_llm_config_widget)
-                _c.setProperty("testid", _tid)
-                _c.setMinimumSize(0, 0)
-                _c.setVisible(False)
-                _llm_config_containers.append(_c)
-            self._llm_config_containers = _llm_config_containers
-            # Item 021: o FlagsPanel canonico e o que o CommandQueueWidget
-            # embutiu em `queue-div-flag`. Aqui so guardamos a referencia para
-            # `_on_main_llm_changed` continuar aplicando C-57/C-43 nele.
+            # O FlagsPanel canonico vive em `queue-div-flag`. A referencia e
+            # mantida para `_on_main_llm_changed` continuar aplicando C-57/C-43.
             self._llm_config_flags_panel = getattr(
                 self._command_queue, "_flags_panel", None
             )
-            self._llm_config_widget = _llm_config_widget
-            _section_stack.addWidget(_llm_config_widget)              # 6 = llm_config
 
-        # Boot fixo em COMMAND SEQUENCE (D14), sem persistencia entre sessoes
-        # (mesmo precedente do `_active_section = 0` do CommandQueueWidget).
-        _section_stack.setCurrentIndex(0)
+            # Secao unica para queue-div-llm-routing. A div ja e QHBoxLayout,
+            # entao entra com largura natural: `stretch=1` a esticaria para 1/4
+            # da row e espalharia as secoes com folga no meio.
+            _llm_routing_widget = QWidget()
+            _llm_routing_widget.setObjectName("OutputToolbarLLMRouting")
+            _llm_routing_widget.setProperty(
+                "testid", "output-toolbar-section-llm-routing"
+            )
+            _llm_routing_widget.setAttribute(
+                Qt.WidgetAttribute.WA_StyledBackground, True
+            )
+            _llm_routing_widget.setStyleSheet(
+                "QWidget#OutputToolbarLLMRouting { background-color: #1E1E21;"
+                "  border: 1px solid #3F3F46; border-radius: 6px; }"
+            )
+            _llm_routing_layout = QHBoxLayout(_llm_routing_widget)
+            _llm_routing_layout.setContentsMargins(4, 4, 4, 4)
+            _llm_routing_layout.setSpacing(6)
+            _llm_routing_layout.addWidget(
+                self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
+            )
+            self._llm_routing_widget = _llm_routing_widget
+            _section_stack.addWidget(_llm_routing_widget)             # 6 = llm_routing
+
+        # Boot fixo em LLM ROUTING quando a pagina existe; sem persistencia
+        # entre sessoes (mesmo precedente do `_active_section` do
+        # CommandQueueWidget). Layout legado cai em COMMAND SEQUENCE.
+        _section_stack.setCurrentIndex(_initial_toolbar_section_index())
 
         # As tres primeiras secoes entram no MESMO mecanismo de teto das tres de
         # flow (`_flow_section_pages`, semeado por `_build_mcp_column`). Sem
@@ -1541,26 +1646,20 @@ class MainWindow(QMainWindow):
         _header_widget = self._command_queue.header_widget
         _flow_update = {
             _TOOLBAR_SECTION_COMMAND_SEQUENCE: (_header_widget, _header_widget),
+            _TOOLBAR_SECTION_TERMINAL_INSERTIONS: (
+                _center_widget, _center_widget,
+            ),
             _TOOLBAR_SECTION_AGENTES: (_agentes_widget, _agentes_widget),
         }
         if llm_config_v2_enabled():
-            # Flag ligada: TERMINAL INSERTIONS sai, LLM CONFIG entra no indice 6.
-            if _llm_config_widget is not None:
-                _flow_update[_TOOLBAR_SECTION_LLM_CONFIG] = (
-                    _llm_config_widget, _llm_config_widget,
+            if _llm_routing_widget is not None:
+                _flow_update[_TOOLBAR_SECTION_LLM_ROUTING] = (
+                    _llm_routing_widget, _llm_routing_widget,
                 )
-        else:
-            # Flag desligada: layout legado com TERMINAL INSERTIONS no indice 1.
-            _flow_update[_TOOLBAR_SECTION_TERMINAL_INSERTIONS] = (
-                _center_widget, _center_widget,
-            )
         self._flow_section_pages.update(_flow_update)
         _watched_pages = [_header_widget, _center_widget, _agentes_widget]
-        if _llm_config_widget is not None:
-            # Sem filtro de evento a pagina entra em `_flow_section_pages` mas
-            # nunca dispara o recalculo: o teto de altura (R-18/C-04) so seria
-            # medido na troca de secao, e ficaria stale a cada resize do header.
-            _watched_pages.append(_llm_config_widget)
+        if _llm_routing_widget is not None:
+            _watched_pages.append(_llm_routing_widget)
         for _watched in _watched_pages:
             _watched.installEventFilter(self)
 
@@ -1586,8 +1685,8 @@ class MainWindow(QMainWindow):
         # Worker | MCP Flags) para esta linha. Ancorado no topo: a coluna do
         # meio agora cresce com o conteudo do stack e nao deve esticar os
         # vizinhos junto.
-        # Item 017: com SF_LLM_CONFIG_V2="1", _llm_box foi reparenteado para
-        # a aba LLM Config (_llm_config_widget). Nao adicionar na top-row.
+        # Com SF_LLM_CONFIG_V2="1", _llm_box foi reparenteado para LLM Routing.
+        # Nao adicionar na top-row.
         if not llm_config_v2_enabled():
             _top_row_layout.addWidget(                                                 # llm-routing
                 self._command_queue._llm_box, alignment=Qt.AlignmentFlag.AlignTop
@@ -1606,7 +1705,7 @@ class MainWindow(QMainWindow):
             stretch=1,
             alignment=Qt.AlignmentFlag.AlignTop,
         )
-        self._select_toolbar_section(0)
+        self._select_toolbar_section(_initial_toolbar_section_index())
 
         # Ultima coluna empilhada: test-mode em cima, queue-toggles embaixo.
         _queue_toggles_column = self._build_queue_toggles_column()
@@ -1849,8 +1948,8 @@ class MainWindow(QMainWindow):
         """Seletor das secoes do header (I3.2 de
         07-27-workflow-app-header-toggles-llm-unico).
 
-        Sao SEIS: as cinco secoes consolidadas em 2026-07-27 mais o catalogo
-        Corgly gerenciado pelo repositorio-pai.
+        Sao seis secoes operacionais no layout legado. Com o gate ativo, LLM
+        Routing e adicionada como setima secao sem substituir Terminal Insertions.
 
         A aba 'Agentes' saiu do
         `queue-subtabs-insertions` e virou pagina do stack, e a secao unica
@@ -1897,18 +1996,18 @@ class MainWindow(QMainWindow):
 
         self._toolbar_section_btns: list[QPushButton] = []
         if llm_config_v2_enabled():
-            # Item 017: TERMINAL INSERTIONS sai, LLM CONFIG entra na ultima
-            # posicao (C-03: 6 secoes, LLM Config na ultima).
+            # Preserva as seis secoes operacionais e adiciona LLM ROUTING na
+            # ultima posicao. Nao existe uma pagina LLM CONFIG vazia em paralelo.
             _specs = (
                 ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
+                ("output-toolbar-section-terminal-insertions", "TERMINAL INSERTIONS"),
                 ("output-toolbar-section-agentes", "AGENTES"),
                 ("output-toolbar-section-mcps", "MCPs"),
                 ("output-toolbar-section-brainstorm", "BRAINSTORM"),
                 ("output-toolbar-section-corgly", "CORGLY"),
-                ("output-toolbar-section-llm-config", "LLM CONFIG"),
+                ("output-toolbar-section-llm-routing", "LLM ROUTING"),
             )
-            # Stack indices: sem TERMINAL INSERTIONS (idx 1), LLM CONFIG no idx 6.
-            self._toolbar_section_stack_indices = [0, 2, 3, 4, 5, 6]
+            self._toolbar_section_stack_indices = [0, 1, 2, 3, 4, 5, 6]
         else:
             _specs = (
                 ("output-toolbar-section-command-sequence", "COMMAND SEQUENCE"),
@@ -1945,7 +2044,7 @@ class MainWindow(QMainWindow):
 
     def _sync_flow_section_height(self) -> None:
         """Encolhe `output-toolbar-section-selector` ate o conteudo real da
-        secao ativa. Vale para as SEIS secoes.
+        secao ativa. Vale para todas as secoes.
 
         Motivacao: `ResponsiveButtonFlowLayout.sizeHint()` reporta a altura de
         uma largura de referencia estreita (360px, varias linhas de botoes),
@@ -1960,7 +2059,7 @@ class MainWindow(QMainWindow):
         Historico: a 1a versao (2026-07-27) media so MCPs/BRAINSTORM e liberava
         o teto nas outras tres — que por isso herdavam a altura da pagina mais
         alta entre elas (TERMINAL INSERTIONS, inflada pelo QTabWidget interno).
-        Hoje as seis entram em `_flow_section_pages`; o teto so e liberado
+        Hoje todas entram em `_flow_section_pages`; o teto so e liberado
         quando nao ha `heightForWidth` utilizavel.
 
         Nunca corta abaixo do `minimumSizeHint` da pagina: o piso e o proprio
@@ -1993,14 +2092,18 @@ class MainWindow(QMainWindow):
         content = -1
         if page_layout is not None and width > 0 and page_layout.hasHeightForWidth():
             content = page_layout.heightForWidth(width)
-        if content <= 0 and page is getattr(self, "_llm_config_widget", None):
-            # LLM CONFIG (item 017) e a unica pagina de `_flow_section_pages`
-            # sem flow layout: seus filhos sao widgets de altura fixa, entao o
-            # QHBoxLayout nao implementa heightForWidth e o teto cairia no
-            # release abaixo. Sem teto, o QStackedLayout dimensiona a aba pela
-            # pagina mais alta do stack (MCPs/BRAINSTORM) e sobra uma faixa
-            # vazia de ~250px sob a row — exatamente o R-18 ao contrario.
-            # Aqui o sizeHint E a altura real (nada depende da largura).
+        _fixed_height_pages = {
+            getattr(self, "_llm_routing_widget", None),
+        }
+        if content <= 0 and page in _fixed_height_pages:
+            # LLM ROUTING e uma pagina de `_flow_section_pages` sem flow layout:
+            # seus filhos sao widgets
+            # de altura fixa, entao o QHBoxLayout nao implementa heightForWidth
+            # e o teto cairia no release abaixo. Sem teto, o QStackedLayout
+            # dimensiona a aba pela pagina mais alta do stack (MCPs/BRAINSTORM)
+            # e sobra uma faixa vazia de ~250px sob a row — exatamente o R-18
+            # ao contrario. Aqui o sizeHint E a altura real (nada depende da
+            # largura).
             content = max(page.sizeHint().height(), page.minimumSizeHint().height())
         if content <= 0:
             # Sem heightForWidth utilizavel (stub de teste, pagina ainda sem
@@ -2051,11 +2154,13 @@ class MainWindow(QMainWindow):
         """Troca a pagina do stack do header e o estilo do botao ativo.
 
         Exatamente um botao em `_TAB_ACTIVE_STYLE` por vez. Idempotente:
-        chamado tambem no boot para fixar `COMMAND SEQUENCE` (D14).
+        chamado tambem no boot para fixar a aba inicial
+        (`_initial_toolbar_section_index()`).
         """
         stack = getattr(self, "_toolbar_section_stack", None)
-        # Item 017: mapeia indice do botao para indice do stack (quando flag
-        # ligada, TERMINAL INSERTIONS e pulada e LLM CONFIG entra no idx 6).
+        # Mapeia indice do botao para indice do stack. LLM ROUTING entra no
+        # indice 6 quando a flag esta ligada; as seis paginas anteriores mantem
+        # seus indices historicos.
         stack_index = index
         section_indices = getattr(self, "_toolbar_section_stack_indices", None)
         if section_indices is not None and 0 <= index < len(section_indices):
@@ -2141,19 +2246,26 @@ class MainWindow(QMainWindow):
         left_top_layout = QVBoxLayout(left_top)
         left_top_layout.setContentsMargins(6, 6, 6, 6)
         left_top_layout.setSpacing(0)
-        # Item 024 (D024-d): under SF_INSTANCE_GROUP_ROUTE_AWARE="1",
-        # instance_group goes to queue-div-main-llm (first position) instead
-        # of output-toolbar-center. Legacy path: reparent to left_top as before.
+        # Item 024 (D024-d): no roteamento expandido, instance_group ocupa uma
+        # coluna propria antes de Main LLM. Sem essa coluna (layout legado), o
+        # destino route-aware original dentro de Main LLM e preservado.
         if instance_group_route_aware_enabled():
-            _main_llm_layout = self._command_queue.main_llm_section.layout()
-            if _main_llm_layout is not None:
-                _main_llm_layout.insertWidget(0, self._metrics_bar._instance_group)
+            _instance_section = self._command_queue.instance_buttons_section
+            if (
+                _instance_section is not None
+                and _instance_section.layout() is not None
+            ):
+                _instance_section.layout().addWidget(self._metrics_bar._instance_group)
             else:
-                left_top_layout.addWidget(self._metrics_bar._instance_group)
+                _main_llm_layout = self._command_queue.main_llm_section.layout()
+                if _main_llm_layout is not None:
+                    _main_llm_layout.insertWidget(0, self._metrics_bar._instance_group)
+                else:
+                    left_top_layout.addWidget(self._metrics_bar._instance_group)
         else:
             left_top_layout.addWidget(self._metrics_bar._instance_group)
 
-        # Checkboxes de rota de terminal (T1/T2/T3) e de Notes do T1.
+        # Radios exclusivos de rota de terminal (T1/T2/T3) e checkbox de Notes.
         # 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2/I1.3/I1.4):
         # o bloco unico `terminal-route-toggles` foi DISSOLVIDO. Os objetos
         # continuam nascendo aqui (o toolbar e construido antes do splitter de
@@ -2162,39 +2274,41 @@ class MainWindow(QMainWindow):
         # barra CODEX. `terminal-notes-t1` vai para o footer
         # `terminal-interactive-notes`; `terminal-notes-t2` deixou de existir
         # (D7). Os nomes dos atributos sao contrato (D4/R10): NAO renomear.
-        self._chk_route_t1 = QCheckBox("T1")
-        self._chk_route_t1.setProperty("testid", "terminal-route-t1")
-        self._chk_route_t1.setChecked(True)
-        self._chk_route_t1.setToolTip(
-            "T1: publicar em terminal-interactive (pyte).\n"
-            "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
-            "Nenhum = no-op silencioso."
-        )
-        self._chk_route_t1.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
+        self._terminal_route_group = QButtonGroup(self)
+        self._terminal_route_group.setExclusive(True)
 
-        self._chk_route_t2 = QCheckBox("T2")
-        self._chk_route_t2.setProperty("testid", "terminal-route-t2")
-        self._chk_route_t2.setChecked(False)
-        self._chk_route_t2.setToolTip(
-            "T2: publicar em terminal-workspace pyte (colapsavel via arrow).\n"
-            "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
-            "Nenhum = no-op silencioso."
+        self._chk_route_t1 = QRadioButton("T1")
+        self._chk_route_t1.setProperty("testid", "terminal-route-t1")
+        self._chk_route_t1.setToolTip(
+            "Selecionar T1 como destino exclusivo: terminal-interactive (pyte)."
         )
-        self._chk_route_t2.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
+        self._chk_route_t1.setStyleSheet(_TERMINAL_ROUTE_RADIO_STYLE)
+
+        self._chk_route_t2 = QRadioButton("T2")
+        self._chk_route_t2.setProperty("testid", "terminal-route-t2")
+        self._chk_route_t2.setToolTip(
+            "Selecionar T2 como destino exclusivo: terminal-workspace pyte."
+        )
+        self._chk_route_t2.setStyleSheet(_TERMINAL_ROUTE_RADIO_STYLE)
 
         # T3 = terminal Codex (pyte). Por default desligado — o operador
         # expande o T3 pelo arrow no label bar do terminal-workspace-splitter
         # e ativa o route quando quiser scriptar diretamente naquele painel.
-        self._chk_route_t3 = QCheckBox("T3")
+        self._chk_route_t3 = QRadioButton("T3")
         self._chk_route_t3.setProperty("testid", "terminal-route-t3")
-        self._chk_route_t3.setChecked(False)
         self._chk_route_t3.setEnabled(True)
         self._chk_route_t3.setToolTip(
-            "T3: publicar em terminal-codex-output (pyte, Codex).\n"
-            "Combinacoes T1/T2/T3 publicam em todos os marcados.\n"
-            "Nenhum = no-op silencioso."
+            "Selecionar T3 como destino exclusivo: terminal-codex-output (Codex)."
         )
-        self._chk_route_t3.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
+        self._chk_route_t3.setStyleSheet(_TERMINAL_ROUTE_RADIO_STYLE)
+
+        for _route_radio in (
+            self._chk_route_t1,
+            self._chk_route_t2,
+            self._chk_route_t3,
+        ):
+            self._terminal_route_group.addButton(_route_radio)
+        self._chk_route_t1.setChecked(True)
 
         # Notes T1: quando marcado, o texto do prompt vai para o campo de notas
         # do T1 (staging area no footer terminal-interactive-notes) em vez do
@@ -2209,11 +2323,13 @@ class MainWindow(QMainWindow):
         )
         self._chk_notes_t1.setStyleSheet(_TERMINAL_ROUTE_CHK_STYLE)
 
-        # Item 024: emit terminal_route_updated whenever any route checkbox
-        # changes, so MetricsBar can cache the snapshot for route-aware
-        # instance-group dispatch.
-        for _chk in (self._chk_route_t1, self._chk_route_t2, self._chk_route_t3):
-            _chk.toggled.connect(self._emit_terminal_route_snapshot)
+        # Emite somente quando um radio se torna ativo. Ignorar o toggled=False
+        # evita publicar o estado transitorio entre a rota antiga e a nova.
+        self._terminal_route_group.buttonToggled.connect(
+            lambda _button, checked: (
+                self._emit_terminal_route_snapshot() if checked else None
+            )
+        )
         # Emit initial snapshot so MetricsBar has a valid cache at boot.
         self._emit_terminal_route_snapshot()
 
@@ -2412,31 +2528,15 @@ class MainWindow(QMainWindow):
         _saved_base = _pset.value("prompts_row/base_prompt")
         self._prompt_base: str = _saved_base if isinstance(_saved_base, str) else _DEFAULT_BASE_PROMPT
 
-        gear_btn = QPushButton("")
-        gear_btn.setProperty("testid", "toolbar-prompts-config-gear")
-        gear_btn.setFixedSize(32, 32)
-        gear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        gear_btn.setToolTip("Configurar prompts da sub-aba (label, path, prompt base)")
-        gear_btn.setStyleSheet(
-            "QPushButton { background-color: #3F3F46;"
-            "  border: 1px solid #52525B; border-radius: 5px; padding: 0; }"
-            "QPushButton:hover { background-color: #52525B; border-color: #71717A; }"
-            "QPushButton:pressed { background-color: #FBBF24; }"
-            "QPushButton:pressed QLabel { color: #18181B; }"
+        gear_btn = _GearButton(
+            testid="toolbar-prompts-config-gear",
+            tooltip="Configurar prompts da sub-aba (label, path, prompt base)",
         )
-        _gear_lbl = QLabel("⚙", gear_btn)
-        _gear_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        _gear_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        _gear_lbl.setStyleSheet("color: #FAFAFA; font-size: 16px; background: transparent; border: none;")
-        _gear_layout = QHBoxLayout(gear_btn)
-        _gear_layout.setContentsMargins(0, 0, 0, 0)
-        _gear_layout.setSpacing(0)
-        _gear_layout.addWidget(_gear_lbl, 0, Qt.AlignmentFlag.AlignCenter)
         gear_btn.clicked.connect(self._open_prompts_config_dialog)
-        # 2026-06-22: o gear de prompts deixa de ser cornerWidget compartilhado
-        # (aparecia em TODAS as sub-abas e confundia) e passa a viver DENTRO da
-        # sub-aba PROMPTS — so renderiza com ela aberta. Ref guardado para os
-        # rebuilds da sub-aba (_open_prompts_config_dialog, _on_prompts_dir_changed).
+        # Vive na div `queue-subtab-insertions-prompts-utils` (canto direito
+        # da sub-aba PROMPTS, mesmo padrao de personas-utils / brainstorm-utils).
+        # So renderiza com a sub-aba aberta. Ref guardado para os rebuilds
+        # (_open_prompts_config_dialog, _on_prompts_dir_changed).
         self._prompts_config_gear = gear_btn
 
         # Watcher para auto-detectar novos .md criados em prompts-subtab
@@ -2472,10 +2572,10 @@ class MainWindow(QMainWindow):
         # consumido pela Task 6 (checkbox T1/T2).
         from PySide6.QtCore import QSize as _QSize
         self._layout_icon_stacked = QIcon(
-            str(Path(_WORKFLOW_APP_DIR) / "assets" / "layout-stacked.svg")
+            str(_ASSETS_DIR / "layout-stacked.svg")
         )
         self._layout_icon_side = QIcon(
-            str(Path(_WORKFLOW_APP_DIR) / "assets" / "layout-side-by-side.svg")
+            str(_ASSETS_DIR / "layout-side-by-side.svg")
         )
         self._layout_toggle_btn = QPushButton()
         self._layout_toggle_btn.setProperty("testid", "terminal-layout-toggle")
@@ -2539,8 +2639,9 @@ class MainWindow(QMainWindow):
         self._mcp_column_btns = action_widgets[4:13]
         # rules: dcp+meta-feeding+cmd+terminal+listeners+cascade-bug+indicators+prompt+add-rules
         _rules_btns = workflow_app_widgets[1:]
-        # prompts: entries .md + gear de configuracao (ultimo widget do flow).
-        # 2026-06-22: asq-user migrou daqui para a sub-aba CMD (ver _cmd_btns).
+        # prompts: entries .md + gear de configuracao (vai para a div utils
+        # no canto direito, nao para o flow). 2026-06-22: asq-user migrou
+        # daqui para a sub-aba CMD (ver _cmd_btns).
         self._asq_user_btn = action_widgets[13]
         _prompts_btns = (
             self._populate_header_prompts_subtab()
@@ -2556,6 +2657,9 @@ class MainWindow(QMainWindow):
         # asq-user (output-btn-asq-user) vive aqui desde 2026-06-22 (migrado de PROMPTS).
         _cmd_btns = [self._asq_user_btn] + self._populate_header_cmd_subtab()
 
+        # new-cmd: comandos de modernizacao de comandos.
+        _new_cmd_btns = self._populate_header_new_cmd_subtab()
+
         # auto-improove: melhoria continua de assets SystemForge.
         _auto_improove_btns = self._populate_header_auto_improove_subtab()
 
@@ -2569,6 +2673,7 @@ class MainWindow(QMainWindow):
         self._command_queue.populate_prompts_subtab(_prompts_btns)
         self._command_queue.populate_rules_subtab(_rules_btns)
         self._command_queue.populate_cmd_subtab(_cmd_btns)
+        self._command_queue.populate_new_cmd_subtab(_new_cmd_btns)
         self._command_queue.populate_auto_improove_subtab(_auto_improove_btns)
         self._command_queue.populate_personal_subtab(_personal_btns)
         self._command_queue.populate_personas_subtab(_personas_btns)
@@ -2576,10 +2681,8 @@ class MainWindow(QMainWindow):
         # existia era o bloco `terminal-route-toggles`, dissolvido em
         # 07-27-workflow-app-header-toggles-llm-unico (I1.4). O metodo continua
         # disponivel como API generica do CommandQueueWidget.
-        # Refactor 2026-06-22: o gear de prompts NAO e mais cornerWidget (vivia
-        # no canto compartilhado de todas as sub-abas). Agora entra como ultimo
-        # widget do flow da sub-aba PROMPTS (ver _prompts_btns acima), so visivel
-        # com ela aberta.
+        # O gear de prompts NAO e cornerWidget compartilhado: vive na div
+        # `queue-subtab-insertions-prompts-utils`, so visivel com PROMPTS aberta.
 
         # queue-count-label vive em progress-section (refactor 2026-05-18).
         # attach_count_label nao e mais chamado — o label ja esta em ProgressSection.
@@ -2601,13 +2704,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _systemforge_root() -> Path:
-        """Raiz do repositorio SystemForge — cwd canonico do terminal.
-
-        Este modulo vive sempre em
-        `ai-forge/workflow-app/src/workflow_app/main_window.py`, logo
-        `parents[4]` aponta deterministicamente para a raiz do repo.
-        """
-        return Path(__file__).resolve().parents[4]
+        """Raiz validada do SystemForge, inclusive no build PyInstaller."""
+        return _SYSTEMFORGE_PATH
 
     def _brainstorm_seeds_dir(self) -> Path:
         """Diretorio absoluto dos seeds da grade brainstorm."""
@@ -2893,6 +2991,22 @@ class MainWindow(QMainWindow):
             # arquivo nao ha o que reler. Servir o cacheado e o unico caminho.
             return cached
 
+        if getattr(sys, "frozen", False):
+            checkout_source = (
+                Path(_WORKFLOW_APP_DIR)
+                / "src"
+                / "workflow_app"
+                / "agent_integration_specs.py"
+            )
+            if checkout_source.is_file():
+                source = str(checkout_source)
+            else:
+                # Modulos de um build onefile vivem no arquivo PYZ e seu
+                # `__file__` virtual nao existe no filesystem. Sem checkout
+                # externo nao ha live reload possivel; o registry empacotado e
+                # a fonte valida desta execucao, sem degradacao.
+                return cached
+
         served = MainWindow._agent_registry_served
         try:
             info = os.stat(source)
@@ -3001,6 +3115,135 @@ class MainWindow(QMainWindow):
             return ()
         return specs
 
+    @staticmethod
+    def _prompt_rel_path(prompt: str) -> str:
+        """Extrai o caminho relativo usado no prompt da persona."""
+        marker = " em "
+        if marker not in prompt:
+            return ""
+        return prompt.rsplit(marker, 1)[-1].strip()
+
+    def _add_mcp_persona_checkbox(
+        self,
+        persona_layout: ResponsiveButtonFlowLayout,
+        checkbox_style: str,
+        label: str,
+        testid: str,
+        prompt: str,
+        category: str,
+        *,
+        agent_slug: str | None = None,
+    ) -> QCheckBox:
+        chk = QCheckBox(label)
+        chk.setProperty("testid", testid)
+        chk.setProperty("persona_prompt", prompt)
+        chk.setProperty("persona_category", category)
+        chk.setToolTip(prompt)
+        chk.setCursor(Qt.CursorShape.PointingHandCursor)
+        chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        chk.setStyleSheet(checkbox_style)
+        if agent_slug is not None:
+            chk.setProperty("agent_slug", agent_slug)
+            chk.setAccessibleName(f"Ativar integracao MCP do agente {label}")
+        persona_layout.addWidget(chk)
+        self._mcp_persona_checkboxes.append(chk)
+        return chk
+
+    def _sync_mcp_persona_checkboxes(
+        self, personas: list[tuple[str, str]]
+    ) -> list[QCheckBox]:
+        """Materializa checkboxes ausentes em ``output-mcp-persona-checkboxes``.
+
+        A ordem fica sempre preservada: itens existentes ficam na frente e
+        novos itens entram no fim, seguindo a ordem de ``personas``.
+        """
+        checkbox_layout = getattr(self, "_mcp_persona_checkbox_layout", None)
+        checkbox_style = getattr(self, "_mcp_persona_checkbox_style", "")
+        if checkbox_layout is None or not checkbox_style:
+            return []
+
+        if llm_config_v2_enabled():
+            _action_testids = [
+                "output-mcp-action-thinking-fable",
+                "output-mcp-action-thinking-opus",
+                "output-mcp-action-thinking-codex-ultra",
+                "output-mcp-action-thinking-kimi",
+                "output-mcp-action-thinking-grok-xhigh",
+                "output-mcp-action-execution-grok",
+                "output-mcp-action-execution-sonnet",
+                "output-mcp-action-execution-kimi",
+                "output-mcp-action-execution-qwen",
+                "output-mcp-action-execution-codex",
+            ]
+        else:
+            _action_testids = [
+                "output-mcp-action-main",
+                "output-mcp-action-parallel",
+                "output-mcp-action-dual",
+            ]
+
+        occupied_paths = {
+            self._prompt_rel_path(str(chk.property("persona_prompt") or ""))
+            for chk in self._mcp_persona_checkboxes
+        }
+        occupied_testids = {
+            str(chk.property("testid"))
+            for chk in self._mcp_persona_checkboxes
+            if chk.property("testid")
+        }
+
+        agent_specs = self._collect_mcp_agent_specs(
+            list(occupied_testids) + _action_testids
+        )
+        specs_by_slug = {spec.slug: spec for spec in agent_specs}
+        specs_by_path: dict[str, McpAgentSpec] = {}
+        for spec in agent_specs:
+            spec_path = self._prompt_rel_path(spec.persona_prompt)
+            if spec_path:
+                specs_by_path[spec_path] = spec
+
+        new_checkboxes: list[QCheckBox] = []
+        for slug, rel_path in personas:
+            if rel_path in occupied_paths:
+                continue
+            extra_category = self._persona_category(slug, rel_path)
+            spec = specs_by_path.get(rel_path) or specs_by_slug.get(slug)
+            if spec is not None and spec.testid not in occupied_testids:
+                chk = self._add_mcp_persona_checkbox(
+                    checkbox_layout,
+                    checkbox_style,
+                    spec.label,
+                    spec.testid,
+                    spec.persona_prompt,
+                    extra_category,
+                    agent_slug=spec.slug,
+                )
+                self._mcp_agent_buttons.append(chk)
+                occupied_paths.add(rel_path)
+                occupied_testids.add(spec.testid)
+                new_checkboxes.append(chk)
+                continue
+
+            extra_testid = f"output-mcp-persona-{slug}"
+            if extra_testid in occupied_testids:
+                continue
+            extra_label = self._persona_button_label(slug, rel_path)
+            extra_prompt = f"no papel de {extra_label}, conforme regras em {rel_path}"
+            chk = self._add_mcp_persona_checkbox(
+                checkbox_layout,
+                checkbox_style,
+                extra_label,
+                extra_testid,
+                extra_prompt,
+                extra_category,
+                agent_slug=slug,
+            )
+            occupied_paths.add(rel_path)
+            occupied_testids.add(extra_testid)
+            new_checkboxes.append(chk)
+
+        return new_checkboxes
+
     def _build_mcp_column(
         self, mcp_btns: list[QPushButton]
     ) -> tuple[QWidget, QWidget]:
@@ -3046,12 +3289,14 @@ class MainWindow(QMainWindow):
             "QWidget#OutputToolbarMcp { background-color: #1C1C1F;"
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
-        col_layout = QVBoxLayout(column)
+        # Row: checkboxes (stretch) + colunas Thinking/Execution no canto
+        # direito, no mesmo padrao de `queue-subtab-insertions-personas-utils`.
+        col_layout = QHBoxLayout(column)
         col_layout.setContentsMargins(8, 6, 8, 6)
-        col_layout.setSpacing(4)
+        col_layout.setSpacing(6)
 
-        # Conteudo da secao MCPs: personas/agentes + 3 acoes. Os 9 botoes legados
-        # ficam parented em holder oculto para evitar coleta prematura pelo Qt.
+        # Conteudo da secao MCPs (esquerda): personas/agentes. Os 9 botoes
+        # legados ficam parented em holder oculto para evitar coleta prematura.
         mcps_page = QWidget()
         mcps_layout = QVBoxLayout(mcps_page)
         mcps_layout.setContentsMargins(0, 0, 0, 0)
@@ -3106,65 +3351,103 @@ class MainWindow(QMainWindow):
         # flow responsivo — mesma linguagem visual da aba Brainstorm. Cada
         # persona e um controle individual (fundo, borda e raio proprios) com a
         # largura do proprio label; a quantidade por linha acompanha a largura
-        # da janela. Os marcados tem seus prompts anexados ao comando MCP via
-        # _compose_mcp_text na ORDEM da UI (a mesma ordem desta tupla).
-        # A familia de pesquisa (search-in/search-out/search-forge) abre a
-        # sequencia. exec-slash foi removido desta grade de output para abrir
-        # espaco a search-forge na composicao original (continua disponivel em
-        # queue-subtab-insertions-personas, que auto-descobre).
+        # da janela. A familia de pesquisa (search-in/search-out/search-forge)
+        # abre a sequencia. exec-slash foi removido desta grade de output para
+        # abrir espaco a search-forge na composicao original (continua
+        # disponivel em queue-subtab-insertions-personas, que auto-descobre).
+        #
+        # CONTRATO DESTA TUPLA (item 015 do loop 08-17-systemforge-multillm-
+        # gaps-refactor, decisao D7). Cada entrada e
+        # `(label, testid, prompt, category)`; a `category` era ate 2026-08-19 um
+        # segundo mapa de classe, a milhares de linhas daqui, chaveado pelo
+        # sufixo do testid. Duas listas paralelas do mesmo conjunto: mudar uma
+        # sem a outra dava filtro errado em silencio. Aquele mapa foi absorvido
+        # como 4o campo; esta tupla e agora a fonte fisica unica.
+        #
+        # 1. A ORDEM E SEMANTICA. `_compose_mcp_text` concatena os prompts das
+        #    personas marcadas nesta ordem, juntando com "; e depois disso ".
+        #    A ordem da tupla vira ordem de execucao no prompt colado, entao
+        #    reordenar aqui muda comportamento sem nenhum sinal na UI.
+        # 2. O PREFIXO DE 16 E CURADORIA CONGELADA. Essas 16 abrem a secao e
+        #    NAO podem ser reordenadas: a ordem e a de composicao do prompt.
+        #    As demais personas de `output-toolbar-agentes` (`_scan_persona_files`)
+        #    entram DEPOIS, sem mexer neste prefixo. Specs suplementares de
+        #    `/mcp:create-agent` (`output-mcp-agent-{slug}`) tambem entram neste
+        #    mesmo container, no fim, se ainda nao tiverem checkbox.
+        # 3. O SUFIXO `-rules` NAO CLASSIFICA NADA. 12 das 16 curadas sao
+        #    `*-rules.md`. O filtro "tudo que nao termina em -rules" devolve
+        #    exatamente 16 itens por COINCIDENCIA, mas 12 deles sao outros
+        #    slugs (diferenca simetrica de 24). Um teste de contagem nua ficaria
+        #    verde com a UI errada; por isso os testes travam o prefixo de
+        #    testids, nao o numero total.
+        # 4. EXCECAO A CLAUSULA 1 DE `agent_integration_specs.py`. Aquele
+        #    docstring proibe listas paralelas em `main_window.py`; esta tupla e
+        #    a UNICA excecao, por dois motivos: (a) a ordem semantica do ponto 1,
+        #    que um registry declarativo perderia; (b) locus cross-repo, porque
+        #    `ai-forge/workflow-app` e repositorio git proprio e
+        #    `_systemforge_root()` (= `parents[4]`) so resolve dentro do
+        #    monorepo, entao dado externo produziria seletor vazio num clone
+        #    isolado. Ler a clausula 1 de `agent_integration_specs.py`, que
+        #    registra a mesma excecao.
+        # 5. O QUE NAO FAZER: nao reordenar o prefixo de 16; nao criar chave de
+        #    frontmatter nova nas personas para sinalizar pertencimento a esta
+        #    secao; nao mover a lista para arquivo de dados. Os valores de
+        #    `category` DEVEM pertencer a `PERSONA_FILTER_CATEGORIES` (inclusive
+        #    "specialists", minuscula por ser o literal real daquela tupla).
+        #    `output-mcp-agent-buttons` NAO existe mais: suplementos vivem aqui.
         persona_specs = (
             # Pesquisa + analise
             ("search-in", "output-mcp-persona-search-in",
              "no papel de search-in, conforme regras em "
-             "ai-forge/MCP/agents/search-in-rules.md"),
+             "ai-forge/MCP/agents/search-in-rules.md", "Research"),
             ("search-out", "output-mcp-persona-search-out",
              "no papel de search-out, conforme regras em "
-             "ai-forge/MCP/agents/search-out-rules.md"),
+             "ai-forge/MCP/agents/search-out-rules.md", "Research"),
             ("search-forge", "output-mcp-persona-search-forge",
              "no papel de search-forge, conforme regras em "
-             "ai-forge/MCP/agents/search-forge-rules.md"),
+             "ai-forge/MCP/agents/search-forge-rules.md", "Research"),
             ("controversial", "output-mcp-persona-controversial",
              "no papel de controversial, conforme regras em "
-             "ai-forge/MCP/agents/controversial-devils-advocate-rules.md"),
+             "ai-forge/MCP/agents/controversial-devils-advocate-rules.md", "Review"),
             # Robustez + ciclo de task
             ("hardening", "output-mcp-persona-hardening",
              "no papel de engenheiro de hardening, conforme regras em "
-             "ai-forge/MCP/agents/hardening-engineer-rules.md"),
+             "ai-forge/MCP/agents/hardening-engineer-rules.md", "Review"),
             ("criar-task", "output-mcp-persona-criar-task",
              "no papel de criador de tasks, conforme regras em "
-             "ai-forge/MCP/agents/criar-task-rules.md"),
+             "ai-forge/MCP/agents/criar-task-rules.md", "Build"),
             ("revisar-task", "output-mcp-persona-revisar-task",
              "no papel de revisor de tasks criadas, conforme regras em "
-             "ai-forge/MCP/agents/revisar-task-rules.md"),
+             "ai-forge/MCP/agents/revisar-task-rules.md", "Review"),
             ("executor", "output-mcp-persona-executor",
              "no papel de executor de tasks, conforme regras em "
-             "ai-forge/MCP/agents/executar-task-rules.md"),
+             "ai-forge/MCP/agents/executar-task-rules.md", "Build"),
             # Execucao + especializados
             ("rev-exec", "output-mcp-persona-rev-exec",
              "no papel de revisor de execucao, conforme regras em "
-             "ai-forge/MCP/agents/revisar-execucao-rules.md"),
+             "ai-forge/MCP/agents/revisar-execucao-rules.md", "Review"),
             ("revisar-qa", "output-mcp-persona-revisar-qa",
              "no papel de revisor de QA, conforme regras em "
-             "ai-forge/MCP/agents/revisar-qa-rules.md"),
+             "ai-forge/MCP/agents/revisar-qa-rules.md", "Review"),
             ("code-debugger", "output-mcp-persona-code-debugger",
              "no papel de code-debugger, conforme regras em "
-             "ai-forge/MCP/agents/code-debugger.md"),
+             "ai-forge/MCP/agents/code-debugger.md", "Review"),
             ("delegador", "output-mcp-persona-delegador",
              "no papel de analista-delegador, conforme regras em "
-             "ai-forge/MCP/agents/analista-delegador-rules.md"),
+             "ai-forge/MCP/agents/analista-delegador-rules.md", "Plan"),
             # Catalogo, clareza, UX e performance
             ("scaffold-update", "output-mcp-persona-scaffolds-blueprints-updater",
              "no papel de atualizador de scaffolds e blueprints, conforme regras em "
-             "ai-forge/MCP/agents/scaffolds-blueprints-updater.md"),
+             "ai-forge/MCP/agents/scaffolds-blueprints-updater.md", "Build"),
             ("questionador", "output-mcp-persona-questioner",
              "no papel de questionador, conforme regras em "
-             "ai-forge/MCP/agents/questioner-rules.md"),
+             "ai-forge/MCP/agents/questioner-rules.md", "Review"),
             ("UX/UI", "output-mcp-persona-ux-ui",
              "no papel de especialista UX/UI, conforme regras em "
-             "ai-forge/MCP/agents/ux-ui-specialist.md"),
+             "ai-forge/MCP/agents/ux-ui-specialist.md", "Design"),
             ("performance", "output-mcp-persona-performance-engineer",
              "no papel de performance engineer, conforme regras em "
-             "ai-forge/MCP/agents/performance-engineer.md"),
+             "ai-forge/MCP/agents/performance-engineer.md", "specialists"),
         )
         # Cada persona e uma pilula individual (fundo/borda/raio proprios), no
         # mesmo tamanho de fonte e no mesmo padrao cromatico dos botoes da aba
@@ -3193,11 +3476,15 @@ class MainWindow(QMainWindow):
             "QCheckBox::indicator:hover { border-color: #86EFAC; }"
         )
         self._mcp_persona_checkboxes: list[QCheckBox] = []
+        self._mcp_agent_buttons: list[QCheckBox] = []
+        self._mcp_persona_checkbox_style = checkbox_style
         # Refactor 07-27 (paridade com a aba Brainstorm): as 4 linhas fixas de 4
         # checkboxes com largura igual (`output-mcp-persona-checkboxes`, -2, -3,
         # -4) viraram UM container com flow responsivo. Cada controle tem a
         # largura do proprio label e a quantidade por linha acompanha a largura
         # da janela. O testid da primeira linha continua sendo o do container.
+        # 2026-08-20: `output-mcp-agent-buttons` foi absorvido neste mesmo
+        # container — suplementos e o resto da aba Agentes viram QCheckBox aqui.
         persona_row = QWidget()
         persona_row.setObjectName("McpPersonaRow")
         persona_row.setProperty("testid", "output-mcp-persona-checkboxes")
@@ -3210,21 +3497,108 @@ class MainWindow(QMainWindow):
             persona_row, spacing=7, v_spacing=1, max_lines=None
         )
         persona_layout.setContentsMargins(8, 2, 8, 2)
+        self._mcp_persona_checkbox_layout = persona_layout
         _enable_height_for_width(persona_row)
-        for label, testid, prompt in persona_specs:
-            chk = QCheckBox(label)
-            chk.setProperty("testid", testid)
-            chk.setProperty("persona_prompt", prompt)
-            # Item 023: categoria de filtro para a barra de personas MCPs.
-            _suffix = testid.replace("output-mcp-persona-", "", 1)
-            _cat = self._MCP_PERSONA_CATEGORIES.get(_suffix, PERSONA_FILTER_DEFAULT)
-            chk.setProperty("persona_category", _cat)
-            chk.setToolTip(prompt)
-            chk.setCursor(Qt.CursorShape.PointingHandCursor)
-            chk.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            chk.setStyleSheet(checkbox_style)
-            persona_layout.addWidget(chk)
-            self._mcp_persona_checkboxes.append(chk)
+
+        for label, testid, prompt, category in persona_specs:
+            self._add_mcp_persona_checkbox(
+                persona_layout,
+                checkbox_style,
+                label,
+                testid,
+                prompt,
+                category,
+            )
+
+        occupied_paths = {
+            self._prompt_rel_path(prompt)
+            for _lbl, _tid, prompt, _cat in persona_specs
+        }
+        occupied_testids = {
+            testid for _lbl, testid, _prompt, _cat in persona_specs
+        }
+        if llm_config_v2_enabled():
+            _action_testids = [
+                "output-mcp-action-thinking-fable",
+                "output-mcp-action-thinking-opus",
+                "output-mcp-action-thinking-codex-ultra",
+                "output-mcp-action-thinking-kimi",
+                "output-mcp-action-thinking-grok-xhigh",
+                "output-mcp-action-execution-grok",
+                "output-mcp-action-execution-sonnet",
+                "output-mcp-action-execution-kimi",
+                "output-mcp-action-execution-qwen",
+                "output-mcp-action-execution-codex",
+            ]
+        else:
+            _action_testids = [
+                "output-mcp-action-main",
+                "output-mcp-action-parallel",
+                "output-mcp-action-dual",
+            ]
+        # Specs lidas ANTES dos extras para reusar testid/diretiva persistente
+        # (writer, tester, ...) quando a persona tambem vive na aba Agentes.
+        agent_specs = self._collect_mcp_agent_specs(
+            list(occupied_testids) + _action_testids
+        )
+        specs_by_slug = {spec.slug: spec for spec in agent_specs}
+        specs_by_path: dict[str, McpAgentSpec] = {}
+        for spec in agent_specs:
+            spec_path = self._prompt_rel_path(spec.persona_prompt)
+            if spec_path:
+                specs_by_path[spec_path] = spec
+
+        for slug, rel_path in self._scan_persona_files():
+            if rel_path in occupied_paths:
+                continue
+            extra_category = self._persona_category(slug, rel_path)
+            spec = specs_by_path.get(rel_path) or specs_by_slug.get(slug)
+            if spec is not None and spec.testid not in occupied_testids:
+                chk = self._add_mcp_persona_checkbox(
+                    persona_layout,
+                    checkbox_style,
+                    spec.label,
+                    spec.testid,
+                    spec.persona_prompt,
+                    extra_category,
+                    agent_slug=spec.slug,
+                )
+                self._mcp_agent_buttons.append(chk)
+                occupied_paths.add(rel_path)
+                occupied_testids.add(spec.testid)
+                continue
+            extra_testid = f"output-mcp-persona-{slug}"
+            if extra_testid in occupied_testids:
+                continue
+            extra_label = self._persona_button_label(slug, rel_path)
+            extra_prompt = (
+                f"no papel de {extra_label}, conforme regras em {rel_path}"
+            )
+            self._add_mcp_persona_checkbox(
+                persona_layout,
+                checkbox_style,
+                extra_label, extra_testid, extra_prompt, extra_category
+            )
+            occupied_paths.add(rel_path)
+            occupied_testids.add(extra_testid)
+
+        for spec in agent_specs:
+            if spec.testid in occupied_testids:
+                continue
+            spec_path = self._prompt_rel_path(spec.persona_prompt)
+            spec_category = self._persona_category(spec.slug, spec_path)
+            chk = self._add_mcp_persona_checkbox(
+                persona_layout,
+                checkbox_style,
+                spec.label,
+                spec.testid,
+                spec.persona_prompt,
+                spec_category,
+                agent_slug=spec.slug,
+            )
+            self._mcp_agent_buttons.append(chk)
+            occupied_testids.add(spec.testid)
+
         # Item 023: barra de filtro de personas na secao MCPs (C-16).
         # Compartilha a logica de categorias com a sub-aba Agentes
         # (PERSONA_FILTER_CATEGORIES). Visivel apenas sob kill-switch ligado.
@@ -3254,94 +3628,14 @@ class MainWindow(QMainWindow):
 
         mcps_layout.addWidget(persona_row)
 
-        # Integracoes suplementares de agentes (AGENT-TASK-007): as specs vivem
-        # na fonte unica `agent_integration_specs` (editada por
-        # /mcp:create-agent) e sao materializadas aqui como QPushButton REAL
-        # checkable (nunca QCheckBox) com testid `output-mcp-agent-{slug}`.
-        # Posicao deterministica: DEPOIS dos 16 personas, ANTES da action row —
-        # a composicao le personas primeiro e suplementos depois. Registry vazio
-        # nao cria nenhum widget (zero mudanca visual). A lista e RECRIADA a cada
-        # build, entao um rebuild nao acumula nem perde botoes.
-        self._mcp_agent_buttons: list[QPushButton] = []
-        if llm_config_v2_enabled():
-            _action_testids = [
-                "output-mcp-action-thinking-claude",
-                "output-mcp-action-thinking-codex",
-                "output-mcp-action-thinking-kimi",
-                "output-mcp-action-execution-claude",
-                "output-mcp-action-execution-codex",
-                "output-mcp-action-execution-kimi",
-                "output-mcp-action-execution-grok",
-                "output-mcp-action-execution-qwen",
-            ]
-        else:
-            _action_testids = [
-                "output-mcp-action-main",
-                "output-mcp-action-parallel",
-                "output-mcp-action-dual",
-            ]
-        agent_specs = self._collect_mcp_agent_specs(
-            [str(chk.property("testid")) for chk in self._mcp_persona_checkboxes]
-            + _action_testids
-        )
-        agent_button_style = (
-            "QPushButton { color: #D4D4D8; font-size: 10px; font-weight: 700;"
-            "  background-color: #27272A; border: 1px solid #3F3F46;"
-            "  border-radius: 4px; padding: 1px 6px; }"
-            "QPushButton:hover { border-color: #52525B; }"
-            "QPushButton:checked { background-color: #16A34A; color: #FAFAFA;"
-            "  border-color: #16A34A; }"
-        )
-        # Refactor 07-27: as antigas linhas de 4 botoes com largura igual
-        # (output-mcp-agent-buttons, -2, -3...) viraram UM unico container com
-        # flow responsivo. Cada botao tem a largura do proprio label e a
-        # quantidade por linha acompanha a largura da janela.
-        if agent_specs:
-            row = QWidget()
-            row.setObjectName("McpAgentRow")
-            row.setProperty("testid", "output-mcp-agent-buttons")
-            row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            row.setStyleSheet(
-                "QWidget#McpAgentRow { background-color: #202027;"
-                "  border: 1px solid #3F3F46; border-radius: 5px; }"
-            )
-            row_layout = ResponsiveButtonFlowLayout(
-                row, spacing=7, v_spacing=1, max_lines=None
-            )
-            row_layout.setContentsMargins(8, 2, 8, 2)
-            _enable_height_for_width(row)
-            for spec in agent_specs:
-                btn = QPushButton(spec.label)
-                btn.setCheckable(True)
-                btn.setChecked(False)
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.setProperty("testid", spec.testid)
-                btn.setProperty("agent_slug", spec.slug)
-                btn.setProperty("persona_prompt", spec.persona_prompt)
-                btn.setToolTip(spec.persona_prompt)
-                btn.setAccessibleName(
-                    f"Ativar integracao MCP do agente {spec.label}"
-                )
-                btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-                btn.setFixedHeight(22)
-                btn.setStyleSheet(agent_button_style)
-                row_layout.addWidget(btn)
-                self._mcp_agent_buttons.append(btn)
-            mcps_layout.addWidget(row)
-
         def _compose_mcp_text(base_text: str) -> str:
-            # Ordem deterministica da composicao: personas (row-major) e depois
-            # os agentes suplementares na ordem do registry. So entra o que
-            # estiver ATIVO; nenhum controle inativo altera o prompt.
+            # Ordem deterministica: a ordem dos checkboxes no container
+            # (prefixo curado, extras da aba Agentes, suplementos do registry).
+            # So entra o que estiver ATIVO.
             prompts = [
                 str(chk.property("persona_prompt"))
                 for chk in self._mcp_persona_checkboxes
                 if chk.isChecked()
-            ]
-            prompts += [
-                str(btn.property("persona_prompt"))
-                for btn in getattr(self, "_mcp_agent_buttons", [])
-                if btn.isChecked()
             ]
             if not prompts:
                 return base_text
@@ -3352,15 +3646,18 @@ class MainWindow(QMainWindow):
         # Item 005 (C26): o kill-switch em questao passou a ser o dedicado
         # `SF_MCP_THINK_EXEC_V2` — o gate foi MOVIDO do global
         # `SF_LLM_CONFIG_V2`, nao duplicado. Ausente/off = caminho legado
-        # Main MCP / Parallel / Dual; "1" = matriz `_TE_COMMANDS` (3 pastilhas
-        # Thinking + 5 Execution).
+        # Main MCP / Parallel / Dual; "1" = matriz `_TE_COMMANDS` (5 pastilhas
+        # Thinking + 5 Execution, iguais as colunas de `queue-div-flag`).
         action_row = QWidget()
         action_row.setProperty("testid", "output-mcp-action-row")
-        action_layout = ResponsiveButtonFlowLayout(
-            action_row, spacing=4, v_spacing=1, max_lines=None
+        action_row.setStyleSheet("background: transparent; border: none;")
+        action_row.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
+        action_layout = QHBoxLayout(action_row)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        _enable_height_for_width(action_row)
+        action_layout.setSpacing(6)
+        action_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
 
         _te_btn_style = (
             "QPushButton { background-color: #334155; color: #FAFAFA;"
@@ -3372,9 +3669,10 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { color: #71717A; border-color: #3F3F46;"
             "  background-color: #27272A; }"
         )
+        # Mesmo QSS de label de `queue-div-main-llm`: 11px/#A1A1AA, label em cima.
         _te_label_style = (
-            "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
-            "  letter-spacing: 0.5px; padding: 0 2px; }"
+            "QLabel { color: #A1A1AA; font-size: 11px; font-weight: 700;"
+            "  background: transparent; border: none; }"
         )
 
         def _make_te_btn(label: str, testid: str, command: str,
@@ -3397,75 +3695,84 @@ class MainWindow(QMainWindow):
         if mcp_think_exec_v2_enabled():
             # TE-01: matriz fixa por botao, independente do Main LLM.
             _TE_COMMANDS: dict[str, str] = {
-                "output-mcp-action-thinking-claude":
-                    "claude --model opus --effort high",
-                "output-mcp-action-thinking-codex": "/mcp:codex",
+                "output-mcp-action-thinking-fable": "/mcp:fable",
+                "output-mcp-action-thinking-opus": "/mcp:claude-ultra",
+                "output-mcp-action-thinking-codex-ultra": "/mcp:codex-ultra",
                 "output-mcp-action-thinking-kimi": "/mcp:kimi-k3",
-                "output-mcp-action-execution-claude":
-                    "claude --model sonnet --effort standard",
-                "output-mcp-action-execution-codex": "/mcp:codex",
-                "output-mcp-action-execution-kimi": "/mcp:kimi",
+                "output-mcp-action-thinking-grok-xhigh": "/mcp:grok-xhigh",
                 "output-mcp-action-execution-grok": "/mcp:grok",
+                "output-mcp-action-execution-sonnet": "/mcp:sonnet",
+                "output-mcp-action-execution-kimi": "/mcp:kimi",
                 "output-mcp-action-execution-qwen": "/mcp:qwen",
+                "output-mcp-action-execution-codex": "/mcp:codex",
             }
 
-            # Grupo Thinking (3 pastilhas)
-            _thinking_group = QWidget()
-            _thinking_group.setProperty(
-                "testid", "output-mcp-action-thinking"
-            )
-            _thinking_lay = QHBoxLayout(_thinking_group)
-            _thinking_lay.setContentsMargins(0, 0, 0, 0)
-            _thinking_lay.setSpacing(3)
-            _th_lbl = QLabel("Thinking")
-            _th_lbl.setStyleSheet(_te_label_style)
-            _thinking_lay.addWidget(_th_lbl)
-            for lbl, tid, cmd in (
-                ("Claude", "output-mcp-action-thinking-claude",
-                 _TE_COMMANDS["output-mcp-action-thinking-claude"]),
-                ("Codex", "output-mcp-action-thinking-codex",
-                 _TE_COMMANDS["output-mcp-action-thinking-codex"]),
-                ("Kimi", "output-mcp-action-thinking-kimi",
-                 _TE_COMMANDS["output-mcp-action-thinking-kimi"]),
-            ):
-                btn = _make_te_btn(lbl, tid, cmd)
-                btn.clicked.connect(
-                    lambda _c=False, t=tid: _on_te_action(t)
+            def _make_te_column(
+                testid: str, title: str, items: tuple[tuple[str, str, str], ...]
+            ) -> QWidget:
+                """Coluna no estilo `queue-div-main-llm`: label em cima, botoes embaixo."""
+                group = QWidget()
+                group.setProperty("testid", testid)
+                group.setStyleSheet("background: transparent; border: none;")
+                group.setSizePolicy(
+                    QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
                 )
-                _thinking_lay.addWidget(btn)
-
-            # Grupo Execution (5 pastilhas)
-            _exec_group = QWidget()
-            _exec_group.setProperty("testid", "output-mcp-action-execution")
-            _exec_lay = QHBoxLayout(_exec_group)
-            _exec_lay.setContentsMargins(0, 0, 0, 0)
-            _exec_lay.setSpacing(3)
-            _ex_lbl = QLabel("Execution")
-            _ex_lbl.setStyleSheet(_te_label_style)
-            _exec_lay.addWidget(_ex_lbl)
-            for lbl, tid, cmd, tip, enabled in (
-                ("Claude", "output-mcp-action-execution-claude",
-                 _TE_COMMANDS["output-mcp-action-execution-claude"],
-                 "", True),
-                ("Codex", "output-mcp-action-execution-codex",
-                 _TE_COMMANDS["output-mcp-action-execution-codex"],
-                 "", True),
-                ("Kimi", "output-mcp-action-execution-kimi",
-                 _TE_COMMANDS["output-mcp-action-execution-kimi"],
-                 "", True),
-                ("Grok", "output-mcp-action-execution-grok",
-                 _TE_COMMANDS["output-mcp-action-execution-grok"],
-                 "Grok MCP server nao registrado", False),
-                ("Qwen", "output-mcp-action-execution-qwen",
-                 _TE_COMMANDS["output-mcp-action-execution-qwen"],
-                 "Qwen MCP server nao registrado", False),
-            ):
-                btn = _make_te_btn(lbl, tid, cmd, tip, enabled)
-                if enabled:
+                lay = QVBoxLayout(group)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(2)
+                lay.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
+                lbl = QLabel(title)
+                lbl.setStyleSheet(_te_label_style)
+                lay.addWidget(lbl)
+                options = QWidget()
+                options.setStyleSheet("background: transparent; border: none;")
+                opt_lay = QVBoxLayout(options)
+                opt_lay.setContentsMargins(0, 0, 0, 0)
+                opt_lay.setSpacing(7)
+                for btn_label, tid, cmd in items:
+                    btn = _make_te_btn(btn_label, tid, cmd)
                     btn.clicked.connect(
                         lambda _c=False, t=tid: _on_te_action(t)
                     )
-                _exec_lay.addWidget(btn)
+                    opt_lay.addWidget(btn)
+                lay.addWidget(options)
+                return group
+
+            # Grupo Thinking — mesma ordem da coluna thinking de queue-div-flag.
+            _thinking_group = _make_te_column(
+                "output-mcp-action-thinking",
+                "Thinking",
+                (
+                    ("fable", "output-mcp-action-thinking-fable",
+                     _TE_COMMANDS["output-mcp-action-thinking-fable"]),
+                    ("opus", "output-mcp-action-thinking-opus",
+                     _TE_COMMANDS["output-mcp-action-thinking-opus"]),
+                    ("codex-ultra", "output-mcp-action-thinking-codex-ultra",
+                     _TE_COMMANDS["output-mcp-action-thinking-codex-ultra"]),
+                    ("kimi-k3", "output-mcp-action-thinking-kimi",
+                     _TE_COMMANDS["output-mcp-action-thinking-kimi"]),
+                    ("grok-xhigh", "output-mcp-action-thinking-grok-xhigh",
+                     _TE_COMMANDS["output-mcp-action-thinking-grok-xhigh"]),
+                ),
+            )
+
+            # Grupo Execution — mesma ordem da coluna execution de queue-div-flag.
+            _exec_group = _make_te_column(
+                "output-mcp-action-execution",
+                "Execution",
+                (
+                    ("grok", "output-mcp-action-execution-grok",
+                     _TE_COMMANDS["output-mcp-action-execution-grok"]),
+                    ("sonnet", "output-mcp-action-execution-sonnet",
+                     _TE_COMMANDS["output-mcp-action-execution-sonnet"]),
+                    ("kimi", "output-mcp-action-execution-kimi",
+                     _TE_COMMANDS["output-mcp-action-execution-kimi"]),
+                    ("qwen", "output-mcp-action-execution-qwen",
+                     _TE_COMMANDS["output-mcp-action-execution-qwen"]),
+                    ("codex", "output-mcp-action-execution-codex",
+                     _TE_COMMANDS["output-mcp-action-execution-codex"]),
+                ),
+            )
 
             action_layout.addWidget(_thinking_group)
             action_layout.addWidget(_exec_group)
@@ -3511,14 +3818,53 @@ class MainWindow(QMainWindow):
                 action_layout.addWidget(btn)
                 self._mcp_action_buttons.append(btn)
 
-        mcps_layout.addWidget(action_row)
-        mcps_layout.addStretch(1)
+        _enable_height_for_width(mcps_page)
         col_layout.addWidget(mcps_page, stretch=1)
+        if mcp_think_exec_v2_enabled():
+            col_layout.addWidget(
+                action_row,
+                alignment=(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+                ),
+            )
+        else:
+            mcps_layout.addWidget(action_row)
 
         # Secao BRAINSTORM: picker .md + grade seed-driven. Mesma moldura visual
         # da secao MCPs — sao duas secoes irmas do seletor, nao mais duas
         # sub-abas de uma so.
+        # Layout: row com brainstorm_page (stretch=1) + div utils (coluna direita)
+        # contendo o gear button (mesmo padrao de output-toolbar-agentes).
         brainstorm_page = self._build_brainstorm_page(QFileDialog, QGridLayout)
+
+        # Div utils da brainstorm (similar a queue-subtab-insertions-personas-utils)
+        _brainstorm_utils = QWidget()
+        _brainstorm_utils.setObjectName("BrainstormUtilsColumn")
+        _brainstorm_utils.setProperty("testid", "queue-subtab-insertions-brainstorm-utils")
+        _brainstorm_utils.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _brainstorm_utils.setStyleSheet(
+            "QWidget#BrainstormUtilsColumn { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _brainstorm_utils.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        _brainstorm_utils_layout = QVBoxLayout(_brainstorm_utils)
+        _brainstorm_utils_layout.setContentsMargins(4, 4, 4, 4)
+        _brainstorm_utils_layout.setSpacing(4)
+
+        # Gear button do brainstorm (movido de brainstorm-md-picker-row)
+        gear_btn_brainstorm = _GearButton(
+            testid="brainstorm-mcp-config-gear",
+            tooltip="Configurar seeds brainstorm-mcp (label, prompt, agent, action, target)",
+        )
+        gear_btn_brainstorm.clicked.connect(self._open_brainstorm_mcp_config_dialog)
+        self._brainstorm_mcp_config_gear = gear_btn_brainstorm
+        _brainstorm_utils_layout.addWidget(
+            gear_btn_brainstorm, alignment=Qt.AlignmentFlag.AlignHCenter
+        )
+        _brainstorm_utils_layout.addStretch(1)
+
         brainstorm_column = QWidget()
         brainstorm_column.setObjectName("OutputToolbarBrainstorm")
         brainstorm_column.setProperty("testid", "output-toolbar-brainstorm")
@@ -3527,10 +3873,17 @@ class MainWindow(QMainWindow):
             "QWidget#OutputToolbarBrainstorm { background-color: #1C1C1F;"
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
-        brainstorm_col_layout = QVBoxLayout(brainstorm_column)
-        brainstorm_col_layout.setContentsMargins(8, 6, 8, 6)
-        brainstorm_col_layout.setSpacing(4)
+        # Row: page (stretch=1) + utils div (fixed width, aligned right)
+        brainstorm_col_layout = QHBoxLayout(brainstorm_column)
+        brainstorm_col_layout.setContentsMargins(4, 4, 4, 4)
+        brainstorm_col_layout.setSpacing(6)
         brainstorm_col_layout.addWidget(brainstorm_page, stretch=1)
+        brainstorm_col_layout.addWidget(
+            _brainstorm_utils,
+            alignment=(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+            ),
+        )
 
         # Mapa consumido por `_sync_flow_section_height()` e pelo `eventFilter`:
         # index da secao no `output-toolbar-section-stack` -> (moldura, pagina).
@@ -3549,7 +3902,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _corgly_commands_root() -> Path:
         """Canonical parent-owned Corgly command directory."""
-        return Path(__file__).resolve().parents[4] / ".claude" / "commands" / "corgly"
+        return _SYSTEMFORGE_PATH / ".claude" / "commands" / "corgly"
 
     @staticmethod
     def _corgly_class_sort_key(filename: str) -> tuple[tuple[int, int | str], ...]:
@@ -4005,7 +4358,7 @@ class MainWindow(QMainWindow):
         suffix = f"\nComando atual: {base_text.strip()}" if base_text else ""
         return (
             "Publica a acao MCP do Main LLM selecionado em queue-div-main-llm "
-            "nos terminais marcados pelos checkboxes de rota dos headers "
+            "no terminal selecionado pelos radios de rota dos headers "
             "T1/T2/T3. O Main LLM escolhe APENAS o comando, nao o terminal."
             f"\nMain LLM: {label}{suffix}"
         )
@@ -4300,7 +4653,7 @@ class MainWindow(QMainWindow):
 
         # Picker de .md — guarda o path para os 24 botoes da grade.
         self._brainstorm_md_path: str | None = None
-        md_btn = QPushButton("Selecionar .md")
+        md_btn = QPushButton("Brainstorm md")
         md_btn.setProperty("testid", "brainstorm-md-picker")
         md_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         md_btn.setToolTip(
@@ -4384,24 +4737,22 @@ class MainWindow(QMainWindow):
             self._open_brainstorm_md_reader_dialog()
 
         # T4 (loop 05-21-implantation-tasklist-aba-brainstorm): row container
-        # com `md_btn` (stretch=1) + copy path button + eye reader button +
-        # `gear_btn_brainstorm` (24x24, _GearButton extraido). Testid canonico
-        # `brainstorm-mcp-config-gear`. Clique abre
-        # BrainstormMcpConfigDialog (modulo separado, import sob demanda no
-        # handler para nao impactar cold start).
+        # com `md_btn` + stretch (space-between) + copy path + eye reader.
+        # `brainstorm-mcp-config-gear` foi movido para output-toolbar-brainstorm (2026-08-20).
         row_container = QWidget()
         row_container.setProperty("testid", "brainstorm-md-picker-row")
         row_container.setStyleSheet("background: transparent; border: none;")
         row_layout = QHBoxLayout(row_container)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
-        row_layout.addWidget(md_btn, stretch=1)
+        row_layout.addWidget(md_btn)
+        row_layout.addStretch(1)
         copy_md_path_btn = QPushButton()
         copy_md_path_btn.setProperty("testid", "brainstorm-md-copy-path")
         copy_md_path_btn.setFixedSize(24, 24)
         copy_md_path_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_md_path_btn.setToolTip("Copiar path do arquivo .md selecionado")
-        copy_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "copy.svg"
+        copy_icon_path = _ASSETS_DIR / "copy.svg"
         # Centralizacao do icone (2026-07-20): QPushButton icon-only sob QSS
         # com border+padding desloca o icone alguns px. O icone vai num QLabel
         # filho AlignCenter ocupando os 24x24 inteiros — mesmo padrao ja
@@ -4417,25 +4768,18 @@ class MainWindow(QMainWindow):
         eye_md_reader_btn.setFixedSize(24, 24)
         eye_md_reader_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         eye_md_reader_btn.setToolTip("Abrir leitor/editor do arquivo .md selecionado")
-        eye_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "eye.svg"
+        eye_icon_path = _ASSETS_DIR / "eye.svg"
         self._set_centered_svg_icon(eye_md_reader_btn, eye_icon_path, 13, "1:1")
         eye_md_reader_btn.setStyleSheet(_GEAR_QSS)
         eye_md_reader_btn.clicked.connect(_open_selected_md_reader)
         self._brainstorm_md_reader_btn = eye_md_reader_btn
         row_layout.addWidget(eye_md_reader_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        gear_btn_brainstorm = _GearButton(
-            testid="brainstorm-mcp-config-gear",
-            tooltip="Configurar seeds brainstorm-mcp (label, prompt, agent, action, target)",
-        )
-        gear_btn_brainstorm.clicked.connect(self._open_brainstorm_mcp_config_dialog)
-        self._brainstorm_mcp_config_gear = gear_btn_brainstorm
-        row_layout.addWidget(gear_btn_brainstorm, 0, Qt.AlignmentFlag.AlignVCenter)
         # D2: o picker .md pertence ao bloco visual de anexos project/loop/brainstorm.
         # A pagina Brainstorm continua dona dos botoes e do estado; apenas o row
         # do picker e reparenteado para o bloco semantico de anexos.
         brainstorm_attachment_row = getattr(self, "_attachments_brainstorm_row", None)
         if brainstorm_attachment_row is not None and brainstorm_attachment_row.layout() is not None:
-            brainstorm_attachment_row.layout().addWidget(row_container)
+            brainstorm_attachment_row.layout().addWidget(row_container, stretch=1)
         else:
             page_layout.addWidget(row_container)
 
@@ -4548,6 +4892,91 @@ class MainWindow(QMainWindow):
         )
 
         dlg = BrainstormMdReaderDialog(selected_path, self)
+        dlg.exec()
+
+    def _copy_project_json_path(self) -> None:
+        """Copia o path do project.json selecionado para a área de transferência."""
+        proj_path = (
+            app_state.project_config.config_path
+            if app_state.project_config is not None
+            else ""
+        )
+        if not proj_path:
+            signal_bus.toast_requested.emit(
+                "Nenhum project.json selecionado.", "warning"
+            )
+            return
+        QApplication.clipboard().setText(str(proj_path))
+        signal_bus.toast_requested.emit(
+            "Path do project.json copiado para a área de transferência.", "info"
+        )
+
+    def _open_project_json_reader(self) -> None:
+        """Abre o leitor/editor do project.json selecionado."""
+        proj_path = (
+            app_state.project_config.config_path
+            if app_state.project_config is not None
+            else ""
+        )
+        if not proj_path:
+            signal_bus.toast_requested.emit(
+                "Nenhum project.json selecionado.", "warning"
+            )
+            return
+        proj_file = Path(proj_path)
+        if not proj_file.is_file():
+            signal_bus.toast_requested.emit(
+                "project.json selecionado não existe mais.", "warning"
+            )
+            return
+        # Reusa o mesmo dialog do brainstorm, mas para JSON
+        from workflow_app.widgets.brainstorm_md_reader_dialog import (
+            BrainstormMdReaderDialog,
+        )
+        dlg = BrainstormMdReaderDialog(proj_file, self)
+        dlg.setWindowTitle(f"Project JSON: {proj_file.name}")
+        dlg.exec()
+
+    def _copy_loop_json_path(self) -> None:
+        """Copia o path do _LOOP-CONFIG.json selecionado para a área de transferência."""
+        loop_path = (
+            app_state.loop_config.config_path
+            if app_state.loop_config is not None
+            else ""
+        )
+        if not loop_path:
+            signal_bus.toast_requested.emit(
+                "Nenhum _LOOP-CONFIG.json selecionado.", "warning"
+            )
+            return
+        QApplication.clipboard().setText(str(loop_path))
+        signal_bus.toast_requested.emit(
+            "Path do _LOOP-CONFIG.json copiado para a área de transferência.", "info"
+        )
+
+    def _open_loop_json_reader(self) -> None:
+        """Abre o leitor/editor do _LOOP-CONFIG.json selecionado."""
+        loop_path = (
+            app_state.loop_config.config_path
+            if app_state.loop_config is not None
+            else ""
+        )
+        if not loop_path:
+            signal_bus.toast_requested.emit(
+                "Nenhum _LOOP-CONFIG.json selecionado.", "warning"
+            )
+            return
+        loop_file = Path(loop_path)
+        if not loop_file.is_file():
+            signal_bus.toast_requested.emit(
+                "_LOOP-CONFIG.json selecionado não existe mais.", "warning"
+            )
+            return
+        from workflow_app.widgets.brainstorm_md_reader_dialog import (
+            BrainstormMdReaderDialog,
+        )
+        dlg = BrainstormMdReaderDialog(loop_file, self)
+        dlg.setWindowTitle(f"Loop Config: {loop_file.name}")
         dlg.exec()
 
     def _open_brainstorm_mcp_config_dialog(self) -> None:
@@ -4876,7 +5305,7 @@ class MainWindow(QMainWindow):
         incondicionalmente (semantica historica preservada).
 
         Espelha o mapping de `_publish_to_terminal` sem consultar os
-        checkboxes de rota (`terminal-route-t1/t2/t3`, hoje nos headers dos
+        radios de rota (`terminal-route-t1/t2/t3`, hoje nos headers dos
         proprios terminais):
         - 1 -> terminal-interactive (pyte) via paste_text_in_terminal.
         - 2 -> terminal-workspace (pyte) via paste_text_in_workspace_terminal.
@@ -5267,9 +5696,9 @@ class MainWindow(QMainWindow):
         signal_bus.datatest_mode_changed.emit(mode)
 
     def _send_testid_probe_to_selected_terminal(self, testid: str) -> None:
-        """Envia `data-testid="..."` + backspace para o(s) terminal(is) roteado(s).
+        """Envia `data-testid="..."` + backspace para o terminal roteado.
 
-        Reusa `_publish_to_terminal` para respeitar os checkboxes de rota
+        Reusa `_publish_to_terminal` para respeitar o radio de rota ativo
         e transferir foco para o terminal com prioridade configurada.
         """
         payload = f'data-testid="{testid}"\x08'
@@ -5864,8 +6293,8 @@ class MainWindow(QMainWindow):
         ]
         _pset.setValue("prompts_row/entries", _json.dumps(_entries_simple))
 
-        # Reconstruir sub-aba prompts. gear de prompts sempre como ultimo widget
-        # do flow (vive dentro da sub-aba). asq-user nao entra aqui (migrou p/ CMD).
+        # Reconstruir sub-aba prompts. O gear vai para a div utils do canto
+        # (nao para o flow). asq-user nao entra aqui (migrou p/ CMD).
         _new_btns = (
             self._populate_header_prompts_subtab()
             + [self._prompts_config_gear]
@@ -5952,7 +6381,7 @@ class MainWindow(QMainWindow):
             ]),
         )
 
-        # asq-user nao entra aqui (migrou p/ CMD); gear sempre por ultimo no flow.
+        # asq-user nao entra aqui (migrou p/ CMD); gear vai para a div utils.
         _new_btns = (
             self._populate_header_prompts_subtab()
             + [self._prompts_config_gear]
@@ -6033,7 +6462,7 @@ class MainWindow(QMainWindow):
         """Read `terminal-route-t1/t2/t3` + Notes once into an immutable snapshot.
 
         Defaults match historical `_publish_to_terminal` widget-fallback
-        semantics when a checkbox attribute is missing (T1=True, rest False).
+        semantics when a route widget is missing (T1=True, rest False).
         """
         t1 = (
             bool(self._chk_route_t1.isChecked())
@@ -6058,9 +6487,9 @@ class MainWindow(QMainWindow):
         return TerminalRouteSnapshot(t1=t1, t2=t2, t3=t3, notes_t1=n1)
 
     def _emit_terminal_route_snapshot(self) -> None:
-        """Capture current route checkboxes and emit terminal_route_updated.
+        """Capture the active route radio and emit terminal_route_updated.
 
-        Item 024: connected to T1/T2/T3 checkbox ``toggled`` signals so
+        Item 024: connected to the exclusive T1/T2/T3 radio group so
         MetricsBar always has a fresh snapshot cached for route-aware
         instance-group dispatch.
         """
@@ -6670,7 +7099,7 @@ class MainWindow(QMainWindow):
         workflow_app_btn = _make_btn(
             "Workflow App", "queue-btn-workflow-app-path",
             "#0EA5E9", "#0284C7", "#0369A1",
-            "Cola o path ai-forge/workflow-app no terminal\n(respeita os checkboxes de rota dos headers)",
+            "Cola o path ai-forge/workflow-app no terminal\n(respeita o radio de rota ativo)",
         )
         workflow_app_btn.clicked.connect(_paste_path("ai-forge/workflow-app"))
 
@@ -6725,7 +7154,7 @@ class MainWindow(QMainWindow):
             "Terminal-rules", "queue-btn-terminal-basic-rules-path",
             "#F97316", "#EA580C", "#C2410C",
             "Cola o path ai-forge/rules/workflow-app-terminal.md no terminal\n"
-            "(roteamento via checkboxes de rota dos headers + focus transfer)",
+            "(roteamento via radio de rota ativo + focus transfer)",
         )
         terminal_rules_btn.clicked.connect(_paste_path("ai-forge/rules/workflow-app-terminal.md"))
 
@@ -6814,7 +7243,7 @@ class MainWindow(QMainWindow):
             "#14B8A6", "#0D9488", "#0F766E",
             "Cola o path ai-forge/rules/main-llm-publish.md no terminal\n"
             "(regras de PUBLICACAO por Main LLM no queue-div-main-llm: Claude usa\n"
-            "o comando, Kimi a adaptacao do comando, Codex o prompt que simula)",
+            "o comando, Kimi/Qwen /skill:slash-executor, Codex o prompt que simula)",
         )
         main_llm_publish_rules_btn.clicked.connect(
             _paste_path("ai-forge/rules/main-llm-publish.md")
@@ -6941,7 +7370,7 @@ class MainWindow(QMainWindow):
             "#EAB308", "#CA8A04", "#A16207",
             "Cola um prompt curto pedindo ao Claude para criar um novo arquivo "
             "em ai-forge/rules/ a partir do contexto estudado agora\n"
-            "(respeita os checkboxes de rota dos headers)",
+            "(respeita o radio de rota ativo)",
         )
         add_rules_btn.clicked.connect(_paste_add_rules)
 
@@ -7046,28 +7475,6 @@ class MainWindow(QMainWindow):
         "questioner-rules": "Questionador",
         "ux-ui-specialist": "UX/UI",
         "performance-engineer": "Performance",
-    }
-
-    # Item 023: categorias das 16 personas hardcoded da secao MCPs.
-    # Chave = sufixo do testid (ex: "search-in" de "output-mcp-persona-search-in").
-    # Valores DEVEM pertencer a PERSONA_FILTER_CATEGORIES.
-    _MCP_PERSONA_CATEGORIES: dict[str, str] = {
-        "search-in": "Research",
-        "search-out": "Research",
-        "search-forge": "Research",
-        "controversial": "Review",
-        "hardening": "Review",
-        "criar-task": "Build",
-        "revisar-task": "Review",
-        "executor": "Build",
-        "rev-exec": "Review",
-        "revisar-qa": "Review",
-        "code-debugger": "Review",
-        "delegador": "Plan",
-        "scaffolds-blueprints-updater": "Build",
-        "questioner": "Review",
-        "ux-ui": "Design",
-        "performance-engineer": "specialists",
     }
 
     # Atribuicao canonica persona -> categoria de filtro da sub-aba 'Agentes'.
@@ -7382,7 +7789,7 @@ class MainWindow(QMainWindow):
             "Varre ai-forge/MCP/agents/, adiciona apenas personas novas e\n"
             "mantem este botao sempre no final da sub-aba."
         )
-        _refresh_icon = Path(_WORKFLOW_APP_DIR) / "assets" / "refresh.svg"
+        _refresh_icon = _ASSETS_DIR / "refresh.svg"
         if _refresh_icon.is_file():
             update_btn.setIcon(QIcon(str(_refresh_icon)))
             update_btn.setIconSize(
@@ -7583,17 +7990,24 @@ class MainWindow(QMainWindow):
         um botao para cada uma, inserido ANTES do proprio botao update (que
         permanece sempre o ultimo widget do flow).
         """
-        new_btns = self._build_persona_buttons(self._scan_persona_files())
-        if not new_btns:
+        scanned = self._scan_persona_files()
+        new_btns = self._build_persona_buttons(scanned)
+        new_mcp_btns = self._sync_mcp_persona_checkboxes(scanned)
+
+        if not new_btns and not new_mcp_btns:
             signal_bus.toast_requested.emit(
                 "Nenhuma persona nova em ai-forge/MCP/agents/.", "info",
             )
             return
-        self._command_queue.add_persona_buttons(
-            new_btns, keep_last=self._persona_update_btn,
-        )
+        if new_mcp_btns:
+            self._apply_mcp_persona_filter()
+        if new_btns:
+            self._command_queue.add_persona_buttons(
+                new_btns, keep_last=self._persona_update_btn,
+            )
+        added_count = len(new_btns) if new_btns else len(new_mcp_btns)
         signal_bus.toast_requested.emit(
-            f"{len(new_btns)} persona(s) adicionada(s) a aba PERSONAS.", "info",
+            f"{added_count} persona(s) adicionada(s) a aba PERSONAS.", "info",
         )
 
     def _open_personas_config_dialog(self) -> None:
@@ -7789,11 +8203,13 @@ class MainWindow(QMainWindow):
         # (debug-blue-reverse usa um tom de sky para distinguir do debug-blue).
         # IO do contador e auxiliar: try/except total, falha silenciosa com
         # warning no log, nunca crash nem toast de erro (R-btn1/R-btn2).
-        _COUNTER_FILE = Path("blacksmith/listeners/.debug-counter")
+        _COUNTER_FILE = _SYSTEMFORGE_PATH / "blacksmith/listeners/.debug-counter"
 
         def _read_debug_counter() -> int:
             try:
                 return int(_COUNTER_FILE.read_text(encoding="utf-8").strip())
+            except FileNotFoundError:
+                return 0
             except Exception as exc:
                 logger.warning("listener debug-counter read falhou: %s", exc)
                 return 0
@@ -7876,6 +8292,56 @@ class MainWindow(QMainWindow):
         extra_btns.append(repair_btn)
 
         return extra_btns
+
+    def _populate_header_new_cmd_subtab(self) -> list[QPushButton]:
+        """Constroi os botoes da sub-aba 'NEW CMD' (commands modernos)."""
+        def _make_btn(
+            label: str, testid: str, bg: str, hover: str, pressed: str, tooltip: str,
+        ) -> QPushButton:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 10px; font-weight: 700; padding: 1px 8px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {pressed}; }}"
+                "QPushButton:disabled { background-color: #3F3F46; color: #71717A; }"
+            )
+            return btn
+
+        def _paste_command(command: str):
+            def _h() -> None:
+                self._publish_insertion_llm_aware(command)
+            return _h
+
+        _NEW_CMDS = [
+            (
+                "modernize",
+                "queue-btn-new-cmd-modernize",
+                "#0EA5E9", "#0284C7", "#0369A1",
+                "/cmd:modernize",
+                "Cola o comando /cmd:modernize no terminal\n"
+                "(moderniza um slash-command do SystemForge contra o catalogo LLM)",
+            ),
+            (
+                "upd-modernize-template",
+                "queue-btn-new-cmd-upd-modernize-template",
+                "#14B8A6", "#0D9488", "#0F766E",
+                "/cmd:upd-modernize-template",
+                "Cola o comando /cmd:upd-modernize-template no terminal\n"
+                "(atualiza o template de capacidades LLM com fontes oficiais)",
+            ),
+        ]
+
+        btns: list[QPushButton] = []
+        for label, testid, bg, hover, pressed, cmd, tooltip in _NEW_CMDS:
+            btn = _make_btn(label, testid, bg, hover, pressed, tooltip)
+            btn.clicked.connect(_paste_command(cmd))
+            btns.append(btn)
+        return btns
 
     def _populate_header_auto_improove_subtab(self) -> list[QPushButton]:
         """Constroi os botoes da sub-aba 'AUTO IMPROOVE'.
@@ -8232,7 +8698,7 @@ class MainWindow(QMainWindow):
                 notes_input.setFocus()
 
         expand_btn = QPushButton()
-        expand_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "expand.svg"
+        expand_icon_path = _ASSETS_DIR / "expand.svg"
         expand_icon = self._load_tinted_svg_icon(expand_icon_path, "#FAFAFA")
         if expand_icon is not None:
             expand_btn.setIcon(expand_icon)
@@ -8250,7 +8716,7 @@ class MainWindow(QMainWindow):
         expand_shortcut.activated.connect(_open_notes_modal)
 
         paste_btn = QPushButton()
-        arrow_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "arrow-up.svg"
+        arrow_icon_path = _ASSETS_DIR / "arrow-up.svg"
         arrow_icon = self._load_tinted_svg_icon(arrow_icon_path, "#FAFAFA")
         if arrow_icon is not None:
             paste_btn.setIcon(arrow_icon)
@@ -8288,7 +8754,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(paste_btn)
 
         clear_btn = QPushButton()
-        broom_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "broom.svg"
+        broom_icon_path = _ASSETS_DIR / "broom.svg"
         broom_icon = self._load_tinted_svg_icon(broom_icon_path, "#FAFAFA")
         if broom_icon is not None:
             clear_btn.setIcon(broom_icon)
@@ -8303,7 +8769,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(clear_btn)
 
         copy_btn = QPushButton()
-        copy_icon_path = Path(_WORKFLOW_APP_DIR) / "assets" / "copy.svg"
+        copy_icon_path = _ASSETS_DIR / "copy.svg"
         copy_icon = self._load_tinted_svg_icon(copy_icon_path, "#FAFAFA")
         if copy_icon is not None:
             copy_btn.setIcon(copy_icon)
@@ -9616,6 +10082,35 @@ class MainWindow(QMainWindow):
         self._command_queue.clear_queue()
         self._show_toast(f"Fila esvaziada: {count} comandos removidos.", "success")
 
+    def _rotate_auto_loop_icon(self) -> None:
+        """Rotaciona o icone do botao auto-loop quando selecionado.
+
+        Pinta em canvas 16x16 fixo. `QPixmap.transformed(rotate)` infla o
+        bounding box na diagonal (~sqrt(2) em 45°) e o QIcon reescala de
+        volta — o icone parece pulsar. O canvas elimina essa variacao.
+        """
+        self._auto_loop_rotation = (self._auto_loop_rotation + 8) % 360
+        icon = self._auto_loop_icon
+        if icon is None:
+            return
+        from PySide6.QtGui import QPainter, QPixmap
+
+        size = 16
+        source = icon.pixmap(size, size)
+        canvas = QPixmap(size, size)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.translate(size / 2.0, size / 2.0)
+            painter.rotate(self._auto_loop_rotation)
+            painter.translate(-size / 2.0, -size / 2.0)
+            painter.drawPixmap(0, 0, source)
+        finally:
+            painter.end()
+        self._auto_loop_btn.setIcon(QIcon(canvas))
+
     def _on_auto_loop_toggled(self, checked: bool) -> None:
         """Espelha o toggle do botao auto-loop no CommandQueueWidget.
 
@@ -10209,7 +10704,7 @@ def main() -> None:
         logger.warning("Falha ao carregar styles/tokens.qss: %s", exc)
 
     # Window icon
-    icon_path = Path(__file__).parent.parent.parent / "assets" / "icon.svg"
+    icon_path = _ASSETS_DIR / "icon.svg"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
@@ -10217,17 +10712,9 @@ def main() -> None:
     from workflow_app.db.database_manager import db_manager
     db_manager.setup()
 
-    # Verify SDK availability and authentication before opening main window
-    from workflow_app.dialogs.critical_error_modal import CriticalErrorModal
-    from workflow_app.errors import SDKNotAuthenticatedError, SDKNotAvailableError
-    from workflow_app.sdk.sdk_adapter import SDKAdapter
-
-    adapter = SDKAdapter()
-    try:
-        adapter.ensure_sdk_ready()
-    except (SDKNotAvailableError, SDKNotAuthenticatedError) as exc:
-        CriticalErrorModal.show_and_exit(exc)
-        return  # sys.exit already called, prevents further execution
+    # Do not gate application startup on Claude CLI auth. The embedded
+    # terminals are the recovery path for login and CLI repair; SDK-specific
+    # flows still run their readiness checks where they actually execute.
 
     window = MainWindow()
     window.show()

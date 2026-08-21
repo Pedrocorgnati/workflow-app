@@ -1,6 +1,6 @@
-"""Regression tests for terminal route checkboxes (T1/T2/T3) in MainWindow.
+"""Regression tests for terminal route radios (T1/T2/T3) in MainWindow.
 
-Os checkboxes vivem no header de cada terminal desde
+Os radios vivem no header de cada terminal desde
 07-27-workflow-app-header-toggles-llm-unico (I1.1/I1.2); o bloco unico
 `terminal-route-toggles` nao existe mais.
 """
@@ -22,7 +22,7 @@ from workflow_app.signal_bus import signal_bus
 #   1. O que continua valendo nos dois lados — a rota do texto sai dos
 #      checkboxes T1/T2/T3, e a composicao anexa os prompts de persona — segue
 #      testado nos dois modos, ancorando no botao equivalente
-#      (`thinking-codex` publica exatamente o mesmo `/mcp:codex` que o
+#      (`execution-codex` publica exatamente o mesmo `/mcp:codex` que o
 #      `Main MCP` legado sob Main Claude).
 #   2. O que so existe no legado — Main Kimi virar `/skill:claude`, Main Codex
 #      injetar `Use skill-kimi...` no xterm — nao tem equivalente sob a flag e
@@ -37,18 +37,20 @@ from workflow_app.signal_bus import signal_bus
 _TE_V2 = mcp_think_exec_v2_enabled()
 
 _MCP_ACTION_MAIN = (
-    "output-mcp-action-thinking-codex" if _TE_V2 else "output-mcp-action-main"
+    "output-mcp-action-execution-codex" if _TE_V2 else "output-mcp-action-main"
 )
 _MCP_ACTION_LABELS = (
     {
-        "output-mcp-action-thinking-claude": "Claude",
-        "output-mcp-action-thinking-codex": "Codex",
-        "output-mcp-action-thinking-kimi": "Kimi",
-        "output-mcp-action-execution-claude": "Claude",
-        "output-mcp-action-execution-codex": "Codex",
-        "output-mcp-action-execution-kimi": "Kimi",
-        "output-mcp-action-execution-grok": "Grok",
-        "output-mcp-action-execution-qwen": "Qwen",
+        "output-mcp-action-thinking-fable": "fable",
+        "output-mcp-action-thinking-opus": "opus",
+        "output-mcp-action-thinking-codex-ultra": "codex-ultra",
+        "output-mcp-action-thinking-kimi": "kimi-k3",
+        "output-mcp-action-thinking-grok-xhigh": "grok-xhigh",
+        "output-mcp-action-execution-grok": "grok",
+        "output-mcp-action-execution-sonnet": "sonnet",
+        "output-mcp-action-execution-kimi": "kimi",
+        "output-mcp-action-execution-qwen": "qwen",
+        "output-mcp-action-execution-codex": "codex",
     }
     if _TE_V2
     else {
@@ -98,9 +100,18 @@ def owned_window(qapp):
 
 
 def _set_route(win, *, t1: bool, t2: bool, t3: bool) -> None:
-    win._chk_route_t1.setChecked(t1)
-    win._chk_route_t2.setChecked(t2)
-    win._chk_route_t3.setChecked(t3)
+    radios = (win._chk_route_t1, win._chk_route_t2, win._chk_route_t3)
+    states = (t1, t2, t3)
+    if sum(states) == 1:
+        radios[states.index(True)].setChecked(True)
+        return
+
+    # Backend compatibility tests still exercise defensive persisted snapshots
+    # with zero/multiple routes. The real UI never disables exclusivity.
+    win._terminal_route_group.setExclusive(False)
+    for radio, checked in zip(radios, states, strict=True):
+        radio.setChecked(checked)
+    win._terminal_route_group.setExclusive(True)
 
 
 # I2.1: os radios `output-mcp-provider-*` foram eliminados. O provider dos
@@ -160,12 +171,43 @@ def _checkbox_by_testid(win, testid: str):
     raise AssertionError(f"checkbox nao encontrado: {testid}")
 
 
-def test_terminal_route_toggles_exist(qtbot):
+def test_terminal_route_radios_are_exclusive_with_t1_default(qtbot):
+    from PySide6.QtWidgets import QRadioButton
+
     win = _new_window(qtbot)
 
-    assert win._chk_route_t1.property("testid") == "terminal-route-t1"
-    assert win._chk_route_t2.property("testid") == "terminal-route-t2"
-    assert win._chk_route_t3.property("testid") == "terminal-route-t3"
+    radios = (win._chk_route_t1, win._chk_route_t2, win._chk_route_t3)
+    assert all(isinstance(radio, QRadioButton) for radio in radios)
+    assert [radio.property("testid") for radio in radios] == [
+        "terminal-route-t1",
+        "terminal-route-t2",
+        "terminal-route-t3",
+    ]
+    assert win._terminal_route_group.exclusive() is True
+    assert [radio.isChecked() for radio in radios] == [True, False, False]
+
+    win._chk_route_t2.click()
+    assert [radio.isChecked() for radio in radios] == [False, True, False]
+
+    win._chk_route_t3.click()
+    assert [radio.isChecked() for radio in radios] == [False, False, True]
+
+    # Um radio exclusivo selecionado nao pode ser desmarcado pelo mesmo clique.
+    win._chk_route_t3.click()
+    assert [radio.isChecked() for radio in radios] == [False, False, True]
+
+
+def test_terminal_route_radio_emits_only_the_new_exclusive_snapshot(qtbot):
+    win = _new_window(qtbot)
+    emitted: list = []
+    signal_bus.terminal_route_updated.connect(emitted.append)
+    try:
+        win._chk_route_t2.click()
+    finally:
+        signal_bus.terminal_route_updated.disconnect(emitted.append)
+
+    assert len(emitted) == 1
+    assert emitted[0].requested_destinations() == ("T2",)
 
 
 def test_route_toggles_block_no_longer_exists(qtbot):
@@ -178,7 +220,7 @@ def test_route_toggles_block_no_longer_exists(qtbot):
 
 
 def test_route_toggles_live_in_their_own_terminal_headers(qtbot):
-    """Criterio 3: cada checkbox mora no header do seu proprio terminal."""
+    """Criterio 3: cada radio mora no header do seu proprio terminal."""
     win = _new_window(qtbot)
 
     expected = {
@@ -186,9 +228,9 @@ def test_route_toggles_live_in_their_own_terminal_headers(qtbot):
         "terminal-route-t2": "terminal-workspace-label-bar",
         "terminal-route-t3": "terminal-codex-label-bar",
     }
-    for chk_testid, header_testid in expected.items():
-        chk = _checkbox_by_testid(win, chk_testid)
-        parent = chk.parentWidget()
+    for radio_testid, header_testid in expected.items():
+        radio = _radio_by_testid(win, radio_testid)
+        parent = radio.parentWidget()
         assert parent is not None
         assert parent.property("testid") == header_testid
 
@@ -367,11 +409,9 @@ def test_mcp_toolbar_claude_main_command_routes_by_toggles_not_provider(qtbot):
     assert sent_t2 == []
 
 
-def test_mcp_toolbar_provider_does_not_force_terminal_when_no_toggle(qtbot):
-    # Sem nenhum checkbox de rota marcado, a acao MCP e no-op (o provider nao
-    # força terminal). Garante que a função de roteamento saiu do provider.
+def test_mcp_toolbar_uses_default_t1_route(qtbot):
+    # A UI sempre tem uma rota: no boot, T1 e o destino selecionado.
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
 
     sent_t1: list[str] = []
     sent_t2: list[str] = []
@@ -384,7 +424,7 @@ def test_mcp_toolbar_provider_does_not_force_terminal_when_no_toggle(qtbot):
         signal_bus.paste_text_in_terminal.disconnect(sent_t1.append)
         signal_bus.paste_text_in_workspace_terminal.disconnect(sent_t2.append)
 
-    assert sent_t1 == []
+    assert sent_t1 == ["/mcp:codex"]
     assert sent_t2 == []
 
 
@@ -456,8 +496,8 @@ def test_mcp_toolbar_last_personas_have_exact_paths_and_order(qtbot):
     assert row is not None
     assert row.property("testid") == "output-mcp-persona-checkboxes"
     row_checkboxes = row.findChildren(type(_checkbox_by_testid(win, expected[0][0])))
-    assert len(row_checkboxes) == 16
-    assert [checkbox.property("testid") for checkbox in row_checkboxes[-4:]] == [
+    assert len(row_checkboxes) >= 16
+    assert [checkbox.property("testid") for checkbox in row_checkboxes[:16][-4:]] == [
         testid for testid, _path in expected
     ]
     for testid, path in expected:
@@ -651,9 +691,11 @@ def test_publish_routes_to_t3_only(qtbot, monkeypatch):
     assert focus_t1 == []
 
 
-def test_publish_routes_to_all_with_t1_focus_priority(qtbot, monkeypatch):
+def test_publish_uses_only_the_last_selected_route(qtbot, monkeypatch):
     win = _new_window(qtbot)
-    _set_route(win, t1=True, t2=True, t3=True)
+    win._chk_route_t1.click()
+    win._chk_route_t2.click()
+    win._chk_route_t3.click()
 
     sent_t1: list[str] = []
     sent_t3: list[str] = []
@@ -677,10 +719,10 @@ def test_publish_routes_to_all_with_t1_focus_priority(qtbot, monkeypatch):
         signal_bus.paste_text_in_workspace_terminal.disconnect(sent_t3.append)
         signal_bus.focus_interactive_terminal.disconnect(_on_focus)
 
-    assert sent_t1 == ["echo all"]
-    assert sent_t3 == ["echo all"]
+    assert sent_t1 == []
+    assert sent_t3 == []
     assert xterm_calls == [("echo all", False)]
-    assert focus_t1 == [1]
+    assert focus_t1 == []
 
 
 # ── Snapshot-based publish report (AGENT-TASK-005) ───────────────────────────
@@ -713,9 +755,12 @@ def test_capture_terminal_route_snapshot_is_immutable(qtbot):
 
 
 def test_publish_report_no_route_is_silent_empty(qtbot):
+    from workflow_app.main_window import TerminalRouteSnapshot
+
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
-    snap = win._capture_terminal_route_snapshot()
+    # Defensive backend behavior remains supported for persisted/explicit
+    # snapshots, although the radio UI cannot produce an empty selection.
+    snap = TerminalRouteSnapshot()
 
     sent_t1: list[str] = []
     signal_bus.paste_text_in_terminal.connect(sent_t1.append)
@@ -905,8 +950,14 @@ def test_create_agent_dialog_uses_open_snapshot_and_errors_without_route(
     qtbot, monkeypatch,
 ):
     """Open-time snapshot is used; no route keeps modal open with explicit error."""
+    from workflow_app.main_window import TerminalRouteSnapshot
+
     win = _new_window(qtbot)
-    _set_route(win, t1=False, t2=False, t3=False)
+    monkeypatch.setattr(
+        win,
+        "_capture_terminal_route_snapshot",
+        lambda: TerminalRouteSnapshot(),
+    )
 
     create_btn = _button_by_testid(win, "queue-btn-personas-create")
     create_btn.click()

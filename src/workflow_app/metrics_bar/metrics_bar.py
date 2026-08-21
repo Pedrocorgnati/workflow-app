@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -61,15 +62,30 @@ from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 
 # ─── Instance buttons drag&drop (output-toolbar-center-top) ───────────────── #
 #
-# Os botoes do `instance-group` (clauded/kimid/codex) sao reordenaveis
-# via drag&drop. A ordem persiste em QSettings("SystemForge", "WorkflowApp")
-# sob `_INSTANCE_ORDER_SETTINGS_KEY` e e restaurada na proxima abertura do app.
-_CANONICAL_INSTANCE_NAMES = ["clauded", "kimid", "codex"]
+# Os botoes do `instance-group` sao reordenaveis via drag&drop. A ordem persiste
+# em QSettings("SystemForge", "WorkflowApp") sob `_INSTANCE_ORDER_SETTINGS_KEY`
+# e e restaurada na proxima abertura do app.
+#
+# Os nomes canonicos derivam de HELPER_COMMANDS para garantir que nenhum botao
+# entre na barra sem tambem estar isento do early-exit watcher. `sonnet` e
+# `kimi-k3` sao EXCLUIDOS porque pertencem ao eixo de flags de ativacao do
+# /model, nao ao eixo de instancias de terminal.
+_CANONICAL_INSTANCE_NAMES = [
+    alias
+    for alias in HELPER_COMMANDS
+    if alias not in {"cd", "/model", "/effort", "/clear", "sonnet", "kimi-k3"}
+]
+# Rotulo visivel no instance-group. O nome interno (comando / persistencia)
+# permanece o alias canonico; so o texto do botao muda.
+_INSTANCE_BUTTON_LABELS: dict[str, str] = {
+    "qwened": "qwen",
+}
 _INSTANCE_ORDER_SETTINGS_KEY = "MetricsBar/instanceOrder"
 _INSTANCE_SCHEMA_VERSION_KEY = "MetricsBar/instanceGroupSchemaVersion"
 _INSTANCE_SCHEMA_VERSION_CURRENT = 2
 _INSTANCE_DRAG_MIME = "application/x-workflow-instance-button"
 _INSTANCE_DRAG_THRESHOLD = 6
+_INSTANCE_GRID_COLUMNS = 2
 
 
 class _DraggableInstanceButton(QPushButton):
@@ -145,8 +161,7 @@ class _InstanceDropZone(QWidget):
             return
         raw = bytes(event.mimeData().data(_INSTANCE_DRAG_MIME))
         name = raw.decode("utf-8", errors="replace")
-        drop_x = event.position().toPoint().x()
-        self._on_drop(name, drop_x)
+        self._on_drop(name, event.position().toPoint())
         event.acceptProposedAction()
 
 
@@ -618,12 +633,15 @@ class MetricsBar(QWidget):
         self._loop_select_btn.setStyleSheet(_SELECT_BTN_STYLE)
         self._loop_select_btn.clicked.connect(self._on_loop_select)
 
-        self._proj_open_btn = QPushButton("Abrir")
-        self._proj_open_btn.setProperty("testid", "metrics-btn-proj-open")
+        # Eliminado da UI em 2026-08-20 (copy+eye ocupam o slot). A logica
+        # `_on_proj_open` permanece; o botao NUNCA pode chamar show() sem
+        # parent — QPushButton orfao vira janela top-level 1:1 no boot.
+        self._proj_open_btn = QPushButton("Abrir", parent=self)
         self._proj_open_btn.setToolTip("Abrir pasta do projeto no explorador de arquivos")
         self._proj_open_btn.setFixedHeight(28)
         self._proj_open_btn.setStyleSheet(_SELECT_BTN_STYLE)
         self._proj_open_btn.clicked.connect(self._on_proj_open)
+        self._proj_open_btn.hide()
 
         # ── Instance toggle buttons (clauded group) ───────────────────── #
         # Task 4 (loop 05-13-workflow-app-layout-2):
@@ -641,15 +659,17 @@ class MetricsBar(QWidget):
         self._instance_group.setProperty("testid", "instance-group")
         self._instance_group.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._instance_group.setStyleSheet("background: transparent;")
-        _ig_layout = QHBoxLayout(self._instance_group)
+        _ig_layout = QGridLayout(self._instance_group)
         _ig_layout.setContentsMargins(0, 0, 0, 0)
         _ig_layout.setSpacing(4)
 
-        for name in instance_order:
+        for idx, name in enumerate(instance_order):
             btn = _DraggableInstanceButton(name, parent=self._instance_group)
+            label = _INSTANCE_BUTTON_LABELS.get(name, name)
+            btn.setText(label)
             btn.setFixedHeight(28)
             btn.setToolTip(
-                f"{name} — clique para selecionar. Arraste para reordenar."
+                f"{label} — clique para selecionar. Arraste para reordenar."
             )
             # Lambda usa self._instance_btns.index(b) para obter o indice ATUAL
             # do botao no momento do clique (apos qualquer reorderacao).
@@ -659,7 +679,9 @@ class MetricsBar(QWidget):
                 )
             )
             self._instance_btns.append(btn)
-            _ig_layout.addWidget(btn)
+            row = idx // _INSTANCE_GRID_COLUMNS
+            col = idx % _INSTANCE_GRID_COLUMNS
+            _ig_layout.addWidget(btn, row, col)
 
         self._apply_instance_styles()
         # Item 024: cached TerminalRouteSnapshot, updated via terminal_route_updated
@@ -756,7 +778,7 @@ class MetricsBar(QWidget):
         lf.addWidget(self._dot_general, 1)
         listeners_col = QWidget(self._listeners_frame)
         listeners_col_layout = QVBoxLayout(listeners_col)
-        listeners_col_layout.setContentsMargins(0, 0, 0, 0)
+        listeners_col_layout.setContentsMargins(0, 0, 30, 0)
         listeners_col_layout.setSpacing(6)
         listeners_col_layout.addWidget(self._dot_interactive)
         listeners_col_layout.addWidget(self._dot_workspace)
@@ -1200,7 +1222,16 @@ class MetricsBar(QWidget):
         matches the button label (fix R-22: ``codex`` emits ``"codex"``,
         not ``"codex-high"``). Legacy path (flag absent/``"0"``) preserves
         the historical fixed routing byte-for-byte.
+
+        Alias indisponiveis (nao canonicos) disparam toast em vez de sinal,
+        garantindo Zero Silencio sem recorrer a estado disabled dos botoes.
         """
+        if name not in _CANONICAL_INSTANCE_NAMES:
+            self._signal_bus.toast_requested.emit(
+                f"Instancia '{name}' nao disponivel na barra.", "error"
+            )
+            return
+
         self._selected_instance = index
         self._apply_instance_styles()
         self._signal_bus.instance_selected.emit(name)
@@ -1209,11 +1240,15 @@ class MetricsBar(QWidget):
             self._signal_bus.run_command_route_aware.emit(
                 name, self._current_route_snapshot
             )
-        elif name == "codex":
-            self._signal_bus.run_command_in_workspace_xterm.emit("codex-high")
-        elif name == "kimid":
+        elif name in {"codex", "codex-high", "grokd"}:
+            # T3 (workspace_xterm): codex emite o comando real "codex-high".
+            command = "codex-high" if name == "codex" else name
+            self._signal_bus.run_command_in_workspace_xterm.emit(command)
+        elif name in {"kimid", "qwened"}:
+            # T2 (workspace_terminal).
             self._signal_bus.run_command_in_workspace_terminal.emit(name)
         else:
+            # T1 (interactive terminal): clauded, claude, e futuros T1.
             self._signal_bus.run_command_in_terminal.emit(name)
 
     def _apply_instance_styles(self) -> None:
@@ -1321,13 +1356,18 @@ class MetricsBar(QWidget):
             _INSTANCE_SCHEMA_VERSION_KEY, _INSTANCE_SCHEMA_VERSION_CURRENT
         )
 
-    def _on_instance_button_dropped(self, name: str, drop_x: int) -> None:
+    def _on_instance_button_dropped(self, name: str, drop_pos) -> None:
         """Reordena botoes no layout em resposta a um drop e persiste a ordem.
 
-        `drop_x` e a coordenada x do drop no sistema de coordenadas do
-        _instance_group. Posicao de insercao e calculada relativa aos centros
-        horizontais dos botoes vizinhos.
+        Com o layout em grid de 2 colunas, a posicao de insercao e determinada
+        pela celula mais proxima do ponto de soltura (vizinho mais proximo em
+        ordem de leitura). Apos reordenar a lista interna, o grid e reconstruido.
         """
+        from PySide6.QtCore import QPoint
+
+        if not isinstance(drop_pos, QPoint):
+            drop_pos = QPoint(int(drop_pos), 0)
+
         src_idx = next(
             (i for i, b in enumerate(self._instance_btns) if b._instance_name == name),
             None,
@@ -1335,12 +1375,26 @@ class MetricsBar(QWidget):
         if src_idx is None:
             return
 
-        visual_target = len(self._instance_btns)
+        # Vizinho mais proximo: botao cujo centro geometrico tem menor distancia
+        # de Manhattan ate o ponto de soltura.
+        best_idx = 0
+        best_dist = None
         for i, btn in enumerate(self._instance_btns):
-            center = btn.x() + btn.width() // 2
-            if drop_x < center:
-                visual_target = i
-                break
+            center = btn.geometry().center()
+            dist = abs(center.x() - drop_pos.x()) + abs(center.y() - drop_pos.y())
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        # Decide se insere antes ou depois do vizinho mais proximo: soltura a
+        # direita/abaixo do centro em ordem de leitura => insere depois.
+        center = self._instance_btns[best_idx].geometry().center()
+        after = (
+            drop_pos.x() > center.x()
+            or (drop_pos.x() == center.x() and drop_pos.y() > center.y())
+        )
+        visual_target = best_idx + (1 if after else 0)
+        visual_target = max(0, min(visual_target, len(self._instance_btns)))
 
         target_idx = visual_target - 1 if src_idx < visual_target else visual_target
         if target_idx == src_idx:
@@ -1350,11 +1404,17 @@ class MetricsBar(QWidget):
         if 0 <= self._selected_instance < len(self._instance_btns):
             selected_name = self._instance_btns[self._selected_instance]._instance_name
 
-        layout = self._instance_group.layout()
         btn = self._instance_btns.pop(src_idx)
-        layout.removeWidget(btn)
         self._instance_btns.insert(target_idx, btn)
-        layout.insertWidget(target_idx, btn)
+
+        # Reconstruir o grid com a nova ordem.
+        layout = self._instance_group.layout()
+        while layout.takeAt(0):
+            pass
+        for i, b in enumerate(self._instance_btns):
+            row = i // _INSTANCE_GRID_COLUMNS
+            col = i % _INSTANCE_GRID_COLUMNS
+            layout.addWidget(b, row, col)
 
         if selected_name is not None:
             for i, b in enumerate(self._instance_btns):
@@ -2108,7 +2168,7 @@ class MetricsBar(QWidget):
         self._proj_refresh.show()
         self._proj_x.show()
         self._proj_select_btn.hide()
-        self._proj_open_btn.show()
+        self._proj_open_btn.hide()
         if feature_name:
             self._feature_name_input.setText(feature_name)
             self._feature_name_input.show()
@@ -2127,7 +2187,7 @@ class MetricsBar(QWidget):
             self._loop_select_btn.hide()
         else:
             self._loop_select_btn.show()
-        self._proj_open_btn.show()
+        self._proj_open_btn.hide()
 
     def _apply_loop_loaded(self, name: str) -> None:
         self._loop_name_lbl.setToolTip(name)
@@ -3050,7 +3110,7 @@ class MetricsBar(QWidget):
 
         Os workers T2/T3 NAO vem por aqui: chegam em
         `_on_worker_occupancy_changed`, porque nao sao fixos por canal desde
-        que `SF_PARALLEL_WORKERS_V2` expos qwen/grok (gap C24).
+        que o roster expandido expos qwen/grok (gap C24).
         """
         if llm in self._MAIN_LLM_SLUGS:
             self._main_llm = llm

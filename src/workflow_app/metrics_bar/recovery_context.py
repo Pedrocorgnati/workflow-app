@@ -20,7 +20,7 @@ Fonte canonica do binding canal->LLM: ai-forge/rules/llm-routing-div.md
 (interactive=Main LLM, workspace=worker marcado do par T2, workspace_xterm=
 worker marcado do par T3). A resolucao delega a
 `metrics_bar/channel_llm.resolve_channel_llm` - o mapa constante que vivia
-aqui foi removido em 2026-08-19 (gap C24): sob `SF_PARALLEL_WORKERS_V2=1` ele
+aqui foi removido em 2026-08-19 (gap C24): no roster expandido ele
 gravava `- llm: kimi` para um T2 rodando Qwen, mandando o agente de
 recuperacao diagnosticar a CLI errada. Aqui, ao contrario de
 `recovery_prompt.llm_for_channel`, canal nao mapeado retorna `INDISPONIVEL`

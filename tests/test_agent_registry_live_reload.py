@@ -311,6 +311,19 @@ def test_modulo_instalado_intocado_serve_o_cacheado(monkeypatch, toasts):
     assert toasts == []
 
 
+def test_registry_empacotado_serve_cache_sem_aviso(tmp_path, monkeypatch, toasts):
+    """Onefile sem checkout externo usa o modulo do PYZ como fonte valida."""
+    pseudo_source = tmp_path / "_MEI123" / "workflow_app" / "agent_integration_specs.py"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(mw, "_WORKFLOW_APP_DIR", str(tmp_path / "sem-checkout"))
+    monkeypatch.setattr(specs_mod, "__file__", str(pseudo_source))
+
+    registry = MainWindow._load_agent_registry("output-toolbar-mcp")
+
+    assert registry is specs_mod
+    assert toasts == []
+
+
 # ── Integracao com os coletores (identidade de dataclass) ────────────────────
 
 

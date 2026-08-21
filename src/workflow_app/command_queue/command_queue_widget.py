@@ -46,12 +46,12 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app import dcp as dcp_pkg
+from workflow_app.command_queue.codex_whitelist import is_image_generation_command
 from workflow_app.command_queue.command_item_widget import (
     CommandItemWidget,
     command_text_with_flags,
     render_with_mcp_flags,
 )
-from workflow_app.command_queue.codex_whitelist import is_image_generation_command
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
 from workflow_app.command_queue.model_effort_equivalence import (
@@ -65,9 +65,10 @@ from workflow_app.command_queue.provider_router import (
     RoutingState,
     classify_provider,
 )
+from workflow_app.delivery.lock_bridge import (
+    _find_systemforge_root as _find_delivery_systemforge_root,
+)
 from workflow_app.dialogs.confirm_cancel_modal import ConfirmCancelModal
-from workflow_app.provider_capability_loader import get_loader as get_capability_loader
-from workflow_app.metrics_bar.recovery_prompt import RECOVERY_REASONS
 from workflow_app.domain import (
     CommandSpec,
     CommandStatus,
@@ -76,6 +77,9 @@ from workflow_app.domain import (
     InteractionType,
     ModelName,
 )
+from workflow_app.metrics_bar.recovery_prompt import RECOVERY_REASONS
+from workflow_app.provider_capability_loader import get_loader as get_capability_loader
+from workflow_app.runtime_paths import workflow_app_assets_dir
 from workflow_app.services.delivery_invalid_formatter import (
     format_delivery_invalid_popup,
 )
@@ -106,7 +110,8 @@ from workflow_app.templates.quick_templates import (
 _DROP_INDICATOR_COLOR = QColor("#F59E0B")  # Amber-400
 _DROP_INDICATOR_WIDTH = 2
 
-_WORKFLOW_APP_DIR = Path(__file__).resolve().parents[3]  # .../ai-forge/workflow-app
+_WORKFLOW_APP_DIR = _find_delivery_systemforge_root() / "ai-forge" / "workflow-app"
+_ASSETS_DIR = workflow_app_assets_dir()
 
 # ── Filtro por categoria da sub-aba 'Agentes' (insertions personas) ─────────── #
 # A sub-aba 'Agentes' expoe uma barra de filtros (QTabBar) acima do flow unico
@@ -459,6 +464,30 @@ class _TemplateLabel(_VisibilitySignalLabel):
     def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt API
         # Sempre visivel: ignora pedidos para esconder, mantem signal compat.
         super().setVisible(True)
+
+
+_TEMPLATE_ICON_CHIP_STYLE = (
+    "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
+    "  border: 1px solid #52525B; border-radius: 3px; padding: 2px; }"
+    "QPushButton:hover { background-color: #52525B; color: #FFFFFF; }"
+    "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
+    "  border-color: #FBBF24; }"
+)
+
+
+def _apply_template_icon_chip(
+    button: QPushButton, icon: QIcon | None, fallback_text: str
+) -> None:
+    """Aplica o chrome 22x22 dos chips da row queue-template-label."""
+    if icon is not None:
+        button.setIcon(icon)
+        button.setIconSize(QSize(12, 12))
+        button.setText("")
+    else:
+        button.setText(fallback_text)
+    button.setFixedSize(22, 22)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setStyleSheet(_TEMPLATE_ICON_CHIP_STYLE)
 
 
 def _load_tinted_svg_icon(path: Path, color_hex: str) -> QIcon | None:
@@ -2225,29 +2254,32 @@ class CommandQueueWidget(QWidget):
         header.setObjectName("CommandQueueHeader")
         header.setProperty("testid", "output-toolbar-left")
         header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Moldura identica a output-toolbar-center: fundo #1E1E21, borda
+        # 1px #3F3F46, radius 6px, padding uniforme 4px. As abas primarias
+        # ficam a esquerda em tamanho natural (sem barra interna de 38px
+        # nem stretch full-width), no mesmo papel do QTabBar de
+        # queue-subtabs-insertions.
         header.setStyleSheet(
-            "QWidget#CommandQueueHeader { background-color: #27272A;"
+            "QWidget#CommandQueueHeader { background-color: #1E1E21;"
             "  border: 1px solid #3F3F46; border-radius: 6px; }"
         )
         header_layout = QVBoxLayout(header)
-        # Task 1 (loop 05-13-workflow-app-layout-2): margin-top 10 no container output-toolbar-left.
-        header_layout.setContentsMargins(4, 14, 4, 4)
+        header_layout.setContentsMargins(4, 4, 4, 4)
         header_layout.setSpacing(0)
 
         # ── Tab/action row ───────────────────────────────────────────────
-        # Apenas abas primarias (Workflow, LOOPs, Auxiliar).
+        # Apenas abas primarias (LOOPs, Workflow, Auxiliar).
         # insertions_bar (Inserções + route-toggles + gear) migrou para
         # output-toolbar-center via MainWindow._setup_ui.
         tab_row = QWidget()
-        tab_row.setFixedHeight(38)
-        tab_row.setStyleSheet("background-color: #1E1E21;")
+        tab_row.setStyleSheet("background: transparent; border: none;")
         tab_row_layout = QHBoxLayout(tab_row)
-        tab_row_layout.setContentsMargins(4, 1, 4, 1)
+        tab_row_layout.setContentsMargins(0, 0, 0, 4)
         tab_row_layout.setSpacing(6)
 
         tab_bar = QWidget()
         tab_bar.setProperty("testid", "output-toolbar-left-primary-tabs")
-        tab_bar.setStyleSheet("background-color: transparent;")
+        tab_bar.setStyleSheet("background: transparent; border: none;")
         tab_bar_layout = QHBoxLayout(tab_bar)
         tab_bar_layout.setContentsMargins(0, 0, 0, 0)
         tab_bar_layout.setSpacing(3)
@@ -2276,12 +2308,19 @@ class CommandQueueWidget(QWidget):
         for i, label in enumerate(("Workflow", "LOOPs", "Auxiliar")):
             btn = QPushButton(label.upper())
             btn.setFixedHeight(22)
+            btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("testid", _tab_testids[i])
             btn.clicked.connect(lambda _ch=False, idx=i: self._switch_section(idx))
-            tab_bar_layout.addWidget(btn, stretch=1)
             self._sec_tabs.append(btn)
+        # Ordem visual: LOOPs | WORKFLOW | AUXILIAR. `_sec_tabs` e
+        # `_sec_contents` seguem o indice logico (0=Workflow, 1=LOOPs).
+        tab_bar_layout.addWidget(self._sec_tabs[1])
+        tab_bar_layout.addWidget(self._sec_tabs[0])
+        tab_bar_layout.addWidget(self._sec_tabs[2])
 
-        tab_row_layout.addWidget(tab_bar, stretch=1)
+        tab_row_layout.addWidget(tab_bar)
+        tab_row_layout.addStretch(1)
         # insertions_bar NAO entra no tab_row — MainWindow coloca em output-toolbar-center.
 
         # Exposed so MainWindow can:
@@ -2807,7 +2846,12 @@ class CommandQueueWidget(QWidget):
         enable_height_for_width(_paths_tab)
         _prompts_tab = QWidget()
         _prompts_tab.setProperty("testid", "queue-subtab-insertions-prompts")
-        _prompts_outer = QVBoxLayout(_prompts_tab)
+        _prompts_row = QHBoxLayout(_prompts_tab)
+        _prompts_row.setContentsMargins(0, 0, 0, 0)
+        _prompts_row.setSpacing(6)
+
+        _prompts_main = QWidget()
+        _prompts_outer = QVBoxLayout(_prompts_main)
         _prompts_outer.setContentsMargins(0, 0, 0, 0)
         _prompts_outer.setSpacing(3)
 
@@ -2836,12 +2880,44 @@ class CommandQueueWidget(QWidget):
             _prompts_flow_host, spacing=4, v_spacing=1, max_lines=None
         )
         self._subtab_prompts_layout.setContentsMargins(0, 2, 0, 2)
-        # heightForWidth precisa subir host -> _prompts_outer -> _prompts_tab
+        # heightForWidth precisa subir host -> _prompts_main -> _prompts_tab
         # para a sub-aba ser medida pela altura real (o QVBoxLayout so propaga
         # se o item filho anunciar hfw na size policy).
         enable_height_for_width(_prompts_flow_host)
+        enable_height_for_width(_prompts_main)
         enable_height_for_width(_prompts_tab)
         _prompts_outer.addWidget(_prompts_flow_host, stretch=1)
+
+        # Div utils (mesmo padrao de `queue-subtab-insertions-personas-utils`
+        # e `queue-subtab-insertions-brainstorm-utils`): o gear de config sai
+        # do flow e fica no canto direito, pequeno e discreto.
+        _prompts_utils = QWidget()
+        _prompts_utils.setObjectName("PromptsUtilsColumn")
+        _prompts_utils.setProperty("testid", "queue-subtab-insertions-prompts-utils")
+        _prompts_utils.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _prompts_utils.setStyleSheet(
+            "QWidget#PromptsUtilsColumn { background-color: #1E1E21;"
+            "  border: 1px solid #3F3F46; border-radius: 6px; }"
+        )
+        _prompts_utils.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self._subtab_prompts_utils_layout = QVBoxLayout(_prompts_utils)
+        self._subtab_prompts_utils_layout.setContentsMargins(4, 4, 4, 4)
+        self._subtab_prompts_utils_layout.setSpacing(4)
+        self._subtab_prompts_utils_layout.setSizeConstraint(
+            QLayout.SizeConstraint.SetFixedSize
+        )
+        self._prompts_utils_div = _prompts_utils
+        self.prompts_utils_div = _prompts_utils
+
+        _prompts_row.addWidget(_prompts_main, stretch=1)
+        _prompts_row.addWidget(
+            _prompts_utils,
+            alignment=(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+            ),
+        )
 
         _prf = QSettings("systemForge", "workflow-app")
         _active_prompt_filter = int(_prf.value("prompts/active_filter", 0))
@@ -2853,6 +2929,7 @@ class CommandQueueWidget(QWidget):
         )
         _rules_tab, self._subtab_rules_layout = _make_subtab("queue-subtab-insertions-rules")
         _cmd_tab, self._subtab_cmd_layout = _make_subtab("queue-subtab-insertions-cmd")
+        _new_cmd_tab, self._subtab_new_cmd_layout = _make_subtab("queue-subtab-insertions-new-cmd")
         _auto_improove_tab, self._subtab_auto_improove_layout = _make_subtab("queue-subtab-insertions-auto-improove")
         _personal_tab, self._subtab_personal_layout = _make_subtab("queue-subtab-insertions-personal")
 
@@ -2959,6 +3036,7 @@ class CommandQueueWidget(QWidget):
         self._insertions_subtabs.addTab(_prompts_tab, "PROMPTS")
         self._insertions_subtabs.addTab(_rules_tab, "RULES")
         self._insertions_subtabs.addTab(_cmd_tab, "CMD")
+        self._insertions_subtabs.addTab(_new_cmd_tab, "NEW CMD")
         self._insertions_subtabs.addTab(_auto_improove_tab, "AUTO IMPROOVE")
         self._insertions_subtabs.addTab(_personal_tab, "PERSONAL")
         # 'Agentes' NAO e mais sub-aba daqui: virou pagina 3 do
@@ -2972,12 +3050,17 @@ class CommandQueueWidget(QWidget):
         # clamp passa a [0,3].
         # 2026-06-03: 5a sub-aba "PERSONAS" adicionada apos CMD; clamp passa a [0,4].
         # 2026-06-03: 6a sub-aba "AUTO IMPROOVE" e 7a "PERSONAL" adicionadas; clamp [0,6].
-        # 2026-07-27: 'Agentes' promovida a secao do header; restam 6 sub-abas
-        # (PATHS..PERSONAL) e o clamp volta para [0,5]. Um indice 6 persistido
-        # por sessao antiga cai em PATHS.
+        # 2026-07-27: 'Agentes' promovida a secao do header; restavam 6 sub-abas
+        # (PATHS..PERSONAL) e o clamp voltava para [0,5]. Um indice 6 persistido
+        # por sessao antiga caia em PATHS.
+        # 2026-08-20: 7a sub-aba "NEW CMD" adicionada ao lado de CMD; clamp
+        # passa a [0,6]. Se o indice persistido vier sem essa aba (>=4),
+        # desloca uma posicao para preservar PATHS/PROMPTS/RULES/CMD.
         _stg = QSettings("systemForge", "workflow-app")
         _active_subtab = int(_stg.value("insertions/active_subtab", 0))
-        if not (0 <= _active_subtab < 6):
+        if _active_subtab >= 4:
+            _active_subtab += 1
+        if not (0 <= _active_subtab < 7):
             _active_subtab = 0
         self._insertions_subtabs.setCurrentIndex(_active_subtab)
         self._insertions_subtabs.currentChanged.connect(
@@ -2986,7 +3069,7 @@ class CommandQueueWidget(QWidget):
             )
         )
         # O QStackedLayout interno do QTabWidget dimensiona pelo MAXIMO entre as
-        # 6 sub-abas: PATHS (1 linha) herdava a altura de PROMPTS (5 linhas) e o
+        # 7 sub-abas: PATHS (1 linha) herdava a altura de PROMPTS (5 linhas) e o
         # pane sobrava vazio. `_sync_insertions_subtabs_height` poe um teto na
         # altura real da sub-aba ATIVA. Resize/LayoutRequest (populate, filtro,
         # resize da janela) chegam pelo eventFilter.
@@ -3019,38 +3102,36 @@ class CommandQueueWidget(QWidget):
 
         # Play bar — big play button
         _PLAY_ROW_TOP_HEIGHT = 32
+        _ACTIONS_ROW_HEIGHT = 28
+        _PLAY_ROW_BOTTOM_HEIGHT = 32
         # queue-div-llm-routing (_llm_box) deixou de morar na play bar: passou a
         # ser reparenteado para a linha 1 da OutputToolbar do MainWindow (slot
         # antes ocupado por output-toolbar-progress-boxes). As secoes agora sao
         # verticais (Main LLM / Parallel Worker / MCP Flags / MCP / brainstorm),
         # empilhadas uma sobre a outra; dentro de cada secao label e inputs ficam
-        # em row. play_row_third guarda so o copy-btn.
-        _COPY_ROW_HEIGHT = 26
+        # em row.
         _PLAY_BAR_VERTICAL_MARGINS = 10
         _PLAY_BAR_SPACING = 4
         _PLAY_BAR_HEIGHT = (
             _PLAY_ROW_TOP_HEIGHT
-            + _COPY_ROW_HEIGHT
+            + _PLAY_ROW_BOTTOM_HEIGHT
+            + _ACTIONS_ROW_HEIGHT
             + _PLAY_BAR_VERTICAL_MARGINS
-            + _PLAY_BAR_SPACING
+            + (_PLAY_BAR_SPACING * 2)
         )
-        play_bar = QWidget()
-        play_bar.setStyleSheet(
+        self._play_bar = QWidget()
+        self._play_bar.setStyleSheet(
             "background-color: #1C1C1F; border-bottom: 1px solid #3F3F46;"
         )
-        play_bar.setFixedHeight(_PLAY_BAR_HEIGHT)
-        pl = QVBoxLayout(play_bar)
+        self._play_bar.setFixedHeight(_PLAY_BAR_HEIGHT)
+        pl = QVBoxLayout(self._play_bar)
         pl.setContentsMargins(8, 5, 8, 5)
         pl.setSpacing(4)
 
         play_row_top = QHBoxLayout()
         play_row_top.setContentsMargins(0, 0, 0, 0)
         play_row_top.setSpacing(8)
-        play_row_third = QHBoxLayout()
-        play_row_third.setContentsMargins(0, 0, 0, 0)
-        play_row_third.setSpacing(8)
         pl.addLayout(play_row_top)
-        pl.addLayout(play_row_third)
 
         # "Rodar próximo" — botão dominante da play bar (primeira posição,
         # verde #16A34A, stretch=7). Executa o proximo item pendente da fila e
@@ -3075,13 +3156,22 @@ class CommandQueueWidget(QWidget):
         self._play_btn.clicked.connect(self._on_step_btn_clicked)
 
         # Container "div" envolvendo o queue-btn-play-next para alvo de testes
-        # de UI (data-testid). Mantem o stretch=2 original do play_btn.
+        # de UI (data-testid). Duas linhas:
+        #   Linha 1: apenas queue-btn-play-next
+        #   Linha 2: autocast-btn + schedule-autocast-btn + main-command-queue-auto-loop-btn
         self._play_btn_container = QWidget()
         self._play_btn_container.setProperty("testid", "queue-btn-play-next-container")
-        _play_btn_container_layout = QHBoxLayout(self._play_btn_container)
+        _play_btn_container_layout = QVBoxLayout(self._play_btn_container)
         _play_btn_container_layout.setContentsMargins(0, 0, 0, 0)
-        _play_btn_container_layout.setSpacing(0)
+        _play_btn_container_layout.setSpacing(4)
         _play_btn_container_layout.addWidget(self._play_btn)
+
+        # Linha 2: autocast + schedule + auto-loop
+        self._play_row_bottom = QHBoxLayout()
+        self._play_row_bottom.setContentsMargins(0, 0, 0, 0)
+        self._play_row_bottom.setSpacing(4)
+        _play_btn_container_layout.addLayout(self._play_row_bottom)
+
         play_row_top.addWidget(self._play_btn_container, stretch=2)
 
         # Autocast (segunda posicao — invertido com schedule em Iter 12).
@@ -3217,8 +3307,8 @@ class CommandQueueWidget(QWidget):
 
         signal_bus.schedule_autocast_visual_changed.connect(_on_schedule_visual_changed)
         self._ac_sched_layout.addWidget(self._btn_schedule_autocast, stretch=0)
-        # play_btn (stretch=2) + ac_sched (stretch=3) -> 40/60 split na row.
-        play_row_top.addLayout(self._ac_sched_layout, stretch=3)
+        # Linha 2 do queue-btn-play-next-container: autocast + schedule + auto-loop
+        self._play_row_bottom.addLayout(self._ac_sched_layout, stretch=1)
 
         # LLM routing: one container with the main session selector and
         # optional worker preference toggles used by [Rodar proximo].
@@ -3230,13 +3320,16 @@ class CommandQueueWidget(QWidget):
         # - flag OFF: coluna. As tres secoes (Main LLM | Parallel Worker | Flag)
         #   ficam empilhadas, separadas por divisores HLine. A div mora na
         #   top-row, ao lado do selector, onde so ha largura para uma coluna.
-        # - flag ON: linha. As tres secoes ficam lado a lado, separadas por
-        #   divisores VLine. A div mora dentro da aba LLM Config, que tem a
-        #   largura inteira do header e um teto de altura (R-18); empilhar ali
-        #   estouraria o maximo do selector.
+        # - flag ON: linha. Instance, Main, Parallel e Flag ficam lado a lado,
+        #   separadas por divisores VLine. A div mora dentro da aba LLM Routing,
+        #   que tem a largura inteira do header e um teto de altura (R-18).
         # Em ambos os casos, nas duas primeiras secoes o label fica em cima dos
         # inputs; em Flag o label divide a linha com os checkboxes.
         from workflow_app.config import llm_config_v2_enabled as _llm_v2_on
+        from workflow_app.config.feature_flags import (
+            instance_group_route_aware_enabled as _instance_group_in_routing,
+        )
+
         _llm_box_horizontal = _llm_v2_on()
         _llm_box = QWidget()
         self._llm_box = _llm_box
@@ -3305,12 +3398,37 @@ class CommandQueueWidget(QWidget):
 
         self._make_llm_divider = _make_llm_divider
 
+        # Na aba expandida, os aliases formam a primeira coluna independente.
+        # O widget real pertence ao MetricsBar e e reparenteado pelo MainWindow
+        # depois que ambos os componentes existem. No modo legado, o destino
+        # historico continua sendo queue-div-main-llm.
+        self.instance_buttons_section = None
+        if _llm_box_horizontal and _instance_group_in_routing():
+            _instance_section = QWidget()
+            _instance_section.setProperty("testid", "queue-div-instance-buttons")
+            _instance_section.setStyleSheet("background: transparent; border: none;")
+            _instance_section.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
+            _instance_layout = QVBoxLayout(_instance_section)
+            _instance_layout.setContentsMargins(0, 0, 0, 0)
+            _instance_layout.setSpacing(0)
+            self.instance_buttons_section = _instance_section
+            _llm_layout.addWidget(_instance_section)
+            _llm_layout.addWidget(_make_llm_divider())
+
         _main_section = QWidget()
-        # Item 024: exposed as public attribute so MainWindow can reparent
-        # instance_group here under SF_INSTANCE_GROUP_ROUTE_AWARE="1" (D024-d).
+        # Exposto para preservar o destino route-aware do modo legado. Na aba
+        # expandida, instance-group vive na coluna dedicada criada acima.
         self.main_llm_section = _main_section
         _main_section.setProperty("testid", "queue-div-main-llm")
         _main_section.setStyleSheet("background: transparent; border: none;")
+        if _llm_box_horizontal:
+            _main_section.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
         # Layout em coluna: label em cima, inputs (radios) embaixo. spacing 2
         # deixa o gap label-controle menor que o gap entre secoes (_llm_layout
         # usa 6), agrupando cada par visualmente.
@@ -3321,9 +3439,17 @@ class CommandQueueWidget(QWidget):
         _main_label.setStyleSheet(_section_label_qss)
         _main_options = QWidget()
         _main_options.setStyleSheet("background: transparent; border: none;")
-        _main_options_layout = QHBoxLayout(_main_options)
+        _main_options_layout = (
+            QGridLayout(_main_options)
+            if _llm_box_horizontal
+            else QHBoxLayout(_main_options)
+        )
         _main_options_layout.setContentsMargins(0, 0, 0, 0)
-        _main_options_layout.setSpacing(7)
+        if _llm_box_horizontal:
+            _main_options_layout.setHorizontalSpacing(7)
+            _main_options_layout.setVerticalSpacing(2)
+        else:
+            _main_options_layout.setSpacing(7)
         self._main_claude_radio = QRadioButton("claude")
         self._main_claude_radio.setProperty("testid", "queue-radio-main-claude")
         self._main_claude_radio.setChecked(True)
@@ -3337,10 +3463,11 @@ class CommandQueueWidget(QWidget):
         self._main_qwen_radio.setProperty("testid", "queue-radio-main-qwen")
         self._main_grok_radio = QRadioButton("grok")
         self._main_grok_radio.setProperty("testid", "queue-radio-main-grok")
-        # Item 004 (C6/C13): radios de VARIANTE. `opus`/`sonnet` sao variantes
-        # de modelo da family `claude`; `kimi-k3` e variante da family `kimi`.
-        # Nenhum deles e provider novo — `provider_router.Provider` continua com
-        # os 5 membros de sempre (MF-01, source.md:1198).
+        # Radios de VARIANTE (opus/sonnet/kimi-k3) NAO entram em
+        # `queue-div-main-llm`: esta div escolhe o CLI do terminal, nao a
+        # capacidade de raciocinio. As variantes vivem em `queue-div-flag`.
+        # Os widgets continuam existindo (testids C6) mas ficam ocultos e
+        # fora do layout, para persistencia antiga cair na family.
         self._main_opus_radio = QRadioButton("opus")
         self._main_opus_radio.setProperty("testid", "queue-radio-main-opus")
         self._main_sonnet_radio = QRadioButton("sonnet")
@@ -3349,19 +3476,37 @@ class CommandQueueWidget(QWidget):
         self._main_kimi_k3_radio.setProperty("testid", "queue-radio-main-kimi-k3")
         self._main_llm_group = QButtonGroup(self)
         self._main_llm_group.setExclusive(True)
+        # Layout expandido: so os 5 CLIs de terminal em duas colunas.
+        # Fora da aba, o layout legado continua horizontal.
+        _main_grid_positions = {
+            self._main_claude_radio: (0, 0),
+            self._main_codex_radio: (0, 1),
+            self._main_kimi_radio: (1, 0),
+            self._main_grok_radio: (1, 1),
+            self._main_qwen_radio: (2, 0),
+        }
         for _btn in (
             self._main_claude_radio,
             self._main_codex_radio,
             self._main_kimi_radio,
             self._main_qwen_radio,
             self._main_grok_radio,
+        ):
+            _btn.setStyleSheet(_control_qss)
+            self._main_llm_group.addButton(_btn)
+            if _llm_box_horizontal:
+                _row, _column = _main_grid_positions[_btn]
+                _main_options_layout.addWidget(_btn, _row, _column)
+            else:
+                _main_options_layout.addWidget(_btn)
+        for _variant_btn in (
             self._main_opus_radio,
             self._main_sonnet_radio,
             self._main_kimi_k3_radio,
         ):
-            _btn.setStyleSheet(_control_qss)
-            self._main_llm_group.addButton(_btn)
-            _main_options_layout.addWidget(_btn)
+            _variant_btn.setStyleSheet(_control_qss)
+            self._main_llm_group.addButton(_variant_btn)
+            _variant_btn.setVisible(False)
         # ST006: kill-switch — qwen radio visivel somente quando llm_config_v2
         # esta ligado. Ausente ou off = oculto.
         # Item 026: kill-switch — grok radio visivel somente quando
@@ -3391,20 +3536,18 @@ class CommandQueueWidget(QWidget):
             "kimi": True,
             "qwen": main_providers_v2_enabled(),
             "grok": grok_spike_enabled(),
-            "opus": main_providers_v2_enabled(),
-            "sonnet": main_providers_v2_enabled(),
-            "kimi-k3": main_providers_v2_enabled(),
+            # Variantes de raciocinio sairam do Main LLM (sempre ocultas).
+            "opus": False,
+            "sonnet": False,
+            "kimi-k3": False,
         }
         if not _main_radio_visible["qwen"]:
             self._main_qwen_radio.setVisible(False)
         if not _main_radio_visible["grok"]:
             self._main_grok_radio.setVisible(False)
-        if not _main_radio_visible["opus"]:
-            self._main_opus_radio.setVisible(False)
-        if not _main_radio_visible["sonnet"]:
-            self._main_sonnet_radio.setVisible(False)
-        if not _main_radio_visible["kimi-k3"]:
-            self._main_kimi_k3_radio.setVisible(False)
+        self._main_opus_radio.setVisible(False)
+        self._main_sonnet_radio.setVisible(False)
+        self._main_kimi_k3_radio.setVisible(False)
         # Item 018: persistencia do radio Main LLM via QSettings.
         # Restaura a selecao da sessao anterior (default: claude).
         _main_stg = QSettings("systemForge", "workflow-app")
@@ -3423,19 +3566,27 @@ class CommandQueueWidget(QWidget):
         _saved_slug = str(_saved_main or "claude").strip().lower()
         if _saved_slug not in _main_radio_map:
             _saved_slug = "claude"
+        # Variantes de raciocinio persistidas (opus/sonnet/kimi-k3) caem na
+        # family: o Main LLM agora e so o CLI do terminal.
+        _saved_slug = {
+            "opus": "claude",
+            "sonnet": "claude",
+            "kimi-k3": "kimi",
+        }.get(_saved_slug, _saved_slug)
         # Slug persistido cujo radio esta oculto por kill-switch (ex.: sessao
         # anterior rodou com SF_GROK_SPIKE=1 e esta nao) volta para claude em
         # vez de marcar um radio invisivel — Main marcado tem que ser Main que
         # o operador consegue ver e trocar.
-        if not _main_radio_visible[_saved_slug]:
+        if not _main_radio_visible.get(_saved_slug, False):
             _saved_slug = "claude"
         _main_radio_map[_saved_slug].setChecked(True)
         self._main_llm_group.buttonClicked.connect(
             lambda btn: self._persist_main_llm_selection()
         )
-        # O stretch vive no layout horizontal interno: em coluna ele so
-        # empurraria o conteudo para cima, sem alinhar nada.
-        _main_options_layout.addStretch(1)
+        # O stretch horizontal permanece apenas no modo legado. Na aba, a
+        # grade tem exatamente duas colunas de controles.
+        if not _llm_box_horizontal:
+            _main_options_layout.addStretch(1)
         _main_layout.addWidget(_main_label)
         _main_layout.addWidget(_main_options)
         _llm_layout.addWidget(_main_section)
@@ -3443,6 +3594,11 @@ class CommandQueueWidget(QWidget):
         _worker_section = QWidget()
         _worker_section.setProperty("testid", "queue-div-parallel-worker")
         _worker_section.setStyleSheet("background: transparent; border: none;")
+        if _llm_box_horizontal:
+            _worker_section.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
         # Layout em coluna: label em cima, inputs (checkboxes) embaixo.
         _worker_layout = QVBoxLayout(_worker_section)
         _worker_layout.setContentsMargins(0, 0, 0, 0)
@@ -3453,7 +3609,7 @@ class CommandQueueWidget(QWidget):
         _worker_options.setStyleSheet("background: transparent; border: none;")
         _worker_options_layout = QHBoxLayout(_worker_options)
         _worker_options_layout.setContentsMargins(0, 0, 0, 0)
-        _worker_options_layout.setSpacing(8)
+        _worker_options_layout.setSpacing(12 if _llm_box_horizontal else 8)
         self._use_kimi_chk = QCheckBox("kimi")
         self._use_kimi_chk.setProperty("testid", "queue-chk-use-kimi")
         self._use_kimi_chk.setToolTip(
@@ -3495,12 +3651,9 @@ class CommandQueueWidget(QWidget):
             for _hidden_worker in (self._use_qwen_chk, self._use_grok_chk):
                 _hidden_worker.setChecked(False)
                 _hidden_worker.setVisible(False)
-        # Split visual T2/T3 (source.md:1191 + §10.2): um terminal so aceita um
-        # worker, e a exclusividade PW-01 ja e enforced nos handlers
-        # `_on_use_*_toggled`. Sem os dois sub-grupos rotulados, os 4 checkboxes
-        # numa row unica nao dizem QUAL terminal cada par disputa — o operador
-        # so descobre a troca depois do toast. Agrupar e a projecao visual do
-        # invariante, nao decoracao.
+        # Split visual T2/T3 (source.md:1191 + §10.2): na aba, cada terminal e
+        # uma coluna interna com seus dois workers empilhados, repetindo a
+        # leitura em grade do Main LLM. O modo legado preserva a linha unica.
         _sub_label_qss = (
             "QLabel { color: #71717A; font-size: 10px; font-weight: 700;"
             "  background: transparent; border: none; }"
@@ -3512,9 +3665,13 @@ class CommandQueueWidget(QWidget):
             _sub = QWidget()
             _sub.setProperty("testid", _sub_testid)
             _sub.setStyleSheet("background: transparent; border: none;")
-            _sub_layout = QHBoxLayout(_sub)
+            _sub_layout = (
+                QVBoxLayout(_sub)
+                if _llm_box_horizontal
+                else QHBoxLayout(_sub)
+            )
             _sub_layout.setContentsMargins(0, 0, 0, 0)
-            _sub_layout.setSpacing(6)
+            _sub_layout.setSpacing(2 if _llm_box_horizontal else 6)
             _sub_lbl = QLabel(_sub_text)
             _sub_lbl.setStyleSheet(_sub_label_qss)
             _sub_layout.addWidget(_sub_lbl)
@@ -3541,29 +3698,29 @@ class CommandQueueWidget(QWidget):
         _flag_section = QWidget()
         _flag_section.setProperty("testid", "queue-div-flag")
         _flag_section.setStyleSheet("background: transparent; border: none;")
-        # Layout em LINHA (2026-07-27): ao contrario das duas secoes acima, o
-        # label "Flag" fica a esquerda, na mesma linha dos checkboxes --kimi /
-        # --codex. Sao so dois controles curtos, entao a linha unica economiza
-        # altura da coluna sem apertar nada.
-        _flag_layout = QHBoxLayout(_flag_section)
+        # Na aba, Flag segue o mesmo formato das demais colunas: titulo em cima
+        # e controles abaixo. O modo legado continua horizontal.
+        _flag_layout = (
+            QVBoxLayout(_flag_section)
+            if _llm_box_horizontal
+            else QHBoxLayout(_flag_section)
+        )
         _flag_layout.setContentsMargins(0, 0, 0, 0)
-        _flag_layout.setSpacing(8)
-        # Item 021 (fechado em 2026-08-17): sob a flag, quem preenche
-        # `queue-div-flag` e o FlagsPanel com os 7 literais canonicos, DENTRO
-        # da div. Antes o painel vivia num container irmao do `_llm_box`, fora
-        # da moldura de `queue-div-llm-routing`, o que (a) partia a secao em
-        # dois blocos visuais desalinhados e (b) duplicava os testids
-        # `queue-chk-flag-kimi`/`-codex` (um par no painel, outro aqui).
-        # Aliasando os checkboxes do painel como `_flag_<slug>_chk`, todo o
-        # plumbing existente (`_refresh_flag_checkboxes_state`,
-        # `_active_mcp_flags_from_local`, C-43/C-57) passa a valer para os 7
-        # sem duplicar controle.
+        _flag_layout.setSpacing(2 if _llm_box_horizontal else 8)
+        # Item 021: sob a flag, quem preenche `queue-div-flag` e o FlagsPanel
+        # (thinking/execution). Aliasando os checkboxes do painel como
+        # `_flag_<slug>_chk`, o plumbing (`_refresh_flag_checkboxes_state`,
+        # `_active_mcp_flags_from_local`, C-43/C-57) vale para todos os
+        # literais sem duplicar controle.
         self._flags_panel = None
         if _llm_box_horizontal:
             from workflow_app.config.llm_flags import _FLAG_CANONICAL_ORDER
             from workflow_app.llm_config.flags_panel import FlagsPanel
 
-            _panel = FlagsPanel(main_llm_resolver=self._resolve_interactive_main_llm)
+            _panel = FlagsPanel(
+                main_llm_resolver=self._resolve_interactive_main_llm,
+                show_label=False,
+            )
             self._flags_panel = _panel
             for _flag in _FLAG_CANONICAL_ORDER:
                 _chk = _panel.checkbox(_flag)
@@ -3576,6 +3733,8 @@ class CommandQueueWidget(QWidget):
                     _chk,
                 )
             _panel.flags_changed.connect(self._on_flags_panel_changed)
+            # Titulos de coluna (thinking / execution) vivem no FlagsPanel;
+            # o label unico "Flag" sobraria como terceira faixa.
             _flag_layout.addWidget(_panel)
         else:
             _flag_label = QLabel("Flag")
@@ -3607,40 +3766,23 @@ class CommandQueueWidget(QWidget):
         _llm_layout.addWidget(_make_llm_divider())
         _llm_layout.addWidget(_flag_section)
         # _llm_box NAO entra na play bar: o MainWindow o reparenteia para a
-        # linha 1 da OutputToolbar. A coluna fecha aqui, nas tres secoes acima;
-        # o MainWindow nao anexa mais nada nela. play_row_third guarda so o
-        # copy-btn.
+        # aba LLM Routing. O MainWindow anexa somente o instance-group na
+        # primeira coluna reservada.
 
-        # Botao de copiar todos os comandos renderizados em queue-command-list.
-        # Posicionado em play_row_third apos --force Kimi.
+        # Chip 22x22 da row queue-template-label (copy + clear). Estilo unico
+        # para os dois: 1:1, so o icone muda.
         self._copy_commands_btn = QPushButton()
         self._copy_commands_btn.setProperty(
             "testid", "queue-btn-copy-commands"
         )
         _copy_icon = _load_tinted_svg_icon(
-            _WORKFLOW_APP_DIR / "assets" / "copy.svg", "#FAFAFA"
+            _ASSETS_DIR / "copy.svg", "#FAFAFA"
         )
-        if _copy_icon is not None:
-            self._copy_commands_btn.setIcon(_copy_icon)
-            self._copy_commands_btn.setIconSize(QSize(12, 12))
-        else:
-            self._copy_commands_btn.setText("⎘")
-        self._copy_commands_btn.setFixedSize(22, 22)
-        self._copy_commands_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _apply_template_icon_chip(self._copy_commands_btn, _copy_icon, "⎘")
         self._copy_commands_btn.setToolTip(
             "Copiar todos os comandos renderizados, uma linha por comando"
         )
-        self._copy_commands_btn.setStyleSheet(
-            "QPushButton { background-color: #3F3F46; color: #FAFAFA;"
-            "  border: 1px solid #52525B; border-radius: 3px; padding: 2px; }"
-            "QPushButton:hover { background-color: #52525B; color: #FFFFFF; }"
-            "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
-            "  border-color: #FBBF24; }"
-        )
         self._copy_commands_btn.clicked.connect(self._on_copy_rendered_commands)
-        play_row_third.addWidget(
-            self._copy_commands_btn, alignment=Qt.AlignmentFlag.AlignVCenter
-        )
 
         # Main Kimi preserves the old slash-to-skill conversion and hides the
         # per-item blue arrows while active. Worker toggles keep the legacy
@@ -3669,60 +3811,7 @@ class CommandQueueWidget(QWidget):
         # MetricsBar cega EM SILENCIO. Emissao dupla e inofensiva.
         QTimer.singleShot(0, self._emit_worker_occupancy)
 
-        main_layout.addWidget(play_bar)
-
-        # Model/Effort row — above queue-template-label.
-        # Espelha o comportamento visual de queue-template-label e
-        # queue-last-command. Dois divs internos em row: esquerda renderiza
-        # o ultimo `/model X` rodado em queue-command-list; direita renderiza
-        # o ultimo `/effort X`. Atualizado em _on_run_command; resetado em
-        # load_pipeline / clear_queue.
-        self._model_effort_row = QWidget()
-        self._model_effort_row.setProperty("testid", "queue-model-effort-row")
-        self._model_effort_row.setFixedHeight(28)
-        self._model_effort_row.setStyleSheet(
-            "QWidget { background-color: #1C1C1F;"
-            " border-bottom: 1px solid #3F3F46; }"
-        )
-        _mel = QHBoxLayout(self._model_effort_row)
-        _mel.setContentsMargins(10, 4, 10, 4)
-        _mel.setSpacing(6)
-
-        _ME_LBL_BASE = (
-            "background: transparent; border: none;"
-            " color: #D4D4D8; font-size: 11px; font-family: monospace;"
-        )
-
-        self._last_model_div = QWidget()
-        self._last_model_div.setProperty("testid", "queue-last-model")
-        self._last_model_div.setStyleSheet("background: transparent;")
-        _lmdl = QHBoxLayout(self._last_model_div)
-        _lmdl.setContentsMargins(0, 0, 0, 0)
-        _lmdl.setSpacing(4)
-        self._last_model_label = QLabel("/model: —")
-        self._last_model_label.setProperty("testid", "queue-last-model-value")
-        self._last_model_label.setStyleSheet(_ME_LBL_BASE)
-        _lmdl.addWidget(self._last_model_label)
-        _lmdl.addStretch(1)
-        _mel.addWidget(self._last_model_div, stretch=1)
-
-        self._last_effort_div = QWidget()
-        self._last_effort_div.setProperty("testid", "queue-last-effort")
-        self._last_effort_div.setStyleSheet("background: transparent;")
-        _ledl = QHBoxLayout(self._last_effort_div)
-        _ledl.setContentsMargins(0, 0, 0, 0)
-        _ledl.setSpacing(4)
-        _ledl.addStretch(1)
-        self._last_effort_label = QLabel("/effort: —")
-        self._last_effort_label.setProperty("testid", "queue-last-effort-value")
-        self._last_effort_label.setStyleSheet(_ME_LBL_BASE)
-        _ledl.addWidget(self._last_effort_label)
-        _mel.addWidget(self._last_effort_div, stretch=1)
-
-        self._last_model_value: str = ""
-        self._last_effort_value: str = ""
-
-        main_layout.addWidget(self._model_effort_row)
+        main_layout.addWidget(self._play_bar)
 
         # Template indicator label — shows which template/button was clicked.
         self._template_row = QWidget()
@@ -3741,7 +3830,12 @@ class CommandQueueWidget(QWidget):
             "background: transparent; color: #A1A1AA;"
             " border: none; padding: 4px 10px; font-size: 11px;"
         )
+        # Label ocupa o restante da largura; copy/clear entram no canto
+        # direito (Clear e reparentado pelo MainWindow apos a criacao).
         _trl.addWidget(self._template_label, stretch=1)
+        _trl.addWidget(
+            self._copy_commands_btn, 0, Qt.AlignmentFlag.AlignVCenter
+        )
 
         # Sempre visivel (mudanca 2026-05-17 P4) — row sincroniza via signal
         # mas _TemplateLabel.setVisible(False) e no-op, entao a row tambem.
@@ -4024,6 +4118,82 @@ class CommandQueueWidget(QWidget):
         de publicar num terminal inexistente (Zero Silencio)."""
         self._codex_t3_available = bool(alive)
 
+    _T3_OUTPUT_TESTID = "terminal-codex-output"
+    _GROK_CLI_BASENAME = "grok"
+
+    def _find_t3_output_panel(self) -> QWidget | None:
+        """Locate the canonical T3 widget (`terminal-codex-output`).
+
+        Returns None when this queue is not embedded in MainWindow (unit
+        tests) or when T3 has not been built yet.
+        """
+        win = self.window()
+        if win is None:
+            return None
+        for child in win.findChildren(QWidget):
+            if child.property("testid") == self._T3_OUTPUT_TESTID:
+                return child
+        return None
+
+    def _t3_pty_hosts_cli(self, cli: str) -> bool | None:
+        """Whether the T3 PTY session currently hosts ``cli``.
+
+        Returns:
+          - True when a descendant process of the T3 PTY matches ``cli``
+          - False when the PTY is inspectable but ``cli`` is not running
+            (zsh idle, leftover Codex REPL, other binary)
+          - None when there is no PTY to inspect (headless / unit tests).
+            Callers then fall back to occupancy; occupancy alone is NOT
+            enough in production.
+        """
+        panel = self._find_t3_output_panel()
+        if panel is None:
+            return None
+        shell = getattr(panel, "_shell", None)
+        if shell is None:
+            return None
+        pid_fn = getattr(shell, "pid", None)
+        pid = pid_fn() if callable(pid_fn) else None
+        if pid is None:
+            return None
+        hosts_fn = getattr(shell, "hosts_cli", None)
+        if not callable(hosts_fn):
+            return None
+        try:
+            return bool(hosts_fn(cli))
+        except OSError:
+            return None
+
+    def _ensure_t3_grok_host(self) -> bool:
+        """Gate Worker T3 Grok: widget + occupancy + PTY process.
+
+        Toasts the specific reason and returns False on abort (Zero Silencio).
+        """
+        if not self._codex_t3_available:
+            signal_bus.toast_requested.emit(
+                "Worker Grok (T3): terminal-codex-output nao esta pronto — "
+                "dispatch abortado.",
+                "warning",
+            )
+            return False
+        _t2, t3 = self._resolve_worker_occupancy()
+        if t3 != "grok":
+            signal_bus.toast_requested.emit(
+                "Worker Grok (T3): o xterm nao hospeda o CLI grok "
+                "(queue-chk-use-grok desmarcado) — dispatch abortado.",
+                "warning",
+            )
+            return False
+        hosted = self._t3_pty_hosts_cli(self._GROK_CLI_BASENAME)
+        if hosted is False:
+            signal_bus.toast_requested.emit(
+                "Worker Grok (T3): o PTY nao hospeda o processo grok "
+                "(ocupacao marcada, CLI ausente) — dispatch abortado.",
+                "warning",
+            )
+            return False
+        return True
+
     def _on_autocast_abort_requested(self, cause: str, channel: str) -> None:
         """Desliga o botao autocast quando um listener entra em estado failed.
 
@@ -4127,10 +4297,41 @@ class CommandQueueWidget(QWidget):
         """
         self._populate_subtab(self._subtab_paths_layout, widgets + (second_row or []))
 
+    #: testid do utilitario da aba PROMPTS. Nao e um prompt filtravel e vive
+    #: na div `queue-subtab-insertions-prompts-utils`, em coluna, encostada no
+    #: canto direito da sub-aba.
+    _PROMPTS_UTIL_TESTIDS = (
+        "toolbar-prompts-config-gear",
+    )
+
     def populate_prompts_subtab(self, widgets: list[QWidget]) -> None:
-        """Sub-aba 'prompts': botoes de prompt construídos a partir de arquivos .md."""
-        self._populate_subtab(self._subtab_prompts_layout, widgets)
+        """Sub-aba 'prompts': botoes de prompt construídos a partir de arquivos .md.
+
+        O gear `toolbar-prompts-config-gear` sai do flow e vai para a div
+        `queue-subtab-insertions-prompts-utils` no canto direito.
+        """
+        prompts = [w for w in widgets if not self._is_prompts_util(w)]
+        utils = [w for w in widgets if self._is_prompts_util(w)]
+        self._populate_subtab(self._subtab_prompts_layout, prompts)
+        self._populate_prompts_utils(utils)
         self._apply_prompt_filter()
+
+    def _is_prompts_util(self, widget: QWidget) -> bool:
+        """True para o gear de config da aba PROMPTS."""
+        tid = widget.property("testid")
+        return isinstance(tid, str) and tid in self._PROMPTS_UTIL_TESTIDS
+
+    def _populate_prompts_utils(self, widgets: list[QWidget]) -> None:
+        """Reconstroi a coluna de utilitarios (gear) da aba PROMPTS."""
+        layout = self._subtab_prompts_utils_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        for w in widgets:
+            layout.addWidget(w, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.invalidate()
 
     def populate_rules_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'rules': dcp-list, cmd-list, terminal, listeners, indicators, add-rules."""
@@ -4139,6 +4340,10 @@ class CommandQueueWidget(QWidget):
     def populate_cmd_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'CMD': comandos avulsos que colam um slash-command no terminal."""
         self._populate_subtab(self._subtab_cmd_layout, widgets)
+
+    def populate_new_cmd_subtab(self, widgets: list[QWidget]) -> None:
+        """Sub-aba 'NEW CMD': comandos de modernizacao e atualizacao de templates."""
+        self._populate_subtab(self._subtab_new_cmd_layout, widgets)
 
     def populate_auto_improove_subtab(self, widgets: list[QWidget]) -> None:
         """Sub-aba 'AUTO IMPROOVE': comandos de melhoria continua de assets SystemForge."""
@@ -4350,8 +4555,8 @@ class CommandQueueWidget(QWidget):
         """Posiciona um widget no canto direito da tab bar das sub-abas de
         inserções (PATHS/PROMPTS/RULES), na mesma row dos botoes de aba.
 
-        Usado para o toolbar-prompts-config-gear, que passa a viver ao lado
-        das abas em vez de no bloco insertions_bar.
+        Sem chamador ativo: o `toolbar-prompts-config-gear` vive na div
+        `queue-subtab-insertions-prompts-utils` (canto da sub-aba PROMPTS).
         """
         self._insertions_subtabs.setCornerWidget(
             widget, Qt.Corner.TopRightCorner
@@ -8232,6 +8437,7 @@ class CommandQueueWidget(QWidget):
         metrics-project-pill; abre dialog proprio; emite specs e toast.
         """
         from PySide6.QtWidgets import QInputDialog
+
         from workflow_app.command_queue.micro_sites_multilingue_expander import (
             MicroSitesMultilingueError,
             validate_and_build_specs,
@@ -8292,23 +8498,6 @@ class CommandQueueWidget(QWidget):
         self._last_cmd_count_slot.setVisible(True)
         self._last_cmd_eye.setVisible(True)
         self._last_cmd_eye.setToolTip(cleaned)
-        # queue-model-effort-row: captura o ultimo /model e /effort rodados
-        # a partir de queue-command-list. Atualiza so o lado correspondente.
-        if cmd_token == "/model" and len(parts) > 1:
-            self._last_model_value = parts[1]
-            self._last_model_label.setText(f"/model: {self._last_model_value}")
-            # Defensivo (C27): um `/model {modelo} {effort}` de duas palavras so
-            # pode ser residuo da traducao revogada, e hoje nao chega a ser
-            # despachado. Se chegar, o 3o token vai para a celula de effort em
-            # vez de deixar o lado direito congelado mentindo sobre o que rodou.
-            if len(parts) > 2:
-                self._last_effort_value = parts[2]
-                self._last_effort_label.setText(f"/effort: {self._last_effort_value}")
-        elif cmd_token in ("/effort", "/reasoning") and len(parts) > 1:
-            # `/reasoning` so aparece como residuo (C27): mesma celula da row,
-            # rotulada com o token realmente despachado.
-            self._last_effort_value = parts[1]
-            self._last_effort_label.setText(f"{cmd_token}: {self._last_effort_value}")
         self._highlight_current_command(cleaned)
         self._maybe_auto_save(cmd_text)
 
@@ -8366,10 +8555,6 @@ class CommandQueueWidget(QWidget):
         # _current_dcp_flow_path AFTER this signal returns, so DCP-sourced
         # loads end up with the path correctly set. Non-DCP sources stay None.
         self._current_dcp_flow_path = None
-
-        # Reset queue-model-effort-row: nova pipeline reseta o ultimo /model
-        # e /effort rodados (escopados a queue-command-list atual).
-        self._reset_model_effort_row()
 
         # Clear existing
         for item in self._items:
@@ -8630,18 +8815,11 @@ class CommandQueueWidget(QWidget):
         self._last_cmd_eye.setVisible(False)
         self._last_cmd_eye.setToolTip("")
         self._last_cmd_full = ""
-        self._reset_model_effort_row()
         # P4: queue-template-label e sempre visivel; nao escondemos mais.
         self._empty_widget.setVisible(True)
         self._list_widget.setVisible(False)
         self._emit_progress_metrics()
         self._update_save_btn_state()
-
-    def _reset_model_effort_row(self) -> None:
-        self._last_model_value = ""
-        self._last_effort_value = ""
-        self._last_model_label.setText("/model: —")
-        self._last_effort_label.setText("/effort: —")
 
     def _item_at(self, position: int) -> CommandItemWidget | None:
         for item in self._items:
@@ -8834,10 +9012,15 @@ class CommandQueueWidget(QWidget):
 
     def _dispatch_blue_arrow(self, kimi_prompt: str) -> None:
         """Forward a blue-arrow click to `kimi_blue_arrow_dispatched` with
-        the right delay. If the previous workspace dispatch was /clear, add
-        2s extra because Kimi's TUI repaint after a clear is slower than
-        normal — without the extra delay, Enter lands before /skill: is
-        composed and the command is silently dropped.
+        the right delay. Handler do par T2 inteiro (Worker Kimi e Worker
+        Qwen): o clique per-item e o step convergem aqui via
+        `_on_kimi_clicked`. Se a ocupacao do T2 e `qwen`, reescreve
+        `/skill:slash-executor` para o slash nativo `/slash-executor`.
+
+        If the previous workspace dispatch was /clear, add 2s extra because
+        Kimi's TUI repaint after a clear is slower than normal — without the
+        extra delay, Enter lands before /skill: is composed and the command
+        is silently dropped. O mesmo delay vale para Qwen (Rich prompt).
 
         task 006 — condicao de falha 3 (adaptacao Kimi retorna texto vazio ->
         abortar). `adapt_to_kimi` levanta ValueError em vez de devolver vazio,
@@ -8856,6 +9039,9 @@ class CommandQueueWidget(QWidget):
         # caso 011 sem tocar `adapt_to_kimi`. Idempotente para o payload de
         # recovery (ja `/skill:slash-executor ...`).
         kimi_prompt = self._route_blue_arrow_through_universal(kimi_prompt)
+        t2, _ = self._resolve_worker_occupancy()
+        if t2 == "qwen":
+            kimi_prompt = self._build_qwen_slash_executor_invocation(kimi_prompt)
         if self._last_workspace_dispatch_was_clear:
             delay = (
                 self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
@@ -9200,8 +9386,10 @@ class CommandQueueWidget(QWidget):
           - interactive + Claude -> slash cru (run_command_in_terminal);
           - interactive + Codex  -> _build_codex_slash_executor_prompt(interactive);
           - interactive + Kimi   -> /skill:slash-executor + slash cru;
-          - workspace            -> Kimi blue-arrow (kimi_blue_arrow_dispatched, T2);
-          - workspace_xterm      -> _build_codex_slash_executor_prompt(workspace_xterm).
+          - interactive + Qwen   -> /slash-executor + slash cru;
+          - interactive + Grok   -> /slash-executor --delegation-runtime=grok + slash;
+          - workspace            -> Kimi/Qwen blue-arrow (kimi_blue_arrow_dispatched, T2);
+          - workspace_xterm      -> Codex envelope OU Grok `/slash-executor` nativo.
 
         O canal e marcado busy pelo CAMINHO EXISTENTE: o MetricsBar ja conecta
         run_command_in_terminal / run_command_in_workspace_xterm /
@@ -9240,25 +9428,46 @@ class CommandQueueWidget(QWidget):
         # excecao de recovery EXPLICITA (igual ao Claude cru), nunca por
         # auto-deteccao fragil. Ver ai-forge/rules/listener-vermelho.md.
         if channel == "workspace":
-            # T2 Parallel Worker Kimi: o paste real e a seta azul (TASK 09),
-            # via kimi_blue_arrow_dispatched. O payload usa o executor universal.
-            payload = self._build_kimi_slash_executor_invocation(
-                base, recovery_mode=True
+            # T2 Parallel Worker: seta azul (TASK 09). Qwen no T2 usa o
+            # slash nativo `/slash-executor`; Kimi permanece `/skill:`.
+            t2, _ = self._resolve_worker_occupancy()
+            builder = (
+                self._build_qwen_slash_executor_invocation
+                if t2 == "qwen"
+                else self._build_kimi_slash_executor_invocation
             )
+            payload = builder(base, recovery_mode=True)
             self._dispatch_blue_arrow(payload)
         elif channel == "workspace_xterm":
-            # T3 Parallel Worker Codex.
-            payload = self._build_codex_slash_executor_prompt(
-                base, listener_channel="workspace_xterm", recovery_mode=True
-            )
-            if payload is None:
-                self._reject_recovery_command(
-                    channel,
-                    "Auto-recuperacao abortada: comando Claude "
-                    "/tools:listener-recovery nao encontrado em "
-                    ".claude/commands/ para o canal Codex.",
+            # T3 Parallel Worker: Codex envelope por default; Grok usa o
+            # mesmo builder nativo do Main (`/slash-executor`), nunca o
+            # envelope "Use the SystemForge slash-command executor rules".
+            _t2, t3 = self._resolve_worker_occupancy()
+            if t3 == "grok":
+                hosted = self._t3_pty_hosts_cli(self._GROK_CLI_BASENAME)
+                if hosted is False:
+                    self._reject_recovery_command(
+                        channel,
+                        "Auto-recuperacao abortada: T3 PTY nao hospeda o "
+                        "processo grok (queue-chk-use-grok marcado, CLI "
+                        "ausente).",
+                    )
+                    return
+                payload = self._build_grok_slash_executor_invocation(
+                    base, recovery_mode=True
                 )
-                return
+            else:
+                payload = self._build_codex_slash_executor_prompt(
+                    base, listener_channel="workspace_xterm", recovery_mode=True
+                )
+                if payload is None:
+                    self._reject_recovery_command(
+                        channel,
+                        "Auto-recuperacao abortada: comando Claude "
+                        "/tools:listener-recovery nao encontrado em "
+                        ".claude/commands/ para o canal Codex.",
+                    )
+                    return
             signal_bus.run_command_in_workspace_xterm.emit(payload)
         else:  # channel == "interactive" — roteia pelo Main LLM (T1)
             llm = self._resolve_interactive_main_llm()
@@ -9274,6 +9483,14 @@ class CommandQueueWidget(QWidget):
                         ".claude/commands/ para o Main LLM Codex.",
                     )
                     return
+            elif llm == "qwen":
+                payload = self._build_qwen_slash_executor_invocation(
+                    base, recovery_mode=True
+                )
+            elif llm == "grok":
+                payload = self._build_grok_slash_executor_invocation(
+                    base, recovery_mode=True
+                )
             elif llm == "kimi":
                 payload = self._build_kimi_slash_executor_invocation(
                     base, recovery_mode=True
@@ -9372,7 +9589,7 @@ class CommandQueueWidget(QWidget):
             signal_bus.main_llm_changed.emit("claude")
 
     def _on_main_qwen_toggled(self, checked: bool) -> None:
-        """Main LLM Qwen: dispatch via compiled path (D-32, item 007).
+        """Main LLM Qwen: mesmo payload de terminal que Kimi (slash-executor).
 
         Item 012 (D5): re-renderiza os itens ja enfileirados (sufixo, dispatch
         text e badge de dialeto seguem o Main vivo).
@@ -9502,7 +9719,7 @@ class CommandQueueWidget(QWidget):
         Duas resolucoes lado a lado divergem com o tempo, e este metodo existe
         justamente porque uma copia divergiu: os modulos de recuperacao
         carregavam um mapa constante `workspace=kimi`/`workspace_xterm=codex`
-        que passou a mentir quando `SF_PARALLEL_WORKERS_V2` expos qwen/grok
+        que passou a mentir quando o roster expandido expos qwen/grok
         (gap C24). `_persist_worker_selection` e `_emit_worker_occupancy` sao
         os dois consumidores.
         """
@@ -9902,6 +10119,9 @@ class CommandQueueWidget(QWidget):
     )
     _LISTENER_RULES_PATH = "ai-forge/rules/workflow-app-listeners.md"
     _KIMI_SLASH_EXECUTOR_SKILL = "slash-executor"
+    _QWEN_SLASH_EXECUTOR_INVOCATION = "/slash-executor"
+    _GROK_SLASH_EXECUTOR_INVOCATION = "/slash-executor"
+    _GROK_DELEGATION_RUNTIME_FLAG = "--delegation-runtime=grok"
     # Slug normalizado (namespace, com `:`) do comando de auto-recuperacao do
     # red-listener. O dispatch de recuperacao (`_on_request_recovery_command`)
     # sinaliza recovery_mode EXPLICITAMENTE aos executores Codex/Kimi para este
@@ -10086,6 +10306,113 @@ class CommandQueueWidget(QWidget):
         return f"{leading}/skill:{cls._KIMI_SLASH_EXECUTOR_SKILL} {flag}{stripped}"
 
     @classmethod
+    def _kimi_executor_prefix(cls) -> str:
+        return f"/skill:{cls._KIMI_SLASH_EXECUTOR_SKILL}"
+
+    @classmethod
+    def _starts_with_invocation(cls, stripped: str, invocation: str) -> bool:
+        return stripped == invocation or stripped.startswith(invocation + " ")
+
+    @classmethod
+    def _build_qwen_slash_executor_invocation(
+        cls, cmd_text: str, *, recovery_mode: bool = False
+    ) -> str:
+        """Route Main Qwen slash commands through the native `/slash-executor`.
+
+        Qwen TUI resolves `/slash-executor` (skill name, no `/skill:` prefix).
+        Leftover Kimi dialect `/skill:slash-executor ...` is rewritten to the
+        native form so old queue snapshots still run. Other `/skill:` wrappers
+        stay intact. Recovery injects `--recovery-mode` the same way as Kimi.
+        """
+        stripped = cmd_text.lstrip()
+        if not stripped.startswith("/"):
+            return cmd_text
+        leading = cmd_text[: len(cmd_text) - len(stripped)]
+        native = cls._QWEN_SLASH_EXECUTOR_INVOCATION
+        if cls._starts_with_invocation(stripped, native):
+            return cmd_text
+        kimi_prefix = cls._kimi_executor_prefix()
+        if cls._starts_with_invocation(stripped, kimi_prefix):
+            return f"{leading}{native}{stripped[len(kimi_prefix):]}"
+        if stripped.startswith("/skill:"):
+            return cmd_text
+        flag = ""
+        if recovery_mode and cls._normalized_slash_slug(stripped) == cls._RECOVERY_SLUG:
+            flag = "--recovery-mode "
+        return f"{leading}{native} {flag}{stripped}"
+
+    @classmethod
+    def _build_grok_slash_executor_invocation(
+        cls, cmd_text: str, *, recovery_mode: bool = False
+    ) -> str:
+        """Route Grok slash commands through native `/slash-executor`.
+
+        Grok TUI resolves `/slash-executor` (command in `.grok/commands/`).
+        Fresh wraps always inject `--delegation-runtime=grok`. Leftover Kimi
+        dialect `/skill:slash-executor ...` is rewritten to the native form.
+        Other `/skill:<slug>` wrappers are rewritten to `/<slug>` then wrapped
+        — Grok TUI does not speak `/skill:`. Already-native `/slash-executor
+        ...` is returned unchanged (no double-wrap). Recovery injects
+        `--recovery-mode` after the delegation flag, before the target slash.
+        PromptCompiler and Codex envelope stay out of this builder.
+        """
+        stripped = cmd_text.lstrip()
+        if not stripped.startswith("/"):
+            return cmd_text
+        leading = cmd_text[: len(cmd_text) - len(stripped)]
+        native = cls._GROK_SLASH_EXECUTOR_INVOCATION
+        if cls._starts_with_invocation(stripped, native):
+            return cmd_text
+        kimi_prefix = cls._kimi_executor_prefix()
+        if cls._starts_with_invocation(stripped, kimi_prefix):
+            remainder = stripped[len(kimi_prefix):].lstrip()
+            if remainder.startswith("/"):
+                return cls._build_grok_slash_executor_invocation(
+                    f"{leading}{remainder}", recovery_mode=recovery_mode
+                )
+            return cls._wrap_grok_slash_executor(
+                leading, remainder, recovery_mode=recovery_mode
+            )
+        if stripped.startswith("/skill:"):
+            rest = stripped[len("/skill:"):]
+            if not rest:
+                return cmd_text
+            rewritten = f"/{rest}"
+            return cls._build_grok_slash_executor_invocation(
+                f"{leading}{rewritten}", recovery_mode=recovery_mode
+            )
+        return cls._wrap_grok_slash_executor(
+            leading, stripped, recovery_mode=recovery_mode
+        )
+
+    @classmethod
+    def _wrap_grok_slash_executor(
+        cls, leading: str, target: str, *, recovery_mode: bool
+    ) -> str:
+        """Compose `/slash-executor --delegation-runtime=grok [--recovery-mode] <slash>`.
+
+        Flag order matches the Task 02/06 aceite: delegation runtime first,
+        then recovery, then the target slash. `_split_executor_flags` strips
+        leftover executor flags from snapshots so they are not double-copied
+        into the target command.
+        """
+        native = cls._GROK_SLASH_EXECUTOR_INVOCATION
+        clean, _runtime, recovery_from_text = cls._split_executor_flags(target)
+        body = clean.lstrip()
+        slug_src = body if body.startswith("/") else (f"/{body}" if body else "")
+        flags = [cls._GROK_DELEGATION_RUNTIME_FLAG]
+        if (recovery_mode or recovery_from_text) and (
+            cls._normalized_slash_slug(slug_src) == cls._RECOVERY_SLUG
+        ):
+            flags.append("--recovery-mode")
+        flag_str = " ".join(flags)
+        if not body:
+            return f"{leading}{native} {flag_str}"
+        if not body.startswith("/"):
+            body = f"/{body}"
+        return f"{leading}{native} {flag_str} {body}"
+
+    @classmethod
     def _route_blue_arrow_through_universal(cls, kimi_prompt: str) -> str:
         """FIX-011 Opt 1 — aplica ao dispatch blue-arrow (worker Kimi T2) a MESMA
         decisao de roteamento do caminho de insercao interativo (`_render_*`,
@@ -10141,9 +10468,8 @@ class CommandQueueWidget(QWidget):
         return head[1:].replace("/", ":")
 
     # Runtimes de delegacao autorizados pelo executor universal (C8/C9).
-    # O valor default e `kimi` porque a skill slash-executor e a implementacao
-    # Kimi; qualquer outro provider (codex/grok/qwen) e transportado ate seu
-    # runtime nativo.
+    # Nao existe runtime default: ausencia significa que o caller nao declarou
+    # identidade e o executor assume o proprio runtime.
     _DELEGATION_RUNTIMES: tuple[str, ...] = ("kimi", "codex", "grok", "qwen")
 
     @classmethod
@@ -10179,33 +10505,52 @@ class CommandQueueWidget(QWidget):
             `--recovery-mode` primeiro, depois `--delegation-runtime=`, depois
             o comando alvo e seus argumentos.
         """
-        leading = cmd_text[: len(cmd_text) - len(cmd_text.lstrip())]
-        stripped = cmd_text.lstrip()
+        leading_len = len(cmd_text) - len(cmd_text.lstrip())
+        leading = cmd_text[:leading_len]
         recovery = False
         runtime: str | None = None
-        tokens = stripped.split()
-        consumed = 0
-        for tok in tokens:
+        cursor = leading_len
+        consumed = False
+
+        # Escaneia somente o prefixo de flags do executor. Usar split/join aqui
+        # alterava tabs, espacos repetidos e whitespace terminal mesmo quando
+        # nenhuma flag era consumida, violando a identidade C-35.
+        while cursor < len(cmd_text):
+            token_match = re.match(r"\S+", cmd_text[cursor:])
+            if token_match is None:
+                break
+            tok = token_match.group(0)
             if tok == "--recovery-mode":
                 recovery = True
-                consumed += 1
-                continue
-            if tok.startswith("--delegation-runtime="):
+            elif tok.startswith("--delegation-runtime="):
                 value = tok.split("=", 1)[1]
                 # So consome o token quando o valor e valido. Valor invalido
                 # deixa o token no comando alvo, para que o executor la embaixo
                 # bloqueie com reason BLOCKED (fail-closed no ponto mais cedo).
                 if value in cls._DELEGATION_RUNTIMES:
                     runtime = value
-                    consumed += 1
-                    continue
+                else:
+                    break
+            else:
                 break
-            break
-        clean = " ".join(tokens[consumed:])
-        if not clean:
-            clean = stripped
+
+            consumed = True
+            cursor += token_match.end()
+            while cursor < len(cmd_text) and cmd_text[cursor].isspace():
+                cursor += 1
+
+        # Fast path deliberado: sem flag consumida, devolve o mesmo objeto de
+        # texto byte a byte, inclusive whitespace nao canonico.
+        if not consumed:
+            return cmd_text, default_runtime, False
+
+        clean = f"{leading}{cmd_text[cursor:]}"
+        # Preserva o fail-closed legado para uma entrada composta apenas pelas
+        # flags do executor: sem comando alvo, nao fabrica payload vazio.
+        if not clean.strip():
+            clean = cmd_text.lstrip()
         return (
-            f"{leading}{clean}",
+            clean,
             runtime if runtime is not None else default_runtime,
             recovery,
         )
@@ -10575,7 +10920,7 @@ class CommandQueueWidget(QWidget):
         adaptacao de publicacao por Main LLM. Contrato/invariantes:
         blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §6/§8.1.
 
-        `llm`: "claude" | "codex" | "kimi" | "qwen".
+        `llm`: "claude" | "codex" | "kimi" | "qwen" | "grok".
         `mode`: "insert" (insercao, nunca pulsa) | "dispatch" (fila, pode pulsar).
         """
         head = cls._command_head(text)
@@ -10598,7 +10943,7 @@ class CommandQueueWidget(QWidget):
                 listener_channel=listener_channel,
             )
 
-        # /clear: raw para os tres LLM (todos entendem).
+        # /clear: raw para os LLM (todos entendem).
         if head == "/clear":
             return RenderedInsertion(text=text, listener_channel=listener_channel)
 
@@ -10612,9 +10957,25 @@ class CommandQueueWidget(QWidget):
 
         slug = head[1:]
 
-        if llm == "kimi":
+        if llm in ("kimi", "qwen"):
+            build_executor = (
+                cls._build_qwen_slash_executor_invocation
+                if llm == "qwen"
+                else cls._build_kimi_slash_executor_invocation
+            )
+            if llm == "qwen" and cls._starts_with_invocation(
+                head, cls._QWEN_SLASH_EXECUTOR_INVOCATION
+            ):
+                return RenderedInsertion(text=text, listener_channel=listener_channel)
             if head.startswith("/skill:"):
-                # Kimi entende /skill: nativamente -> raw.
+                if llm == "qwen" and cls._starts_with_invocation(
+                    text.lstrip(), cls._kimi_executor_prefix()
+                ):
+                    return RenderedInsertion(
+                        text=build_executor(text),
+                        listener_channel=listener_channel,
+                    )
+                # Kimi (e wrappers Qwen /skill:<slug>) entendem /skill: nativamente.
                 return RenderedInsertion(text=text, listener_channel=listener_channel)
             if slug in cls._CUSTOM_PROMPT_DIRECTIVES:
                 if cls._resolve_custom_prompt_file(slug) is None:
@@ -10626,7 +10987,7 @@ class CommandQueueWidget(QWidget):
                         ),
                     )
                 return RenderedInsertion(
-                    text=cls._build_kimi_slash_executor_invocation(text),
+                    text=build_executor(text),
                     listener_channel=listener_channel,
                 )
             has_command = cls._resolve_claude_command_file(slug) is not None
@@ -10645,7 +11006,61 @@ class CommandQueueWidget(QWidget):
                     listener_channel=listener_channel,
                 )
             return RenderedInsertion(
-                text=cls._build_kimi_slash_executor_invocation(
+                text=build_executor(
+                    text,
+                    recovery_mode=(
+                        cls._normalized_slash_slug(text) == cls._RECOVERY_SLUG
+                    ),
+                ),
+                listener_channel=listener_channel,
+            )
+
+        if llm == "grok":
+            build_executor = cls._build_grok_slash_executor_invocation
+            if cls._starts_with_invocation(
+                head, cls._GROK_SLASH_EXECUTOR_INVOCATION
+            ):
+                return RenderedInsertion(
+                    text=text, listener_channel=listener_channel
+                )
+            if head.startswith("/skill:"):
+                rewritten = build_executor(text)
+                if rewritten.lstrip().startswith("/skill:"):
+                    return RenderedInsertion(
+                        text=None,
+                        abort_reason=(
+                            "/skill: nao e dialeto do TUI Grok — "
+                            "reescreva como /slash-executor"
+                        ),
+                    )
+                return RenderedInsertion(
+                    text=rewritten, listener_channel=listener_channel
+                )
+            if slug in cls._CUSTOM_PROMPT_DIRECTIVES:
+                if cls._resolve_custom_prompt_file(slug) is None:
+                    return RenderedInsertion(
+                        text=None,
+                        abort_reason=(
+                            f"custom-prompt '{slug}' nao encontrado em "
+                            "ai-forge/custom-prompts/"
+                        ),
+                    )
+                return RenderedInsertion(
+                    text=build_executor(text),
+                    listener_channel=listener_channel,
+                )
+            has_command = cls._resolve_claude_command_file(slug) is not None
+            has_skill = cls._resolve_skill_target(slug)
+            if slug and not has_command and not has_skill:
+                return RenderedInsertion(
+                    text=None,
+                    abort_reason=(
+                        f"comando/skill '{slug}' nao encontrado em "
+                        ".claude/commands/ ou .agents/skills/"
+                    ),
+                )
+            return RenderedInsertion(
+                text=build_executor(
                     text,
                     recovery_mode=(
                         cls._normalized_slash_slug(text) == cls._RECOVERY_SLUG
@@ -10691,16 +11106,6 @@ class CommandQueueWidget(QWidget):
                     ),
                 )
             return RenderedInsertion(text=transformed, listener_channel=listener_channel)
-
-        if llm == "qwen":
-            return RenderedInsertion(
-                text=None,
-                abort_reason=(
-                    f"slash-command '{head}' nao possui compilacao pura para Qwen; "
-                    "selecione Claude, Kimi ou Codex"
-                ),
-                listener_channel=listener_channel,
-            )
 
         # LLM desconhecido: defensivo -> raw (igual Claude).
         return RenderedInsertion(text=text, listener_channel=listener_channel)
@@ -10797,8 +11202,21 @@ class CommandQueueWidget(QWidget):
         self._on_run_command(cmd_text)
         return True
 
-    def _dispatch_kimi_main_command(self, cmd_text: str) -> bool:
-        """Dispatch through the Main LLM Kimi path. Returns False on abort."""
+    def _dispatch_kimi_main_command(
+        self, cmd_text: str, *, llm_label: str = "Kimi", dialect: str = "kimi"
+    ) -> bool:
+        """Dispatch through the skill-runtime Main LLM path (Kimi / Qwen).
+
+        Kimi publishes `/skill:slash-executor /<claude-command>` (or
+        `/skill:<slug>` for skill-only / wrapper-specific cases). Qwen
+        (`dialect="qwen"`) publishes native `/slash-executor /<claude-command>`.
+        `llm_label` appears only in abort toasts. Returns False on abort.
+        """
+        build_executor = (
+            self._build_qwen_slash_executor_invocation
+            if dialect == "qwen"
+            else self._build_kimi_slash_executor_invocation
+        )
         head = self._command_head(cmd_text)
         if is_directive_line(cmd_text):
             # O Kimi CLI nao tem diretiva TEXTUAL de modelo/reasoning: o
@@ -10814,7 +11232,20 @@ class CommandQueueWidget(QWidget):
             signal_bus.run_command_in_terminal.emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
+        if dialect == "qwen" and self._starts_with_invocation(
+            head, self._QWEN_SLASH_EXECUTOR_INVOCATION
+        ):
+            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
         if head.startswith("/skill:"):
+            if dialect == "qwen" and self._starts_with_invocation(
+                cmd_text.lstrip(), self._kimi_executor_prefix()
+            ):
+                transformed = build_executor(cmd_text)
+                signal_bus.run_command_in_terminal.emit(transformed)
+                self._on_run_command(cmd_text)
+                return True
             signal_bus.run_command_in_terminal.emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
@@ -10823,23 +11254,23 @@ class CommandQueueWidget(QWidget):
             if slug in self._CUSTOM_PROMPT_DIRECTIVES:
                 # Custom-prompt directive (ex.: /goal): nao existe em
                 # .claude/commands/ nem como skill. Roteia pelo executor
-                # universal (`/skill:slash-executor /goal ...`), que resolve o
-                # arquivo em ai-forge/custom-prompts/ e preserva o contrato de
-                # listener. Nunca abortar como comando desconhecido.
+                # universal, que resolve o arquivo em ai-forge/custom-prompts/
+                # e preserva o contrato de listener. Nunca abortar como
+                # comando desconhecido.
                 if self._resolve_custom_prompt_file(slug) is None:
                     signal_bus.toast_requested.emit(
-                        f"Main LLM Kimi: custom-prompt '{slug}' nao encontrado "
+                        f"Main LLM {llm_label}: custom-prompt '{slug}' nao encontrado "
                         "em ai-forge/custom-prompts/ — dispatch abortado.",
                         "warning",
                     )
                     return False
-                transformed = self._build_kimi_slash_executor_invocation(cmd_text)
+                transformed = build_executor(cmd_text)
             else:
                 has_command = self._resolve_claude_command_file(slug) is not None
                 has_skill = self._resolve_skill_target(slug)
                 if slug and not has_command and not has_skill:
                     signal_bus.toast_requested.emit(
-                        f"Main LLM Kimi: comando/skill '{slug}' nao encontrado em "
+                        f"Main LLM {llm_label}: comando/skill '{slug}' nao encontrado em "
                         ".claude/commands/ ou .agents/skills/ — dispatch abortado.",
                         "warning",
                     )
@@ -10852,7 +11283,7 @@ class CommandQueueWidget(QWidget):
                     # Defesa-em-profundidade: o slug de recovery como item NORMAL
                     # de fila tambem recebe recovery_mode (flag --recovery-mode),
                     # nunca o wrapper generico que conflita com sua FASE FINAL.
-                    transformed = self._build_kimi_slash_executor_invocation(
+                    transformed = build_executor(
                         cmd_text,
                         recovery_mode=(
                             self._normalized_slash_slug(cmd_text)
@@ -10866,61 +11297,27 @@ class CommandQueueWidget(QWidget):
         return True
 
     def _dispatch_qwen_main_command(self, cmd_text: str) -> bool:
-        """Dispatch through the Main LLM Qwen path (compiled path, D-32).
+        """Dispatch through the Main LLM Qwen path.
 
-        Top-level commands execute directly; namespaced commands go through
-        the PromptCompiler (item 007) to resolve the prompt before sending.
-        Returns False on abort (dynamic unavailability or compile error).
+        Qwen TUI resolves `/slash-executor` natively (no `/skill:` prefix).
+        The compiled PromptCompiler envelope is not used here.
+        Returns False on abort (runtime unavailable or unknown slash).
         """
         head = self._command_head(cmd_text)
-        # Qwen nao expoe equivalente de modelo/effort: a adequacao REMOVE essas
-        # linhas no enqueue, entao qualquer diretiva que chegue aqui e residuo
-        # de outro dialeto. Suprime e pulsa, nunca despacha (C27).
-        if is_directive_line(cmd_text):
-            signal_bus.listener_helper_pulse.emit("interactive")
-            return True
-        # /clear: always raw to T1.
-        if head == "/clear":
-            signal_bus.run_command_in_terminal.emit(cmd_text)
-            self._on_run_command(cmd_text)
-            return True
-        # ST005: dynamic unavailability check — if Qwen runtime is unhealthy,
-        # block dispatch with actionable reason.
-        if not self._qwen_runtime_available():
-            signal_bus.toast_requested.emit(
-                "Main LLM Qwen: processo Qwen indisponivel no momento. "
-                "Verifique se o daemon Qwen esta rodando e a porta esta escutando.",
-                "warning",
-            )
-            return False
-        # For slash commands, try the compiled path (D-32).
-        if head.startswith("/"):
-            slug = head[1:].split()[0] if head else ""
-            if slug.startswith("skill:"):
-                # Skills pass through directly.
-                signal_bus.run_command_in_terminal.emit(cmd_text)
-                self._on_run_command(cmd_text)
-                return True
-            # Try compiled path via PromptCompiler.
-            try:
-                from workflow_app.prompt_compiler import PromptCompiler
-                _root = self._find_systemforge_root()
-                if _root is not None:
-                    compiler = PromptCompiler(_root)
-                    compiled = compiler.compile(cmd_text.strip().split()[0], " ".join(cmd_text.strip().split()[1:]))
-                    signal_bus.run_command_in_terminal.emit(compiled.prompt_text)
-                    self._on_run_command(cmd_text)
-                    return True
-            except Exception:
-                pass
-            # Fallback: send raw if compilation fails or root not found.
-            signal_bus.run_command_in_terminal.emit(cmd_text)
-            self._on_run_command(cmd_text)
-            return True
-        # Non-slash commands: send directly.
-        signal_bus.run_command_in_terminal.emit(cmd_text)
-        self._on_run_command(cmd_text)
-        return True
+        # Diretivas e /clear nao dependem do daemon: pulsam / vao raw como Kimi.
+        if not is_directive_line(cmd_text) and head != "/clear":
+            # ST005: dynamic unavailability check — if Qwen runtime is unhealthy,
+            # block dispatch with actionable reason.
+            if not self._qwen_runtime_available():
+                signal_bus.toast_requested.emit(
+                    "Main LLM Qwen: processo Qwen indisponivel no momento. "
+                    "Verifique se o daemon Qwen esta rodando e a porta esta escutando.",
+                    "warning",
+                )
+                return False
+        return self._dispatch_kimi_main_command(
+            cmd_text, llm_label="Qwen", dialect="qwen"
+        )
 
     def _qwen_runtime_available(self) -> bool:
         """ST005: placeholder de health check do runtime Qwen no dispatch.
@@ -10935,25 +11332,95 @@ class CommandQueueWidget(QWidget):
         """
         return True
 
-    def _dispatch_grok_main_command(self, cmd_text: str) -> bool:
-        """Dispatch through the Main LLM Grok path (item 026, D-30).
+    def _dispatch_grok_main_command(self, cmd_text: str, *, to_t1: bool = True) -> bool:
+        """Dispatch through the Grok native `/slash-executor` (Main T1 or Worker T3).
 
-        Grok as Main LLM routes through the interactive terminal.
-        /model and /effort are Claude-specific directives, skipped.
-        /clear always goes raw to T1.
+        Payload: `/slash-executor --delegation-runtime=grok /<comando> <args>`.
+        Never `/skill:slash-executor`. PromptCompiler and Codex envelope stay
+        out. C19 / grok_spike / provider bridge kernel stay out: this method
+        only changes the TEXT pasted into the already-open PTY.
+
+        `to_t1=True` -> T1 interactive (Main Grok). `to_t1=False` -> T3
+        workspace_xterm (worker Grok). Returns False on abort.
         """
+        emit = (
+            signal_bus.run_command_in_terminal.emit
+            if to_t1
+            else signal_bus.run_command_in_workspace_xterm.emit
+        )
+        channel = "interactive" if to_t1 else "workspace_xterm"
+        llm_label = "Grok" if to_t1 else "Worker Grok (T3)"
         head = self._command_head(cmd_text)
-        # Idem Qwen: sem equivalente hoje, diretiva que chegue aqui e residuo.
         if is_directive_line(cmd_text):
-            signal_bus.listener_helper_pulse.emit("interactive")
+            signal_bus.listener_helper_pulse.emit(channel)
             return True
         if head == "/clear":
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
-        # Route through interactive terminal for now (provider bridge
-        # migration is ST002).
-        signal_bus.run_command_in_terminal.emit(cmd_text)
+        if not to_t1:
+            if not self._ensure_t3_grok_host():
+                return False
+        if self._starts_with_invocation(
+            head, self._GROK_SLASH_EXECUTOR_INVOCATION
+        ):
+            emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+        if head.startswith("/skill:"):
+            transformed = self._build_grok_slash_executor_invocation(cmd_text)
+            if transformed.lstrip().startswith("/skill:"):
+                signal_bus.toast_requested.emit(
+                    f"Main LLM {llm_label}: dialeto /skill: nao e valido no "
+                    "TUI Grok — dispatch abortado.",
+                    "warning",
+                )
+                return False
+            emit(transformed)
+            self._on_run_command(cmd_text)
+            return True
+        if head.startswith("/"):
+            slug = head[1:].split()[0] if head else ""
+            if slug in self._CUSTOM_PROMPT_DIRECTIVES:
+                if self._resolve_custom_prompt_file(slug) is None:
+                    signal_bus.toast_requested.emit(
+                        f"Main LLM {llm_label}: custom-prompt '{slug}' nao "
+                        "encontrado em ai-forge/custom-prompts/ — dispatch "
+                        "abortado.",
+                        "warning",
+                    )
+                    return False
+                transformed = self._build_grok_slash_executor_invocation(
+                    cmd_text
+                )
+            else:
+                has_command = self._resolve_claude_command_file(slug) is not None
+                has_skill = self._resolve_skill_target(slug)
+                if slug and not has_command and not has_skill:
+                    signal_bus.toast_requested.emit(
+                        f"Main LLM {llm_label}: comando/skill '{slug}' nao "
+                        "encontrado em .claude/commands/ ou .agents/skills/ "
+                        "— dispatch abortado.",
+                        "warning",
+                    )
+                    return False
+                transformed = self._build_grok_slash_executor_invocation(
+                    cmd_text,
+                    recovery_mode=(
+                        self._normalized_slash_slug(cmd_text)
+                        == self._RECOVERY_SLUG
+                    ),
+                )
+        else:
+            transformed = cmd_text
+        if not transformed or not transformed.strip():
+            signal_bus.toast_requested.emit(
+                f"Main LLM {llm_label}: adaptacao retornou texto vazio — "
+                "dispatch abortado.",
+                "warning",
+            )
+            return False
+        emit(transformed)
         self._on_run_command(cmd_text)
         return True
 
@@ -11592,7 +12059,7 @@ class CommandQueueWidget(QWidget):
           5. `active_flags`   -> `_active_mcp_flags()`
 
         C16 FECHADO POR REMOCAO DO MECANISMO, nao por implantacao de switch: nao
-        existe congelamento a gatear, entao `SF_MAIN_PROVIDERS_V2` NAO ganha
+        existe congelamento a gatear, entao o gate do roster Main NAO ganha
         essa responsabilidade e nenhum kill-switch novo foi criado. O
         dicionario `id(item) -> contrato` foi removido junto, e com ele o
         vazamento por reuso de endereco do CPython (ver comentario no final de
@@ -11651,7 +12118,10 @@ class CommandQueueWidget(QWidget):
         # Claude-main path already routed workers correctly, so the fix is to
         # make that same worker routing apply under any Main LLM.
         #
-        cmd_text = next_item.command_text()
+        # `dispatch_text` e o produtor renderizado vivo compartilhado com o
+        # clique per-item. `command_text` ignora o sufixo de flags e fazia o
+        # step perder Delegation flags sob Main Codex/Kimi/Qwen/Grok.
+        cmd_text = next_item.dispatch_text()
         cmd_head = spec.name.strip().split(None, 1)[0].lower()
 
         # ── Provider router (autoridade do worker axis, source.md §12) ─────── #
@@ -11791,8 +12261,10 @@ class CommandQueueWidget(QWidget):
             self._last_workspace_dispatch_was_clear = False  # consumed by blue arrow
             return
         if use_qwen:
-            # Item 020: Qwen worker routes to T2 (workspace terminal),
-            # same dispatch path as Kimi but via Provider.QWEN.
+            # Seta azul T2: o clique per-item (`_on_exec_clicked` com
+            # Provider.QWEN) e o step compartilham `_on_kimi_clicked` ->
+            # `_dispatch_blue_arrow`. Occupacao qwen reescreve o payload
+            # para `/slash-executor` nativo.
             next_item._on_kimi_clicked()
             self._last_workspace_dispatch_was_clear = False
             return
@@ -11801,9 +12273,9 @@ class CommandQueueWidget(QWidget):
                 next_item._mark_as_sent()
             return
         if use_grok:
-            # Item 020: Grok worker routes to T3 (workspace xterm),
-            # same dispatch path as Codex but via Provider.GROK.
-            if self._dispatch_codex_command(cmd_text):
+            # Worker T3 Grok uses the same native `/slash-executor` builder
+            # as Main Grok. Envelope Codex fica so no worker Codex.
+            if self._dispatch_grok_main_command(cmd_text, to_t1=False):
                 next_item._mark_as_sent()
             return
 
