@@ -411,6 +411,46 @@ class TerminalStatusDot(QWidget):
         super().mousePressEvent(event)
 
 
+# ── Guarda de telemetria real (TASK 01 do loop 08-24-analise-fluxo-loop) ──── #
+# `_append_failure_telemetry` grava em `.claude/wf-failures/` do repositorio
+# real. Sob pytest isso contamina o corpus de telemetria com eventos que nunca
+# aconteceram em producao (secao 10.1.5 da analise: 760 de 2.553 eventos do
+# corte auditado sao ruido de teste). O bloqueio e POR CONSTRUCAO: nao depende
+# de o teste lembrar de monkeypatchar `_repo_root_path`. Escrita em tmp_path
+# continua permitida — o guard so recusa a raiz real resolvida a partir deste
+# modulo, que monkeypatch de instancia nao consegue mover.
+FAILURE_TELEMETRY_GUARD_ENV = "WF_BLOCK_REAL_FAILURE_TELEMETRY"
+
+
+def _module_repo_root() -> "Path | None":
+    """Raiz real do repositorio, resolvida a partir deste arquivo.
+
+    Deliberadamente NAO e metodo de instancia: `MetricsBar._repo_root_path` e
+    monkeypatchavel por teste, e o guard precisa de uma referencia que o teste
+    nao consiga reapontar."""
+    cur = Path(__file__).resolve().parent
+    while cur != cur.parent:
+        if (cur / "ai-forge" / "workflow-app").is_dir():
+            return cur
+        cur = cur.parent
+    return None
+
+
+def real_failure_telemetry_blocked(root: "Path | None") -> bool:
+    """True quando `root` e a raiz real do repo E o guard esta armado."""
+    if os.environ.get(FAILURE_TELEMETRY_GUARD_ENV) != "1":
+        return False
+    if root is None:
+        return False
+    real = _module_repo_root()
+    if real is None:
+        return False
+    try:
+        return Path(root).resolve() == real
+    except OSError:
+        return False
+
+
 class MetricsBar(QWidget):
     """38px project selector, instance selection, and navigation toolbar."""
 
@@ -1163,6 +1203,9 @@ class MetricsBar(QWidget):
         # recuperacao grava `last_command: INDISPONIVEL` e o agente de
         # recuperacao nao sabe sequer qual comando derrubou o canal.
         self._last_command: dict[str, str] = {}
+        # Instante do ultimo despacho por canal. Sem isto,
+        # `duration_seconds` na telemetria de falha seria null para sempre.
+        self._last_dispatch_ts: dict[str, float] = {}
         # Provider opcional de tail de terminal, injetado pela MainWindow (que
         # e quem detem os OutputPanel). Mantido como callable para a MetricsBar
         # nao importar painel nenhum: o acoplamento fica na janela, que ja
@@ -3061,32 +3104,58 @@ class MetricsBar(QWidget):
         dot.set_state("awaiting_user")
         self._update_overall_listener()
 
-    def _append_failure_telemetry(self, channel: str, reason: str) -> None:
-        """Observabilidade pura (FIX-009-012-OBS): grava UMA linha JSONL por
-        falha de listener em .claude/wf-failures/{YYYY-MM-DD}.jsonl. NUNCA
-        altera estado/cor/fence; fail-soft total (qualquer erro e engolido).
-        `command`/`duration_seconds` sao null (desconhecidos neste ponto;
-        Zero Assumido — nao inventa dado). Multi-instancia: append de uma
-        linha curta no mesmo arquivo diario e tolerado (sem garantia
-        transacional, mas linhas nao se corrompem em append O_APPEND)."""
+    def _append_failure_telemetry(
+        self,
+        channel: str,
+        reason: str,
+        *,
+        source: str = "listener",
+        exit_code: int | None = None,
+        item_id: str | None = None,
+    ) -> None:
+        """Grava UMA linha JSONL por falha em .claude/wf-failures/{YYYY-MM-DD}.jsonl.
+
+        Observabilidade pura: NUNCA altera estado/cor/fence, e fail-soft total.
+
+        O envelope e montado por `telemetry.failure_event.build_failure_event`
+        (schema versionado) e nao mais inline. O corte auditado tinha 2.553
+        eventos com `command`, `exit_code` e `duration_seconds` 100% nulos — um
+        funil que registrava a existencia da falha e nada sobre ela. Agora
+        `command_name` sai de `_last_command` ja sanitizado (so o nome canonico;
+        args, heredoc e path ficam de fora) e `duration_seconds` e o intervalo
+        real entre despacho e falha, quando houve despacho observado.
+
+        Campos que continuam nullable sao os que seguem genuinamente
+        desconhecidos neste ponto: nao ha exit code de processo aqui, e sem
+        despacho registrado nao ha duracao (Zero Assumido)."""
         try:
             root = self._repo_root_path()
             if root is None:
                 return
+            if real_failure_telemetry_blocked(root):
+                # Guard armado (pytest): nao contaminar o corpus real.
+                return
             import json as _json_obs
             import time as _time_obs
+
+            from workflow_app.telemetry.failure_event import build_failure_event
+
+            despacho = self._last_dispatch_ts.get(channel)
+            agora = _time_obs.time()
+            rec = build_failure_event(
+                channel=channel,
+                reason=reason,
+                source=source,
+                run_id=self._last_processed_run_id.get(channel, ""),
+                item_id=item_id,
+                raw_command=self._last_command.get(channel),
+                exit_code=exit_code,
+                duration_seconds=(agora - despacho) if despacho else None,
+                ts=agora,
+            )
             d = root / ".claude" / "wf-failures"
             d.mkdir(parents=True, exist_ok=True)
-            day = _time_obs.strftime("%Y-%m-%d", _time_obs.gmtime())
-            rec = {
-                "ts": _time_obs.time(),
-                "channel": channel,
-                "reason": reason,
-                "exit_code": None,
-                "run_id": self._last_processed_run_id.get(channel, ""),
-                "command": None,
-                "duration_seconds": None,
-            }
+            day = _time_obs.strftime("%Y-%m-%d", _time_obs.gmtime(agora))
             with open(d / f"{day}.jsonl", "a", encoding="utf-8") as f:
                 f.write(_json_obs.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:
@@ -3175,6 +3244,8 @@ class MetricsBar(QWidget):
         if len(first_line) > 500:
             first_line = first_line[:500] + " [...]"
         self._last_command[channel] = first_line
+        import time as _time_disp
+        self._last_dispatch_ts[channel] = _time_disp.time()
 
     def set_output_tail_provider(
         self, provider: Callable[[str], str] | None

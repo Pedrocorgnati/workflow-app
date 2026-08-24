@@ -1,0 +1,109 @@
+{
+  "_fixture_scope": "Task 05 do estudo 08-24. Sizing comprimido no bucket + override per-item. Conteudo imutavel; nao apontar para diretorio vivo.",
+  "schema_version": "3.0.0",
+  "name": "fixture-sizing-comprimido",
+  "project": "fixture",
+  "kind": "daily-loop",
+  "mode": "task",
+  "source_md": "(fixture congelada, sem source vivo)",
+  "basic_flow": {
+    "brief_root": "fixture/brief",
+    "docs_root": "fixture/docs",
+    "wbs_root": "fixture/wbs",
+    "workspace_root": "fixture/workspace"
+  },
+  "project_details": {
+    "target_stack": "n/a",
+    "language": "pt-BR"
+  },
+  "iteration_template": {
+    "exec": [
+      "/loop:iteraction:create-task --task {target}",
+      "/clear",
+      "/loop:iteraction:execute-task --task {target}"
+    ],
+    "clear_between_items": true
+  },
+  "daily_loop": {
+    "version": "3.0.0",
+    "slug": "fixture-sizing-comprimido",
+    "loop_root": "fixture-sizing-comprimido",
+    "progress_path": "PROGRESS.md",
+    "tasks_dir": "tasks",
+    "log_path": "_LOOP-LOG.md",
+    "total_items": 3,
+    "clear_between_items": true,
+    "do_command": "/loop:noop-fallback",
+    "buckets": [
+      {
+        "id": "T-opus-high",
+        "model": "opus",
+        "effort": "high",
+        "task_file": "tasks/T-opus-high.md",
+        "items": [
+          {
+            "id": "001",
+            "kind": "preparo",
+            "task_path": "tasks/items/task-001-alfa.md",
+            "commands": ["/loop:iteraction:execute-task --task tasks/items/task-001-alfa.md"]
+          },
+          {
+            "id": "002",
+            "kind": "iteration",
+            "task_path": "tasks/items/task-002-beta.md",
+            "model": "sonnet",
+            "effort": "medium",
+            "commands": ["/loop:iteraction:execute-task --task tasks/items/task-002-beta.md"]
+          }
+        ]
+      },
+      {
+        "id": "T-sonnet-medium",
+        "model": "sonnet",
+        "effort": "medium",
+        "task_file": "tasks/T-sonnet-medium.md",
+        "items": [
+          {
+            "id": "003",
+            "kind": "finalizacao",
+            "task_path": "tasks/items/task-003-gama.md",
+            "commands": ["/loop:iteraction:review-executed-loop --task tasks/items/task-003-gama.md"]
+          }
+        ]
+      }
+    ],
+    "items_index": {
+      "001": {
+        "id": "001",
+        "kind": "preparo",
+        "task_path": "tasks/items/task-001-alfa.md",
+        "target": "tasks/items/task-001-alfa.md",
+        "commands": ["/loop:iteraction:execute-task --task tasks/items/task-001-alfa.md"]
+      },
+      "002": {
+        "id": "002",
+        "kind": "iteration",
+        "delegate_kind": "implementation",
+        "task_path": "tasks/items/task-002-beta.md",
+        "target": "tasks/items/task-002-beta.md",
+        "model": "sonnet",
+        "effort": "medium",
+        "commands": ["/loop:iteraction:execute-task --task tasks/items/task-002-beta.md"]
+      },
+      "003": {
+        "id": "003",
+        "kind": "finalizacao",
+        "task_path": "tasks/items/task-003-gama.md",
+        "target": "tasks/items/task-003-gama.md",
+        "commands": ["/loop:iteraction:review-executed-loop --task tasks/items/task-003-gama.md"]
+      }
+    }
+  },
+  "finalization": {
+    "commands": ["/loop:review"]
+  },
+  "metadata": {
+    "frozen_at": "2026-08-24",
+    "derived_from": "anatomia do caso 08-19 (sizing por bucket), sem copiar o diretorio vivo"
+  }
+}

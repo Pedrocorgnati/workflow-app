@@ -4,7 +4,7 @@
 >
 > **Escopo:** `ai-forge/workflow-app/src/workflow_app/daily_loop/loader.py` e os 3 specs canonicos `/loop:create-structure`, `/loop:integration`, `/loop:workflow-app`.
 >
-> **Origem:** consolidacao da secao 1.1 + 3.6 + 3.8 do `blacksmith/loop-archives/05-13-micro-architecture-refactor/_HARDENING-REPORT.md` (loop deste hardening: `blacksmith/loop-archives/05-13-hardening-cmd-flow/`, item 008 P1).
+> **Origem:** consolidacao da secao 1.1 + 3.6 + 3.8 do `blacksmith/done/05-13-micro-architecture-refactor/_HARDENING-REPORT.md` (loop deste hardening: `blacksmith/done/05-13-hardening-cmd-flow/`, item 008 P1).
 
 ---
 
@@ -135,7 +135,7 @@ Todos exportados em `workflow_app.daily_loop.__init__`. Implementacao dos dois p
 
 | Valor de `mode`   | Origem                              | Per-iteration commands | Consumer canonico                                   |
 |-------------------|-------------------------------------|------------------------|----------------------------------------------------|
-| `"rocksmash"`     | `/loop --rocksmash`, `/legacy:detect`| 4 (do/review-done/compare/integrate) | `build_loop_rocksmash_specs` + `build_loop_specs` |
+| `"rocksmash"`     | `/legacy:detect` APENAS (ver nota abaixo) | 4 (do/review-done/compare/integrate) | `build_loop_rocksmash_specs` + `build_loop_specs` |
 | `"task"`          | `/loop --task`                      | variavel               | `build_loop_specs`                                  |
 | `"cmd"`           | `/loop --cmd`                       | variavel               | `build_loop_specs`                                  |
 | `"cmd-single"`    | `/loop --cmd-single`                | variavel + expanded    | `build_loop_specs`                                  |
@@ -143,6 +143,30 @@ Todos exportados em `workflow_app.daily_loop.__init__`. Implementacao dos dois p
 | `"mkt_assets"`    | `/mkt-assets` (lane gemea de `/loop`)| variavel, tokens `/mkt-assets:*` | `build_loop_specs` (lane containment)    |
 | `"normal"`        | retro-compat (sem CLI flag)         | variavel               | `build_loop_specs` ou `build_daily_loop_specs`      |
 | ausente / null    | retro-compat V3 pre-2026-05-19      | tratado como `"normal"`| idem                                                |
+
+**Nota (2026-08-24) — `/loop --rocksmash` NAO produz `mode == "rocksmash"`.** A tabela acima
+listava `/loop --rocksmash` como origem desse valor; a promessa nunca foi implementada e foi
+removida. O orquestrador em modo `--rocksmash` nao cria pasta, nao gera JSON e nao escreve
+`mode`: ele valida o `.md`, localiza o `_LOOP-CONFIG.json` irmao e instrui o operador a usar
+`queue-btn-rocksmash`. O botao entao expande uma **config normal** (`mode` `task`/`cmd`/`both`
+ou ausente). Nenhum config auditado no corpus carrega `mode == "rocksmash"`.
+
+Consequencia de contrato: **o rocksmash e uma transformacao auxiliar sobre config normal**, nao
+um modo persistido. O discriminador sobrevive apenas para loops promovidos por `/legacy:detect`,
+e `assert_rocksmash_iteration_shape` continua sendo o gate desses. Para todos os demais — isto e,
+para o caminho que o operador realmente clica — a validacao autoritativa e do **shape da fila
+expandida**, feita sempre por `_assert_expanded_queue_shape` em `loop_rocksmash_expander.py`.
+Validar um modo que a preparacao nunca escreve seria um gate que nunca dispara.
+
+Promover `mode == "rocksmash"` a modo persistido de primeira classe exigiria ampliar schema,
+migracao e UI sem beneficio demonstrado: o caminho executavel ja funciona sem ele.
+
+**Tier do rocksmash (politica explicita).** O framing (`:prepare`, `:rename`) e fixo em `opus` +
+`standard`, alinhado ao bucket canonico `T-opus-standard`. Cada iteracao herda o sizing do proprio
+item/bucket da config normal (`_bucket_to_model_effort`) — o rocksmash nao declara tier proprio por
+iteracao, porque um segundo sistema de tier sobrescreveria em silencio o sizing por item que o
+operador ja declarou. Mesma politica em `ai-forge/rules/rocksmash.md` secao 2.2.
+
 
 **Validador canonico (referencia python):**
 
@@ -167,13 +191,15 @@ Os quatro exportados em `workflow_app.daily_loop.__init__`. Implementacao em `lo
 
 **Producers (gravam `mode`):**
 
-- `/loop:create-structure` — escreve `mode` top-level apos detectar o flag do CLI (`--rocksmash` => `"rocksmash"`; demais => valor literal do flag). Sem flag, omite o campo (defaulta a non-rocksmash silenciosamente).
-- `/loop:integration` — preserva `mode`; quando `mode == "rocksmash"`, materializa `buckets[*].items[*].commands` com os 4 tokens canonicos (e replica em `items_index[NNN].commands` para auditoria W9).
+- `/loop:create-structure` — escreve `mode` top-level com o valor literal do flag do CLI (`--task`, `--cmd`, `--cmd-single`, `--both`). Sem flag, omite o campo (defaulta a `"normal"` silenciosamente). **Nao escreve `"rocksmash"`**: o modo `--rocksmash` nao gera JSON, logo nunca chega a este comando (ver nota da secao 2.3).
+- `/loop:integration` — preserva `mode`; quando `mode == "rocksmash"` (loops promovidos por `/legacy:detect`), materializa `buckets[*].items[*].commands` com os 4 tokens canonicos (e replica em `items_index[NNN].commands` para auditoria W9).
 - `/legacy:detect` — promove loops legacy rocksmash setando `mode = "rocksmash"` E aplicando backfill via `/legacy:enqueue-all-modules` para converter `[do, review-done]` em `[do, review-done, compare, integrate]` (B12).
 
 **Migracao:** loops V3 sem `mode` (pre-2026-05-19) sao tratados como `"normal"` automaticamente, sem warning. Loops rocksmash legacy (com `daily_loop.rocksmash_legacy_two_step: true`) continuam emitindo 2 comandos por iteracao no expander; o backfill B12 promove para 4 comandos quando o operador estiver pronto.
 
-**Gate de runtime:** `assert_rocksmash_iteration_shape` rejeita com `DailyLoopConfigError` quando o shape diverge dos 4 tokens canonicos. Falha apresenta o `id` do item, a sequencia observada e a sequencia esperada — Zero Silencio. Para itens com `commands == []` em estado pre-integration (`metadata.integration_completed_at` ausente), o validator tolera o placeholder (alinha com a tabela da secao 2: shape `{"id":"NNN","commands":[]}` e legitimo pre-`/loop:integration`).
+**Gate de runtime (fila expandida, sempre ativo):** `_assert_expanded_queue_shape` em `loop_rocksmash_expander.py` valida a fila realmente emitida por `build_loop_rocksmash_specs` — `:prepare` primeiro, `:rename` ultimo, exatamente um bloco canonico por item de iteracao, na ordem. Diretivas (`/clear`, `/model`, `/effort`) sao removidas antes da comparacao porque a injecao delas depende de drift de sizing. Este e o gate que vale para toda config normal, isto e, para todo loop que o operador expande pelo botao.
+
+**Gate de runtime (config, opt-in):** `assert_rocksmash_iteration_shape` rejeita com `DailyLoopConfigError` quando o shape diverge dos 4 tokens canonicos. Falha apresenta o `id` do item, a sequencia observada e a sequencia esperada — Zero Silencio. Para itens com `commands == []` em estado pre-integration (`metadata.integration_completed_at` ausente), o validator tolera o placeholder (alinha com a tabela da secao 2: shape `{"id":"NNN","commands":[]}` e legitimo pre-`/loop:integration`).
 
 ### 2.4 Chaves top-level prefixadas com `_` — namespace advisory reservado (adicionado 2026-05-21 — T-05 R5 stale-marking)
 
@@ -183,8 +209,23 @@ Produtores podem usar esse namespace para sinalizacao que nao deve influenciar a
 
 Qualquer futura adocao de JSON Schema com `additionalProperties: false` para `_LOOP-CONFIG.json` DEVE whitelistar o prefixo `_` (pattern property `^_`) para preservar este namespace.
 
----
+### 2.5 Marcador de status em `PROGRESS.md` — conjunto canonico fechado (adicionado 2026-08-24 — Task 04 do estudo 08-24)
 
+**Regra de ouro:** a coluna `Status` da tabela de `PROGRESS.md` aceita exatamente tres glifos: `[x]` = `done`, `[ ]` = `pending`, `[!]` = `failed`. O conjunto e **fechado**. Nao existe glifo "quase pending" nem glifo tolerado.
+
+Uma linha que ja tem **forma de item** (ID valido, celula `[<glifo>]`, target, bucket valido) mas glifo fora do conjunto e um `InvalidMarker`, e o loader **bloqueia**:
+
+- `parse_progress_items()` e `parse_progress_items_loop()` levantam `InvalidMarkerError` (subclasse de `DailyLoopConfigError`, entao callers antigos que ja capturam config malformada continuam funcionando);
+- o erro carrega `.markers` — lista de `InvalidMarker(item_id, glyph, line_no, raw_line)` — para que preview e auditoria listem os IDs afetados em vez de so mostrar a mensagem;
+- o glifo desconhecido **nunca** e convertido para `pending`, `done` ou `failed`. Adivinhar o status pretendido e o anti-pattern que esta regra existe para matar: antes desta versao a linha era descartada em silencio pelo regex e o item sumia da fila sem nenhum sinal.
+
+Consumidores que precisam inspecionar em vez de bloquear (auditor de corpus, preview do botao Loop) passam `strict=False` e leem a trilha por `scan_progress_invalid_markers()` / `scan_progress_invalid_markers_loop()`. Nesse modo o item invalido e omitido da fila materializada e continua contando no total bruto do censo — nunca no denominador de um status canonico.
+
+Linhas sem forma de item (cabecalho, separador, prosa livre) seguem sendo ignoradas em silencio, como antes: o bloqueio e para item malformado, nao para texto.
+
+Ocorrencia real no corpus: `[~]` em `blacksmith/loop-archives/07-24-criacao-agentes/PROGRESS.md` (item 003) — uma unica linha em ~3k itens, invisivel ate esta regra existir.
+
+---
 ## 3. Gold example — schema canonico V3 + `daily_loop`
 
 Copy-paste pronto para `_LOOP-CONFIG.json` em qualquer loop sob `blacksmith/loop-archives/{name}/`. Reflete o shape que o `metrics-project-pill` aceita (`config_parser.parse_config()` exige V3 com `basic_flow`) e que `_on_daily_loop_clicked` -> `build_daily_loop_specs` / `build_loop_specs` consome.
@@ -348,13 +389,27 @@ Producers complementares (escrevem auditoria, nunca o shape autoritario):
 
 ## 5. Consumers (leitores deste shape)
 
-Tres call sites em `loader.py` consomem o shape canonico. Toda regressao silenciosa do fallback dispara warning explicito (Zero Silencio) via `_warn_silent_fallback_if_items_index_populated` (linha 385).
+Tres call sites em `loader.py` consomem o shape canonico. Toda regressao silenciosa do fallback dispara warning explicito (Zero Silencio) via `_warn_silent_fallback_if_items_index_populated`.
+
+> **Numeros de linha sao referencia frouxa, nao contrato.** Ancore a leitura no NOME da funcao (`grep -n "^def build_loop_specs" loader.py`); os intervalos abaixo driftam a cada edicao do modulo e foram reconferidos em 2026-08-24.
 
 | Consumer | Localizacao em `loader.py` | Lane do workflow-app | Comportamento |
 |----------|---------------------------|----------------------|---------------|
-| `_resolve_item_commands(daily_loop, item_id)` | linhas 252-300 | helper compartilhado | Retorna `list[str]` literal quando `buckets[*].items[*].commands` esta populado; retorna `[]` ou `None` nos shapes do fallback (vide tabela secao 2). Rejeita `/daily-loop:do` dentro de `commands` com `DailyLoopConfigError`. |
-| `build_daily_loop_specs(raw_config, loop_root)` | linhas 421-712 (chamada de `_resolve_item_commands` em 568; warning em 587) | lane legacy `/daily-loop` (`queue-btn-daily-loop`) | Emite UM `CommandSpec` por entrada de `commands` quando populado. Caso fallback: emite `CommandSpec(name=f"{do_command} --slug {slug} --item {item_id}")` + warning stderr se `items_index[item_id].commands` tem conteudo (drift detectavel). |
-| `build_loop_specs(raw_config, loop_root)` | linhas 802-988 (chamada de `_resolve_item_commands` em 933; warning em 952) | lane `/loop --task\|--cmd\|--cmd-single\|--both` (`queue-btn-loop`, `queue-btn-cmd-single`) | Comportamento diverge de `build_daily_loop_specs` em `review_done_command` (ver nota abaixo). |
+| `_resolve_item_commands(daily_loop, item_id)` | `def` na linha 526 | helper compartilhado | Retorna `list[str]` literal quando `buckets[*].items[*].commands` esta populado; retorna `[]` ou `None` nos shapes do fallback (vide tabela secao 2). Rejeita `/daily-loop:do` dentro de `commands` com `DailyLoopConfigError`. |
+| `build_daily_loop_specs(raw_config, loop_root)` | `def` na linha 1286 | lane legacy `/daily-loop` (`queue-btn-daily-loop`) | Emite UM `CommandSpec` por entrada de `commands` quando populado. Caso fallback: emite `CommandSpec(name=f"{do_command} --slug {slug} --item {item_id}")` + warning stderr se `items_index[item_id].commands` tem conteudo (drift detectavel). |
+| `build_loop_specs(raw_config, loop_root)` | `def` na linha 1774 | lane `/loop --task\|--cmd\|--cmd-single\|--both` (`queue-btn-loop`, `queue-btn-cmd-single`) | Comportamento diverge de `build_daily_loop_specs` em `review_done_command` (ver nota abaixo). |
+
+**Nota de sizing per-item (reconferida 2026-08-24):**
+
+`model`/`effort` NAO sao bucket-only. `_resolve_item_model_effort` (`def` na linha 754) le
+`items_index[item_id].{model,effort}` como **fonte primaria V3**, com fallback para a entrada
+dict correspondente em `buckets[*].items[*]` (shape V2). O bucket entra como default apenas
+quando o item nao declara sizing e nao ha run anchor ativo.
+
+`null` explicito e um TERCEIRO estado, distinto de ausente e de valor: significa "herdar o run
+ativo" (convencao de compressao de runs da FASE `/loop:individual-analysis`), e o caller aplica
+essa heranca em vez de cair no default do bucket. Documentacao que descreve sizing como
+"bucket-only" esta descrevendo o comportamento anterior a essa convencao.
 
 **Nota de divergencia `review_done_command` entre lanes (fix 2026-05-20):**
 
@@ -392,8 +447,8 @@ Este CONTRACT.md e linkado bidirecionalmente:
   - [`.claude/commands/loop/create-structure.md`](../../../../../.claude/commands/loop/create-structure.md) — secao "Contrato T0 obrigatorio para `daily_loop.buckets[*].items` (P0)" aponta para este CONTRACT.md.
   - [`.claude/commands/loop/workflow-app.md`](../../../../../.claude/commands/loop/workflow-app.md) — secao OVERRIDE CANONICO 2026-05-12 e PASSO 7.5 (W9) apontam para este CONTRACT.md.
 - **Loader runtime:** [`ai-forge/workflow-app/src/workflow_app/daily_loop/loader.py`](loader.py) — autoridade de implementacao.
-- **Relatorio de origem:** [`blacksmith/loop-archives/05-13-micro-architecture-refactor/_HARDENING-REPORT.md`](../../../../../blacksmith/loop-archives/05-13-micro-architecture-refactor/_HARDENING-REPORT.md) — secao 1.1 (tabela shape match), 3.6 (decisao de criar este documento), 3.8 (gate pre-commit).
-- **Loop de hardening:** [`blacksmith/loop-archives/05-13-hardening-cmd-flow/`](../../../../../blacksmith/loop-archives/05-13-hardening-cmd-flow/) — itens 002/003/004 (patches nas specs), 008 (este CONTRACT.md).
+- **Relatorio de origem:** [`blacksmith/done/05-13-micro-architecture-refactor/_HARDENING-REPORT.md`](../../../../../blacksmith/done/05-13-micro-architecture-refactor/_HARDENING-REPORT.md) — secao 1.1 (tabela shape match), 3.6 (decisao de criar este documento), 3.8 (gate pre-commit).
+- **Loop de hardening:** [`blacksmith/done/05-13-hardening-cmd-flow/`](../../../../../blacksmith/done/05-13-hardening-cmd-flow/) — itens 002/003/004 (patches nas specs), 008 (este CONTRACT.md).
 - **Auditoria retroativa:** [`ai-forge/scripts/audit-loop-configs.py`](../../../../scripts/audit-loop-configs.py) — script de varredura/fix que detecta e remedia loops afetados; relatorio em `blacksmith/loop-archives/_AUDIT-2026-05-13.md`.
 
 ---

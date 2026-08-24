@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
+
+# ── Guard de telemetria real (TASK 01) ──────────────────────────────────────
+# Armado NO IMPORT do conftest, antes de qualquer coleta: `MetricsBar.
+# _append_failure_telemetry` recusa escrever em `.claude/wf-failures/` do repo
+# real enquanto esta variavel estiver setada. Escrita em tmp_path continua
+# funcionando (o guard compara com a raiz real resolvida no modulo).
+# Contrato: ai-forge/workflow-app/tests/test_telemetry_no_real_write.py
+os.environ["WF_BLOCK_REAL_FAILURE_TELEMETRY"] = "1"
+
+# ── Guard do sidecar de lifecycle (Task 24) ─────────────────────────────────
+# Mesma forma, outro destino: sem isto a suite despeja centenas de eventos
+# sinteticos em `~/.workflow-app/logs/loop-lifecycle-*.jsonl` e contamina o
+# corpus que decide se um loop foi cancelado ou abandonado. O guard cede a
+# `SF_LOOP_LIFECYCLE_DIR`, entao teste que aponta para tmp_path grava normal.
+# Contrato: ai-forge/workflow-app/tests/test_loop_lifecycle_sink.py
+os.environ["WF_BLOCK_REAL_LIFECYCLE_TELEMETRY"] = "1"
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
@@ -50,6 +67,16 @@ def qapp():
     if app is None:
         app = QApplication(sys.argv)
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _block_real_failure_telemetry(monkeypatch):
+    """Reafirma o guard a cada teste (TASK 01).
+
+    O import do conftest ja arma a variavel; este autouse impede que um teste
+    que mexa em `os.environ` deixe a guarda baixada para os testes seguintes.
+    """
+    monkeypatch.setenv("WF_BLOCK_REAL_FAILURE_TELEMETRY", "1")
 
 
 @pytest.fixture(autouse=True)

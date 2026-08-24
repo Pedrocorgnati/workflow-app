@@ -17,14 +17,16 @@ Cobertura:
   4. Codex e mockado (R1 da task): nenhuma chamada de rede acontece nesta
      suite — os tests exercitam apenas o expander deterministico em memoria.
 
-Skips condicionais:
-  * Tests que dependem de cursor real (B8 pending) sao marcados como skipped.
-  * Tests que dependem de extensao de queue_btn (B7 pending) sao marcados.
+  5. Ciclo de vida completo do cursor por subfase (2026-08-24, Task 20):
+     dispatch -> confirmacao -> crash -> reabertura -> bloqueio -> retomada.
+     Este cenario deixou de ser skip quando o sidecar
+     `_ROCKSMASH-STATE.json` passou a existir; o antigo "awaiting B8" testava
+     dicionarios montados no proprio teste, o que nao prova nada sobre o
+     modulo de producao.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -39,17 +41,28 @@ from workflow_app.daily_loop.loader import (
     assert_rocksmash_iteration_shape,
     is_rocksmash_mode,
 )
+from workflow_app.daily_loop.rocksmash_state import (
+    SUBPHASES,
+    begin_subphase,
+    init_state,
+    mark_subphase,
+    read_state,
+    reopen_state,
+)
 
-def _module_available(dotted_name: str) -> bool:
-    try:
-        return importlib.util.find_spec(dotted_name) is not None
-    except (ImportError, ModuleNotFoundError, ValueError):
-        return False
+
+SUBPHASES_AS_VERBS = tuple(f"/loop-rocksmash:{s}" for s in SUBPHASES)
 
 
-_CURSOR_MODULE_AVAILABLE = _module_available(
-    "workflow_app.rocksmash.cursor"
-) or _module_available("workflow_app.command_queue.rocksmash_cursor")
+def _iteration_tokens(specs) -> list[str]:
+    """Verbos de iteracao emitidos, sem diretivas nem enquadramento."""
+    return [
+        s.name.split(" ", 1)[0]
+        for s in specs
+        if s.name.startswith("/loop-rocksmash:")
+        and s.name.split(" ", 1)[0]
+        not in ("/loop-rocksmash:prepare", "/loop-rocksmash:rename")
+    ]
 
 
 def _make_loop_workspace(tmp_path: Path, *, num_items: int = 2) -> Path:
@@ -295,10 +308,66 @@ def test_smoke_invalid_config_raises_with_actionable_message(tmp_path: Path) -> 
     )
 
 
-@pytest.mark.skipif(
-    not _CURSOR_MODULE_AVAILABLE,
-    reason="awaiting B8: rocksmash_cursor module ainda nao existe",
-)
 def test_smoke_cursor_lifecycle_full_loop(tmp_path: Path) -> None:
-    """E2E completo com cursor: init -> advance -> rename. Skip ate B8."""
-    pytest.skip("awaiting B8 implementation")
+    """E2E do cursor: dispatch -> confirmacao -> crash -> reabertura -> retomada.
+
+    O caminho inteiro sobre os modulos de producao, com o `_LOOP-CONFIG.json`
+    real em disco. E o cenario que justifica o sidecar existir: sem ele, o
+    passo 4 (crash) seria indistinguivel de "nunca rodou" e a fila
+    re-executaria efeito ja aplicado.
+    """
+    config_path = _make_loop_workspace(tmp_path, num_items=2)
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    root = config_path.parent
+    itens = [
+        (str(it["id"]), it)
+        for b in cfg["daily_loop"]["buckets"]
+        for it in b["items"]
+    ]
+
+    # 1. Fila integral antes de qualquer registro.
+    tokens_iniciais = _iteration_tokens(build_loop_rocksmash_specs(cfg, root))
+    assert tokens_iniciais.count("/loop-rocksmash:do") == 2
+
+    # 2. Item 001 roda inteiro, subfase a subfase, marcado pelo confirmador.
+    init_state(root, cfg, itens, now=1.0)
+    for i, sub in enumerate(SUBPHASES):
+        begin_subphase(root, cfg, "001", sub, now=10.0 + i)
+        mark_subphase(root, cfg, "001", sub, now=10.5 + i)
+
+    # 3. Retomada nao reenfileira o item concluido.
+    tokens = _iteration_tokens(build_loop_rocksmash_specs(cfg, root))
+    assert tokens == list(SUBPHASES_AS_VERBS)
+
+    # 4. Item 002 despacha `do` e o processo morre antes de persistir desfecho.
+    begin_subphase(root, cfg, "002", "do", pid=999_999, now=20.0)
+    assert read_state(root).subphase("002", "do").status == "in_flight"
+
+    # 5. Reabertura converte o orfao em `unknown` e a fila trava.
+    with pytest.raises(DailyLoopConfigError, match="unknown"):
+        build_loop_rocksmash_specs(cfg, root)
+    assert read_state(root).subphase("002", "do").status == "unknown"
+
+    # 6. Reconciliacao explicita (a decisao humana que o cursor nao toma):
+    #    verificou-se que o efeito NAO foi aplicado, entao volta a pending.
+    mark_subphase(
+        root, cfg, "002", "do", status="pending", now=30.0,
+        note="reconciliado: efeito nao aplicado",
+    )
+    tokens = _iteration_tokens(build_loop_rocksmash_specs(cfg, root))
+    assert tokens == list(SUBPHASES_AS_VERBS)
+
+    # 7. Fim do loop: so o enquadramento sobra.
+    for sub in SUBPHASES:
+        mark_subphase(root, cfg, "002", sub, now=40.0)
+    specs = build_loop_rocksmash_specs(cfg, root)
+    assert _iteration_tokens(specs) == []
+    nomes = [s.name.split(" ", 1)[0] for s in specs]
+    assert "/loop-rocksmash:prepare" in nomes
+    assert "/loop-rocksmash:rename" in nomes
+
+
+def test_smoke_reopen_sem_sidecar_nao_inventa_estado(tmp_path: Path) -> None:
+    """Sem arquivo, `reopen_state` devolve None — ausencia e fato, nao estado."""
+    config_path = _make_loop_workspace(tmp_path, num_items=1)
+    assert reopen_state(config_path.parent) is None

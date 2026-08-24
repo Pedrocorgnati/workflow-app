@@ -1,0 +1,98 @@
+{
+  "total_specs": 12,
+  "phase_count": 6,
+  "phases": [
+    "/cmd:create {SOURCE_MD}",
+    "/cmd:review /loop:alvo {SOURCE_MD}",
+    "/cmd:kimi-pair-analyse /loop:alvo",
+    "/cmd:kimi-pair-execute blacksmith/loop_alvo-kimi-pair-report.md",
+    "/cmd:readme-upd",
+    "/auto-improove:mcp-flags --target /loop:alvo"
+  ],
+  "specs": [
+    {
+      "position": 1,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 2,
+      "name": "/model opus",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 3,
+      "name": "/effort high",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 4,
+      "name": "/cmd:create {SOURCE_MD}",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 5,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 6,
+      "name": "/cmd:review /loop:alvo {SOURCE_MD}",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 7,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 8,
+      "name": "/cmd:kimi-pair-analyse /loop:alvo",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 9,
+      "name": "/cmd:kimi-pair-execute blacksmith/loop_alvo-kimi-pair-report.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 10,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 11,
+      "name": "/cmd:readme-upd",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 12,
+      "name": "/auto-improove:mcp-flags --target /loop:alvo",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    }
+  ]
+}

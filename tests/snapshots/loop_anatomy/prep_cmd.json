@@ -1,0 +1,127 @@
+{
+  "total_specs": 16,
+  "phase_count": 7,
+  "phases": [
+    "/loop:create-structure --cmd source.md --name 08-24-fixture-anatomy",
+    "/loop:individual-analysis --cmd --name 08-24-fixture-anatomy",
+    "/loop:integration --cmd --name 08-24-fixture-anatomy",
+    "/loop:review --cmd --name 08-24-fixture-anatomy",
+    "/loop:integrated-architecture --loop-slug 08-24-fixture-anatomy",
+    "/loop:workflow-app --cmd --name 08-24-fixture-anatomy",
+    "/loop:friendly-resume --name 08-24-fixture-anatomy"
+  ],
+  "specs": [
+    {
+      "position": 1,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 2,
+      "name": "/model opus",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 3,
+      "name": "/effort high",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 4,
+      "name": "/loop:create-structure --cmd source.md --name 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 5,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 6,
+      "name": "/loop:individual-analysis --cmd --name 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 7,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 8,
+      "name": "/loop:integration --cmd --name 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 9,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 10,
+      "name": "/loop:review --cmd --name 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 11,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 12,
+      "name": "/loop:integrated-architecture --loop-slug 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 13,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 14,
+      "name": "/loop:workflow-app --cmd --name 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 15,
+      "name": "/clear",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 16,
+      "name": "/loop:friendly-resume --name 08-24-fixture-anatomy",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    }
+  ]
+}

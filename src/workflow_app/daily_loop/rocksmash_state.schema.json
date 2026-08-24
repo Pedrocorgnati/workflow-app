@@ -1,0 +1,144 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://systemforge.local/schemas/rocksmash-state-1.0.0.json",
+  "title": "_ROCKSMASH-STATE.json",
+  "description": "Autoridade de maquina do progresso do rocksmash: estado por item e por subfase, vinculado ao hash da config que o gerou. rocksmash-progress.md e metadata.last_rocksmash_* sao PROJECOES de compatibilidade e nunca decidem retomada.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "loop_slug",
+    "config_hash",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "loop_slug": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Basename do loop_root. Identidade humana; nao e chave de validade."
+    },
+    "config_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA256 do conteudo canonico do _LOOP-CONFIG.json no momento do init. Divergencia = estado stale: a config mudou (tipicamente por :rename) e os item_ids podem ter mudado de significado."
+    },
+    "created_at": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Epoch UTC do init. Null quando nao observado."
+    },
+    "updated_at": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Epoch UTC da ultima escrita. Null quando nao observado."
+    },
+    "items": {
+      "type": "object",
+      "description": "Chave = item_id (string, como aparece em buckets[*].items[*].id).",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subphases"
+        ],
+        "properties": {
+          "task_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path do artefato da task no momento do init. Projecao de diagnostico; a autoridade de path continua sendo a config."
+          },
+          "subphases": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "do",
+              "review-done",
+              "compare",
+              "integrate"
+            ],
+            "properties": {
+              "do": {
+                "$ref": "#/definitions/subphase"
+              },
+              "review-done": {
+                "$ref": "#/definitions/subphase"
+              },
+              "compare": {
+                "$ref": "#/definitions/subphase"
+              },
+              "integrate": {
+                "$ref": "#/definitions/subphase"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "subphase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "in_flight",
+            "completed",
+            "failed",
+            "unknown"
+          ],
+          "description": "pending = nao observada como concluida. in_flight = despachada, marcada ANTES do efeito. completed/failed = desfecho autoritativo, escrito somente pelo confirmador da fila. unknown = in_flight orfao (processo morreu): pode ter aplicado efeito, bloqueia retomada automatica ate reconciliacao."
+        },
+        "completed_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Epoch UTC. Null = nao observado; nunca inferir 'agora'."
+        },
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Componente que confirmou. Valor canonico: 'queue-confirmer'. Null = nao observado."
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Diagnostico curto opcional (ex: motivo do failed)."
+        },
+        "started_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Epoch do dispatch. null = nao observado (R19), nunca 'nao comecou'."
+        },
+        "pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "PID do processo que despachou a subfase, gravado junto com in_flight. Serve para distinguir execucao viva de orfao via kill -0 na reabertura; limpo em qualquer status terminal."
+        }
+      }
+    }
+  }
+}

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 import sys
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,12 +61,51 @@ from workflow_app.domain import (
     CommandSpec,
     EffortLevel,
     InteractionType,
+    LoopExecutionContext,
     ModelName,
 )
 
 
 class DailyLoopConfigError(ValueError):
     """Raised when _LOOP-CONFIG.json or PROGRESS.md is malformed."""
+
+
+@dataclass(frozen=True)
+class InvalidMarker:
+    """Uma linha de PROGRESS.md com marcador de status fora do conjunto canonico.
+
+    Conjunto canonico fechado: `[x]` done, `[ ]` pending, `[!]` failed.
+    Qualquer outro glifo (ex.: `[~]`, observado uma vez no corpus real) NAO e
+    convertido para status canonico nem descartado em silencio: vira um
+    `InvalidMarker` e bloqueia a materializacao da fila.
+    """
+
+    item_id: str
+    glyph: str
+    line_no: int
+    raw_line: str
+
+
+class InvalidMarkerError(DailyLoopConfigError):
+    """PROGRESS.md contem marcador de status desconhecido.
+
+    Carrega a trilha completa em `.markers` para que auditor e preview possam
+    listar os IDs afetados em vez de so mostrar a mensagem.
+    """
+
+    def __init__(self, markers: "list[InvalidMarker]") -> None:
+        self.markers = list(markers)
+        detail = "; ".join(
+            f"linha {m.line_no}: item {m.item_id} com marcador [{m.glyph}]"
+            for m in self.markers
+        )
+        super().__init__(
+            "PROGRESS.md contem marcador de status desconhecido "
+            f"({len(self.markers)} ocorrencia(s)). "
+            "Marcadores canonicos: [x] done, [ ] pending, [!] failed. "
+            f"{detail}. "
+            "Corrija o PROGRESS.md; o loader nao adivinha o status pretendido."
+        )
 
 
 @dataclass(frozen=True)
@@ -180,6 +220,20 @@ _ITEM_ROW = re.compile(
     r"(?P<target>[^|]+?)\s*\|\s*"
     r"(?P<bucket>[A-Za-z0-9_.:-]+)\s*\|"
 )
+
+
+# Mesma forma do `_ITEM_ROW`, porem com o glifo de status ABERTO. Serve para
+# distinguir "linha que nao e item" (ignorar) de "linha que e item mas tem
+# marcador invalido" (bloquear).
+_ITEM_ROW_ANY_MARK = re.compile(
+    r"^\s*\|\s*"
+    r"(?P<id>[A-Za-z0-9_-]+)\s*\|\s*"
+    r"\[(?P<mark>[^\]]?)\]\s*\|\s*"
+    r"(?P<target>[^|]+?)\s*\|\s*"
+    r"(?P<bucket>[A-Za-z0-9_.:-]+)\s*\|"
+)
+
+_CANONICAL_MARKS = {"x": "done", "!": "failed", " ": "pending"}
 
 
 def diagnose_workspace_doubled_path(
@@ -383,12 +437,53 @@ def resolve_effective_workspace_root(
     return loop_workspace
 
 
-def parse_progress_items(progress_md_text: str) -> list[ProgressItem]:
+def scan_progress_invalid_markers(progress_md_text: str) -> list[InvalidMarker]:
+    """Trilha de marcadores invalidos de um PROGRESS.md (daily-loop).
+
+    Uma linha entra na trilha quando tem a FORMA de item (ID, celula
+    `[<glifo>]`, target, bucket) mas o glifo esta fora de `{x, !, espaco}`.
+    Linhas que nao tem forma de item (cabecalho, separador, prosa) continuam
+    sendo ignoradas, como antes.
+    """
+    bad: list[InvalidMarker] = []
+    for line_no, line in enumerate(progress_md_text.splitlines(), start=1):
+        m = _ITEM_ROW_ANY_MARK.match(line)
+        if not m:
+            continue
+        mark = m.group("mark")
+        if mark in _CANONICAL_MARKS:
+            continue
+        bad.append(
+            InvalidMarker(
+                item_id=m.group("id"),
+                glyph=mark,
+                line_no=line_no,
+                raw_line=line.rstrip(),
+            )
+        )
+    return bad
+
+
+def parse_progress_items(
+    progress_md_text: str,
+    *,
+    strict: bool = True,
+) -> list[ProgressItem]:
     """Extract item rows from a PROGRESS.md.
 
     Tolerates extra columns (e.g. `Updated`) — only the first 4 are required.
     Skips any non-matching lines (header rows, separators, free-form notes).
+
+    Marcador fora do conjunto canonico `[x] [ ] [!]` NAO e mais descartado em
+    silencio: com `strict=True` (default) levanta `InvalidMarkerError` com a
+    trilha completa; com `strict=False` a linha e omitida da lista de itens e
+    o chamador deve consultar `scan_progress_invalid_markers` para exibir o
+    bloqueio (auditor de corpus, preview do botao Loop).
     """
+    if strict:
+        bad = scan_progress_invalid_markers(progress_md_text)
+        if bad:
+            raise InvalidMarkerError(bad)
     items: list[ProgressItem] = []
     for line in progress_md_text.splitlines():
         m = _ITEM_ROW.match(line)
@@ -761,6 +856,82 @@ def _resolve_run_default_model_effort(
     return None, None
 
 
+# Waiver explicito do run anchor. O operador que decidir rodar um loop V3 sem
+# nenhum sizing per-item registra o motivo no proprio config; sem registro, a
+# heranca cairia em silencio no default do bucket (incidente
+# 05-25-rede-micro-sites). Ver `.claude/commands/loop/individual-analysis.md`
+# PASSO 2, nota "Run anchor obrigatorio".
+_SIZING_ANCHOR_WAIVER_KEY = "sizing_anchor_waiver"
+
+
+def _require_run_anchor(
+    daily_loop: dict[str, Any],
+    anchor: tuple[ModelName | None, EffortLevel | None],
+) -> None:
+    """Exige run anchor explicito em config V3, salvo waiver humano registrado.
+
+    Escopo estreito de proposito. O gate so dispara quando o PRODUTOR ja tocou
+    sizing, ou seja, quando ao menos uma entrada de `items_index` declara a
+    chave `model` ou `effort` (mesmo com valor `null`) — que e a assinatura de
+    `/loop:individual-analysis` ter rodado. Config que nunca menciona sizing
+    (V2 legada, ou fixture minima) continua semeando do bucket, sem mudanca de
+    comportamento.
+
+    - passa assim que UM item carrega `model` E `effort` explicitos;
+    - falha quando o produtor gravou sizing all-null, que e o caso real que
+      derruba a heranca para o default do bucket;
+    - o waiver `daily_loop.sizing_anchor_waiver` (com `motivo` e `autor`)
+      libera o loop, deixando a decisao rastreada no proprio config.
+
+    Raises:
+        DailyLoopConfigError: sizing declarado porem all-null, sem waiver valido.
+    """
+    if anchor[0] is not None and anchor[1] is not None:
+        return
+
+    items_index = daily_loop.get("items_index")
+    if not isinstance(items_index, dict) or not items_index:
+        return  # V2 legado: seed pelo bucket, comportamento preservado
+
+    produtor_tocou_sizing = any(
+        isinstance(entry, dict) and ("model" in entry or "effort" in entry)
+        for entry in items_index.values()
+    )
+    if not produtor_tocou_sizing:
+        return  # sizing nunca declarado: nada a ancorar, seed pelo bucket
+
+    waiver = daily_loop.get(_SIZING_ANCHOR_WAIVER_KEY)
+    if isinstance(waiver, dict):
+        motivo = str(waiver.get("motivo", "") or "").strip()
+        autor = str(waiver.get("autor", "") or "").strip()
+        if motivo and autor:
+            import sys
+
+            print(
+                f"[daily-loop] WARN: run sem anchor explicito, liberado por "
+                f"{_SIZING_ANCHOR_WAIVER_KEY} (autor={autor!r}, motivo={motivo!r})",
+                file=sys.stderr,
+            )
+            return
+        raise DailyLoopConfigError(
+            f"daily_loop.{_SIZING_ANCHOR_WAIVER_KEY} exige 'motivo' e 'autor' "
+            "nao vazios para liberar um run sem anchor."
+        )
+
+    raise DailyLoopConfigError(
+        "run sem anchor de sizing: nenhum item de items_index grava model E "
+        "effort explicitos.\n"
+        "  Sem anchor a fila inteira herda o default do bucket, que e o bug do "
+        "incidente 05-25-rede-micro-sites.\n"
+        "  Remedie de UM destes jeitos:\n"
+        "    1) rodar /loop:individual-analysis (o mapeamento score -> "
+        "(model, effort) sempre resolve um par); ou\n"
+        "    2) gravar model+effort em pelo menos um item de items_index; ou\n"
+        "    3) registrar daily_loop.sizing_anchor_waiver = "
+        '{"motivo": "...", "autor": "..."} quando a ausencia for deliberada.'
+    )
+
+
 def _resolve_effective_sizing(
     daily_loop: dict[str, Any],
     item_id: str,
@@ -900,6 +1071,19 @@ def is_rocksmash_mode(raw_config: dict[str, Any]) -> bool:
     if not isinstance(mode, str):
         return False
     return mode.strip().lower() == "rocksmash"
+
+
+def _nullable_mode(raw_config: dict[str, Any]) -> str | None:
+    """`mode` normalizado, ou None quando ausente.
+
+    Config V3 legada nao declara `mode` (13.1, linha Compatibilidade). Ausencia
+    vira None em vez de um default inventado: no corpus de telemetria, "modo
+    desconhecido" e informacao; "normal" fabricado seria mentira estatistica.
+    """
+    mode = raw_config.get("mode")
+    if not isinstance(mode, str):
+        return None
+    return mode.strip().lower() or None
 
 
 def _strip_directives(cmds: list[str]) -> list[str]:
@@ -1231,6 +1415,14 @@ def build_daily_loop_specs(
     if not slug:
         raise DailyLoopConfigError("daily_loop.slug ausente")
 
+    # Correlacao de execucao (Task 15 do estudo 08-24). Nasce AQUI, no builder
+    # da fila, e viaja dentro do CommandSpec ate o dispatcher. `queue_id`
+    # identifica ESTA montagem da fila (duas execucoes do mesmo loop sao runs
+    # distintos e nao podem colidir na telemetria); `loop_id` e o slug do
+    # arquivo. Nenhum consumidor infere item_id do texto do comando.
+    queue_id = uuid.uuid4().hex
+    loop_mode = _nullable_mode(raw_config)
+
     bucket_index = _resolve_bucket_index(daily_loop)
 
     loop_root_path = Path(loop_root)
@@ -1315,6 +1507,7 @@ def build_daily_loop_specs(
     # explicito do loop, NAO o bucket. Independente da emissao; nao resetado por
     # /clear (esse reset zera apenas a re-emissao de /model e /effort).
     active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
+    _require_run_anchor(daily_loop, (active_model, active_effort))
 
     for idx, item in enumerate(pending):
         # Opt-in: drop a /clear between items (after the prior :review-done,
@@ -1342,6 +1535,18 @@ def build_daily_loop_specs(
             )
         model, effort, active_model, active_effort = _resolve_effective_sizing(
             daily_loop, item.item_id, bucket, active_model, active_effort
+        )
+
+        # Um contexto por item. Comandos de diretiva (`/clear`, `/model`,
+        # `/effort`) NAO recebem contexto: nao pertencem a item nenhum e
+        # marca-los inflaria a contagem por item na telemetria.
+        item_ctx = LoopExecutionContext(
+            loop_id=slug,
+            queue_id=queue_id,
+            item_id=item.item_id,
+            phase="do",
+            bucket_id=item.bucket_id,
+            mode=loop_mode,
         )
 
         if model != current_model:
@@ -1403,6 +1608,7 @@ def build_daily_loop_specs(
                         config_path="",
                         position=0,
                         effort=effort,
+                        loop_context=item_ctx,
                         phase="daily-loop",
                     )
                 )
@@ -1420,6 +1626,7 @@ def build_daily_loop_specs(
                     config_path="",  # do command resolves loop_root via slug
                     position=0,
                     effort=effort,
+                    loop_context=item_ctx,
                     phase="daily-loop",
                 )
             )
@@ -1459,6 +1666,7 @@ def build_daily_loop_specs(
                 config_path="",
                 position=0,
                 effort=_REVIEW_DONE_EFFORT,
+                loop_context=item_ctx.with_phase("review-done"),
                 phase="daily-loop",
             )
         )
@@ -1569,7 +1777,53 @@ _LOOP_MARK_RE = re.compile(r"^\[(?P<mark>[ x!])\]$")
 _LOOP_BUCKET_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 
-def parse_progress_items_loop(progress_md_text: str) -> list[ProgressItem]:
+_LOOP_MARK_ANY_RE = re.compile(r"^\[(?P<mark>[^\]]?)\]$")
+
+
+def scan_progress_invalid_markers_loop(
+    progress_md_text: str,
+) -> list[InvalidMarker]:
+    """Trilha de marcadores invalidos, variante backtick-aware do `/loop`.
+
+    Mesmo criterio de `scan_progress_invalid_markers`: so entra na trilha a
+    linha que ja tem forma de item (ID e bucket validos) mas glifo de status
+    fora do conjunto canonico.
+    """
+    bad: list[InvalidMarker] = []
+    for line_no, line in enumerate(progress_md_text.splitlines(), start=1):
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = _split_md_row_backtick_aware(line)
+        if len(cells) < 5:
+            continue
+        id_raw = cells[1].strip()
+        mark_raw = cells[2].strip()
+        bucket_raw = cells[4].strip()
+        if not _LOOP_ID_RE.match(id_raw):
+            continue
+        if not _LOOP_BUCKET_RE.match(bucket_raw):
+            continue
+        if _LOOP_MARK_RE.match(mark_raw):
+            continue
+        any_m = _LOOP_MARK_ANY_RE.match(mark_raw)
+        if any_m is None:
+            continue
+        bad.append(
+            InvalidMarker(
+                item_id=id_raw,
+                glyph=any_m.group("mark"),
+                line_no=line_no,
+                raw_line=line.rstrip(),
+            )
+        )
+    return bad
+
+
+def parse_progress_items_loop(
+    progress_md_text: str,
+    *,
+    strict: bool = True,
+) -> list[ProgressItem]:
     """Backtick-aware variant of `parse_progress_items` for the /loop pipeline.
 
     Accepts the same PROGRESS.md schema as daily-loop (columns: ID, Status,
@@ -1584,7 +1838,15 @@ def parse_progress_items_loop(progress_md_text: str) -> list[ProgressItem]:
       - cell[4] matches the bucket regex.
 
     Header rows, separators, and free-form prose are silently skipped.
+
+    Marcador fora de `[x] [ ] [!]` bloqueia: com `strict=True` (default)
+    levanta `InvalidMarkerError`; com `strict=False` a linha e omitida e o
+    chamador consulta `scan_progress_invalid_markers_loop`.
     """
+    if strict:
+        bad = scan_progress_invalid_markers_loop(progress_md_text)
+        if bad:
+            raise InvalidMarkerError(bad)
     items: list[ProgressItem] = []
     for line in progress_md_text.splitlines():
         if not line.lstrip().startswith("|"):
@@ -1622,6 +1884,160 @@ def parse_progress_items_loop(progress_md_text: str) -> list[ProgressItem]:
             )
         )
     return items
+
+
+# ---------------------------------------------------------------------------
+# Preview de retomada (Task 16 do estudo 08-24)
+# ---------------------------------------------------------------------------
+#
+# O botao Loop ja retomava — mas em silencio: o operador clicava e descobria o
+# que tinha sido enfileirado olhando a fila. O preview troca isso por uma foto
+# do PROGRESS.md ANTES da materializacao, com contagem E os IDs de cada status.
+# IDs importam mais que contagem: "3 falhos" nao diz se sao os mesmos 3 de
+# ontem; "013, 021, 022" diz.
+#
+# `[!]` aparece no preview e continua fora da fila. Ele e visivel porque
+# esconde-lo faz o loop parecer completo quando nao esta, e e terminal porque
+# a reconciliacao atomica `failed -> pending` ainda nao tem contrato (Task 17).
+# Enfileirar `[!]` sem esse contrato reexecutaria efeito ja aplicado.
+
+
+@dataclass(frozen=True)
+class LoopResumePreview:
+    """Foto do PROGRESS.md antes de materializar a fila do `/loop`.
+
+    Nao decide nada: quem elege continua sendo o PROGRESS.md lido pelo loader.
+    Esta estrutura so torna a decisao visivel antes que ela vire fila.
+    """
+
+    pending_ids: tuple[str, ...] = ()
+    done_ids: tuple[str, ...] = ()
+    failed_ids: tuple[str, ...] = ()
+    invalid_markers: tuple[InvalidMarker, ...] = ()
+
+    @property
+    def pending_count(self) -> int:
+        return len(self.pending_ids)
+
+    @property
+    def done_count(self) -> int:
+        return len(self.done_ids)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failed_ids)
+
+    @property
+    def invalid_count(self) -> int:
+        return len(self.invalid_markers)
+
+    @property
+    def total_count(self) -> int:
+        """Itens com forma de item — invalidos incluidos.
+
+        Um item com marcador `[~]` existe no arquivo; omiti-lo do total faria o
+        preview reportar um universo menor que o real justamente no caso em que
+        o arquivo esta errado.
+        """
+        return (
+            self.pending_count
+            + self.done_count
+            + self.failed_count
+            + self.invalid_count
+        )
+
+    @property
+    def blocked(self) -> bool:
+        """True quando ha marcador fora de `[x] [ ] [!]`.
+
+        Bloquear e a unica resposta honesta: o loader nao adivinha se `[~]`
+        queria dizer pendente ou concluido, e chutar erra metade das vezes.
+        """
+        return bool(self.invalid_markers)
+
+    def summary_line(self) -> str:
+        partes = [
+            f"{self.pending_count} pendente(s)",
+            f"{self.done_count} concluido(s)",
+            f"{self.failed_count} falho(s)",
+        ]
+        if self.invalid_count:
+            partes.append(f"{self.invalid_count} invalido(s)")
+        return ", ".join(partes)
+
+    def ids_line(self) -> str:
+        """IDs por status, omitindo os grupos vazios (ruido sem informacao)."""
+        blocos: list[str] = []
+        if self.pending_ids:
+            blocos.append("pendentes: " + ", ".join(self.pending_ids))
+        if self.done_ids:
+            blocos.append("concluidos: " + ", ".join(self.done_ids))
+        if self.failed_ids:
+            blocos.append("falhos [!] (terminais): " + ", ".join(self.failed_ids))
+        return " | ".join(blocos)
+
+    def invalid_detail(self) -> str:
+        return "; ".join(
+            f"linha {m.line_no}: item {m.item_id} com marcador [{m.glyph}]"
+            for m in self.invalid_markers
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pending_count": self.pending_count,
+            "done_count": self.done_count,
+            "failed_count": self.failed_count,
+            "invalid_count": self.invalid_count,
+            "total_count": self.total_count,
+            "pending_ids": list(self.pending_ids),
+            "done_ids": list(self.done_ids),
+            "failed_ids": list(self.failed_ids),
+            "blocked": self.blocked,
+        }
+
+
+def build_loop_resume_preview(progress_md_text: str) -> LoopResumePreview:
+    """Classifica cada linha de item do PROGRESS.md sem materializar nada.
+
+    Usa `strict=False` de proposito: aqui o marcador invalido precisa ser
+    LISTADO, nao levantado. Quem levanta e o loader, na materializacao.
+    """
+    invalidos = tuple(scan_progress_invalid_markers_loop(progress_md_text))
+    itens = parse_progress_items_loop(progress_md_text, strict=False)
+    return LoopResumePreview(
+        pending_ids=tuple(it.item_id for it in itens if it.status == "pending"),
+        done_ids=tuple(it.item_id for it in itens if it.status == "done"),
+        failed_ids=tuple(it.item_id for it in itens if it.status == "failed"),
+        invalid_markers=invalidos,
+    )
+
+
+def read_loop_resume_preview(
+    raw_config: dict[str, Any],
+    loop_root: Path | str,
+) -> LoopResumePreview | None:
+    """Le o PROGRESS.md declarado no config e devolve o preview.
+
+    Devolve `None` quando o arquivo nao existe. Nao e tolerancia: o loader ja
+    levanta `DailyLoopConfigError` para PROGRESS.md ausente, com diagnostico de
+    path duplicado que este preview nao tem como reproduzir. Duplicar o erro
+    aqui daria ao operador duas mensagens diferentes para a mesma causa.
+    """
+    daily_loop = raw_config.get("daily_loop")
+    if not isinstance(daily_loop, dict):
+        return None
+    try:
+        progress_path = resolve_loop_path(
+            daily_loop.get("progress_path"),
+            Path(loop_root),
+            label="progress_path",
+            default="PROGRESS.md",
+        )
+    except DailyLoopConfigError:
+        return None
+    if not progress_path.exists():
+        return None
+    return build_loop_resume_preview(progress_path.read_text(encoding="utf-8"))
 
 
 def build_loop_specs(
@@ -1677,6 +2093,14 @@ def build_loop_specs(
     slug = str(daily_loop.get("slug", "")).strip()
     if not slug:
         raise DailyLoopConfigError("daily_loop.slug ausente")
+
+    # Correlacao de execucao (Task 15 do estudo 08-24). Nasce AQUI, no builder
+    # da fila, e viaja dentro do CommandSpec ate o dispatcher. `queue_id`
+    # identifica ESTA montagem da fila (duas execucoes do mesmo loop sao runs
+    # distintos e nao podem colidir na telemetria); `loop_id` e o slug do
+    # arquivo. Nenhum consumidor infere item_id do texto do comando.
+    queue_id = uuid.uuid4().hex
+    loop_mode = _nullable_mode(raw_config)
 
     bucket_index = _resolve_bucket_index(daily_loop)
 
@@ -1745,6 +2169,7 @@ def build_loop_specs(
     # explicito do loop, NAO o bucket. Independente da emissao; nao resetado por
     # /clear (esse reset zera apenas a re-emissao de /model e /effort).
     active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
+    _require_run_anchor(daily_loop, (active_model, active_effort))
 
     for idx, item in enumerate(pending):
         if clear_between_items and idx > 0:
@@ -1770,6 +2195,18 @@ def build_loop_specs(
             )
         model, effort, active_model, active_effort = _resolve_effective_sizing(
             daily_loop, item.item_id, bucket, active_model, active_effort
+        )
+
+        # Um contexto por item. Comandos de diretiva (`/clear`, `/model`,
+        # `/effort`) NAO recebem contexto: nao pertencem a item nenhum e
+        # marca-los inflaria a contagem por item na telemetria.
+        item_ctx = LoopExecutionContext(
+            loop_id=slug,
+            queue_id=queue_id,
+            item_id=item.item_id,
+            phase="do",
+            bucket_id=item.bucket_id,
+            mode=loop_mode,
         )
 
         if model != current_model:
@@ -1835,6 +2272,7 @@ def build_loop_specs(
                         config_path="",
                         position=0,
                         effort=effort,
+                        loop_context=item_ctx,
                         phase="loop",
                     )
                 )
@@ -1851,6 +2289,7 @@ def build_loop_specs(
                     config_path="",
                     position=0,
                     effort=effort,
+                    loop_context=item_ctx,
                     phase="loop",
                 )
             )
@@ -1886,6 +2325,7 @@ def build_loop_specs(
                     config_path="",
                     position=0,
                     effort=_REVIEW_DONE_EFFORT,
+                    loop_context=item_ctx.with_phase("review-done"),
                     phase="loop",
                 )
             )

@@ -1,0 +1,183 @@
+{
+  "total_specs": 23,
+  "phase_count": 14,
+  "phases": [
+    "/loop-rocksmash:prepare {LOOP_ROOT}/_LOOP-CONFIG.json",
+    "/loop-rocksmash:do {LOOP_ROOT}/tasks/items/task-001.md",
+    "/loop-rocksmash:review-done {LOOP_ROOT}/tasks/items/task-001.md",
+    "/loop-rocksmash:compare {LOOP_ROOT}/tasks/items/task-001.md",
+    "/loop-rocksmash:integrate {LOOP_ROOT}/tasks/items/task-001.md",
+    "/loop-rocksmash:do {LOOP_ROOT}/tasks/items/task-002.md",
+    "/loop-rocksmash:review-done {LOOP_ROOT}/tasks/items/task-002.md",
+    "/loop-rocksmash:compare {LOOP_ROOT}/tasks/items/task-002.md",
+    "/loop-rocksmash:integrate {LOOP_ROOT}/tasks/items/task-002.md",
+    "/loop-rocksmash:do {LOOP_ROOT}/tasks/items/task-003.md",
+    "/loop-rocksmash:review-done {LOOP_ROOT}/tasks/items/task-003.md",
+    "/loop-rocksmash:compare {LOOP_ROOT}/tasks/items/task-003.md",
+    "/loop-rocksmash:integrate {LOOP_ROOT}/tasks/items/task-003.md",
+    "/loop-rocksmash:rename {LOOP_ROOT}/_LOOP-CONFIG.json"
+  ],
+  "specs": [
+    {
+      "position": 0,
+      "name": "/clear",
+      "model": "Sonnet",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/model opus",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/effort medium",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:prepare {LOOP_ROOT}/_LOOP-CONFIG.json",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/clear",
+      "model": "Sonnet",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/effort high",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:do {LOOP_ROOT}/tasks/items/task-001.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:review-done {LOOP_ROOT}/tasks/items/task-001.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:compare {LOOP_ROOT}/tasks/items/task-001.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:integrate {LOOP_ROOT}/tasks/items/task-001.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/clear",
+      "model": "Sonnet",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:do {LOOP_ROOT}/tasks/items/task-002.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:review-done {LOOP_ROOT}/tasks/items/task-002.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:compare {LOOP_ROOT}/tasks/items/task-002.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:integrate {LOOP_ROOT}/tasks/items/task-002.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/clear",
+      "model": "Sonnet",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:do {LOOP_ROOT}/tasks/items/task-003.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:review-done {LOOP_ROOT}/tasks/items/task-003.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:compare {LOOP_ROOT}/tasks/items/task-003.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:integrate {LOOP_ROOT}/tasks/items/task-003.md",
+      "model": "Opus",
+      "effort": "high",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/clear",
+      "model": "Sonnet",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/effort medium",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    },
+    {
+      "position": 0,
+      "name": "/loop-rocksmash:rename {LOOP_ROOT}/_LOOP-CONFIG.json",
+      "model": "Opus",
+      "effort": "medium",
+      "interaction_type": "auto"
+    }
+  ]
+}

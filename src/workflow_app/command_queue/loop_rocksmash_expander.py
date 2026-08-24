@@ -24,9 +24,27 @@ with ``kind`` in {``preparo``, ``finalizacao``} are skipped — only
 iteration) produce the per-iteration command set.
 
 ``/clear``, ``/model`` and ``/effort`` directives are auto-injected at
-bucket boundaries, mirroring ``build_loop_specs``. The fixed framing
-commands (``:prepare``, ``:rename``) use ``opus`` + ``standard`` to match
-``T-opus-standard``, the canonical preparo/finalizacao bucket.
+bucket boundaries, mirroring ``build_loop_specs``.
+
+Rocksmash is an **auxiliary transformation over a normal config**, not a
+persisted mode. ``/loop --rocksmash`` creates no folder and no JSON: it
+validates the ``.md`` and points the operator at ``queue-btn-rocksmash``,
+which expands the loop's existing ``_LOOP-CONFIG.json`` (mode ``task`` /
+``cmd`` / ``both`` / absent). No audited config carries ``mode ==
+"rocksmash"``; the discriminator survives only for configs promoted by
+``/legacy:detect``. Therefore the executable gate is the shape of the
+**expanded queue** (``_assert_expanded_queue_shape``, always on), not a
+persisted mode (``assert_rocksmash_iteration_shape``, opt-in).
+
+Tier policy (explicit, single source — mirrored in
+``ai-forge/rules/rocksmash.md`` section 2.2):
+
+* framing (``:prepare`` / ``:rename``) is fixed at ``opus`` + ``standard``,
+  matching ``T-opus-standard``, the canonical preparo/finalizacao bucket;
+* every iteration inherits the sizing of its own item/bucket in the normal
+  config, via ``_bucket_to_model_effort``. Rocksmash does NOT hardcode a
+  tier per iteration — a second sizing system would silently override the
+  per-item sizing the operator already declared.
 """
 
 from __future__ import annotations
@@ -41,6 +59,12 @@ from workflow_app.daily_loop.loader import (
     assert_rocksmash_iteration_shape,
     is_rocksmash_mode,
 )
+from workflow_app.daily_loop.rocksmash_state import (
+    SUBPHASES,
+    SUBPHASES_LEGACY,
+    RocksmashState,
+    reopen_state,
+)
 from workflow_app.domain import (
     CommandSpec,
     EffortLevel,
@@ -50,6 +74,121 @@ from workflow_app.domain import (
 
 _FRAMING_MODEL: ModelName = ModelName.OPUS
 _FRAMING_EFFORT: EffortLevel = EffortLevel.STANDARD
+
+
+def _verb(subphase: str) -> str:
+    return f"/loop-rocksmash:{subphase}"
+
+
+# Derivados de SUBPHASES de proposito: a lista de verbos da fila e a lista de
+# subfases do sidecar sao a MESMA lista. Duplicar os literais aqui permitiria
+# que a fila emitisse um bloco que o cursor nao sabe marcar.
+_ITERATION_VERBS_CANONICAL: tuple[str, ...] = tuple(_verb(s) for s in SUBPHASES)
+_ITERATION_VERBS_LEGACY: tuple[str, ...] = tuple(_verb(s) for s in SUBPHASES_LEGACY)
+_DIRECTIVE_PREFIXES: tuple[str, ...] = ("/clear", "/model ", "/effort ")
+
+
+def _is_directive(name: str) -> bool:
+    return name == "/clear" or name.startswith(("/model ", "/effort "))
+
+
+def _assert_expanded_queue_shape(
+    specs: list[CommandSpec],
+    *,
+    iteration_ids: list[str],
+    legacy_two_step: bool,
+    plan: list[tuple[str, tuple[str, ...]]] | None = None,
+) -> None:
+    """Validate the EXPANDED queue, which is what actually runs.
+
+    The persisted ``mode`` discriminator is not a usable gate here: the
+    preparation never writes ``mode == "rocksmash"`` (``/loop --rocksmash``
+    produces no JSON), so a check keyed on it is dead code for every config
+    the operator actually clicks. What can always be checked is the queue
+    this function just built.
+
+    Verified: ``:prepare`` first, ``:rename`` last, exactly one canonical
+    verb block per iteration item, in order. Directives are stripped before
+    comparison because their injection is drift-dependent (a bucket that
+    already matches the current sizing emits none).
+    """
+    verbos = _ITERATION_VERBS_LEGACY if legacy_two_step else _ITERATION_VERBS_CANONICAL
+    tokens = [s.name.split(" ", 1)[0] for s in specs if not _is_directive(s.name)]
+
+    if plan is None:
+        # Sem cursor: todo item roda o bloco inteiro.
+        plan = [(iid, tuple(verbos)) for iid in iteration_ids]
+
+    blocos: list[str] = []
+    for _iid, subfases in plan:
+        blocos.extend(_verb(s) for s in subfases)
+
+    esperado = ["/loop-rocksmash:prepare"] + blocos + ["/loop-rocksmash:rename"]
+    if tokens != esperado:
+        raise DailyLoopConfigError(
+            "Fila rocksmash expandida com shape invalido.\n"
+            f"  esperado ({len(esperado)} comandos): {esperado}\n"
+            f"  observado ({len(tokens)} comandos): {tokens}\n"
+            f"  itens de iteracao: {iteration_ids}\n"
+            f"  plano do cursor: {plan}\n"
+            "  bloco canonico por iteracao: "
+            f"{list(verbos)}"
+        )
+
+
+def build_resume_plan(
+    state: RocksmashState | None,
+    iteration_ids: list[str],
+    subphases: tuple[str, ...],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Cursor por subfase: o que ainda falta rodar, na ordem canonica.
+
+    Sem estado (``state is None``) o plano e integral — e isso e um fato
+    observado ("nao ha registro"), nao a suposicao de que nada rodou.
+
+    Com estado, cada item contribui apenas com suas subfases ``pending``, na
+    ordem de ``subphases``. Item totalmente concluido some do plano: reabrir o
+    rocksmash nao reenfileira iteracao ja processada.
+
+    Raises:
+        DailyLoopConfigError: quando alguma subfase esta em estado bloqueante
+            (``in_flight`` vivo, ``failed``, ``unknown``). Retomar por cima de
+            um desfecho indeterminado e o unico erro que o cursor nao pode
+            cometer: ``unknown`` significa "pode ter aplicado efeito".
+    """
+    if state is None:
+        return [(iid, tuple(subphases)) for iid in iteration_ids]
+
+    conhecidos = set(iteration_ids)
+    bloqueadas = [b for b in state.blocked_subphases() if b[0] in conhecidos]
+    if bloqueadas:
+        detalhe = ", ".join(f"{iid}/{sub}={st}" for iid, sub, st in bloqueadas)
+        raise DailyLoopConfigError(
+            "Retomada automatica do rocksmash bloqueada por subfases sem desfecho "
+            f"estabelecido: {detalhe}.\n"
+            "  in_flight = dispatch ainda vivo; unknown = dispatch morto no meio "
+            "(pode ter aplicado efeito); failed = falha registrada.\n"
+            "  Reconciliar antes de reenfileirar (ai-forge/rules/loop-failed-reconciliation.md); "
+            "so entao a subfase volta a pending."
+        )
+
+    plano: list[tuple[str, tuple[str, ...]]] = []
+    for iid in iteration_ids:
+        item = state.items.get(iid)
+        if item is None:
+            # Item na config e ausente do estado sob o MESMO config_hash:
+            # o estado foi gravado incompleto. Rodar o bloco inteiro e a
+            # leitura conservadora (nada foi observado para este item).
+            plano.append((iid, tuple(subphases)))
+            continue
+        pendentes = tuple(
+            s
+            for s in subphases
+            if s in item.subphases and item.subphases[s].status == "pending"
+        )
+        if pendentes:
+            plano.append((iid, pendentes))
+    return plano
 
 
 def _iter_items(daily_loop: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -114,6 +253,8 @@ def _resolve_task_path(
 def build_loop_rocksmash_specs(
     raw_config: dict[str, Any],
     loop_root: Path | str,
+    *,
+    use_cursor: bool = True,
 ) -> list[CommandSpec]:
     """Build the canonical /loop-rocksmash:* queue from a daily-loop config.
 
@@ -121,6 +262,11 @@ def build_loop_rocksmash_specs(
         raw_config: parsed ``_LOOP-CONFIG.json`` root dict (must have
             ``kind == "daily-loop"`` and a ``daily_loop`` block).
         loop_root: directory containing the ``_LOOP-CONFIG.json``.
+        use_cursor: when True (default), consults
+            ``{loop_root}/_ROCKSMASH-STATE.json`` and emits only the subphases
+            still ``pending``. When the sidecar is absent the queue is
+            integral, so this flag changes nothing for loops that never wrote
+            state.
 
     Returns:
         list[CommandSpec] starting with ``/clear`` + framing prepare,
@@ -140,11 +286,11 @@ def build_loop_rocksmash_specs(
     loop_root_path = Path(loop_root)
     config_path = loop_root_path / "_LOOP-CONFIG.json"
 
-    # B6 (2026-05-19): when raw_config declares mode=='rocksmash', enforce the
-    # canonical 4-command per-iteration shape on items[].commands. The
-    # validator skips silently for non-rocksmash mode (retro-compat for V3
-    # loops produced before B6 and for loops driven by the legacy two-step
-    # opt-in flag below).
+    # Gate opt-in, nao canonico: so dispara para configs que declaram
+    # mode == "rocksmash" — hoje, apenas as promovidas por /legacy:detect.
+    # A preparacao normal nunca escreve esse modo, entao este check nao pode
+    # ser a garantia do shape. A garantia e _assert_expanded_queue_shape, no
+    # fim desta funcao, que valida a fila realmente emitida.
     if is_rocksmash_mode(raw_config):
         assert_rocksmash_iteration_shape(raw_config)
 
@@ -154,6 +300,7 @@ def build_loop_rocksmash_specs(
     # Legacy two-step opt-in via daily_loop.rocksmash_legacy_two_step (default
     # False). Backfill in B12 promotes legacy loops to four-step automatically.
     legacy_two_step = bool(daily_loop.get("rocksmash_legacy_two_step", False))
+    subphases = SUBPHASES_LEGACY if legacy_two_step else SUBPHASES
 
     all_items = _iter_items(daily_loop)
     iteration_items = [
@@ -170,6 +317,27 @@ def build_loop_rocksmash_specs(
             "Verifique tambem se algum item esta com rocksmash_executable=false "
             "(gate RP-EXEC-01 do /loop-rocksmash:prepare)."
         )
+
+    # Cursor por subfase. `reopen_state` converte in_flight orfao em unknown
+    # antes de qualquer decisao — um dispatch que morreu no meio nunca vira
+    # pendencia silenciosa.
+    state: RocksmashState | None = None
+    if use_cursor:
+        state = reopen_state(loop_root_path)
+        if state is not None and state.is_stale_for(raw_config):
+            raise DailyLoopConfigError(
+                "_ROCKSMASH-STATE.json descreve outra config (stale): a config mudou "
+                "desde o ultimo registro de progresso (tipicamente por "
+                "/loop-rocksmash:rename).\n"
+                "  Retomar aqui aplicaria trabalho no item errado — os item_ids podem "
+                "ter mudado de significado.\n"
+                "  Reconciliar ou reinicializar explicitamente antes de reenfileirar."
+            )
+
+    item_by_id = dict(iteration_items)
+    plan = build_resume_plan(
+        state, [iid for iid, _ in iteration_items], subphases
+    )
 
     specs: list[CommandSpec] = []
 
@@ -218,7 +386,8 @@ def build_loop_rocksmash_specs(
         )
     )
 
-    for iid, item in iteration_items:
+    for iid, subfases in plan:
+        item = item_by_id[iid]
         task_path = _resolve_task_path(item, loop_root_path)
         if task_path is None:
             raise DailyLoopConfigError(
@@ -266,43 +435,10 @@ def build_loop_rocksmash_specs(
             )
             current_effort = effort
 
-        specs.append(
-            CommandSpec(
-                name=f"/loop-rocksmash:do {task_path}",
-                model=model,
-                interaction_type=InteractionType.AUTO,
-                config_path="",
-                position=0,
-                effort=effort,
-                phase="loop-rocksmash",
-            )
-        )
-        specs.append(
-            CommandSpec(
-                name=f"/loop-rocksmash:review-done {task_path}",
-                model=model,
-                interaction_type=InteractionType.AUTO,
-                config_path="",
-                position=0,
-                effort=effort,
-                phase="loop-rocksmash",
-            )
-        )
-        if not legacy_two_step:
+        for subfase in subfases:
             specs.append(
                 CommandSpec(
-                    name=f"/loop-rocksmash:compare {task_path}",
-                    model=model,
-                    interaction_type=InteractionType.AUTO,
-                    config_path="",
-                    position=0,
-                    effort=effort,
-                    phase="loop-rocksmash",
-                )
-            )
-            specs.append(
-                CommandSpec(
-                    name=f"/loop-rocksmash:integrate {task_path}",
+                    name=f"{_verb(subfase)} {task_path}",
                     model=model,
                     interaction_type=InteractionType.AUTO,
                     config_path="",
@@ -354,4 +490,10 @@ def build_loop_rocksmash_specs(
         )
     )
 
+    _assert_expanded_queue_shape(
+        specs,
+        iteration_ids=[iid for iid, _ in iteration_items],
+        legacy_two_step=legacy_two_step,
+        plan=plan,
+    )
     return specs

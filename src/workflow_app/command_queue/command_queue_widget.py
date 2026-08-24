@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -55,6 +56,10 @@ from workflow_app.command_queue.command_item_widget import (
 )
 from workflow_app.command_queue.double_phase_button import DoublePhaseButton
 from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
+from workflow_app.command_queue.loop_phase_manifest import (
+    LoopPhaseManifestError,
+    build_sub_names,
+)
 from workflow_app.command_queue.model_effort_equivalence import (
     adapt_specs_to_main,
     is_directive_line,
@@ -948,6 +953,37 @@ class CommandQueueWidget(QWidget):
         # para o botao unico (task 005) e o dispatch (task 006); nesta etapa
         # NAO governa roteamento nem UI (Zero Estados Indefinidos: inicia None).
         self._last_classified_provider: Provider | None = None
+        # Task 15: ultimo contexto de loop despachado e o evento de lifecycle
+        # montado a partir dele. O atributo continua sendo o espelho do ULTIMO
+        # evento (util a teste e a inspecao); a persistencia do corpus e feita
+        # em paralelo por `_persist_lifecycle`, que anexa cada evento ao
+        # sidecar JSONL. Antes disso o evento morria aqui, sobrescrito pelo
+        # proximo, e o corpus de lifecycle nascia vazio.
+        self._last_loop_context = None
+        self._last_lifecycle_event: dict | None = None
+        # Task 24: eventos de FILA (canceled/closed) e o par provider/instante
+        # do ultimo despacho, necessarios para `item_completed`/`item_failed`.
+        # `None` aqui e "nao observado nesta sessao", nunca zero.
+        self._last_queue_lifecycle_event: dict | None = None
+        self._last_dispatch_provider: str | None = None
+        self._last_dispatch_started_at: float | None = None
+        # Task 16: ultima tentativa de retomada do botao Loop. `None` significa
+        # "nunca clicado" — nao "retomada vazia"; sao estados diferentes e
+        # confundi-los faria o funil contar clique que nao houve.
+        self._last_resume_record: dict | None = None
+        self._last_resume_event: dict | None = None
+        # Task 24 (call sites): travas de idempotencia dos eventos de FILA.
+        # `queue_started` sai uma vez por `queue_id` (a identidade da fila, nao
+        # do dispatch). Pausa/retomada usam uma MAQUINA DE ESTADO por `queue_id`
+        # em vez de um booleano: o booleano desduplicava a emissao dupla
+        # conhecida (module_detail emite e `PipelineManager.pause()` reemite),
+        # mas engolia a retomada de uma pausa gravada em OUTRA sessao do app, e
+        # ai o loop ficava `paused` para sempre no corpus. `app_closed` tem dois
+        # ancoradouros (closeEvent + aboutToQuit) porque o proprio repositorio
+        # documenta que widget-filho nao recebe closeEvent de forma confiavel.
+        self._queue_started_emitted: set[str] = set()
+        self._queue_pause_state: dict[str, str] = {}
+        self._app_closed_emitted: bool = False
 
         # Tracks whether the LAST workspace dispatch was /clear. The next
         # blue-arrow Kimi dispatch reads this to add 2s extra delay before
@@ -1619,39 +1655,21 @@ class CommandQueueWidget(QWidget):
             label = f"  \U0001f4cb  Loop --cmd-single: {cmd_target_slash} ({cmd_action})"
             auto_save_label = f"Loop --cmd-single {cmd_target_slash}"
         else:
-            mode_flag = mode
-            if mode == "--task":
-                sub_names = [
-                    f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
-                    f"/loop:individual-analysis --name {slug}",
-                    f"/loop:integration --name {slug}",
-                    f"/loop:review --name {slug}",
-                    f"/loop:integrated-architecture --loop-slug {slug}",
-                    f"/loop:workflow-app --name {slug}",
-                    f"/loop:friendly-resume --name {slug}",
-                ]
-            elif mode == "--cmd":
-                sub_names = [
-                    f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
-                    f"/loop:individual-analysis {mode_flag} --name {slug}",
-                    f"/loop:integration {mode_flag} --name {slug}",
-                    f"/loop:review {mode_flag} --name {slug}",
-                    f"/loop:integrated-architecture --loop-slug {slug}",
-                    f"/loop:workflow-app {mode_flag} --name {slug}",
-                    f"/loop:friendly-resume --name {slug}",
-                ]
-            else:  # --both
-                sub_names = [
-                    f"/loop:create-structure {mode_flag} {path_arg} --name {slug}",
-                    f"/loop:individual-analysis {mode_flag} --name {slug}",
-                    f"/loop:integration {mode_flag} --name {slug}",
-                    f"/loop:review {mode_flag} --name {slug}",
-                    f"/loop:integrated-architecture --loop-slug {slug}",
-                    f"/loop:mark-type --name {slug}",
-                    f"/loop:check-tasks-and-cmd --name {slug}",
-                    f"/loop:workflow-app {mode_flag} --name {slug}",
-                    f"/loop:friendly-resume --name {slug}",
-                ]
+            # Anatomia (nome, ordem, args) vem do manifesto canonico
+            # ai-forge/rules/loop-phase-manifest.json — nao de listas literais
+            # aqui. Contagem vigente: 8 fases em --task, 7 em --cmd, 10 em
+            # --both (feature-design entrou em --task/--both na Task 27 do
+            # estudo 08-24; fica fora de --cmd porque o modo --cmd cria
+            # slash-commands, nao feature de produto).
+            try:
+                sub_names = build_sub_names(
+                    "loop", mode, path_arg=path_arg, slug=slug
+                )
+            except LoopPhaseManifestError as exc:
+                signal_bus.toast_requested.emit(
+                    f"Manifesto de fases do loop indisponivel: {exc}", "error"
+                )
+                return
 
             specs: list[CommandSpec] = []
             specs.extend(_build_prep_specs("loop", start_position=1))
@@ -1789,39 +1807,18 @@ class CommandQueueWidget(QWidget):
         kimi_model = kimi_cfg.get("model", ModelName.SONNET)
         kimi_effort = kimi_cfg.get("effort", EffortLevel.STANDARD)
 
-        mode_flag = mode
-        if mode == "--task":
-            sub_names = [
-                f"/kimi-loop:init {mode_flag} {path_arg} --name {slug}",
-                f"/kimi-loop:enumerate --name {slug}",
-                f"/kimi-loop:individual-analysis --name {slug}",
-                f"/kimi-loop:integration --name {slug}",
-                f"/kimi-loop:review --name {slug}",
-                f"/kimi-loop:integrated-architecture --loop-slug {slug}",
-                f"/kimi-loop:workflow-app --name {slug}",
-            ]
-        elif mode == "--cmd":
-            sub_names = [
-                f"/kimi-loop:init {mode_flag} {path_arg} --name {slug}",
-                f"/kimi-loop:enumerate {mode_flag} --name {slug}",
-                f"/kimi-loop:individual-analysis {mode_flag} --name {slug}",
-                f"/kimi-loop:integration {mode_flag} --name {slug}",
-                f"/kimi-loop:review {mode_flag} --name {slug}",
-                f"/kimi-loop:integrated-architecture --loop-slug {slug}",
-                f"/kimi-loop:workflow-app {mode_flag} --name {slug}",
-            ]
-        else:  # --both
-            sub_names = [
-                f"/kimi-loop:init {mode_flag} {path_arg} --name {slug}",
-                f"/kimi-loop:enumerate {mode_flag} --name {slug}",
-                f"/kimi-loop:individual-analysis {mode_flag} --name {slug}",
-                f"/kimi-loop:integration {mode_flag} --name {slug}",
-                f"/kimi-loop:review {mode_flag} --name {slug}",
-                f"/kimi-loop:integrated-architecture --loop-slug {slug}",
-                f"/kimi-loop:mark-type --name {slug}",
-                f"/kimi-loop:check-tasks-and-cmd --name {slug}",
-                f"/kimi-loop:workflow-app {mode_flag} --name {slug}",
-            ]
+        # Mesma fonte da lane /loop: ai-forge/rules/loop-phase-manifest.json.
+        # A lane kimi divide create-structure em init + enumerate e nao tem
+        # friendly-resume, mas a contagem coincide: 7/7/9.
+        try:
+            sub_names = build_sub_names(
+                "kimi_loop", mode, path_arg=path_arg, slug=slug
+            )
+        except LoopPhaseManifestError as exc:
+            signal_bus.toast_requested.emit(
+                f"Manifesto de fases do loop indisponivel: {exc}", "error"
+            )
+            return
 
         specs: list[CommandSpec] = []
         specs.extend(_build_prep_specs("kimi_loop", start_position=1))
@@ -2635,7 +2632,8 @@ class CommandQueueWidget(QWidget):
             study_btn,
             ("rocksmash",
              "rocksmash — le anexo loop (_LOOP-CONFIG.json kind=daily-loop), "
-             "expande para fila /loop-rocksmash:prepare + N pares :do/:review-done + "
+             "expande para fila /loop-rocksmash:prepare + N quadruplas "
+             ":do/:review-done/:compare/:integrate + "
              "/loop-rocksmash:rename. Items kind=preparo/finalizacao sao ignorados; "
              "directives /clear, /model, /effort auto-injetadas por bucket boundary.",
              self._on_rocksmash_clicked,
@@ -4054,6 +4052,12 @@ class CommandQueueWidget(QWidget):
         signal_bus.listener_authoritative_idle.connect(
             self._on_listener_authoritative_idle
         )
+        # Task 24: pausa/retomada da fila viram evento. Os dois sinais ja
+        # existiam e nao tinham consumidor de telemetria — a fila parava e o
+        # corpus nao registrava nada, entao `paused` era indistinguivel de
+        # abandono na classificacao historica.
+        signal_bus.pipeline_paused.connect(self._on_queue_paused_observed)
+        signal_bus.pipeline_resumed.connect(self._on_queue_resumed_observed)
         self._btn_next.clicked.connect(self._on_btn_next_clicked)
 
     # ─────────────────────────────────────────────── Auto-loop (fila) ── #
@@ -4208,9 +4212,16 @@ class CommandQueueWidget(QWidget):
         Emitido por MetricsBar._on_terminal_force_failed apos receber
         terminal_force_failed (pattern matcher, exit-code watcher ou
         wf-notify.sh --status failure). Ver workflow-app-listeners.md §3.
+
+        Task 24: desligar o autocast por falha de listener PARA a fila — nada
+        mais avanca sozinho. Sem marcar isso, o loop ficaria com pendentes e
+        zero evento, que e exatamente a assinatura de abandono. A trava de
+        `_on_queue_paused_observed` cuida do caso em que um `pipeline_paused`
+        chega logo em seguida pelo mesmo incidente.
         """
         if self._btn_autocast.isChecked():
             self._btn_autocast.setChecked(False)
+            self._on_queue_paused_observed()
 
     def _on_autocast_step_requested(self) -> None:
         """Programmatic click on `queue-btn-play-next` driven by the autocast loop.
@@ -7253,6 +7264,7 @@ class CommandQueueWidget(QWidget):
         from workflow_app.daily_loop import (
             DailyLoopConfigError,
             build_loop_specs,
+            read_loop_resume_preview,
             read_review_blocked_sentinel,
         )
 
@@ -7350,6 +7362,44 @@ class CommandQueueWidget(QWidget):
                     else project_cfg.project_dir / workspace_path
                 )
 
+        slug = str(raw.get("daily_loop", {}).get("slug", "")) or "loop"
+
+        # Task 16 (estudo 08-24): preview de retomada NO PROPRIO botao Loop.
+        # Nenhum botao novo, nenhum `/loop:resume`: o mesmo clique que ja
+        # retomava agora diz o que vai retomar ANTES de enfileirar. O preview
+        # nao elege nada — PROGRESS.md continua a autoridade, lido aqui e
+        # relido pelo loader na materializacao.
+        preview = None
+        try:
+            preview = read_loop_resume_preview(raw, loop_root)
+        except OSError as exc:
+            self._record_loop_resume(slug, None, "read_error")
+            signal_bus.toast_requested.emit(
+                f"Erro ao ler PROGRESS.md: {exc}", "error"
+            )
+            return
+
+        if preview is not None and preview.blocked:
+            # Marcador fora de `[x] [ ] [!]`: aborta antes de montar fila. O
+            # loader levantaria o mesmo erro adiante, mas sem os IDs — e o ID
+            # e a unica parte acionavel da mensagem.
+            self._record_loop_resume(slug, preview, "blocked_invalid_marker")
+            signal_bus.toast_requested.emit(
+                f"Loop {slug}: PROGRESS.md com marcador invalido — nada "
+                f"enfileirado. {preview.invalid_detail()}. Marcadores "
+                "canonicos: [x] done, [ ] pending, [!] failed.",
+                "error",
+            )
+            return
+
+        if preview is not None:
+            logger.info(
+                "[loop] resume preview %s: %s | %s",
+                slug,
+                preview.summary_line(),
+                preview.ids_line(),
+            )
+
         try:
             specs = build_loop_specs(
                 raw,
@@ -7357,21 +7407,26 @@ class CommandQueueWidget(QWidget):
                 project_workspace_root=project_workspace_root,
             )
         except DailyLoopConfigError as exc:
+            self._record_loop_resume(slug, preview, "config_error")
             signal_bus.toast_requested.emit(f"Loop invalido: {exc}", "error")
             return
         except OSError as exc:
+            self._record_loop_resume(slug, preview, "read_error")
             signal_bus.toast_requested.emit(f"Erro ao ler PROGRESS.md: {exc}", "error")
             return
 
         if not specs:
+            self._record_loop_resume(slug, preview, "empty")
+            concluido = (
+                f" Estado: {preview.summary_line()}." if preview is not None else ""
+            )
             signal_bus.toast_requested.emit(
-                "PROGRESS.md sem itens pendentes — loop concluido. "
+                "PROGRESS.md sem itens pendentes — loop concluido."
+                f"{concluido} "
                 "Rode /daily-loop:review --slug X para o veredito final.",
                 "info",
             )
             return
-
-        slug = str(raw.get("daily_loop", {}).get("slug", "")) or "loop"
         # Count real items from buckets[*].items[*] — the legacy heuristic
         # `name.startswith("/daily-loop:do ")` only matched the fallback wrapper
         # shape and silently reported 0 for canonical post-/loop:integration
@@ -7382,8 +7437,13 @@ class CommandQueueWidget(QWidget):
         )
         logger.info("[loop] loading %s (%d items, %d specs)", slug, item_count, len(specs))
 
-        self._template_label.setText(f"  \U0001f4cb  Loop: {slug} ({item_count} itens)")
+        if preview is not None:
+            resumo = f"{preview.summary_line()} de {preview.total_count}"
+        else:
+            resumo = f"{item_count} itens"
+        self._template_label.setText(f"  \U0001f4cb  Loop: {slug} ({resumo})")
         self._template_label.setVisible(True)
+        self._record_loop_resume(slug, preview, "materialized", specs=specs)
         self._maybe_auto_save(f"Loop {slug}")
         signal_bus.pipeline_ready.emit(specs)
 
@@ -7393,10 +7453,16 @@ class CommandQueueWidget(QWidget):
         Requires the loop attachment to point at a daily-loop
         _LOOP-CONFIG.json. Emits:
             1x /loop-rocksmash:prepare
-            N pares /loop-rocksmash:do + /loop-rocksmash:review-done
-                (apenas items com kind=iteration; preparo/finalizacao
-                sao ignorados)
+            N quadruplas /loop-rocksmash:do + :review-done + :compare
+                + :integrate (shape canonico B6; apenas items com
+                kind=iteration, preparo/finalizacao sao ignorados)
             1x /loop-rocksmash:rename
+
+        A iteracao e QUADRUPLA, nao par: `build_loop_rocksmash_specs` emite
+        os quatro verbos por item e `assert_rocksmash_iteration_shape` os
+        exige no config. O shape de 2 comandos so sobrevive atras do opt-in
+        legado `daily_loop.rocksmash_legacy_two_step`. Snapshot da fila real:
+        tests/snapshots/loop_anatomy/rocksmash_quadrupla.json.
 
         Directives /clear, /model, /effort sao auto-injetadas conforme
         bucket boundaries (espelha build_loop_specs).
@@ -7437,7 +7503,9 @@ class CommandQueueWidget(QWidget):
             return
 
         slug = str(raw.get("daily_loop", {}).get("slug", "")) or "rocksmash"
-        pair_count = sum(
+        # Uma iteracao = uma quadrupla; contar os `:do` continua sendo a
+        # forma certa de contar iteracoes, so o nome estava errado.
+        iteration_count = sum(
             1 for s in specs if s.name.startswith("/loop-rocksmash:do ")
         )
         bucket_ids = sorted(
@@ -7448,15 +7516,15 @@ class CommandQueueWidget(QWidget):
             }
         )
         logger.info(
-            "[rocksmash] loading %s (%d pares, %d specs, buckets=%s)",
+            "[rocksmash] loading %s (%d iteracoes, %d specs, buckets=%s)",
             slug,
-            pair_count,
+            iteration_count,
             len(specs),
             ",".join(bucket_ids) or "-",
         )
 
         self._template_label.setText(
-            f"  \U0001f4cb  rocksmash: {slug} ({pair_count} pares)"
+            f"  \U0001f4cb  rocksmash: {slug} ({iteration_count} iteracoes)"
         )
         self._template_label.setVisible(True)
         self._maybe_auto_save(f"rocksmash {slug}")
@@ -8557,6 +8625,12 @@ class CommandQueueWidget(QWidget):
             _cap_err = self._capability_preflight_specs(specs)
             if _cap_err is not None:
                 signal_bus.toast_requested.emit(_cap_err, "warning")
+
+        # Task 24: a trava de `queue_started` NAO cai aqui. Snapshot/restore
+        # preserva `loop_context` (e com ele o `queue_id`), entao limpar o set
+        # faria a MESMA fila largar duas vezes no corpus depois de um restore.
+        # Fila de verdade nova traz `queue_id` novo e emite sozinha; e a
+        # identidade da fila que manda, nao o ciclo de carregamento.
 
         # Onda 4: clear DCP context — the new pipeline isn't (yet) backed by
         # a SPECIFIC-FLOW.json. The DCP handler will re-arm
@@ -11148,6 +11222,351 @@ class CommandQueueWidget(QWidget):
         "workspace_xterm": "run_command_in_workspace_xterm",
     }
 
+    def _persist_lifecycle(self, evento) -> None:
+        """Anexa `evento` ao sidecar de lifecycle. Nunca levanta.
+
+        Ate a Task 24 os quatro emissores abaixo montavam envelopes validos e
+        os deixavam em `self._last_*_event`, que NENHUM ponto de `src/` lia:
+        cada evento sobrescrevia o anterior e morria com o processo. Guardar o
+        ultimo evento continua util para teste e diagnostico, mas so o sidecar
+        transforma eventos soltos em corpus — e sem corpus `classify_loop_state`
+        nao consegue separar loop `paused` de `canceled` de `stale`.
+
+        `None` entra e sai em silencio: comando fora de loop nao gera evento, e
+        isso e o caminho normal.
+        """
+        try:
+            from workflow_app.telemetry import lifecycle_sink
+
+            lifecycle_sink.record_event(evento)
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
+            logger.debug("[loop] persistencia de lifecycle falhou", exc_info=True)
+
+    def _record_loop_resume(
+        self,
+        loop_id: str,
+        preview,
+        result: str,
+        *,
+        specs: "list[CommandSpec] | None" = None,
+    ) -> None:
+        """Registra `resume_attempted` e o desfecho da materializacao (Task 16).
+
+        Registra a TENTATIVA mesmo quando ela falha — e sobretudo quando falha.
+        Um funil que so conta retomada bem-sucedida esconde exatamente o que
+        precisa ser medido: quantas vezes o operador clicou e nao saiu fila.
+
+        `queue_id` so existe quando houve fila, e vem do `LoopExecutionContext`
+        do primeiro spec que o carrega (Task 15) — nunca de um uuid novo, que
+        seria uma correlacao que nao correlaciona com nada.
+        """
+        try:
+            queue_id = None
+            for spec in specs or []:
+                ctx = getattr(spec, "loop_context", None)
+                if ctx is not None and getattr(ctx, "queue_id", ""):
+                    queue_id = ctx.queue_id
+                    break
+
+            registro: dict = {
+                "resume_attempted": True,
+                "loop_id": loop_id,
+                "queue_id": queue_id,
+                "result": result,
+                "spec_count": len(specs) if specs is not None else 0,
+            }
+            registro.update(
+                preview.to_dict()
+                if preview is not None
+                else {"preview_available": False}
+            )
+            self._last_resume_record = registro
+            logger.info("[loop] resume_attempted %s -> %s", loop_id, result)
+
+            if queue_id is None:
+                # Sem fila nao ha `queue_id`, e `build_lifecycle_event` recusa o
+                # evento sem ele. Recusa correta: o registro acima ja preserva a
+                # tentativa; inventar um id so para satisfazer o schema criaria
+                # um run fantasma no corpus.
+                self._last_resume_event = None
+                return
+
+            from workflow_app.telemetry.loop_lifecycle_event import (
+                build_lifecycle_event,
+            )
+
+            self._last_resume_event = build_lifecycle_event(
+                event_type="queue_resumed",
+                loop_id=loop_id,
+                queue_id=queue_id,
+                result="started",
+            )
+            self._persist_lifecycle(self._last_resume_event)
+        except Exception:  # pragma: no cover - telemetria nunca derruba a fila
+            self._last_resume_event = None
+
+    def _record_loop_dispatch(self, spec, provider) -> None:
+        """Fecha a travessia do `LoopExecutionContext` no dispatcher (Task 15).
+
+        Aqui — e so aqui — os valores EFETIVOS existem: o provider saiu do
+        router, o model e o effort sao os do spec que esta indo para o terminal.
+        Antes do despacho ha intencao; depois dele ha fato.
+
+        Guarda o ultimo contexto e o ultimo evento montado E anexa o evento ao
+        sidecar de lifecycle via `_persist_lifecycle`. O guard de teste
+        (`WF_BLOCK_REAL_LIFECYCLE_TELEMETRY`, armado no conftest) impede que a
+        suite despeje dispatch sintetico no corpus real. O `item_id` vem SEMPRE
+        do contexto — nunca do texto de `spec.name`.
+
+        Aqui tambem nasce `queue_started`: nao existe um handler unico de
+        "comecou a fila" (ha tres caminhos de entrada e o `PipelineManager.start`
+        nao tem chamador ligado), entao o primeiro despacho de cada `queue_id` E
+        o inicio observavel da fila. A trava e por `queue_id` para o rearme do
+        auto-loop nao contar uma segunda largada da mesma fila.
+        """
+        try:
+            from workflow_app.telemetry.loop_lifecycle_event import (
+                build_lifecycle_event,
+            )
+
+            ctx = getattr(spec, "loop_context", None)
+            self._last_loop_context = ctx
+            if ctx is None or not ctx.is_item_scoped():
+                # Comando fora de loop (ou diretiva `/clear`, `/model`,
+                # `/effort`): nao ha item para correlacionar. Zerar o evento
+                # evita que um dispatch avulso herde o item anterior.
+                self._last_lifecycle_event = None
+                return
+            self._record_queue_started(ctx)
+            nome_provider = getattr(provider, "value", None) or str(provider)
+            # Task 24: o desfecho (`item_completed`/`item_failed`) precisa do
+            # MESMO provider efetivo do despacho e do instante inicial para
+            # `duration`. Guardar aqui evita reconstruir o efetivo depois do
+            # fato - reconstrucao que erraria em todo override manual.
+            self._last_dispatch_provider = nome_provider
+            self._last_dispatch_started_at = time.time()
+            self._last_lifecycle_event = build_lifecycle_event(
+                event_type="item_dispatched",
+                loop_id=ctx.loop_id,
+                queue_id=ctx.queue_id,
+                context=ctx,
+                provider_effective=nome_provider,
+                model_effective=spec.model.value,
+                effort_effective=spec.effort.value,
+            )
+            self._persist_lifecycle(self._last_lifecycle_event)
+        except Exception:  # noqa: BLE001 — telemetria nunca derruba dispatch
+            self._last_lifecycle_event = None
+
+    def _record_loop_item_outcome(self, index: int, *, failed: bool) -> None:
+        """Emite `item_completed` / `item_failed` (Task 24).
+
+        Mesmo caminho de `_record_loop_dispatch`: guarda o ultimo evento
+        montado e o anexa ao sidecar de lifecycle. O `item_id` vem do
+        `LoopExecutionContext` do proprio spec - jamais do texto do comando
+        (12.2.5). Comando fora de loop simplesmente nao gera evento: inventar
+        um `item_id` para satisfazer o schema criaria correlacao falsa, que e
+        pior que correlacao ausente.
+
+        `duration` so e preenchida quando este processo observou o despacho.
+        Sem o par despacho/desfecho na mesma sessao ela fica nula - "nao
+        observado", nunca zero.
+        """
+        try:
+            from workflow_app.telemetry.loop_lifecycle_event import (
+                build_lifecycle_event,
+            )
+
+            item = self._item_at(index + 1)
+            spec = item.get_spec() if item else None
+            ctx = getattr(spec, "loop_context", None)
+            if spec is None or ctx is None or not ctx.is_item_scoped():
+                self._last_lifecycle_event = None
+                return
+
+            inicio = getattr(self, "_last_dispatch_started_at", None)
+            duracao = (time.time() - inicio) if inicio else None
+            provider = getattr(self, "_last_dispatch_provider", None)
+            if provider is None:
+                # Sem despacho observado nesta sessao nao ha "efetivo"; o
+                # envelope recusaria o evento e a recusa esta certa.
+                self._last_lifecycle_event = None
+                return
+
+            self._last_lifecycle_event = build_lifecycle_event(
+                event_type="item_failed" if failed else "item_completed",
+                loop_id=ctx.loop_id,
+                queue_id=ctx.queue_id,
+                context=ctx,
+                provider_effective=provider,
+                model_effective=spec.model.value,
+                effort_effective=spec.effort.value,
+                duration=duracao,
+            )
+            self._persist_lifecycle(self._last_lifecycle_event)
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
+            self._last_lifecycle_event = None
+
+    def _record_queue_lifecycle(self, event_type: str, ctx: object = None) -> None:
+        """Emite um evento puramente de fila (`queue_canceled`, `app_closed`).
+
+        `item_id` e `phase` ficam nulos por contrato: a fila nao esta "num
+        item" quando e cancelada. O `queue_id`/`loop_id` saem de `ctx` quando o
+        chamador tem um contexto mais fresco na mao, e do ultimo contexto de
+        loop visto quando nao tem; sem nenhum dos dois nao ha evento, porque um
+        evento de fila sem fila nao correlaciona com nada.
+        """
+        try:
+            from workflow_app.telemetry.loop_lifecycle_event import (
+                build_lifecycle_event,
+            )
+
+            if ctx is None:
+                ctx = getattr(self, "_last_loop_context", None)
+            if ctx is None or not getattr(ctx, "queue_id", ""):
+                self._last_queue_lifecycle_event = None
+                return
+            self._last_queue_lifecycle_event = build_lifecycle_event(
+                event_type=event_type,
+                loop_id=ctx.loop_id,
+                queue_id=ctx.queue_id,
+            )
+            self._persist_lifecycle(self._last_queue_lifecycle_event)
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
+            self._last_queue_lifecycle_event = None
+
+    def _record_queue_started(self, ctx: object) -> None:
+        """Emite `queue_started` uma unica vez por `queue_id`.
+
+        Nao ha, no app, um ponto unico onde "a fila comecou": ha tres caminhos
+        de entrada (play, step manual e autocast) e o `PipelineManager.start()`
+        — que seria o candidato natural — tem seu unico chamador desconectado.
+        Inventar um handler novo so para a telemetria criaria um segundo lugar
+        onde a fila comeca, e os dois divergiriam na primeira mudanca de UI.
+        O primeiro despacho de um `queue_id` E o inicio observavel da fila.
+
+        A trava e por `queue_id`, nao por sessao nem por carregamento: o rearme
+        do auto-loop e o restore de snapshot seguem despachando itens da MESMA
+        fila e nenhum dos dois pode contar uma segunda largada. Fila nova traz
+        `queue_id` novo e larga sozinha.
+        """
+        try:
+            queue_id = getattr(ctx, "queue_id", "") or ""
+            if not queue_id or queue_id in self._queue_started_emitted:
+                return
+            self._queue_started_emitted.add(queue_id)
+            self._record_queue_lifecycle("queue_started", ctx)
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba dispatch
+            logger.debug("[loop] queue_started falhou", exc_info=True)
+
+    def _registrar_transicao_de_fila(self, event_type: str) -> None:
+        """Emite pausa/retomada apenas quando o estado da fila MUDA.
+
+        Duas armadilhas moram aqui e elas puxam para lados opostos.
+
+        A primeira: `pipeline_paused` chega em duplicata pelo desenho atual
+        (module_detail emite o sinal e `PipelineManager.pause()` reemite). Sem
+        desduplicacao um clique viraria duas pausas e a razao pausa/retomada —
+        que e justamente o que `classify_loop_state` le — sairia errada.
+
+        A segunda: a pausa pode ter sido gravada por OUTRA sessao do app. Uma
+        trava booleana por sessao suprimiria a retomada correspondente e
+        deixaria o loop `paused` para sempre no corpus. Isso e pior que uma
+        retomada sobrando: `classify_loop_state` procura pausa SEM retomada
+        posterior, entao retomada sem pausa nao apaga nada, enquanto pausa sem
+        retomada mente sobre o estado final.
+
+        A trava, portanto, e uma maquina de estado por `queue_id` que comeca
+        indefinida: a primeira transicao observada sempre passa, e so a
+        repeticao do MESMO estado e engolida.
+        """
+        try:
+            ctx = getattr(self, "_last_loop_context", None)
+            queue_id = getattr(ctx, "queue_id", "") or ""
+            if not queue_id:
+                # Fora de loop nao ha fila a que correlacionar; o envelope
+                # recusaria o evento e a recusa esta certa.
+                return
+            estado = "paused" if event_type == "queue_paused" else "resumed"
+            if self._queue_pause_state.get(queue_id) == estado:
+                return
+            self._queue_pause_state[queue_id] = estado
+            self._record_queue_lifecycle(event_type, ctx)
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
+            logger.debug("[loop] %s falhou", event_type, exc_info=True)
+
+    def _on_queue_paused_observed(self) -> None:
+        """Slot de `pipeline_paused`. Ver `_registrar_transicao_de_fila`."""
+        self._registrar_transicao_de_fila("queue_paused")
+
+    def _on_queue_resumed_observed(self) -> None:
+        """Slot de `pipeline_resumed`. Ver `_registrar_transicao_de_fila`."""
+        self._registrar_transicao_de_fila("queue_resumed")
+
+    def note_app_closing(self) -> None:
+        """Emite `app_closed` uma vez por processo. Chamado pela MainWindow.
+
+        Publico de proposito: os dois ancoradouros vivem em `main_window.py`
+        (`closeEvent` e o `aboutToQuit`), porque o proprio repositorio ja
+        registra que "widgets-filho nao recebem closeEvent confiavelmente". Com
+        dois ancoradouros a trava e obrigatoria, senao o fechamento normal
+        gravaria dois `app_closed` e a contagem de sessoes encerradas dobraria.
+
+        Sem `app_closed` o fechamento e indistinguivel de abandono: os dois
+        deixam a fila com pendentes e nenhuma marca. Essa e a confusao que o
+        criterio 12.2.18 proibe publicar como metrica.
+        """
+        try:
+            if self._app_closed_emitted:
+                return
+            self._app_closed_emitted = True
+            self._record_queue_lifecycle("app_closed")
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba o shutdown
+            logger.debug("[loop] app_closed falhou", exc_info=True)
+
+    def _record_provider_blocked(
+        self, item: object, *, provider: object = None
+    ) -> None:
+        """Emite `provider_blocked` quando uma barreira recusa o despacho.
+
+        Contextual por contrato: o bloqueio pode pegar a fila parada (credencial
+        ORCH ausente, antes de qualquer item sair) ou um item em voo (capacidade
+        exclusiva de imagem). Por isso `item_id`/`phase` sao opcionais aqui e o
+        contexto vem do PROPRIO item barrado — nunca de `self._last_loop_context`,
+        que guarda o ultimo item DESPACHADO e apontaria para o item anterior.
+
+        `provider_effective` e o provider que seria usado (Main vivo ou o
+        classificado pelo router). Nao ha promocao a "efetivo" de verdade porque
+        nada executou; o campo diz contra qual tier o bloqueio aconteceu, que e
+        a pergunta que o corpus precisa responder.
+        """
+        try:
+            from workflow_app.telemetry.loop_lifecycle_event import (
+                build_lifecycle_event,
+            )
+
+            spec = item.get_spec() if item is not None else None
+            ctx = getattr(spec, "loop_context", None)
+            if ctx is None or not getattr(ctx, "queue_id", ""):
+                # Comando fora de loop: bloqueio real, mas sem fila a que
+                # correlacionar. O envelope recusaria, e a recusa esta certa.
+                return
+            nome_provider = getattr(provider, "value", None)
+            if nome_provider is None and provider is not None:
+                nome_provider = str(provider)
+            self._last_lifecycle_event = build_lifecycle_event(
+                event_type="provider_blocked",
+                loop_id=ctx.loop_id,
+                queue_id=ctx.queue_id,
+                context=ctx,
+                provider_effective=nome_provider,
+                model_effective=getattr(getattr(spec, "model", None), "value", None),
+                effort_effective=getattr(getattr(spec, "effort", None), "value", None),
+            )
+            self._persist_lifecycle(self._last_lifecycle_event)
+        except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
+            logger.debug("[loop] provider_blocked falhou", exc_info=True)
+
     def _dispatch_position(self) -> int | None:
         """Indice do item que esta sendo despachado (itens ja enviados).
 
@@ -11761,6 +12180,16 @@ class CommandQueueWidget(QWidget):
                 "kimi_eligible": spec.kimi_eligible,
                 "status": item._status.value,
                 "sent": not item.is_pending_run(),
+                # Task 15: a correlacao de loop tem que sobreviver a
+                # snapshot/restore. Sem isto, retomar uma fila salva perderia
+                # `item_id` e a unica alternativa seria re-inferi-lo do texto do
+                # comando — precisamente o que 12.2.5 proibe. Ausente (None) em
+                # todo comando fora de loop, e a chave nem e escrita.
+                **(
+                    {"loop_context": spec.loop_context.to_dict()}
+                    if spec.loop_context is not None
+                    else {}
+                ),
             })
         return result
 
@@ -11779,7 +12208,12 @@ class CommandQueueWidget(QWidget):
         position.
         """
         from workflow_app.dcp.flow_validation import validate_flow_commands
-        from workflow_app.domain import CommandStatus, InteractionType, ModelName
+        from workflow_app.domain import (
+            CommandStatus,
+            InteractionType,
+            LoopExecutionContext,
+            ModelName,
+        )
 
         project_dir = None
         try:
@@ -11842,6 +12276,11 @@ class CommandQueueWidget(QWidget):
                 phase=entry.get("phase", "F?"),
                 effort=effort,
                 kimi_eligible=bool(entry.get("kimi_eligible", False)),
+                # Snapshot antigo nao tem a chave: `from_dict` devolve None e o
+                # item volta sem correlacao, como antes — nunca estoura.
+                loop_context=LoopExecutionContext.from_dict(
+                    entry.get("loop_context")
+                ),
             )
             specs.append(spec)
             statuses.append(status)
@@ -11961,12 +12400,14 @@ class CommandQueueWidget(QWidget):
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.CONCLUIDO)
+            self._record_loop_item_outcome(index, failed=not success)
             self._emit_progress_metrics()
 
     def _on_command_failed(self, index: int, _msg: str) -> None:
         item = self._item_at(index + 1)
         if item:
             item.set_status(CommandStatus.ERRO)
+            self._record_loop_item_outcome(index, failed=True)
             self._emit_progress_metrics()
 
     def _on_command_skipped(self, index: int) -> None:
@@ -12065,6 +12506,10 @@ class CommandQueueWidget(QWidget):
         """Show confirmation dialog before cancelling the pipeline."""
         modal = ConfirmCancelModal(parent=self)
         if modal.exec() == ConfirmCancelModal.Accepted:
+            # Task 24: `canceled` exige evento explicito. Sem esta linha o
+            # cancelamento seria indistinguivel de abandono na classificacao
+            # historica - o loop ficaria com pendentes e nenhuma marca.
+            self._record_queue_lifecycle("queue_canceled")
             signal_bus.pipeline_cancelled.emit()
 
     def _on_pipeline_error_with_message(self, _pipeline_id: int, message: str) -> None:
@@ -12152,10 +12597,14 @@ class CommandQueueWidget(QWidget):
         # Main VIVO, porque e contra ela que o dispatch vai rodar. Trocar de Main
         # depois de enfileirar muda o destino real do item ja enfileirado, entao
         # checar a credencial do Main congelado avisaria sobre a conta errada.
-        _orch_err = self._orch_preflight_main_credential(
-            self._resolve_interactive_main_llm()
-        )
+        _main_vivo = self._resolve_interactive_main_llm()
+        _orch_err = self._orch_preflight_main_credential(_main_vivo)
         if _orch_err is not None:
+            # Task 24: este e o fail-closed real do dispatch. Sem evento, um
+            # loop barrado por credencial ausente fica identico a um loop
+            # abandonado — pendentes na lista e nenhuma marca de que alguem
+            # tentou. O contexto vem do item barrado, nao do ultimo despachado.
+            self._record_provider_blocked(next_item, provider=_main_vivo)
             signal_bus.toast_requested.emit(_orch_err, "warning")
             return
 
@@ -12223,12 +12672,24 @@ class CommandQueueWidget(QWidget):
             is_image_generation_command(spec.name)
             and self._last_classified_provider is not Provider.CODEX
         ):
+            # Task 24: bloqueio por capacidade tambem e `provider_blocked`. O
+            # provider aqui e o CLASSIFICADO (contra quem a barreira bateu),
+            # nao o Codex que deveria ter recebido o item.
+            self._record_provider_blocked(
+                next_item, provider=self._last_classified_provider
+            )
             signal_bus.toast_requested.emit(
                 f"{cmd_head}: geracao de imagem so roda no Worker Codex (T3) —"
                 " so o Codex gera imagem. Ative o Worker Codex e tente de novo.",
                 "warning",
             )
             return
+
+        # Task 24: `item_dispatched` so nasce DEPOIS de todo gate que pode
+        # recusar o item. Registrar antes fazia o item barrado por capacidade
+        # aparecer no corpus como despachado e logo em seguida como bloqueado —
+        # um item que nunca saiu contando como saida.
+        self._record_loop_dispatch(spec, self._last_classified_provider)
 
         # use_kimi e governado pelo router: Provider.KIMI significa worker Kimi
         # ativo E (is_kimi_compatible OU spec.kimi_eligible) E Codex nao venceu

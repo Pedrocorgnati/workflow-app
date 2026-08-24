@@ -7277,7 +7277,8 @@ class MainWindow(QMainWindow):
             "Loop-rules", "queue-btn-loop-rules-path",
             "#84CC16", "#65A30D", "#4D7C0F",
             "Cola o path ai-forge/rules/loop-rules.md no terminal\n"
-            "(regras canonicas do subflow /loop F4d: 8 fases de preparacao,\n"
+            "(regras canonicas do subflow /loop F4d: 8 fases de preparacao\n"
+            "em --task, 7 em --cmd e 10 em --both,\n"
             "schema _LOOP-CONFIG.json, iteration_template, comandos auxiliares)",
         )
         loop_rules_btn.clicked.connect(_paste_path("ai-forge/rules/loop-rules.md"))
@@ -8146,6 +8147,20 @@ class MainWindow(QMainWindow):
                 "/loop:clear",
                 "Cola o comando /loop:clear no terminal\n"
                 "(arquiva loops concluidos para blacksmith/done/)",
+            ),
+            # /loop:adr-capture e fase de FINALIZACAO: roda depois de
+            # /loop:reconcile-check e por isso NAO entra na sequencia de
+            # preparacao do manifesto (ai-forge/rules/loop-phase-manifest.json,
+            # modes: []). Chega a fila por este botao, como /loop:clear.
+            # Task 28 do estudo 08-24-systemforge-analise-fluxo-loop.
+            (
+                "loop:adr-capture",
+                "queue-btn-cmd-loop-adr-capture",
+                "#EC4899", "#DB2777", "#BE185D",
+                "/loop:adr-capture",
+                "Cola o comando /loop:adr-capture no terminal\n"
+                "(captura as decisoes arquiteturais da execucao em\n"
+                "DECISIONS.md, formato MADR, no loop root)",
             ),
             (
                 "kimi-pair-analyse",
@@ -9259,6 +9274,13 @@ class MainWindow(QMainWindow):
                 self._splitter.setSizes([total // 3, total * 2 // 3])
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Task 24: `app_closed` ANTES de qualquer teardown. Fechar o app com
+        # itens pendentes e indistinguivel de abandonar o loop se nada for
+        # gravado: os dois deixam `[ ]` no PROGRESS.md e mais nada. O emissor e
+        # idempotente porque ha um segundo ancoradouro no `aboutToQuit` (ver
+        # `main()`), necessario porque widget-filho nao recebe closeEvent de
+        # forma confiavel — a mesma razao que ja motivou `_shutdown_terminals`.
+        self._note_app_closed()
         # T-037: release the cooperative lock BEFORE saving state so the
         # filesystem lock is relinquished even if persistence blows up.
         # release_and_stop() is idempotent and never raises, but we wrap
@@ -9269,6 +9291,16 @@ class MainWindow(QMainWindow):
             logger.exception("closeEvent: failed to release cooperative lock")
         self._save_state()
         super().closeEvent(event)
+
+    def _note_app_closed(self) -> None:
+        """Delega `app_closed` a fila. Nunca levanta: shutdown nao falha por
+        telemetria, e o emissor da fila ja e idempotente por processo."""
+        try:
+            fila = getattr(self, "_command_queue", None)
+            if fila is not None and hasattr(fila, "note_app_closing"):
+                fila.note_app_closing()
+        except Exception:  # noqa: BLE001
+            logger.debug("app_closed: telemetria de fechamento falhou", exc_info=True)
 
     def _on_lock_lost(self, reason: str) -> None:
         """Slot for LockService.lock_lost — surface a toast to the user.
@@ -10723,6 +10755,15 @@ def main() -> None:
     # recebem closeEvent confiavelmente; aboutToQuit eh o caminho safe).
     # Cobre todos os OutputPanel ativos (interactive + workspace pyte).
     def _shutdown_terminals() -> None:
+        # Task 24: segundo ancoradouro de `app_closed`. `closeEvent` cobre o
+        # fechamento pela janela; este cobre saida por sinal, `app.quit()` e
+        # qualquer caminho em que a janela nao recebe o evento. O emissor da
+        # fila trava por processo, entao o fechamento normal (que passa pelos
+        # dois) grava um unico evento.
+        try:
+            window._note_app_closed()
+        except Exception:  # noqa: BLE001
+            pass
         for attr in ("_output_panel", "_workspace_panel"):
             panel = getattr(window, attr, None)
             if panel is not None and hasattr(panel, "shutdown"):

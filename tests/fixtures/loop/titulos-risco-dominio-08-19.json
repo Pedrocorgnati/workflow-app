@@ -1,0 +1,16 @@
+{
+  "_fixture_scope": "Task 11 do estudo 08-24. Titulos minimos extraidos do caso 08-19 (conecta-clube, ondas 0-4) para exercitar o eixo de risco de dominio do PASSO 2R. Conteudo imutavel; nenhum teste aponta para o diretorio vivo (13.2 / Task 05).",
+  "_procedencia": "Copia literal do campo items_index[NNN].title do _LOOP-CONFIG.json do caso 08-19, congelada em 2026-08-24. Os cinco itens de risco sao os que obrigaram o override humano da distribuicao; os tres de controle sao encanamento sem consequencia de dominio.",
+  "risco": {
+    "009": "Capturar e versionar corpus real de webhook Asaas",
+    "021": "Alinhar o catalogo de gatilhos de revogacao a Asaas",
+    "029": "Implementar copy propria para os 18 estados de acesso",
+    "030": "Unificar a derivacao de entitlement entre Home e pagina de acessos",
+    "032": "Registrar o consumidor de LGPD por pedido do titular"
+  },
+  "controle": {
+    "001": "Preparacao",
+    "002": "Adicionar override escopado de deepmerge-ts",
+    "004": "Estender warnMissingRegistrars a todos os registradores opcionais"
+  }
+}

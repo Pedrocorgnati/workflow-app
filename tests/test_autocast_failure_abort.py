@@ -430,8 +430,34 @@ class TestObservability009012:
         assert rec["channel"] == "workspace"
         assert rec["reason"] == "EXIT_NONZERO"
         assert rec["exit_code"] is None
-        assert rec["command"] is None
+        # Envelope versionado (Task 14): `command` virou `command_name` ja
+        # sanitizado. Sem despacho registrado neste teste, nao ha comando nem
+        # duracao observados — nullable e a resposta honesta.
+        assert rec["schema_version"]
+        assert rec["event_id"]
+        assert rec["source"] == "listener"
+        assert rec["failure_class"] == "process"
+        assert "command" not in rec
+        assert rec["command_name"] is None
         assert rec["duration_seconds"] is None
+
+    def test_telemetry_records_dispatched_command_and_duration(
+        self, bar, tmp_path, monkeypatch
+    ):
+        """O corte auditado tinha 100% de `command`/`duration_seconds` nulos.
+        Com despacho observado, os dois passam a ser preenchidos."""
+        import json
+        monkeypatch.setattr(bar, "_repo_root_path", lambda: tmp_path)
+        bar._record_dispatched_command(
+            "workspace", "/loop:iteraction:execute-task --item 013 --token abc"
+        )
+        bar._on_terminal_force_failed("workspace", "EXIT_NONZERO")
+        files = list((tmp_path / ".claude" / "wf-failures").glob("*.jsonl"))
+        rec = json.loads(files[0].read_text().splitlines()[0])
+        assert rec["command_name"] == "/loop:iteraction:execute-task"
+        assert "--token" not in json.dumps(rec)
+        assert isinstance(rec["duration_seconds"], float)
+        assert rec["duration_seconds"] >= 0
 
     def test_telemetry_noop_when_no_repo_root(self, bar):
         # _repo_root_path already None via autouse; must not raise.

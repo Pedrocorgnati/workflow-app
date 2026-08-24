@@ -1,0 +1,94 @@
+{
+  "_fixture_scope": "Task 05 do estudo 08-24. Execucao rocksmash PARCIAL por subfase: a subfase 2.2 esta em curso, 2.3 nem comecou, e a fase 3 continua intocada. Conteudo imutavel.",
+  "schema_version": "3.0.0",
+  "name": "fixture-rocksmash-execucao-parcial",
+  "project": "fixture",
+  "kind": "daily-loop",
+  "mode": "rocksmash",
+  "source_md": "rocksmash-seed-sem-execucao.md",
+  "basic_flow": {
+    "brief_root": "fixture/brief",
+    "docs_root": "fixture/docs",
+    "wbs_root": "fixture/wbs",
+    "workspace_root": "fixture/workspace"
+  },
+  "daily_loop": {
+    "version": "3.0.0",
+    "slug": "fixture-rocksmash-execucao-parcial",
+    "loop_root": "fixture-rocksmash-execucao-parcial",
+    "progress_path": "PROGRESS.md",
+    "tasks_dir": "tasks",
+    "log_path": "_LOOP-LOG.md",
+    "total_items": 3,
+    "clear_between_items": true,
+    "do_command": "/loop:noop-fallback",
+    "buckets": [
+      {
+        "id": "T-opus-high",
+        "model": "opus",
+        "effort": "high",
+        "task_file": "tasks/T-opus-high.md",
+        "items": [
+          {
+            "id": "001",
+            "kind": "iteration",
+            "subphase": "2.1",
+            "state": "done",
+            "task_path": "tasks/items/task-001-validar-campos.md",
+            "commands": ["/loop-rocksmash:do --task tasks/items/task-001-validar-campos.md"]
+          },
+          {
+            "id": "002",
+            "kind": "iteration",
+            "subphase": "2.2",
+            "state": "in_progress",
+            "task_path": "tasks/items/task-002-remover-fallback.md",
+            "commands": ["/loop-rocksmash:do --task tasks/items/task-002-remover-fallback.md"]
+          },
+          {
+            "id": "003",
+            "kind": "iteration",
+            "subphase": "2.3",
+            "state": "not_started",
+            "task_path": "tasks/items/task-003-verificar-lock.md",
+            "commands": ["/loop-rocksmash:do --task tasks/items/task-003-verificar-lock.md"]
+          }
+        ]
+      }
+    ],
+    "items_index": {
+      "001": {
+        "id": "001",
+        "kind": "iteration",
+        "subphase": "2.1",
+        "state": "done",
+        "task_path": "tasks/items/task-001-validar-campos.md",
+        "target": "tasks/items/task-001-validar-campos.md",
+        "commands": ["/loop-rocksmash:do --task tasks/items/task-001-validar-campos.md"]
+      },
+      "002": {
+        "id": "002",
+        "kind": "iteration",
+        "subphase": "2.2",
+        "state": "in_progress",
+        "task_path": "tasks/items/task-002-remover-fallback.md",
+        "target": "tasks/items/task-002-remover-fallback.md",
+        "commands": ["/loop-rocksmash:do --task tasks/items/task-002-remover-fallback.md"]
+      },
+      "003": {
+        "id": "003",
+        "kind": "iteration",
+        "subphase": "2.3",
+        "state": "not_started",
+        "task_path": "tasks/items/task-003-verificar-lock.md",
+        "target": "tasks/items/task-003-verificar-lock.md",
+        "commands": ["/loop-rocksmash:do --task tasks/items/task-003-verificar-lock.md"]
+      }
+    }
+  },
+  "metadata": {
+    "frozen_at": "2026-08-24",
+    "phases_untouched": ["1.1", "1.2", "3.1"],
+    "note": "Fases 1 e 3 do seed nao aparecem aqui de proposito: execucao parcial nao materializa a arvore inteira."
+  }
+}

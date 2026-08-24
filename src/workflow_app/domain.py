@@ -7,7 +7,7 @@ These are the shared types used throughout the entire application.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Optional
 
 # ─── Enums ──────────────────────────────────────────────────────────────── #
@@ -103,6 +103,76 @@ class FlagSpec:
     options: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LoopExecutionContext:
+    """Correlacao de execucao de loop que viaja junto do comando (Task 15).
+
+    Nasce no builder da fila (`daily_loop/loader.py`), entra no `CommandSpec`,
+    sobrevive a snapshot/restore e chega ao dispatcher. E o unico canal legitimo
+    de `item_id`: **nao inferir item a partir do texto do comando**. A inferencia
+    por texto falha em todo comando que nao carrega `--item` (os expandidos de
+    `cmd_complexity: single`, por exemplo) e, pior, acerta o suficiente para
+    parecer confiavel enquanto atribui custo ao item errado.
+
+    Frozen de proposito: contexto de correlacao que muda no meio do caminho
+    deixa de ser correlacao. Para derivar uma variante, use `with_phase`.
+
+    Todos os campos alem de `loop_id`/`queue_id` sao opcionais porque a mesma
+    fila carrega comandos que nao pertencem a item nenhum (`/clear`, `/model`,
+    `/effort`, o review final).
+    """
+
+    loop_id: str = ""
+    queue_id: str = ""
+    item_id: Optional[str] = None
+    phase: Optional[str] = None
+    bucket_id: Optional[str] = None
+    mode: Optional[str] = None
+
+    def is_item_scoped(self) -> bool:
+        """True quando o comando pertence a um item concreto do loop."""
+        return bool(self.item_id)
+
+    def with_phase(self, phase: Optional[str]) -> "LoopExecutionContext":
+        return replace(self, phase=phase)
+
+    def to_dict(self) -> dict:
+        """Forma serializavel para snapshot. Omite o que e nulo: snapshot com
+        chave nula em todo item so engorda o arquivo."""
+        d = {"loop_id": self.loop_id, "queue_id": self.queue_id}
+        for campo in ("item_id", "phase", "bucket_id", "mode"):
+            valor = getattr(self, campo)
+            if valor:
+                d[campo] = valor
+        return d
+
+    @classmethod
+    def from_dict(cls, data: object) -> "Optional[LoopExecutionContext]":
+        """Reconstroi a partir do snapshot. Snapshot antigo nao tem a chave e
+        devolve None — a fila volta sem correlacao, exatamente como antes, em
+        vez de estourar (13.1, linha Compatibilidade)."""
+        if not isinstance(data, dict):
+            return None
+        loop_id = str(data.get("loop_id") or "")
+        queue_id = str(data.get("queue_id") or "")
+        if not loop_id and not queue_id and not data.get("item_id"):
+            return None
+        def _opt(chave: str):
+            valor = data.get(chave)
+            if valor is None:
+                return None
+            texto = str(valor).strip()
+            return texto or None
+        return cls(
+            loop_id=loop_id,
+            queue_id=queue_id,
+            item_id=_opt("item_id"),
+            phase=_opt("phase"),
+            bucket_id=_opt("bucket_id"),
+            mode=_opt("mode"),
+        )
+
+
 @dataclass
 class CommandSpec:
     """Specification of a single command in the pipeline queue.
@@ -126,6 +196,9 @@ class CommandSpec:
     local_action_id: Optional[str] = None         # Identifier into local-actions registry (only when kind=="local-action")
     flags_boolean: list[str] = field(default_factory=list)
     flags_with_value: list[FlagSpec] = field(default_factory=list)
+    # Correlacao de loop (Task 15). None para todo comando fora de loop —
+    # o campo e aditivo e nenhum caller antigo precisa saber que existe.
+    loop_context: Optional[LoopExecutionContext] = None
 
     def display_name(self) -> str:
         """Return formatted display string."""

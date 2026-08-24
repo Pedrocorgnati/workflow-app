@@ -24,9 +24,17 @@ from workflow_app.signal_bus import SignalBus
 
 
 @pytest.fixture()
-def mb(qapp):
+def mb(qapp, tmp_path, monkeypatch):
+    """MetricsBar com raiz de repositorio redirecionada para `tmp_path`.
+
+    TASK 01: a fixture (e nao cada teste) neutraliza `_repo_root_path`, para
+    que nenhum caminho deste modulo escreva em `.claude/wf-failures/` ou em
+    `blacksmith/recovery/context/` do repositorio real. O guard de conftest e a
+    segunda camada; esta e a primeira.
+    """
     bus = SignalBus()
     bar = MetricsBar(bus)
+    monkeypatch.setattr(bar, "_repo_root_path", lambda: tmp_path)
     bar._btn_autocast.setChecked(True)  # autocast ON (recovery precondition)
     return bar
 
