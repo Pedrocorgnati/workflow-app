@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app import dcp as dcp_pkg
+from workflow_app import dispatch_telemetry
 from workflow_app.command_queue.codex_whitelist import is_image_generation_command
 from workflow_app.command_queue.command_item_widget import (
     CommandItemWidget,
@@ -912,6 +913,13 @@ class CommandQueueWidget(QWidget):
         )
 
         self._items: list[CommandItemWidget] = []
+        # Telemetria de dispatch: ultimo head publicado por canal. O incidente
+        # 2026-08-24 mostrou que as duas ocorrencias de comando engolido foram
+        # o PRIMEIRO comando logo depois de um `/clear` — condicao necessaria,
+        # nao suficiente (outros pos-/clear rodaram bem). Registrar o flag em
+        # cada dispatch e o que permite testar essa correlacao com dados em vez
+        # de com memoria de duas amostras.
+        self._last_dispatch_head: dict[str, str] = {}
         # Auto-loop (main-command-queue-auto-loop-btn, main_window): quando
         # ligado, o verde autoritativo do T1 rearma a fila — toda seta unica
         # ambar (item enviado) volta a verde/pendente. Só dispara com a fila
@@ -9050,6 +9058,14 @@ class CommandQueueWidget(QWidget):
             self._last_workspace_dispatch_was_clear = False  # consumed
         else:
             delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+        dispatch_telemetry.open_dispatch(
+            route="blue-arrow",
+            channel="workspace",
+            command=kimi_prompt,
+            position=self._dispatch_position(),
+            after_clear=self._last_dispatch_head.get("workspace") == "/clear",
+        )
+        self._last_dispatch_head["workspace"] = self._command_head(kimi_prompt)
         signal_bus.kimi_blue_arrow_dispatched.emit(kimi_prompt, delay)
 
     # ───────────────────── Listener recovery dispatch ───────────────────── #
@@ -9468,7 +9484,7 @@ class CommandQueueWidget(QWidget):
                         ".claude/commands/ para o canal Codex.",
                     )
                     return
-            signal_bus.run_command_in_workspace_xterm.emit(payload)
+            self._publish_to_terminal("workspace_xterm", route="listener-recovery", text=payload)
         else:  # channel == "interactive" — roteia pelo Main LLM (T1)
             llm = self._resolve_interactive_main_llm()
             if llm == "codex":
@@ -9497,7 +9513,7 @@ class CommandQueueWidget(QWidget):
                 )
             else:  # claude — slash cru, sem transformacao
                 payload = base
-            signal_bus.run_command_in_terminal.emit(payload)
+            self._publish_to_terminal("interactive", route="listener-recovery", text=payload)
 
         label_map = {
             "interactive": "Terminal 1",
@@ -11110,13 +11126,68 @@ class CommandQueueWidget(QWidget):
         # LLM desconhecido: defensivo -> raw (igual Claude).
         return RenderedInsertion(text=text, listener_channel=listener_channel)
 
+    # ──────────────────── Publicacao instrumentada no terminal ───────── #
+    # Ponto unico por onde a fila publica texto em um PTY. Antes do incidente
+    # 2026-08-24 cada dispatcher chamava `signal_bus.run_command_in_*.emit`
+    # direto; como `Signal(str)` nao devolve valor, `_dispatch_green_arrow`
+    # retornava True (e `_mark_as_sent()` rodava) sem que NENHUMA camada
+    # soubesse se os bytes chegaram ao terminal. Duas vezes a fila afirmou ter
+    # despachado um comando que nunca executou, e o log do app nao tinha uma
+    # linha sequer sobre o envio.
+    #
+    # O funil nao muda o roteamento: quem decide canal, formato e ordem
+    # continua sendo cada dispatcher. O que ele acrescenta e o registro do
+    # `emit` — rota, canal, canal-alvo, tamanho, posicao na fila e se o
+    # dispatch anterior no mesmo canal foi um `/clear`. O `output_panel`
+    # completa o par com os bytes efetivamente escritos no PTY e com o eco do
+    # lado do terminal (ver `workflow_app.dispatch_telemetry`).
+
+    _CHANNEL_SIGNALS = {
+        "interactive": "run_command_in_terminal",
+        "workspace": "run_command_in_workspace_terminal",
+        "workspace_xterm": "run_command_in_workspace_xterm",
+    }
+
+    def _dispatch_position(self) -> int | None:
+        """Indice do item que esta sendo despachado (itens ja enviados).
+
+        Barato e suficiente para alinhar uma linha de telemetria com a
+        `_QUEUE-STATE.json` depois do fato — foi exatamente o cruzamento que
+        faltou para posicionar as duas ocorrencias do incidente.
+        """
+        try:
+            return sum(1 for item in self._items if not item.is_pending_run())
+        except Exception:  # noqa: BLE001 — telemetria nunca derruba dispatch
+            return None
+
+    def _publish_to_terminal(self, channel: str, *, route: str, text: str) -> None:
+        """Registra e publica `text` no canal indicado."""
+        dispatch_telemetry.open_dispatch(
+            route=route,
+            channel=channel,
+            command=text,
+            position=self._dispatch_position(),
+            after_clear=self._last_dispatch_head.get(channel) == "/clear",
+        )
+        self._last_dispatch_head[channel] = self._command_head(text)
+        getattr(signal_bus, self._CHANNEL_SIGNALS[channel]).emit(text)
+
+    def _terminal_emitter(self, channel: str, *, route: str):
+        """Callable de 1 argumento equivalente a `signal_bus.<sinal>.emit`.
+
+        Os dispatchers Codex e Grok escolhem o sinal uma vez e o chamam de
+        varios ramos; devolver um emissor preserva esse desenho em vez de
+        espalhar `if to_t1` por cada ramo.
+        """
+        def _emit(text: str) -> None:
+            self._publish_to_terminal(channel, route=route, text=text)
+
+        return _emit
+
     def _dispatch_codex_command(self, cmd_text: str, *, to_t1: bool = False) -> bool:
         """Dispatch a command to Codex. Returns False when validation aborts."""
-        emit = (
-            signal_bus.run_command_in_terminal.emit
-            if to_t1
-            else signal_bus.run_command_in_workspace_xterm.emit
-        )
+        channel = "interactive" if to_t1 else "workspace_xterm"
+        emit = self._terminal_emitter(channel, route="codex-main")
         head = self._command_head(cmd_text)
         if is_directive_line(cmd_text):
             # O Codex CLI nao tem diretiva TEXTUAL de modelo/effort: `/model` e
@@ -11150,7 +11221,6 @@ class CommandQueueWidget(QWidget):
             emit(cmd_text)
             self._on_run_command(cmd_text)
             return True
-        channel = "interactive" if to_t1 else "workspace_xterm"
         slug = head[1:]
         if slug in self._CUSTOM_PROMPT_DIRECTIVES:
             # Custom-prompt directive (ex.: /goal): nao existe em
@@ -11229,13 +11299,13 @@ class CommandQueueWidget(QWidget):
             signal_bus.listener_helper_pulse.emit("interactive")
             return True
         if head == "/clear":
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._publish_to_terminal("interactive", route="kimi-main/clear", text=cmd_text)
             self._on_run_command(cmd_text)
             return True
         if dialect == "qwen" and self._starts_with_invocation(
             head, self._QWEN_SLASH_EXECUTOR_INVOCATION
         ):
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._publish_to_terminal("interactive", route="kimi-main/passthrough", text=cmd_text)
             self._on_run_command(cmd_text)
             return True
         if head.startswith("/skill:"):
@@ -11243,10 +11313,10 @@ class CommandQueueWidget(QWidget):
                 cmd_text.lstrip(), self._kimi_executor_prefix()
             ):
                 transformed = build_executor(cmd_text)
-                signal_bus.run_command_in_terminal.emit(transformed)
+                self._publish_to_terminal("interactive", route="kimi-main/skill-executor", text=transformed)
                 self._on_run_command(cmd_text)
                 return True
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._publish_to_terminal("interactive", route="kimi-main/skill", text=cmd_text)
             self._on_run_command(cmd_text)
             return True
         if head.startswith("/"):
@@ -11292,7 +11362,7 @@ class CommandQueueWidget(QWidget):
                     )
         else:
             transformed = cmd_text
-        signal_bus.run_command_in_terminal.emit(transformed)
+        self._publish_to_terminal("interactive", route="qwen-main", text=transformed)
         self._on_run_command(cmd_text)
         return True
 
@@ -11343,12 +11413,8 @@ class CommandQueueWidget(QWidget):
         `to_t1=True` -> T1 interactive (Main Grok). `to_t1=False` -> T3
         workspace_xterm (worker Grok). Returns False on abort.
         """
-        emit = (
-            signal_bus.run_command_in_terminal.emit
-            if to_t1
-            else signal_bus.run_command_in_workspace_xterm.emit
-        )
         channel = "interactive" if to_t1 else "workspace_xterm"
+        emit = self._terminal_emitter(channel, route="grok-main")
         llm_label = "Grok" if to_t1 else "Worker Grok (T3)"
         head = self._command_head(cmd_text)
         if is_directive_line(cmd_text):
@@ -11466,7 +11532,7 @@ class CommandQueueWidget(QWidget):
 
         # Fix D-2: /clear primeiro, antes de qualquer branch de Main LLM.
         if head == "/clear":
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._publish_to_terminal("interactive", route="green-arrow/clear", text=cmd_text)
             self._on_run_command(cmd_text)
             self._mirror_clear_to_workspace_if_kimi_checked(cmd_text)
             return True
@@ -11490,7 +11556,7 @@ class CommandQueueWidget(QWidget):
             if is_foreign_directive(cmd_text):
                 signal_bus.listener_helper_pulse.emit("interactive")
                 return True
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._publish_to_terminal("interactive", route="green-arrow/claude", text=cmd_text)
             self._on_run_command(cmd_text)
             return True
         return self._dispatch_kimi_main_command(cmd_text)
@@ -11573,14 +11639,14 @@ class CommandQueueWidget(QWidget):
                 and self._use_grok_chk.isChecked())
         )
         if head == "/clear" and _t2_active:
-            signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+            self._publish_to_terminal("workspace", route="mirror-clear/t2", text=cmd_text)
             self._last_workspace_dispatch_was_clear = True
         if head == "/clear" and _t3_active:
             # Fix D-7: mesmo gate de prontidao do T3 que o step path
             # (`clear_both`) — sem ele, o /clear ia para um xterm Codex
             # possivelmente inexistente em silencio. T3 indisponivel -> toast.
             if self._codex_t3_available:
-                signal_bus.run_command_in_workspace_xterm.emit(cmd_text)
+                self._publish_to_terminal("workspace_xterm", route="mirror-clear/t3", text=cmd_text)
             else:
                 signal_bus.toast_requested.emit(
                     "Worker (T3): terminal-codex-output nao esta pronto"
@@ -12228,9 +12294,9 @@ class CommandQueueWidget(QWidget):
             and (_t2_active or _t3_active)
         )
         if clear_both:
-            signal_bus.run_command_in_terminal.emit(cmd_text)
+            self._publish_to_terminal("interactive", route="step/clear-both", text=cmd_text)
             if _t2_active:
-                signal_bus.run_command_in_workspace_terminal.emit(cmd_text)
+                self._publish_to_terminal("workspace", route="step/clear-both", text=cmd_text)
                 self._last_workspace_dispatch_was_clear = True
             if _t3_active:
                 # task 006 finding F3 — mesmo gate de terminal alvo nao pronto
@@ -12241,7 +12307,7 @@ class CommandQueueWidget(QWidget):
                 # esta indisponivel emitimos toast (Zero Silencio) em vez de
                 # publicar no vazio.
                 if self._codex_t3_available:
-                    signal_bus.run_command_in_workspace_xterm.emit(cmd_text)
+                    self._publish_to_terminal("workspace_xterm", route="step/clear-both", text=cmd_text)
                 else:
                     signal_bus.toast_requested.emit(
                         "Worker Codex (T3): terminal-codex-output nao esta pronto"
@@ -12324,7 +12390,7 @@ class CommandQueueWidget(QWidget):
             provider=self._last_classified_provider,
             active_flags=active_flags,
         )
-        signal_bus.run_command_in_terminal.emit(cmd_text_t1)
+        self._publish_to_terminal("interactive", route="step/claude-main", text=cmd_text_t1)
         self._on_run_command(cmd_text_t1)
         next_item._mark_as_sent()
         # Pure interactive dispatch does not affect the workspace flag.

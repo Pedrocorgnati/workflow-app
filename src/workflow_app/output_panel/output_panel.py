@@ -20,6 +20,7 @@ Input:
 
 from __future__ import annotations
 
+import functools
 import pathlib
 import re
 import time
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app import dispatch_telemetry
 from workflow_app.app_instance import APP_SESSION_ID
 from workflow_app.output_panel.enhanced_screen import EnhancedScreen
 from workflow_app.output_panel.persistent_shell import PersistentShell
@@ -483,12 +485,23 @@ class OutputPanel(QWidget):
         BP and non-BP modes.
         """
         if self._shell is None:
+            dispatch_telemetry.record_pty_write(
+                channel=self._channel, command=command,
+                requested=len(command.encode("utf-8", errors="replace")),
+                written=None, bracketed=False,
+            )
             return
         data = command.encode("utf-8", errors="replace")
-        if _BRACKETED_PASTE_MODE in self._screen.mode:
+        bracketed = _BRACKETED_PASTE_MODE in self._screen.mode
+        if bracketed:
             data = b"\x1b[200~" + data + b"\x1b[201~"
-        self._shell.send_raw(data)
+        written = self._shell.send_raw(data)
+        seq = dispatch_telemetry.record_pty_write(
+            channel=self._channel, command=command,
+            requested=len(data), written=written, bracketed=bracketed,
+        )
         QTimer.singleShot(self._ENTER_SUBMIT_DELAY_MS, self._send_enter_to_shell)
+        self._schedule_echo_confirmation(seq, command)
         # Camada 3: marca o dispatch para o early-exit watcher. Reset do
         # ultimo reason tambem — novo dispatch, nova janela de erro.
         # Helpers (/clear, /model, /effort, cd, CLI launches) are exempt:
@@ -517,6 +530,14 @@ class OutputPanel(QWidget):
         (workflow-app-listeners.md §16.1: EARLY_EXIT fica fora de
         RECOVERY_REASONS, entao nao auto-recupera).
         """
+        # A rota imperativa escreve no PTY sem passar por `_run_shell_command`,
+        # entao a telemetria de write nao teria com o que casar. Abrimos o
+        # registro aqui para o dispatch aparecer no log com a rota correta em
+        # vez de virar `unattributed`.
+        seq = dispatch_telemetry.open_dispatch(
+            route="imperative-inject", channel=self._channel, command=command,
+        )
+        self._schedule_echo_confirmation(seq, command)
         if self._is_helper_command(command):
             # Disarma: um _dispatch_ts stale de um comando real anterior nao
             # pode false-firar EARLY_EXIT durante o helper.
@@ -528,8 +549,85 @@ class OutputPanel(QWidget):
 
     def _send_enter_to_shell(self) -> None:
         """Send a bare \r to the persistent shell if it is still alive."""
-        if self._shell is not None:
-            self._shell.send_raw(b"\r")
+        if self._shell is None:
+            dispatch_telemetry.record_enter(channel=self._channel, written=None)
+            return
+        written = self._shell.send_raw(b"\r")
+        dispatch_telemetry.record_enter(channel=self._channel, written=written)
+
+    # ─────────────────────────── Confirmacao de eco do dispatch ─────── #
+    # Terceira perna da telemetria (ver `workflow_app.dispatch_telemetry`).
+    # `emit` diz que a fila publicou; `pty_write` diz quantos bytes o PTY
+    # aceitou. Nenhum dos dois prova que o CLI do outro lado RECEBEU o texto:
+    # o bloco de bracketed paste pode ser descartado pela TUI enquanto ela
+    # repinta (as duas ocorrencias do incidente 2026-08-24 aconteceram no
+    # primeiro comando logo apos um `/clear`). Depois de um atraso curto,
+    # procuramos um trecho distintivo do comando no buffer da tela: presente
+    # = o terminal recebeu; ausente E zero bytes vindos do PTY = engolido.
+
+    _ECHO_CONFIRM_DELAY_MS: int = 1500
+    # Abaixo disto o token nao e distintivo (`/clear`, `haiku`, `--task`) e
+    # um "nao achei na tela" nao significaria nada. Nesses casos registramos
+    # UNKNOWN em vez de acusar um dispatch que provavelmente esta certo.
+    _ECHO_MIN_NEEDLE_CHARS: int = 8
+
+    @staticmethod
+    def _echo_needle(command: str) -> str | None:
+        """Maior token sem espaco do comando, quando distintivo o bastante."""
+        tokens = [t.strip() for t in command.split()]
+        if not tokens:
+            return None
+        longest = max(tokens, key=len)
+        if len(longest) < OutputPanel._ECHO_MIN_NEEDLE_CHARS:
+            return None
+        return longest
+
+    def _screen_contains(self, needle: str) -> bool | None:
+        """Procura `needle` no buffer renderizado. None quando indecidivel.
+
+        A TUI quebra linha em qualquer coluna, entao um token longo pode
+        aparecer partido. Tentamos fatias progressivamente menores antes de
+        concluir ausencia — e nunca abaixo de `_ECHO_MIN_NEEDLE_CHARS`, onde
+        um match seria ruido.
+        """
+        try:
+            lines = list(self._screen.display)
+        except Exception:  # noqa: BLE001 — pyte indisponivel/instavel
+            return None
+        blob = "\n".join(lines)
+        for size in (len(needle), 24, 16, self._ECHO_MIN_NEEDLE_CHARS):
+            if size < self._ECHO_MIN_NEEDLE_CHARS or size > len(needle):
+                continue
+            if needle[:size] in blob:
+                return True
+        return False
+
+    def _schedule_echo_confirmation(
+        self, seq: int, command: str, *, delay_ms: int | None = None
+    ) -> None:
+        """Agenda a checagem de eco para depois do Enter submissor."""
+        QTimer.singleShot(
+            self._ECHO_CONFIRM_DELAY_MS if delay_ms is None else delay_ms,
+            self,
+            functools.partial(
+                self._confirm_dispatch_echo, seq, command, time.monotonic()
+            ),
+        )
+
+    def _confirm_dispatch_echo(
+        self, seq: int, command: str, dispatched_at: float
+    ) -> None:
+        needle = self._echo_needle(command)
+        echoed = None if needle is None else self._screen_contains(needle)
+        dispatch_telemetry.record_echo(
+            seq=seq,
+            channel=self._channel,
+            command=command,
+            echoed=echoed,
+            bytes_seen=self._bytes_since_dispatch,
+            elapsed_ms=int((time.monotonic() - dispatched_at) * 1000),
+            helper=self._is_helper_command(command),
+        )
 
     def _run_kimi_blue_arrow(self, prompt: str, delay_ms: int) -> None:
         """Blue-arrow Kimi dispatch — paste + delayed Enter.
@@ -542,12 +640,23 @@ class OutputPanel(QWidget):
         the prompt right after a clear because the TUI repaints fully).
         """
         if self._shell is None:
+            dispatch_telemetry.record_pty_write(
+                channel=self._channel, command=prompt,
+                requested=len(prompt.encode("utf-8", errors="replace")),
+                written=None, bracketed=False,
+            )
             return
         data = prompt.encode("utf-8", errors="replace")
-        if _BRACKETED_PASTE_MODE in self._screen.mode:
+        bracketed = _BRACKETED_PASTE_MODE in self._screen.mode
+        if bracketed:
             data = b"\x1b[200~" + data + b"\x1b[201~"
-        self._shell.send_raw(data)
+        written = self._shell.send_raw(data)
+        seq = dispatch_telemetry.record_pty_write(
+            channel=self._channel, command=prompt,
+            requested=len(data), written=written, bracketed=bracketed,
+        )
         QTimer.singleShot(delay_ms, self, self._send_enter_to_shell)
+        self._schedule_echo_confirmation(seq, prompt, delay_ms=delay_ms + 1250)
 
     def _on_terminal_output_chunk(self, channel: str, chunk: str) -> None:
         """Render a PTY chunk for the bound terminal channel."""

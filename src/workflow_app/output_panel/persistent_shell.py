@@ -191,17 +191,38 @@ class PersistentShell(QObject):
 
         logger.info("[PersistentShell] Started %s (pid=%d)", self._shell, self._proc.pid)
 
-    def send_raw(self, data: bytes) -> None:
-        """Write raw bytes to the shell PTY (key forwarding)."""
-        if self._master_fd is not None:
-            try:
-                os.write(self._master_fd, data)
-            except OSError as exc:
-                logger.warning("[PersistentShell] send_raw failed: %s", exc)
+    def send_raw(self, data: bytes) -> int:
+        """Write raw bytes to the shell PTY (key forwarding).
 
-    def send_text(self, text: str) -> None:
+        Returns the number of bytes ACCEPTED by ``os.write``. The master fd
+        is O_NONBLOCK (see ``start()``), so a write can legitimately be
+        partial or raise ``BlockingIOError`` (EAGAIN, an ``OSError``) when
+        the line discipline input buffer is full. Both cases used to be
+        discarded in silence: the caller had no way to tell a full write
+        from a swallowed command. The return value is what makes the queue's
+        ``sent=True`` verifiable (see ``workflow_app.dispatch_telemetry``).
+
+        Write semantics are unchanged on purpose — this reports the short
+        write, it does not retry it. Retrying belongs to a fix backed by
+        evidence, not to the instrumentation that produces the evidence.
+        """
+        if self._master_fd is None:
+            return 0
+        try:
+            written = os.write(self._master_fd, data)
+        except OSError as exc:
+            logger.warning("[PersistentShell] send_raw failed: %s", exc)
+            return 0
+        if written != len(data):
+            logger.warning(
+                "[PersistentShell] send_raw partial write: %d/%d bytes",
+                written, len(data),
+            )
+        return written
+
+    def send_text(self, text: str) -> int:
         """Write text (no newline) to the shell PTY."""
-        self.send_raw(text.encode("utf-8", errors="replace"))
+        return self.send_raw(text.encode("utf-8", errors="replace"))
 
     def run_command(self, command: str) -> None:
         """Type a command + Enter into the shell."""
