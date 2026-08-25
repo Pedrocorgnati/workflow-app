@@ -373,6 +373,64 @@ def test_picker_outside_repo_rejected(qapp, monkeypatch, tmp_path, request):
     assert len(warning_toasts_after) == 1
 
 
+def test_picker_rejects_non_markdown_and_dead_path(qapp, monkeypatch, tmp_path, request):
+    """PR1(b): extensao fora de {.md,.markdown} e path inexistente sao rejeitados.
+
+    O filtro do QFileDialog inclui `All Files (*)`, entao a extensao nao e
+    garantia; e o arquivo pode sumir entre o listing e o OK do dialogo. Antes
+    os dois casos entravam em `_brainstorm_md_path` e so falhavam do lado do LLM.
+    """
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+    repo_root = tmp_path / "repo"
+    seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
+    seeds_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        MainWindow, "_systemforge_root", staticmethod(lambda: repo_root)
+    )
+    toasts = _collect_toasts(request)
+    md_btn = _find_md_btn(window)
+    text_before = md_btn.text()
+
+    # Caso 1: dentro do repo, existe, mas nao e Markdown.
+    binario = seeds_dir / "anexo.pdf"
+    binario.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        lambda parent, title, start_dir, file_filter: (str(binario), ""),
+    )
+    md_btn.click()
+
+    assert window._brainstorm_md_path is None
+    assert md_btn.text() == text_before
+    assert [m for m, lvl in toasts if lvl == "warning" and "arquivo Markdown" in m]
+
+    # Caso 2: extensao certa, mas o arquivo nao existe em disco.
+    fantasma = seeds_dir / "apagado.md"
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        lambda parent, title, start_dir, file_filter: (str(fantasma), ""),
+    )
+    md_btn.click()
+
+    assert window._brainstorm_md_path is None
+    assert md_btn.text() == text_before
+    assert [m for m, lvl in toasts if lvl == "warning" and "inexistente ou inacessivel" in m]
+
+    # Caso 3 (controle): `.markdown` valido e aceito - o leitor ja aceitava.
+    ok = seeds_dir / "ideia.markdown"
+    ok.write_text("# ok\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        lambda parent, title, start_dir, file_filter: (str(ok), ""),
+    )
+    md_btn.click()
+
+    assert window._brainstorm_md_path == str(ok)
+    assert md_btn.text() == "ideia.markdown"
+
+
 def test_picker_cancel_preserves_existing_selection(qapp, monkeypatch, tmp_path):
     """Cancelamento do QFileDialog nao altera path, texto nem tooltip atuais."""
     from workflow_app.main_window import MainWindow

@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 # Catalogos reutilizados do widget MCPPromptButton.
 from workflow_app.widgets.mcp_prompt_button import (
+    SEED_TARGET_TERMINAL_RUNTIME_SENTINEL,
     VALID_ACTIONS_PTBR,
     VALID_BUTTON_TYPES,
     VALID_TERMINALS,
@@ -329,6 +330,11 @@ class BrainstormMcpConfigDialog(QDialog):
         self._target_terminal_combo.setProperty(
             "testid", "brainstorm-mcp-config-target-terminal",
         )
+        # O sentinel entra como item de primeira classe (e primeiro da lista):
+        # ele e o valor de 20 dos 24 seeds e significa "quem escolhe e o radio
+        # T1/T2/T3 em runtime". Sem ele no combo, abrir e salvar um seed pela
+        # engrenagem trocava silenciosamente o sentinel por um terminal fixo.
+        self._target_terminal_combo.addItem(SEED_TARGET_TERMINAL_RUNTIME_SENTINEL)
         for t in sorted(VALID_TERMINALS):
             self._target_terminal_combo.addItem(t)
         self._target_terminal_combo.currentTextChanged.connect(self._mark_dirty)
@@ -480,8 +486,12 @@ class BrainstormMcpConfigDialog(QDialog):
             self._action_combo.setCurrentText(action)
         self._target_path_chk.setChecked(bool(meta.get("target_path") or False))
         tt = str(meta.get("target_terminal") or "terminal-interactive-output")
-        if tt in VALID_TERMINALS:
-            self._target_terminal_combo.setCurrentText(tt)
+        # Sempre cravar um valor: o `if` sozinho deixava o combo com o valor do
+        # seed anterior quando `tt` era desconhecido, e `_capture_form_into`
+        # gravava esse residuo no seed atual.
+        if tt not in VALID_TERMINALS and tt != SEED_TARGET_TERMINAL_RUNTIME_SENTINEL:
+            tt = "terminal-interactive-output"
+        self._target_terminal_combo.setCurrentText(tt)
         self._prompt_edit.setPlainText(prompt)
 
         for w in (
@@ -532,7 +542,10 @@ class BrainstormMcpConfigDialog(QDialog):
 
             target_path = bool(self._target_path_chk.isChecked())
             target_terminal = self._target_terminal_combo.currentText()
-            if target_terminal not in VALID_TERMINALS:
+            defer_to_radio = (
+                target_terminal == SEED_TARGET_TERMINAL_RUNTIME_SENTINEL
+            )
+            if not defer_to_radio and target_terminal not in VALID_TERMINALS:
                 raise ValueError(f"target_terminal invalido: {target_terminal!r}")
             coh = ACTION_COHERENCE.get(action)
             if coh is None:
@@ -542,7 +555,18 @@ class BrainstormMcpConfigDialog(QDialog):
                     f"Combinacao invalida: action={action!r} requer "
                     f"target_path in {sorted(coh['target_path'])}",
                 )
-            if target_terminal not in coh["target_terminal"]:
+            if defer_to_radio:
+                # Adiar para o radio so e coerente quando a action aceita os
+                # TRES terminais. Se ela crava um terminal, o runtime nao pode
+                # escolher outro e o sentinel viraria publicacao no lugar errado.
+                if set(coh["target_terminal"]) != VALID_TERMINALS:
+                    raise ValueError(
+                        f"Combinacao invalida: action={action!r} exige terminal "
+                        f"fixo in {sorted(coh['target_terminal'])}, entao "
+                        f"target_terminal nao pode ser "
+                        f"{SEED_TARGET_TERMINAL_RUNTIME_SENTINEL!r}",
+                    )
+            elif target_terminal not in coh["target_terminal"]:
                 raise ValueError(
                     f"Combinacao invalida: action={action!r} requer "
                     f"target_terminal in {sorted(coh['target_terminal'])}",

@@ -132,7 +132,11 @@ def test_analisar_complexidade_routes_simples_or_loop(tmp_path):
     out = build_prompt(seed_meta, md_path, repo_root)
     # Canal SIMPLES e canal LOOP citados por data-testid.
     assert 'data-testid="mcp-prompt-btn-criar-task"' in out
-    assert 'data-testid="mcp-prompt-btn-loop-prepare-checkbox"' in out
+    # PR1(a): o canal LOOP e o BOTAO `mcp-prompt-btn-loop-prepare`. O sufixo
+    # `-checkbox` e o testid do indicador visual gerado por `_InlineCheckBox`,
+    # que NAO despacha nada; mandar o operador clicar nele era rota morta.
+    assert 'data-testid="mcp-prompt-btn-loop-prepare"' in out
+    assert "mcp-prompt-btn-loop-prepare-checkbox" not in out
     assert 'data-testid="queue-btn-loop"' in out
     # Veredito binario e bloco de saida ancorados.
     assert "SIMPLES ou LOOP" in out
@@ -237,7 +241,7 @@ def test_build_prompt_appends_public_project_loop_context_snapshot(tmp_path):
     out = serialize_prompt_for_snapshot(
         build_prompt(enriched, "blacksmith/brainstorm-mcp/contexto.md", repo_root)
     )
-    assert PROMPT_TEMPLATE_VERSION == "2026-07-01-v7"
+    assert PROMPT_TEMPLATE_VERSION == "2026-08-24-v8"
     assert "--- CONTEXTO PUBLICO OPCIONAL ---" in out
     assert '"project": {' in out
     assert '"loop": {' in out

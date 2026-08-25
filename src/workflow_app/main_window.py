@@ -107,6 +107,7 @@ from workflow_app.widgets.filter_panel import FilterPanel
 from workflow_app.widgets.mcp_prompt_actions import append_public_context, build_prompt
 from workflow_app.widgets.mcp_prompt_button import (
     BUTTON_V_PADDING_PX,
+    SEED_TARGET_TERMINAL_RUNTIME_SENTINEL,
     VALID_ACTIONS,
     VALID_BUTTON_TYPES,
     VALID_TERMINALS,
@@ -367,7 +368,13 @@ _SEED_REQUIRED_KEYS = {
     "action",
     "target_path",
 }
-_SEED_TARGET_TERMINAL_RUNTIME_SENTINEL = "depende-do-radio"
+# Alias local do sentinel canonico (fonte: widgets.mcp_prompt_button). Mantido
+# para nao tocar os call-sites historicos; o literal vive num lugar so.
+_SEED_TARGET_TERMINAL_RUNTIME_SENTINEL = SEED_TARGET_TERMINAL_RUNTIME_SENTINEL
+# Extensoes aceitas pelo picker de brainstorm e pelo leitor de .md. Um unico
+# conjunto para os dois lados: antes o leitor aceitava `.markdown` e o picker
+# so anunciava `.md` no filtro, entao a divergencia so aparecia em runtime.
+_BRAINSTORM_MD_SUFFIXES: frozenset[str] = frozenset({".md", ".markdown"})
 
 logger = logging.getLogger(__name__)
 
@@ -4625,6 +4632,21 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(buttons):
             layout.addWidget(btn, i // cols, i % cols)
 
+    def _clear_brainstorm_md_selection(self) -> None:
+        """Zera a selecao do picker .md e devolve o botao ao rotulo neutro.
+
+        Chamado quando o path selecionado deixa de ser valido entre o clique no
+        picker e o clique num botao da grade (arquivo movido, renomeado ou
+        apagado). Sem isto o botao seguia exibindo o nome de um arquivo morto.
+        """
+        self._brainstorm_md_path = None
+        md_btn = getattr(self, "_brainstorm_md_btn", None)
+        if md_btn is not None:
+            md_btn.setText("Brainstorm md")
+            md_btn.setToolTip(
+                "Abrir e selecionar um arquivo .md para os botoes de brainstorm"
+            )
+
     def _build_brainstorm_page(self, q_file_dialog, q_grid_layout) -> QWidget:
         """Conteudo da secao BRAINSTORM (moldura `output-toolbar-brainstorm`).
 
@@ -4698,12 +4720,28 @@ class MainWindow(QMainWindow):
 
             path, _ = q_file_dialog.getOpenFileName(
                 self, "Selecionar arquivo .md", str(initial_dir),
-                "Markdown (*.md);;All Files (*)",
+                "Markdown (*.md *.markdown);;All Files (*)",
             )
             if not path:
                 return  # cancelamento preserva estado anterior intacto
             # Symlink hardening: resolve() em ambos os lados antes de relative_to.
             candidate = Path(path).resolve(strict=False)
+            # O filtro "All Files (*)" deixa escolher qualquer coisa e o dialogo
+            # nao garante que o alvo ainda exista quando o usuario confirma. Sem
+            # estes dois gates um `{target-path}` morto (ou um binario) entrava
+            # no prompt e a falha so aparecia do lado do LLM.
+            if candidate.suffix.lower() not in _BRAINSTORM_MD_SUFFIXES:
+                signal_bus.toast_requested.emit(
+                    "Selecione um arquivo Markdown (.md ou .markdown).",
+                    "warning",
+                )
+                return
+            if not candidate.is_file():
+                signal_bus.toast_requested.emit(
+                    "Arquivo .md inexistente ou inacessivel - selecao rejeitada.",
+                    "warning",
+                )
+                return
             try:
                 candidate.relative_to(root)
             except ValueError:
@@ -4715,9 +4753,12 @@ class MainWindow(QMainWindow):
                     self._brainstorm_toasts["outside_repo"] = str(candidate)
                 return
             # Atomicidade: atribuir somente apos TODAS as validacoes passarem.
-            self._brainstorm_md_path = path
-            md_btn.setText(Path(path).name)
-            md_btn.setToolTip(path)
+            # Guardar o path RESOLVIDO, nao o cru do dialogo: e o resolvido que
+            # passou pelos gates acima e o unico que sobrevive a symlink.
+            resolved = str(candidate)
+            self._brainstorm_md_path = resolved
+            md_btn.setText(candidate.name)
+            md_btn.setToolTip(resolved)
 
         md_btn.clicked.connect(_pick_md)
 
@@ -4882,7 +4923,7 @@ class MainWindow(QMainWindow):
                 "Arquivo .md selecionado nao existe mais.", "warning"
             )
             return
-        if selected_path.suffix.lower() not in {".md", ".markdown"}:
+        if selected_path.suffix.lower() not in _BRAINSTORM_MD_SUFFIXES:
             signal_bus.toast_requested.emit(
                 "O leitor brainstorm aceita apenas arquivos Markdown.", "warning"
             )
@@ -5130,6 +5171,18 @@ class MainWindow(QMainWindow):
                 )
                 signal_bus.dispatch_result.emit(button_id, False)
                 return
+            # Revalidacao no dispatch: entre o clique no picker e o clique no
+            # botao da grade o arquivo pode ter sido movido, renomeado ou
+            # apagado. Publicar o prompt com `{target-path}` morto gasta uma
+            # rodada de LLM para descobrir isso; aqui custa um toast.
+            if edit_inplace and not Path(md_path).is_file():
+                signal_bus.toast_requested.emit(
+                    "O .md selecionado nao existe mais. Selecione outro arquivo.",
+                    "warning",
+                )
+                self._clear_brainstorm_md_selection()
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
 
             action = str(payload.get("action", ""))
             agent_name = str(payload.get("agent_name") or "")
@@ -5252,6 +5305,22 @@ class MainWindow(QMainWindow):
                     "Codex selecionado, mas T3 indisponivel. Prompt enviado no T2.",
                     "warning",
                 )
+            # Invariante de rota unica. T1/T2/T3 sao QRadioButton dentro de
+            # `_terminal_route_group` com setExclusive(True) e T1 marcado por
+            # default, entao `targets` tem exatamente um elemento em qualquer
+            # caminho da UI de producao. Chegar aqui com 0 ou 2+ significa que
+            # o estado da UI divergiu do contrato: abortar inteiro, em vez de
+            # publicar em parte dos terminais e devolver `dispatch_result`
+            # baseado so no ultimo alvo do laco (publicacao parcial silenciosa).
+            if len(targets) != 1:
+                signal_bus.toast_requested.emit(
+                    f"Rota de terminal ambigua ({len(targets)} alvos). Prompt "
+                    "nao publicado - selecione exatamente um terminal "
+                    "(T1, T2 ou T3).",
+                    "error",
+                )
+                signal_bus.dispatch_result.emit(button_id, False)
+                return
             terminal_idx = targets[-1] if targets else 1
             try:
                 published_ok = True

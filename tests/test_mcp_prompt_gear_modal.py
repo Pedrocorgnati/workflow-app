@@ -27,6 +27,12 @@ from workflow_app.widgets.brainstorm_mcp_config_dialog import (
 )
 
 
+#: Literal do sentinel de terminal-em-runtime, deliberadamente NAO importado de
+#: `mcp_prompt_button`: o valor viaja no frontmatter dos seeds em disco, entao o
+#: teste tem que travar a string do contrato. Renomear a constante no codigo sem
+#: migrar os 20 seeds que a usam deve ficar vermelho aqui.
+SEED_TARGET_TERMINAL_RUNTIME_SENTINEL = "depende-do-radio"
+
 _SEED_TEMPLATE = """---
 schema_version: 1
 slug: {slug}
@@ -176,6 +182,89 @@ def test_gear_modal_revert_discards_edits(qtbot, tmp_path):
 
 
 # Regressao: campo Label do gear reflete no label do botao da grade.
+
+
+# PR1(c): o sentinel `depende-do-radio` e valor de dominio, nao lixo.
+
+
+def _index_of(dlg, filename: str) -> int:
+    """Row do seed cujo arquivo e `filename` (a ordem da lista nao e garantida)."""
+    for i, p in enumerate(dlg._seed_paths):
+        if Path(p).name == filename:
+            return i
+    raise AssertionError(f"seed {filename} nao carregado no dialogo")
+
+
+def test_gear_save_preserves_runtime_terminal_sentinel(qtbot, tmp_path):
+    """Abrir-editar-salvar NAO troca `depende-do-radio` por um terminal fixo.
+
+    Era o bug: o sentinel nao estava em `VALID_TERMINALS`, entao o combo nunca
+    o assumia e `_capture_form_into` gravava o texto residual do combo. Como
+    `_on_save_clicked` re-grava os 24 seeds, um unico save destruia o sentinel
+    de TODOS eles - inclusive os que o operador nem abriu.
+    """
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    seeds_dir, _ = _materialize_seeds(repo_root)
+
+    # Dois seeds com action terminal-agnostica passam a diferir o terminal.
+    sentinel_files = {"09-loop-prepare.md": "loop-prepare", "02-search-in.md": "search-in"}
+    for fname, slug in sentinel_files.items():
+        p = seeds_dir / fname
+        save_seed(
+            p,
+            {"target_terminal": SEED_TARGET_TERMINAL_RUNTIME_SENTINEL},
+            f"prompt body for {slug}",
+        )
+        assert load_seed(p)[0]["target_terminal"] == SEED_TARGET_TERMINAL_RUNTIME_SENTINEL
+
+    dlg = BrainstormMcpConfigDialog(
+        parent=None, repo_root=repo_root, seeds_dir=seeds_dir,
+    )
+    qtbot.addWidget(dlg)
+
+    # Seed com sentinel: o combo exibe o proprio sentinel e o form valida.
+    idx = _index_of(dlg, "09-loop-prepare.md")
+    dlg._list_widget.setCurrentRow(idx)
+    assert dlg._target_terminal_combo.currentText() == SEED_TARGET_TERMINAL_RUNTIME_SENTINEL
+    assert dlg._validate() is True
+
+    # Editar OUTRO campo e salvar nao pode arrastar o terminal junto.
+    dlg._label_edit.setText("loop-prepare-editado")
+    dlg._mark_dirty()
+    dlg._on_save_clicked()
+
+    for fname in sentinel_files:
+        meta_after, _ = load_seed(seeds_dir / fname)
+        assert meta_after["target_terminal"] == SEED_TARGET_TERMINAL_RUNTIME_SENTINEL, (
+            f"{fname}: sentinel sobrescrito pelo save do gear"
+        )
+    assert load_seed(seeds_dir / "09-loop-prepare.md")[0]["label"] == "loop-prepare-editado"
+    # Seeds de terminal fixo continuam intactos.
+    assert (
+        load_seed(seeds_dir / "01-criar-md.md")[0]["target_terminal"]
+        == "terminal-interactive-output"
+    )
+
+
+def test_gear_rejects_sentinel_when_action_pins_the_terminal(qtbot, tmp_path):
+    """`Criar arquivo` crava o terminal, entao adiar para o radio e incoerente."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    seeds_dir, _ = _materialize_seeds(repo_root)
+
+    dlg = BrainstormMcpConfigDialog(
+        parent=None, repo_root=repo_root, seeds_dir=seeds_dir,
+    )
+    qtbot.addWidget(dlg)
+
+    dlg._list_widget.setCurrentRow(_index_of(dlg, "01-criar-md.md"))
+    assert dlg._validate() is True
+    dlg._target_terminal_combo.setCurrentText(SEED_TARGET_TERMINAL_RUNTIME_SENTINEL)
+
+    assert dlg._validate() is False
+    assert SEED_TARGET_TERMINAL_RUNTIME_SENTINEL in dlg._error_label.text()
+    assert dlg._save_btn.isEnabled() is False
 
 
 def test_effective_label_strips_legacy_title_in_label():

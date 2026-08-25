@@ -98,6 +98,14 @@ VALID_TERMINALS: set[str] = {
 # Alias publico para compat com leitores externos do widget.
 _VALID_TARGETS: set[str] = VALID_TERMINALS
 
+#: Valor de `target_terminal` que adia a escolha do terminal para o runtime:
+#: quem decide e o radio T1/T2/T3 no momento do clique, nao o seed. Fica FORA
+#: de `VALID_TERMINALS` de proposito (nao e um terminal, e a ausencia de um),
+#: mas e um valor de dominio legitimo do frontmatter -- 20 dos 24 seeds usam.
+#: Definido aqui, junto do catalogo, para que main_window e o dialogo de
+#: configuracao leiam a mesma constante em vez de repetir o literal.
+SEED_TARGET_TERMINAL_RUNTIME_SENTINEL: str = "depende-do-radio"
+
 #: Padding vertical (px, por lado) dos botoes da grade `brainstorm-buttons-grid`.
 #: Unico knob de altura: o botao mede `conteudo + 2 * BUTTON_V_PADDING_PX`. Era 1px
 #: sobre um piso de estilo de 19px (folga real de 2.5px/lado); com o piso

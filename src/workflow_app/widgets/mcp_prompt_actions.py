@@ -3,10 +3,10 @@
 Implementa T5 (loop 05-21-implantation-tasklist-aba-brainstorm), §6.4/§6.5 do
 `mcp-flow-implantation.md`. Substitui a montagem hardcoded de `_on_brainstorm_btn_clicked`
 por template hardened com clausula de precedencia operador > arquivo alvo > agent-path,
-e os 7 literais canonicos de `{action}` (texto literal injetado).
+e os 9 literais canonicos de `{action}` (texto literal injetado).
 
 Contrato:
-- `ACTION_LITERALS` (MappingProxyType): 7 entries label -> literal (byte-a-byte).
+- `ACTION_LITERALS` (MappingProxyType): 9 entries label -> literal (byte-a-byte).
 - `TEMPLATE_HARDENED` (target_path=true): inclui {target-path} + fence anti-injection.
 - `TEMPLATE_SHORT` (target_path=false): sem {target-path}.
 - `build_prompt(seed_meta, md_path, repo_root) -> str`: monta o prompt final.
@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Final, Mapping
 
-PROMPT_TEMPLATE_VERSION: Final[str] = "2026-07-01-v7"
+PROMPT_TEMPLATE_VERSION: Final[str] = "2026-08-24-v8"
 _FILE_OPS_RULES_PATH: Final[str] = "ai-forge/MCP/agents/brainstorm-file-ops-rules.md"
 
 _PLACEHOLDERS: Final[tuple[str, ...]] = (
@@ -171,7 +171,7 @@ _ACTIONS_RAW: dict[str, str] = {
         "decida de forma binaria entre o fluxo reduzido (botao "
         "data-testid=\"mcp-prompt-btn-criar-task\", action \"Criar tasks\", para "
         "escopo pequeno, linear e de baixo risco) e o loop completo (botao "
-        "data-testid=\"mcp-prompt-btn-loop-prepare-checkbox\" preparando depois "
+        "data-testid=\"mcp-prompt-btn-loop-prepare\" preparando depois "
         "data-testid=\"queue-btn-loop\", para escopo grande, multi-etapa, com "
         "dependencias ou de alto risco), aplicando os criterios de "
         "ai-forge/MCP/agents/complexity-router-rules.md; imprima no terminal um "
