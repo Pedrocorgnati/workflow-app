@@ -292,10 +292,25 @@ STATE_INDETERMINADO: Final[str] = "indeterminado"
 #: ratificar ou recusar, com o racional registrado em `loop-rules.md`.
 JANELA_STALE_PROPOSTA_SEGUNDOS: Final[int] = 14 * 24 * 3600
 
-#: Vira `True` quando o operador ratificar a janela em `loop-rules.md`.
-#: Enquanto for `False`, `abandonment_metrics_publishable` recusa publicar
-#: qualquer metrica de abandono (criterio 12.2.18).
-JANELA_STALE_RATIFICADA: Final[bool] = False
+#: `True` desde a ratificacao do operador em 2026-08-24 (gate G-JANELA-STALE,
+#: `loop-rules.md` secao 14.4). O valor ratificado e o proposto:
+#: `JANELA_STALE_PROPOSTA_SEGUNDOS` (14 dias). Enquanto era `False`,
+#: `abandonment_metrics_publishable` recusava publicar qualquer metrica de
+#: abandono (criterio 12.2.18); a ratificacao derruba ESSE bloqueio e nenhum
+#: outro — janela nao declarada na chamada e loop `indeterminado` no corte
+#: continuam barrando a publicacao.
+JANELA_STALE_RATIFICADA: Final[bool] = True
+
+#: Data da ratificacao (ISO). Registrada em codigo para que o auditor consiga
+#: dizer DESDE QUANDO a porta esta aberta sem depender de alguem lembrar de
+#: ler o quadro em `loop-rules.md`.
+JANELA_STALE_RATIFICADA_EM: Final[str] = "2026-08-24"
+
+#: Valor efetivamente ratificado, em segundos. Igual a proposta: o operador
+#: aceitou os 14 dias sem contraproposta. Consumidores que precisam da janela
+#: acordada leem ESTA constante — `JANELA_STALE_PROPOSTA_SEGUNDOS` continua
+#: significando "o numero que foi levado a mesa", nao "o numero em vigor".
+JANELA_STALE_SEGUNDOS: Final[int] = JANELA_STALE_PROPOSTA_SEGUNDOS
 
 #: Data-limite do gate G-JANELA-STALE (`loop-rules.md` secao 14.4), em ISO.
 #: NAO ratifica por decurso de prazo: passar da data so faz o gate ser
@@ -306,12 +321,21 @@ JANELA_STALE_RATIFICADA: Final[bool] = False
 JANELA_STALE_GATE_DEADLINE: Final[str] = "2026-09-21"
 
 
-def stale_gate_status(*, now: float) -> dict[str, Any]:
+def stale_gate_status(
+    *, now: float, ratified: bool = JANELA_STALE_RATIFICADA
+) -> dict[str, Any]:
     """Estado do gate G-JANELA-STALE no instante `now` (epoch UTC).
 
     `now` e INJETADO, nunca lido do relogio aqui: o auditor de corpus e
     reproduzivel por `--as-of`, e ler o relogio dentro tornaria o mesmo corpus
     produzir relatorios diferentes em dias diferentes.
+
+    `ratified` tambem e injetavel (default: a constante do repo). O parametro
+    existe para que a propriedade "vencer o prazo NAO ratifica" continue sendo
+    testavel como LOGICA da funcao depois que o operador ratificou de fato em
+    2026-08-24 — sem ele, o unico teste dessa propriedade viraria uma
+    tautologia sobre a decisao atual do repo e pararia de proteger o proximo
+    gate que abrir.
 
     `expired` e informativo. Ele NAO ratifica nada e NAO desbloqueia
     `abandonment_metrics_publishable`; ratificacao por decurso de prazo e
@@ -326,9 +350,11 @@ def stale_gate_status(*, now: float) -> dict[str, Any]:
     return {
         "gate": "G-JANELA-STALE",
         "deadline": JANELA_STALE_GATE_DEADLINE,
-        "ratified": JANELA_STALE_RATIFICADA,
-        "open": not JANELA_STALE_RATIFICADA,
-        "expired": (not JANELA_STALE_RATIFICADA) and now > limite_ts,
+        "ratified": ratified,
+        "ratified_at": JANELA_STALE_RATIFICADA_EM if ratified else None,
+        "window_seconds": JANELA_STALE_SEGUNDOS if ratified else None,
+        "open": not ratified,
+        "expired": (not ratified) and now > limite_ts,
         "note": (
             "vencimento NAO ratifica a janela; exige renovacao explicita da "
             "data em ai-forge/rules/loop-rules.md secao 14.4"

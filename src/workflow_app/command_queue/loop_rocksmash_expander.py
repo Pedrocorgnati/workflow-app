@@ -26,6 +26,15 @@ iteration) produce the per-iteration command set.
 ``/clear``, ``/model`` and ``/effort`` directives are auto-injected at
 bucket boundaries, mirroring ``build_loop_specs``.
 
+Every non-directive spec carries a ``LoopExecutionContext`` with ``mode ==
+"rocksmash"``; iteration specs additionally carry ``item_id`` and the
+subphase in ``phase``. That context is the ONLY channel by which the
+dispatcher learns which subphase of which item it is about to run — the
+command text carries a ``task_path``, not an identity, and a renamed item
+would silently move the mark to the wrong row. It is what lets
+``RocksmashRuntimeCursor`` write ``_ROCKSMASH-STATE.json`` at runtime
+instead of the sidecar being a file only tests ever produced.
+
 Rocksmash is an **auxiliary transformation over a normal config**, not a
 persisted mode. ``/loop --rocksmash`` creates no folder and no JSON: it
 validates the ``.md`` and points the operator at ``queue-btn-rocksmash``,
@@ -49,6 +58,7 @@ Tier policy (explicit, single source — mirrored in
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -63,14 +73,24 @@ from workflow_app.daily_loop.rocksmash_state import (
     SUBPHASES,
     SUBPHASES_LEGACY,
     RocksmashState,
+    init_state,
     reopen_state,
 )
 from workflow_app.domain import (
     CommandSpec,
     EffortLevel,
     InteractionType,
+    LoopExecutionContext,
     ModelName,
 )
+
+#: Gravado em ``LoopExecutionContext.mode`` de todo spec desta fila. E o unico
+#: discriminador que sobrevive a expansao: a config de origem tem mode
+#: ``task``/``cmd``/``both``/ausente (rocksmash e transformacao, nao modo
+#: persistido), entao sem esta marca o dispatcher nao teria como distinguir uma
+#: subfase rocksmash de um item de ``/loop`` comum e tentaria marcar subfase em
+#: loop que nem sidecar tem.
+ROCKSMASH_CONTEXT_MODE = "rocksmash"
 
 _FRAMING_MODEL: ModelName = ModelName.OPUS
 _FRAMING_EFFORT: EffortLevel = EffortLevel.STANDARD
@@ -264,9 +284,12 @@ def build_loop_rocksmash_specs(
         loop_root: directory containing the ``_LOOP-CONFIG.json``.
         use_cursor: when True (default), consults
             ``{loop_root}/_ROCKSMASH-STATE.json`` and emits only the subphases
-            still ``pending``. When the sidecar is absent the queue is
-            integral, so this flag changes nothing for loops that never wrote
-            state.
+            still ``pending``, **and creates the sidecar when it is absent**
+            (``init_state``), so the next expansion has progress to read.
+            Creating it here does not change the queue this call returns: a
+            fresh state is all-``pending``, which yields the same integral
+            plan as no state at all. When False, nothing is read and nothing
+            is written — the escape hatch for previewing the full expansion.
 
     Returns:
         list[CommandSpec] starting with ``/clear`` + framing prepare,
@@ -333,8 +356,30 @@ def build_loop_rocksmash_specs(
                 "ter mudado de significado.\n"
                 "  Reconciliar ou reinicializar explicitamente antes de reenfileirar."
             )
+        if state is None:
+            # Sidecar ausente: cria agora, com todas as subfases `pending`.
+            # Antes de 2026-08-24 `init_state` nao tinha UM chamador em `src/` —
+            # o arquivo so nascia em teste, entao em execucao real o cursor lia
+            # `None` toda vez e o plano era sempre integral. Criar aqui, no
+            # unico ponto que conhece `iteration_items` e o `legacy_two_step`
+            # efetivo, e o que faz a autoridade de maquina existir de fato.
+            # Nao altera o plano desta fila: estado recem-criado tem tudo
+            # `pending`, e `build_resume_plan` devolve o mesmo bloco integral
+            # que devolveria com `state is None`.
+            state = init_state(
+                loop_root_path,
+                raw_config,
+                iteration_items,
+                legacy_two_step=legacy_two_step,
+            )
 
     item_by_id = dict(iteration_items)
+
+    # Correlacao da fila. Um `queue_id` por expansao: duas expansoes do mesmo
+    # loop sao duas execucoes distintas, e a telemetria de ciclo de vida
+    # precisa separa-las mesmo quando o `loop_id` e o mesmo.
+    queue_id = uuid.uuid4().hex
+    loop_slug = str(daily_loop.get("slug") or "").strip() or loop_root_path.name
     plan = build_resume_plan(
         state, [iid for iid, _ in iteration_items], subphases
     )
@@ -383,6 +428,15 @@ def build_loop_rocksmash_specs(
             position=0,
             effort=_FRAMING_EFFORT,
             phase="loop-rocksmash",
+            # Framing nao e subfase: vai sem `item_id` de proposito. Serve para
+            # correlacionar eventos de FILA (queue_started/queue_canceled) ao
+            # loop certo sem afirmar que algum item estava em execucao.
+            loop_context=LoopExecutionContext(
+                loop_id=loop_slug,
+                queue_id=queue_id,
+                phase="prepare",
+                mode=ROCKSMASH_CONTEXT_MODE,
+            ),
         )
     )
 
@@ -445,6 +499,18 @@ def build_loop_rocksmash_specs(
                     position=0,
                     effort=effort,
                     phase="loop-rocksmash",
+                    # Canal UNICO de identidade do item. O dispatcher nao pode
+                    # inferir item a partir do texto do comando: o argumento e
+                    # um task_path, que muda quando o item e renomeado, e a
+                    # subfase errada seria marcada com aparencia de acerto.
+                    loop_context=LoopExecutionContext(
+                        loop_id=loop_slug,
+                        queue_id=queue_id,
+                        item_id=iid,
+                        phase=subfase,
+                        bucket_id=bucket_id,
+                        mode=ROCKSMASH_CONTEXT_MODE,
+                    ),
                 )
             )
 
@@ -487,6 +553,12 @@ def build_loop_rocksmash_specs(
             position=0,
             effort=_FRAMING_EFFORT,
             phase="loop-rocksmash",
+            loop_context=LoopExecutionContext(
+                loop_id=loop_slug,
+                queue_id=queue_id,
+                phase="rename",
+                mode=ROCKSMASH_CONTEXT_MODE,
+            ),
         )
     )
 

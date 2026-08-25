@@ -266,3 +266,60 @@ def test_regras_declaram_o_sidecar_como_autoridade_unica() -> None:
     # projecao" sem dizer qual resto nao impede ninguem de ler o Markdown.
     assert "rocksmash-progress.md" in texto
     assert QUEUE_CONFIRMER in texto
+
+
+# --------------------------------------------------------------------------
+# o sidecar tem escritor de producao (adenda 2026-08-24)
+#
+# A revisao de 2026-08-24 reprovou a Task 19 por um motivo que teste de
+# comportamento nenhum acima pegava: `init_state`, `begin_subphase` e
+# `mark_subphase` passavam em tudo e nao tinham UM chamador fora de `tests/`.
+# Um sidecar que so testes escrevem e um arquivo que nunca existe em execucao
+# real, e entao todo o resto deste arquivo audita uma autoridade vazia. Os
+# gates abaixo sao estruturais de proposito: eles falham no dia em que alguem
+# desligar a fiacao, mesmo que a semantica continue perfeita.
+# --------------------------------------------------------------------------
+
+
+def _fontes_de_src() -> list[Path]:
+    raiz = Path(__file__).resolve().parents[1] / "src" / "workflow_app"
+    modulo = raiz / "daily_loop" / "rocksmash_state.py"
+    return [p for p in raiz.rglob("*.py") if p != modulo]
+
+
+def _chamadores(simbolo: str) -> list[Path]:
+    return [p for p in _fontes_de_src() if f"{simbolo}(" in p.read_text(encoding="utf-8")]
+
+
+@pytest.mark.parametrize("simbolo", ["init_state", "begin_subphase", "mark_subphase"])
+def test_escritor_do_sidecar_tem_chamador_em_src(simbolo: str) -> None:
+    chamadores = _chamadores(simbolo)
+    assert chamadores, (
+        f"{simbolo} nao tem chamador em src/: o sidecar seria escrito apenas "
+        "por testes e nunca existiria em execucao real"
+    )
+
+
+def test_a_escrita_de_producao_sai_do_confirmador_da_fila() -> None:
+    """Quem escreve e o confirmador, nao quem despacha (R17).
+
+    O modulo checa `actor == QUEUE_CONFIRMER` em runtime; este gate garante que
+    o unico escritor de `src/` de fato passa esse actor, em vez de existir um
+    segundo caminho que so descobre a recusa em producao.
+    """
+    cursor = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "workflow_app"
+        / "command_queue"
+        / "rocksmash_cursor.py"
+    )
+    assert cursor.exists(), "o escritor de producao do sidecar sumiu"
+
+    texto = cursor.read_text(encoding="utf-8")
+    assert "QUEUE_CONFIRMER" in texto
+    assert "actor=QUEUE_CONFIRMER" in texto
+    # Identidade do item vem do contexto da fila; derivar do texto do comando
+    # reintroduziria o acoplamento que `LoopExecutionContext` existe para
+    # eliminar (o texto carrega `task_path`, que muda com rename).
+    assert 'getattr(ctx, "item_id", None)' in texto

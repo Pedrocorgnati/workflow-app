@@ -71,6 +71,10 @@ from workflow_app.command_queue.provider_router import (
     RoutingState,
     classify_provider,
 )
+from workflow_app.command_queue.rocksmash_cursor import (
+    RocksmashRuntimeCursor,
+    scoped_subphase,
+)
 from workflow_app.delivery.lock_bridge import (
     _find_systemforge_root as _find_delivery_systemforge_root,
 )
@@ -967,6 +971,18 @@ class CommandQueueWidget(QWidget):
         self._last_queue_lifecycle_event: dict | None = None
         self._last_dispatch_provider: str | None = None
         self._last_dispatch_started_at: float | None = None
+        # Task 24(a): registro do despacho AINDA SEM DESFECHO. E o que permite
+        # `item_completed`/`item_failed` existirem: os dois eventos estavam
+        # instrumentados e mudos porque seus unicos gatilhos eram
+        # `signal_bus.command_completed`/`command_failed`, que nao tem UM
+        # `.emit()` em `src/`. O desfecho real vem dos dois sinais autoritativos
+        # que o app de fato emite — `listener_authoritative_idle` (verde
+        # pos-fence) e `autocast_abort_requested` (falha de listener).
+        # `None` = "nenhum despacho em voo", nunca "concluido".
+        self._pending_item_outcome: dict | None = None
+        # Tasks 19/20: binding vivo com o `_ROCKSMASH-STATE.json` da fila
+        # rocksmash corrente. `None` em qualquer outra fila — e a maioria delas.
+        self._rocksmash_cursor: RocksmashRuntimeCursor | None = None
         # Task 16: ultima tentativa de retomada do botao Loop. `None` significa
         # "nunca clicado" — nao "retomada vazia"; sao estados diferentes e
         # confundi-los faria o funil contar clique que nao houve.
@@ -4077,9 +4093,18 @@ class CommandQueueWidget(QWidget):
         """T1 chegou ao verde autoritativo — rearma a fila se o auto-loop
         estiver ligado.
 
-        Só o canal `interactive` conta: os workers (T2/T3) ficam verdes em
-        cadencia propria e rearmar por eles reabriria a fila no meio de um
-        dispatch Claude ainda em voo."""
+        Só o canal `interactive` conta PARA O REARME: os workers (T2/T3) ficam
+        verdes em cadencia propria e rearmar por eles reabriria a fila no meio
+        de um dispatch Claude ainda em voo.
+
+        Task 24(a): o DESFECHO, ao contrario do rearme, vale para os tres
+        canais e nao depende do auto-loop estar ligado. Um item despachado ao
+        Worker Codex (T3) conclui quando o T3 fica verde, e o operador que roda
+        a fila no passo a passo produz exatamente o mesmo fato que o autocast
+        produz. Amarrar a telemetria ao toggle faria o corpus mudar de forma
+        conforme um botao de UI — e todo run manual apareceria como abandono.
+        Por isso o fechamento vem ANTES das duas guardas."""
+        self._close_pending_item_outcome(failed=False, channel=channel)
         if not self._auto_loop_enabled:
             return
         if channel != self._AUTO_LOOP_CHANNEL:
@@ -4218,7 +4243,14 @@ class CommandQueueWidget(QWidget):
         zero evento, que e exatamente a assinatura de abandono. A trava de
         `_on_queue_paused_observed` cuida do caso em que um `pipeline_paused`
         chega logo em seguida pelo mesmo incidente.
+
+        Task 24(a): este e o unico desfecho NEGATIVO autoritativo do app. O
+        item em voo no canal que falhou termina em `item_failed`, e o evento
+        sai ANTES do `queue_paused` para que a ordem no corpus conte a historia
+        na ordem em que ela aconteceu: o item falhou, e por isso a fila parou.
+        Invertido, a pausa pareceria decisao do operador.
         """
+        self._close_pending_item_outcome(failed=True, channel=channel, cause=cause)
         if self._btn_autocast.isChecked():
             self._btn_autocast.setChecked(False)
             self._on_queue_paused_observed()
@@ -8661,6 +8693,18 @@ class CommandQueueWidget(QWidget):
         # nunca a composicao da fila.
         specs = adapt_specs_to_main(specs, self._resolve_interactive_main_llm())
 
+        # Tasks 19/20: (re)ligar o cursor de rocksmash. Fazer o bind AQUI, no
+        # funil unico de enfileiramento, e nao no handler do botao, cobre de
+        # graca o caminho de snapshot/restore: uma fila rocksmash restaurada
+        # volta gravando progresso, em vez de rodar subfases mudas e te-las
+        # reenfileiradas na proxima expansao. Fila que nao e rocksmash zera o
+        # cursor — deixar o anterior pendurado marcaria subfase de OUTRO loop.
+        self._rocksmash_cursor = RocksmashRuntimeCursor.from_specs(specs)
+        # Fila nova destroi a anterior: um despacho da fila antiga que ainda
+        # nao teve desfecho nunca sera observado. Descartar e a leitura honesta;
+        # emitir `item_completed` aqui inventaria uma conclusao.
+        self._pending_item_outcome = None
+
         for spec in specs:
             item = self._make_item(spec)
             self._items_layout.addWidget(item)
@@ -11345,6 +11389,18 @@ class CommandQueueWidget(QWidget):
             # fato - reconstrucao que erraria em todo override manual.
             self._last_dispatch_provider = nome_provider
             self._last_dispatch_started_at = time.time()
+            # Task 24(a): abre o registro que o retorno autoritativo vai fechar.
+            # Sobrescrever um pendente anterior e deliberado e nao emite nada:
+            # significa que o despacho anterior nunca chegou ao terminal (gate
+            # de dispatch abortou depois deste ponto) ou que seu canal nunca
+            # ficou verde. Um desfecho que ninguem observou nao vira evento.
+            self._pending_item_outcome = {
+                "spec": spec,
+                "ctx": ctx,
+                "provider": nome_provider,
+                "started_at": self._last_dispatch_started_at,
+                "channel": None,
+            }
             self._last_lifecycle_event = build_lifecycle_event(
                 event_type="item_dispatched",
                 loop_id=ctx.loop_id,
@@ -11358,41 +11414,73 @@ class CommandQueueWidget(QWidget):
         except Exception:  # noqa: BLE001 — telemetria nunca derruba dispatch
             self._last_lifecycle_event = None
 
-    def _record_loop_item_outcome(self, index: int, *, failed: bool) -> None:
-        """Emite `item_completed` / `item_failed` (Task 24).
+    def _close_pending_item_outcome(
+        self,
+        *,
+        failed: bool,
+        channel: str | None = None,
+        cause: str | None = None,
+    ) -> bool:
+        """Fecha o despacho em voo: emite o desfecho e marca a subfase.
 
-        Mesmo caminho de `_record_loop_dispatch`: guarda o ultimo evento
-        montado e o anexa ao sidecar de lifecycle. O `item_id` vem do
-        `LoopExecutionContext` do proprio spec - jamais do texto do comando
-        (12.2.5). Comando fora de loop simplesmente nao gera evento: inventar
-        um `item_id` para satisfazer o schema criaria correlacao falsa, que e
-        pior que correlacao ausente.
+        Este e o produtor runtime que faltava para `item_completed` e
+        `item_failed`. Ate 2026-08-24 os dois eventos existiam no schema, no
+        envelope e nos alias — e nao tinham gatilho: os handlers ligados a eles
+        pendiam de `signal_bus.command_completed`/`command_failed`, sinais sem
+        UM `.emit()` em `src/`. O corpus registrava saida (`item_dispatched`) e
+        nunca chegada, e a razao "concluiu/abandonou" era estruturalmente
+        incalculavel.
 
-        `duration` so e preenchida quando este processo observou o despacho.
-        Sem o par despacho/desfecho na mesma sessao ela fica nula - "nao
-        observado", nunca zero.
+        Chamado dos DOIS unicos desfechos autoritativos do app:
+        `listener_authoritative_idle` (verde pos-fence do canal) e
+        `autocast_abort_requested` (listener declarado failed). Colar texto no
+        terminal NAO e desfecho — ver Regra L14.7 de
+        `ai-forge/rules/loop-rules.md`: "despachado" e "concluido" sao fatos
+        diferentes, e emitir conclusao no `_mark_as_sent` transformaria toda
+        falha silenciosa em sucesso registrado.
+
+        `channel=None` significa "sem restricao de canal" (usado pelo caminho
+        indexado). Com canal, so fecha o despacho que saiu por ele: o T1 ficar
+        verde enquanto um item roda no T3 nao conclui o item do T3.
+
+        Returns:
+            True quando havia despacho em voo e ele foi fechado.
         """
+        pendente = self._pending_item_outcome
+        if pendente is None:
+            return False
+        canal_despacho = pendente.get("channel")
+        if channel is not None and canal_despacho is not None and canal_despacho != channel:
+            return False
+        # Consumo one-shot: limpar ANTES de emitir garante que uma reentrada
+        # (verde duplo, ou abort seguido de verde) nao conte o mesmo item duas
+        # vezes, mesmo que a emissao levante.
+        self._pending_item_outcome = None
+
+        ctx = pendente.get("ctx")
+        spec = pendente.get("spec")
+
+        # Sidecar do rocksmash ANTES da telemetria: o cursor decide retomada
+        # (efeito) e a telemetria descreve historia (leitura). Se algo falhar no
+        # meio, e melhor ter o progresso gravado sem o evento do que o inverso.
+        self._finish_rocksmash_subphase(ctx, failed=failed, cause=cause)
+
         try:
             from workflow_app.telemetry.loop_lifecycle_event import (
                 build_lifecycle_event,
             )
 
-            item = self._item_at(index + 1)
-            spec = item.get_spec() if item else None
-            ctx = getattr(spec, "loop_context", None)
             if spec is None or ctx is None or not ctx.is_item_scoped():
                 self._last_lifecycle_event = None
-                return
-
-            inicio = getattr(self, "_last_dispatch_started_at", None)
+                return True
+            inicio = pendente.get("started_at")
             duracao = (time.time() - inicio) if inicio else None
-            provider = getattr(self, "_last_dispatch_provider", None)
+            provider = pendente.get("provider")
             if provider is None:
-                # Sem despacho observado nesta sessao nao ha "efetivo"; o
-                # envelope recusaria o evento e a recusa esta certa.
+                # Sem despacho observado nao ha "efetivo"; o envelope recusaria
+                # o evento e a recusa esta certa.
                 self._last_lifecycle_event = None
-                return
-
+                return True
             self._last_lifecycle_event = build_lifecycle_event(
                 event_type="item_failed" if failed else "item_completed",
                 loop_id=ctx.loop_id,
@@ -11406,6 +11494,103 @@ class CommandQueueWidget(QWidget):
             self._persist_lifecycle(self._last_lifecycle_event)
         except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
             self._last_lifecycle_event = None
+        return True
+
+    # ───────────────────────────────── cursor de subfase (rocksmash) ── #
+
+    def _begin_rocksmash_subphase(self, spec) -> bool:
+        """Marca `in_flight` no sidecar ANTES do dispatch (Tasks 19/20).
+
+        Diferente da telemetria, este gate PODE abortar o dispatch: a recusa de
+        `begin_subphase` significa "esta subfase ja esta em voo num processo
+        vivo", e despachar por cima e exatamente o efeito duplicado que a
+        autoridade de maquina existe para impedir. Chamado ANTES de
+        `_record_loop_dispatch` para que uma recusa nao deixe um
+        `item_dispatched` de um item que nunca saiu.
+
+        Cursor ausente NAO e sinonimo de "pode despachar". Fila que nao e
+        rocksmash nao tem subfase para marcar e passa direto; mas uma spec que
+        E subfase rocksmash com cursor desligado (config ilegivel no bind) tem
+        que ser RECUSADA. Deixar passar nao produziria sequer um `in_flight`
+        orfao para a reabertura converter em `unknown`: a subfase rodaria sem
+        registro nenhum e voltaria `pending` na proxima expansao, repetindo o
+        efeito. Isso e exatamente o que a autoridade de maquina existe para
+        impedir, entao aqui o default e fail-closed.
+
+        Returns:
+            True quando pode despachar. False quando a subfase ja esta em voo
+            num processo vivo, ou quando o comando e subfase rocksmash e nao ha
+            cursor para registrar o checkpoint.
+        """
+        cursor = self._rocksmash_cursor
+        ctx = getattr(spec, "loop_context", None)
+        if cursor is None:
+            escopo = scoped_subphase(ctx)
+            if escopo is None:
+                return True
+            item_id, subfase = escopo
+            signal_bus.toast_requested.emit(
+                f"Rocksmash {item_id}/{subfase}: dispatch abortado — sem cursor "
+                "de estado para esta fila (config do loop ilegivel no bind). "
+                "Reabra a fila com o _LOOP-CONFIG.json legivel; despachar agora "
+                "rodaria a subfase sem checkpoint e ela voltaria a fila.",
+                "warning",
+            )
+            return False
+        resultado = cursor.begin(ctx)
+        if resultado.error:
+            signal_bus.toast_requested.emit(
+                f"Rocksmash {resultado.item_id}/{resultado.subphase}: "
+                f"dispatch abortado — {resultado.error}",
+                "warning",
+            )
+            return False
+        return True
+
+    def _finish_rocksmash_subphase(
+        self, ctx, *, failed: bool, cause: str | None = None
+    ) -> None:
+        """Grava o desfecho da subfase apos retorno autoritativo.
+
+        Falha de escrita aqui NAO aborta nada: o efeito ja aconteceu. Vira
+        toast porque a subfase fica presa em `in_flight` — e `in_flight` cujo
+        processo morreu vira `unknown` na reabertura, que BLOQUEIA a retomada
+        automatica do loop inteiro ate reconciliacao. O operador precisa saber
+        disso antes de fechar o app, senao descobre na proxima expansao, em
+        forma de fila que recusa abrir. Zero Silencio.
+        """
+        cursor = self._rocksmash_cursor
+        if cursor is None:
+            return
+        resultado = cursor.finish(ctx, failed=failed, note=cause)
+        if resultado.error:
+            signal_bus.toast_requested.emit(
+                f"Rocksmash {resultado.item_id}/{resultado.subphase}: desfecho NAO "
+                f"gravado em _ROCKSMASH-STATE.json — {resultado.error}. "
+                "A subfase segue `in_flight` e virara `unknown` na reabertura, "
+                "que bloqueia a retomada automatica ate reconciliacao manual.",
+                "warning",
+            )
+
+    def _record_loop_item_outcome(self, index: int, *, failed: bool) -> None:
+        """Desfecho pelo caminho INDEXADO (`command_completed`/`command_failed`).
+
+        Delega ao mesmo fechador do caminho autoritativo, de proposito. Ate
+        2026-08-24 este era o unico produtor de `item_completed`/`item_failed`
+        — e um produtor morto: os dois sinais que o alimentam nao tem UM
+        `.emit()` em `src/` (os sinais homonimos dos runners sao outros, e so
+        chegam ao `PipelineManager`, cujo `start()` nao tem chamador ligado).
+        Manter a funcao com corpo proprio criaria dois produtores do MESMO
+        evento; delegar deixa o registro one-shot: quem fechar primeiro
+        consome o pendente, e o segundo vira no-op em vez de contar o item
+        duas vezes.
+
+        `index` sobrevive na assinatura porque os dois slots o passam; o
+        desfecho, porem, sai do registro do despacho, nao da posicao na lista.
+        Sem despacho observado nesta sessao nao ha evento: atribuir custo a um
+        tier adivinhado e pior que nao atribuir.
+        """
+        self._close_pending_item_outcome(failed=failed)
 
     def _record_queue_lifecycle(self, event_type: str, ctx: object = None) -> None:
         """Emite um evento puramente de fila (`queue_canceled`, `app_closed`).
@@ -11589,6 +11774,15 @@ class CommandQueueWidget(QWidget):
             after_clear=self._last_dispatch_head.get(channel) == "/clear",
         )
         self._last_dispatch_head[channel] = self._command_head(text)
+        # Task 24(a): o canal so e conhecido AQUI. `_record_loop_dispatch` roda
+        # antes das ramificacoes de worker e nao sabe se o item vai para T1, T2
+        # ou T3. Sem amarrar, o verde autoritativo do T1 fecharia um item que
+        # esta rodando no T3 — desfecho atribuido ao terminal errado. So a
+        # PRIMEIRA publicacao amarra: um dispatch Codex publica preambulo alem
+        # do comando, e todos vao para o mesmo canal.
+        pendente = self._pending_item_outcome
+        if pendente is not None and pendente.get("channel") is None:
+            pendente["channel"] = channel
         getattr(signal_bus, self._CHANNEL_SIGNALS[channel]).emit(text)
 
     def _terminal_emitter(self, channel: str, *, route: str):
@@ -12683,6 +12877,13 @@ class CommandQueueWidget(QWidget):
                 " so o Codex gera imagem. Ative o Worker Codex e tente de novo.",
                 "warning",
             )
+            return
+
+        # Tasks 19/20: marcar a subfase rocksmash como `in_flight` e o ULTIMO
+        # gate que pode recusar o item — e por isso vem antes do registro de
+        # despacho. Recusa aqui significa "a mesma subfase ja esta em voo num
+        # processo vivo"; deixar passar aplicaria o efeito duas vezes.
+        if not self._begin_rocksmash_subphase(spec):
             return
 
         # Task 24: `item_dispatched` so nasce DEPOIS de todo gate que pode

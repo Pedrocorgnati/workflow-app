@@ -371,3 +371,150 @@ def test_smoke_reopen_sem_sidecar_nao_inventa_estado(tmp_path: Path) -> None:
     """Sem arquivo, `reopen_state` devolve None — ausencia e fato, nao estado."""
     config_path = _make_loop_workspace(tmp_path, num_items=1)
     assert reopen_state(config_path.parent) is None
+
+
+# ==========================================================================
+# 6. Smoke E2E pelo DISPATCHER real (2026-08-24, reabertura da Task 20)
+#
+# Os cenarios acima chamam `init_state`/`begin_subphase`/`mark_subphase` a
+# mao. Isso prova o modulo de estado e nada sobre a fila: enquanto o
+# dispatcher nao chamava essas APIs, todos eles passavam com o sidecar
+# jamais existindo em execucao real. O teste abaixo nao toca no modulo de
+# estado — ele opera a fila (carregar, despachar, verde do canal) e depois
+# LE o sidecar, que e a unica forma de o smoke falhar no dia em que a
+# fiacao for desligada.
+# ==========================================================================
+
+
+def _indice_na_fila(widget, spec) -> int:
+    """Posicao 0-based do item que carrega `spec` na fila ja carregada.
+
+    `load_pipeline` passa os specs por `adapt_specs_to_main`, que pode
+    devolver copias — comparar por identidade quebraria sob Main nao-Claude.
+    A identidade estavel de uma subfase rocksmash e o `loop_context`
+    (`item_id` + `phase`), que e exatamente o canal que o dispatcher le.
+    """
+    alvo = spec.loop_context
+    for i, item in enumerate(widget._items):
+        ctx = getattr(item.get_spec(), "loop_context", None)
+        if ctx is not None and alvo is not None:
+            if (ctx.item_id, ctx.phase) == (alvo.item_id, alvo.phase):
+                return i
+    raise AssertionError(f"spec {spec.name!r} nao esta na fila carregada")
+
+
+def test_smoke_e2e_ciclo_do_item_pelo_dispatcher(qapp, qtbot, tmp_path: Path) -> None:
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.daily_loop.rocksmash_state import read_state, state_path
+
+    config_path = _make_loop_workspace(tmp_path, num_items=2)
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    root = config_path.parent
+    assert not state_path(root).exists(), "sidecar nao pode preexistir ao teste"
+
+    specs = build_loop_rocksmash_specs(cfg, root)
+
+    widget = CommandQueueWidget()
+    qtbot.addWidget(widget)
+    widget.load_pipeline(specs)
+
+    subfases = [
+        s
+        for s in specs
+        if s.name.startswith("/loop-rocksmash:")
+        and not s.name.startswith(("/loop-rocksmash:prepare", "/loop-rocksmash:rename"))
+    ]
+    do_item_001 = [s for s in subfases if s.loop_context.item_id == "001"]
+    assert [s.loop_context.phase for s in do_item_001] == list(SUBPHASES)
+
+    # Item 001 inteiro, uma subfase por vez, pelo HANDLER REAL do botao
+    # "Rodar proximo" (`_on_step_btn_clicked`). Chamar `_begin_rocksmash_
+    # subphase` direto provaria o cursor e nada sobre a fila: a fiacao poderia
+    # estar desligada no handler e o teste seguiria verde. Aqui a unica coisa
+    # que o teste faz e clicar e devolver o verde do canal.
+    # A ordem importa: `in_flight` tem de estar gravado ANTES do verde. Um
+    # dispatcher que so marcasse no desfecho fecharia a subfase igual e
+    # deixaria a janela do crash sem checkpoint — por isso a assercao e feita
+    # entre o clique e o verde, e nao so no fim.
+    ultimo_de_001 = _indice_na_fila(widget, do_item_001[-1])
+    for idx in range(ultimo_de_001 + 1):
+        ctx = getattr(widget._items[idx].get_spec(), "loop_context", None)
+        subfase = (
+            ctx.phase
+            if ctx is not None and ctx.item_id == "001" and ctx.phase in SUBPHASES
+            else None
+        )
+        widget._on_step_btn_clicked()
+        if subfase is not None:
+            assert read_state(root).items["001"].subphases[subfase].status == "in_flight"
+        widget._on_listener_authoritative_idle("interactive")
+        if subfase is not None:
+            assert read_state(root).items["001"].subphases[subfase].status == "completed"
+
+    estado = read_state(root)
+    assert [estado.items["001"].subphases[sub].status for sub in SUBPHASES] == [
+        "completed"
+    ] * len(SUBPHASES)
+    # Item 002 nunca foi despachado: continua integralmente pendente. Um
+    # dispatcher que marcasse por posicao na fila em vez de por contexto
+    # arrastaria o item seguinte junto.
+    assert {estado.items["002"].subphases[sub].status for sub in SUBPHASES} == {"pending"}
+
+    # Reabrir a mesma config nao reenfileira o item ja concluido.
+    replano = build_loop_rocksmash_specs(cfg, root)
+    itens_no_replano = {
+        s.loop_context.item_id
+        for s in replano
+        if s.loop_context is not None and s.loop_context.item_id
+    }
+    assert itens_no_replano == {"002"}
+
+
+def test_smoke_e2e_crash_apos_dispatch_deixa_unknown_e_bloqueia(
+    qapp, qtbot, tmp_path: Path
+) -> None:
+    """O cenario do Aceite, agora no caminho de producao.
+
+    Despachar pela fila e nunca receber o verde do canal e exatamente o
+    "crash entre efeito e persistencia": o efeito pode ter sido aplicado e a
+    confirmacao nao existe. A reabertura nao pode nem repetir nem pular.
+    """
+    from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
+    from workflow_app.daily_loop.rocksmash_state import (
+        read_state,
+        reopen_state,
+        state_path,
+    )
+
+    config_path = _make_loop_workspace(tmp_path, num_items=1)
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    root = config_path.parent
+
+    specs = build_loop_rocksmash_specs(cfg, root)
+    widget = CommandQueueWidget()
+    qtbot.addWidget(widget)
+    widget.load_pipeline(specs)
+
+    primeira = next(s for s in specs if s.name.startswith("/loop-rocksmash:do "))
+    # Cliques reais ate a subfase `do` sair; nenhum verde autoritativo depois
+    # dela: a sessao morre com o comando colado no terminal.
+    for _ in range(_indice_na_fila(widget, primeira) + 1):
+        widget._on_step_btn_clicked()
+
+    assert read_state(root).items["001"].subphases["do"].status == "in_flight"
+
+    # Ainda no MESMO processo, o dispatch em voo ja bloqueia: reexpandir a fila
+    # nao pode reemitir uma subfase que pode estar aplicando efeito agora.
+    with pytest.raises(DailyLoopConfigError, match="in_flight"):
+        build_loop_rocksmash_specs(cfg, root)
+
+    # Agora o crash de verdade: o processo que despachou nao existe mais. So o
+    # pid muda no sidecar — tudo o mais foi escrito pela fila.
+    bruto = json.loads(state_path(root).read_text(encoding="utf-8"))
+    bruto["items"]["001"]["subphases"]["do"]["pid"] = 999_999
+    state_path(root).write_text(json.dumps(bruto), encoding="utf-8")
+
+    estado = reopen_state(root)
+    assert estado.items["001"].subphases["do"].status == "unknown"
+    with pytest.raises(DailyLoopConfigError, match="unknown"):
+        build_loop_rocksmash_specs(cfg, root)

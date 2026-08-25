@@ -349,13 +349,21 @@ class TestGateJanelaStale:
         )
 
     def test_antes_da_data_limite_nao_esta_vencido(self):
-        st = stale_gate_status(now=self._ts("2026-08-24T00:00:00Z"))
+        """Gate ainda ABERTO (ratified=False injetado): antes do prazo,
+        `expired` e False. Injetamos o estado nao-ratificado de proposito —
+        a propriedade sob teste e a aritmetica de prazo, nao a decisao que o
+        operador tomou em 2026-08-24."""
+        st = stale_gate_status(
+            now=self._ts("2026-08-24T00:00:00Z"), ratified=False
+        )
         assert st["open"] is True
         assert st["expired"] is False
         assert st["deadline"] == _lle.JANELA_STALE_GATE_DEADLINE
 
     def test_depois_da_data_limite_vence(self):
-        st = stale_gate_status(now=self._ts("2026-10-01T00:00:00Z"))
+        st = stale_gate_status(
+            now=self._ts("2026-10-01T00:00:00Z"), ratified=False
+        )
         assert st["expired"] is True
 
     def test_vencer_nao_ratifica_nem_abre_a_porta(self):
@@ -364,19 +372,80 @@ class TestGateJanelaStale:
         A janela decide quais loops viram `stale`, e `stale` e o insumo da taxa
         de abandono: um numero que ninguem aceitou nao pode virar denominador so
         porque um prazo passou.
+
+        `ratified=False` e injetado nos DOIS lados (gate e porta) porque o
+        operador ja ratificou no repo: sem a injecao este teste viraria uma
+        tautologia sobre a decisao vigente e pararia de proteger o proximo gate
+        que abrir.
         """
-        st = stale_gate_status(now=self._ts("2027-01-01T00:00:00Z"))
+        st = stale_gate_status(
+            now=self._ts("2027-01-01T00:00:00Z"), ratified=False
+        )
         assert st["expired"] is True
         assert st["ratified"] is False
         porta = abandonment_metrics_publishable(
-            stale_window_seconds=14 * 24 * 3600.0, states=["completed"]
+            stale_window_seconds=14 * 24 * 3600.0,
+            window_ratified=False,
+            states=["completed"],
         )
         assert porta["publishable"] is False
         assert "janela_stale_nao_ratificada_pelo_operador" in porta["blockers"]
 
+    def test_ratificacao_do_operador_fecha_o_gate(self):
+        """Decisao de 2026-08-24: janela de 14 dias RATIFICADA.
+
+        O gate fecha (`open is False`), o vencimento deixa de fazer sentido
+        (`expired is False` mesmo depois do prazo — um gate fechado nao vence)
+        e o estado passa a carregar DESDE QUANDO e COM QUAL valor.
+        """
+        assert _lle.JANELA_STALE_RATIFICADA is True
+        assert _lle.JANELA_STALE_RATIFICADA_EM == "2026-08-24"
+        assert _lle.JANELA_STALE_SEGUNDOS == 14 * 24 * 3600
+
+        st = stale_gate_status(now=self._ts("2027-01-01T00:00:00Z"))
+        assert st["ratified"] is True
+        assert st["open"] is False
+        assert st["expired"] is False
+        assert st["ratified_at"] == "2026-08-24"
+        assert st["window_seconds"] == 14 * 24 * 3600
+
+    def test_ratificacao_derruba_so_o_proprio_bloqueio(self):
+        """A porta da 14.5 tem TRES bloqueios; a ratificacao derruba UM.
+
+        Publicar exige tambem janela declarada na chamada e zero loop
+        `indeterminado` no corte. Confundir "o gate fechou" com "a porta abriu"
+        e exatamente o atalho que a secao 14.5 existe para impedir.
+        """
+        porta_ok = abandonment_metrics_publishable(
+            stale_window_seconds=float(_lle.JANELA_STALE_SEGUNDOS),
+            states=["completed", "stale"],
+        )
+        assert porta_ok["publishable"] is True
+        assert porta_ok["blockers"] == []
+
+        sem_janela = abandonment_metrics_publishable(
+            stale_window_seconds=None, states=["completed"]
+        )
+        assert sem_janela["publishable"] is False
+        assert "janela_stale_nao_declarada" in sem_janela["blockers"]
+
+        com_indeterminado = abandonment_metrics_publishable(
+            stale_window_seconds=float(_lle.JANELA_STALE_SEGUNDOS),
+            states=["completed", _lle.STATE_INDETERMINADO],
+        )
+        assert com_indeterminado["publishable"] is False
+        assert (
+            "existem_loops_indeterminados_no_corte"
+            in com_indeterminado["blockers"]
+        )
+
     def test_now_e_injetado_nunca_lido_do_relogio(self):
         """Censo reproduzivel: mesmo corte, mesmo veredito, em qualquer dia."""
-        a = stale_gate_status(now=self._ts("2026-09-20T23:59:59Z"))
-        b = stale_gate_status(now=self._ts("2026-09-20T23:59:59Z"))
+        a = stale_gate_status(
+            now=self._ts("2026-09-20T23:59:59Z"), ratified=False
+        )
+        b = stale_gate_status(
+            now=self._ts("2026-09-20T23:59:59Z"), ratified=False
+        )
         assert a == b
         assert a["expired"] is False

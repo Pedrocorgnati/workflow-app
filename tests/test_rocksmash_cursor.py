@@ -18,6 +18,17 @@ O que esta travado:
 * default quadruplo preservado, modo legacy de dois passos ainda testado
   (12.2.14);
 * config alterada (stale) nunca e consumida em silencio.
+
+Adenda 2026-08-24 (fechamento do bloqueio de D2): ate aqui o arquivo provava o
+PLANO de retomada e nada mais. O bloqueio da Task 20 era outro — o expander so
+LIA o sidecar; ninguem o criava em execucao e nenhuma spec carregava a
+identidade do item. As duas classes no fim do arquivo travam justamente isso:
+
+* expandir cria o sidecar (`init_state` ganhou chamador em `src/`) sem alterar
+  a fila desta expansao, e reexpandir preserva o progresso ja gravado;
+* cada subfase viaja com `LoopExecutionContext` (item, subfase, bucket, modo),
+  diretiva nenhuma recebe contexto, e o enquadramento correlaciona sem afirmar
+  item.
 """
 
 from __future__ import annotations
@@ -29,11 +40,13 @@ from pathlib import Path
 import pytest
 
 from workflow_app.command_queue.loop_rocksmash_expander import (
+    ROCKSMASH_CONTEXT_MODE,
     _ITERATION_VERBS_CANONICAL,
     _ITERATION_VERBS_LEGACY,
     build_loop_rocksmash_specs,
     build_resume_plan,
 )
+from workflow_app.command_queue.rocksmash_cursor import RocksmashRuntimeCursor
 from workflow_app.daily_loop.loader import DailyLoopConfigError
 from workflow_app.daily_loop.rocksmash_state import (
     SUBPHASES,
@@ -352,3 +365,160 @@ def test_marcar_subfase_persiste_no_disco_e_sobrevive_ao_processo(
     em_disco = json.loads(state_path(root).read_text(encoding="utf-8"))
     assert em_disco["items"]["001"]["subphases"]["do"]["status"] == "completed"
     assert em_disco["items"]["001"]["subphases"]["review-done"]["status"] == "pending"
+
+
+# --------------------------------------------------------------------------
+# o sidecar nasce em execucao (SUT: build_loop_rocksmash_specs)
+#
+# `init_state` existia desde 2026-05-19 sem UM chamador em `src/`: o cursor era
+# uma API que so testes exercitavam. Enquanto isso for verdade, marcar subfase
+# em producao e impossivel — nao ha estado onde marcar.
+# --------------------------------------------------------------------------
+
+
+def _loop_dir(tmp_path: Path, cfg: dict, nome: str) -> Path:
+    """Como `_loop`, mas em subpasta — para dois loops no mesmo `tmp_path`."""
+    root = tmp_path / nome
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "_LOOP-CONFIG.json").write_text(
+        json.dumps(cfg, ensure_ascii=False), encoding="utf-8"
+    )
+    return root
+
+
+def _subfase_specs(specs) -> list:
+    return [
+        s
+        for s in specs
+        if s.name.startswith("/loop-rocksmash:")
+        and not s.name.startswith(("/loop-rocksmash:prepare", "/loop-rocksmash:rename"))
+    ]
+
+
+def test_expandir_cria_o_sidecar(tmp_path: Path) -> None:
+    cfg = _config(2)
+    root = _loop(tmp_path, cfg)
+    assert not state_path(root).exists()
+
+    build_loop_rocksmash_specs(cfg, root)
+
+    estado = read_state(root)
+    assert estado is not None
+    assert sorted(estado.items) == ["001", "002"]
+    assert all(
+        sub.status == "pending"
+        for item in estado.items.values()
+        for sub in item.subphases.values()
+    )
+
+
+def test_criar_o_sidecar_nao_muda_a_fila_desta_expansao(tmp_path: Path) -> None:
+    """Estado recem-criado e todo `pending`: o plano segue integral.
+
+    Sem isto, ligar o cursor teria mudado a fila de quem nunca pediu retomada.
+    """
+    cfg = _config(2)
+    com = _loop_dir(tmp_path, cfg, "com")
+    sem = _loop_dir(tmp_path, cfg, "sem")
+
+    assert _tokens(build_loop_rocksmash_specs(cfg, com)) == _tokens(
+        build_loop_rocksmash_specs(cfg, sem, use_cursor=False)
+    )
+
+
+def test_use_cursor_false_nao_escreve_nada(tmp_path: Path) -> None:
+    cfg = _config(1)
+    root = _loop(tmp_path, cfg)
+    build_loop_rocksmash_specs(cfg, root, use_cursor=False)
+    assert not state_path(root).exists()
+
+
+def test_expandir_duas_vezes_preserva_progresso(tmp_path: Path) -> None:
+    """`init_state` e idempotente: reexpandir nao zera o que ja rodou."""
+    cfg = _config(2)
+    root = _loop(tmp_path, cfg)
+    specs = build_loop_rocksmash_specs(cfg, root)
+    cursor = RocksmashRuntimeCursor.from_specs(specs)
+    assert cursor is not None
+    ctx = _subfase_specs(specs)[0].loop_context
+    cursor.begin(ctx)
+    cursor.finish(ctx, failed=False)
+
+    build_loop_rocksmash_specs(cfg, root)
+
+    estado = read_state(root)
+    assert estado.items["001"].subphases["do"].status == "completed"
+
+
+# --------------------------------------------------------------------------
+# identidade do item viaja pelo contexto, nunca pelo texto do comando
+# --------------------------------------------------------------------------
+
+
+def test_subfases_carregam_item_e_subfase(tmp_path: Path) -> None:
+    cfg = _config(2)
+    root = _loop(tmp_path, cfg)
+    specs = build_loop_rocksmash_specs(cfg, root)
+
+    pares = [(s.loop_context.item_id, s.loop_context.phase) for s in _subfase_specs(specs)]
+    assert pares == [(iid, sub) for iid in ("001", "002") for sub in SUBPHASES]
+    assert all(
+        s.loop_context.mode == ROCKSMASH_CONTEXT_MODE for s in _subfase_specs(specs)
+    )
+    assert all(
+        s.loop_context.bucket_id == "T-opus-high" for s in _subfase_specs(specs)
+    )
+
+
+def test_diretiva_nao_carrega_contexto(tmp_path: Path) -> None:
+    """`/clear` nao pertence a item nenhum.
+
+    Dar contexto a diretiva criaria correlacao falsa, que e pior que correlacao
+    ausente: o desfecho do `/clear` seria contado como desfecho do item.
+    """
+    cfg = _config(1)
+    root = _loop(tmp_path, cfg)
+    specs = build_loop_rocksmash_specs(cfg, root)
+
+    diretivas = [s for s in specs if s.name == "/clear" or s.name.startswith(("/model ", "/effort "))]
+    assert diretivas
+    assert all(s.loop_context is None for s in diretivas)
+
+
+def test_framing_correlaciona_sem_afirmar_item(tmp_path: Path) -> None:
+    cfg = _config(1)
+    root = _loop(tmp_path, cfg)
+    specs = build_loop_rocksmash_specs(cfg, root)
+
+    framing = [
+        s
+        for s in specs
+        if s.name.startswith(("/loop-rocksmash:prepare", "/loop-rocksmash:rename"))
+    ]
+    assert len(framing) == 2
+    for s in framing:
+        assert s.loop_context is not None
+        assert s.loop_context.item_id is None
+        assert not s.loop_context.is_item_scoped()
+
+
+def test_queue_id_e_unico_por_expansao(tmp_path: Path) -> None:
+    """Duas expansoes do mesmo loop sao duas execucoes distintas."""
+    cfg = _config(1)
+    root = _loop(tmp_path, cfg)
+    a = build_loop_rocksmash_specs(cfg, root)
+    b = build_loop_rocksmash_specs(cfg, root)
+
+    assert (
+        _subfase_specs(a)[0].loop_context.queue_id
+        != _subfase_specs(b)[0].loop_context.queue_id
+    )
+
+
+def test_queue_id_e_o_mesmo_dentro_de_uma_expansao(tmp_path: Path) -> None:
+    cfg = _config(2)
+    root = _loop(tmp_path, cfg)
+    specs = build_loop_rocksmash_specs(cfg, root)
+
+    ids = {s.loop_context.queue_id for s in specs if s.loop_context is not None}
+    assert len(ids) == 1
