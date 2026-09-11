@@ -213,6 +213,7 @@ class XtermOutputPanel(QWidget):
             if isinstance(data, (bytes, bytearray))
             else str(data)
         )
+        signal_bus.terminal_output_observed.emit(self._channel_name, chunk)
         if self._dispatch_ts is not None:
             self._bytes_since_dispatch += len(chunk)
         self._scan_chunk_for_fatal(chunk)

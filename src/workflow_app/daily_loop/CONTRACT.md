@@ -121,6 +121,7 @@ Todos exportados em `workflow_app.daily_loop.__init__`. Implementacao dos dois p
 - Producer (`/loop:integration`): re-materializa `items[].commands` mas NAO reescreve `progress_path`/`tasks_dir`/`log_path`; preserva o shape gravado por `/loop:create-structure`.
 - Validator estrutural (`/loop:review` **C16**): detecta + auto-fixa (`fix_action: edit-json`, substitui pelo basename canonico) os campos `progress_path`/`tasks_dir`/`log_path` com segmento embutido; tambem valida resolucao efetiva contra `loop_root` fisico.
 - Validator pre-runtime (`/loop:workflow-app` **W12**): detecta + bloqueia veredict APROVADO; `auto_fixable: false` (correcao via re-rodar `/loop:create-structure` ou via C16 do `/loop:review`). Inclui W12.b — resolucao efetiva do path contra `loop_root` fisico.
+- Validator pre-carga (`/loop:workflow-app` **W13**): o mesmo predicado de `loader.py::classify_run_anchor`. Reporta, antes do clique na fila, se o run tem anchor explicito, waiver valido, ou se `_require_run_anchor` abortaria.
 - Runtime defense (`loader.py::build_daily_loop_specs` e `build_loop_specs`): mensagens de erro enriquecidas com sugestao via `diagnose_workspace_doubled_path` quando `PROGRESS.md nao encontrado` por path doubling.
 
 > **Nota:** `/loop:review` C15 e `/loop:workflow-app` W10 sao os gates do **par Kimi** (adjacencia/contencao de `/cmd:kimi-pair-*`), NAO desta regra de path. Esta secao citava esses numeros por engano ate 2026-05-22 — corrigido para C16/W12 no hardening `blacksmith/loop/05-22-loop-path-hardening.md`.

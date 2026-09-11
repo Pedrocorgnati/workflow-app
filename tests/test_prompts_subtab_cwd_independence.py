@@ -88,6 +88,16 @@ def test_systemforge_prompts_delegate_to_exact_canonical_invocations():
             "/commit:nextjs-hostinger systemforge-dashboard",
             ".claude/commands/commit/nextjs-hostinger.md",
         ),
+        "corgly-db-update.md": (
+            "title: Corgly DB",
+            "/hostinger:update-bd corgly-app",
+            ".claude/commands/hostinger/update-bd.md",
+        ),
+        "corgly-hostinger-deploy.md": (
+            "title: Corgly Deploy",
+            "/commit:nextjs-hostinger corgly-app",
+            ".claude/commands/commit/nextjs-hostinger.md",
+        ),
     }
     for filename, required_tokens in expected.items():
         prompt_path = prompts_dir / filename
@@ -95,7 +105,11 @@ def test_systemforge_prompts_delegate_to_exact_canonical_invocations():
         assert len(prompt_path.stem) <= 32
         assert "category: commit" in text
         assert ".claude/project.json" in text
-        assert "pending-actions/systemforge-dashboard.md" in text
+        slug = "corgly" if filename.startswith("corgly-") else "systemforge-dashboard"
+        assert f"pending-actions/{slug}.md" in text
+        if slug == "corgly":
+            assert ".claude/commands/hostinger/_shared/corgly-app.md" in text
+            assert "corgly-app.json" not in text
         assert text.count("Pare quando ") == 1
         for token in required_tokens:
             assert token in text
@@ -253,8 +267,10 @@ def test_estrategista_delegador_label_survives_old_qsettings(qtbot):
     )
 
 
-def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot):
+def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot, monkeypatch):
     win = _new_window(qtbot)
+    published = []
+    monkeypatch.setattr(win, "_publish_to_terminal", published.append)
     try:
         expected = {
             "output-btn-prompt-sf-db": (
@@ -264,6 +280,14 @@ def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot):
             "output-btn-prompt-sf-deploy": (
                 "SF Deploy",
                 "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
+            ),
+            "output-btn-prompt-corgly-db": (
+                "Corgly DB",
+                "ai-forge/custom-prompts/prompts-subtab/corgly-db-update.md",
+            ),
+            "output-btn-prompt-corgly-deploy": (
+                "Corgly Deploy",
+                "ai-forge/custom-prompts/prompts-subtab/corgly-hostinger-deploy.md",
             ),
             "output-btn-prompt-only-commit": (
                 "only commit",
@@ -291,10 +315,16 @@ def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot):
                 entry["label"] == label and entry["path"] == path
                 for entry in win._prompt_entries
             )
+            if label.startswith("Corgly"):
+                published.clear()
+                btn.click()
+                assert published == [f"{win._prompt_base} {path}"]
 
         _set_prompt_filter(win, "commit")
         assert not _button_by_testid(win, "output-btn-prompt-sf-db").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-sf-deploy").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-corgly-db").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-corgly-deploy").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-only-commit").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-only-push").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-full-deploy").isHidden()
@@ -330,6 +360,12 @@ def test_systemforge_commit_labels_survive_old_qsettings(qtbot):
     assert labels_by_path[
         "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md"
     ] == "SF Deploy"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/corgly-db-update.md"
+    ] == "Corgly DB"
+    assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/corgly-hostinger-deploy.md"
+    ] == "Corgly Deploy"
     assert labels_by_path[
         "ai-forge/custom-prompts/prompts-subtab/only-commit.md"
     ] == "only commit"

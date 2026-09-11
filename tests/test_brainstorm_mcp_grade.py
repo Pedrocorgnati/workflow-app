@@ -24,9 +24,14 @@ from unittest.mock import patch
 import pytest
 from PySide6.QtCore import QObject, Signal
 
+from tests._helpers import assert_fixture_bate_com_os_seeds_reais
+from workflow_app.brainstorm_seed_contract import (
+    BRAINSTORM_SEEDS_RELDIR,
+    CANONICAL_SEED_COUNT,
+    CANONICAL_SEED_FILENAMES,
+)
 from workflow_app.main_window import MainWindow, _BrainstormSeedError
 from workflow_app.widgets.mcp_prompt_button import MCPPromptButton
-
 
 # Helpers
 
@@ -42,7 +47,7 @@ _SEED_TEMPLATES = {
         "target_path": "false",
         "target_terminal": "terminal-interactive-output",
     },
-    "02-search-in.md": {
+    "02-pesquisar.md": {
         "slug": "search-in",
         "title": "Seed - Botao 2 - search-in",
         "button_type": "type-selector-radio-input",
@@ -105,7 +110,7 @@ _SEED_TEMPLATES = {
         "button_type": "type-selector-radio-input",
         "agent_name": "questioner",
         "agent_path": "agents/questioner-rules.md",
-        "action": "Revisar",
+        "action": "Questionar",
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
@@ -197,7 +202,7 @@ _SEED_TEMPLATES = {
         "agent_path": "agents/complexity-router-rules.md",
         "action": "Analisar complexidade",
         "target_path": "true",
-        "target_terminal": "depende-do-radio",
+        "target_terminal": "terminal-interactive-output",
     },
     "17-billing.md": {
         "slug": "billing",
@@ -225,7 +230,7 @@ _SEED_TEMPLATES = {
         "button_type": "type-selector-radio-input",
         "agent_name": "delegador",
         "agent_path": "agents/analista-delegador-rules.md",
-        "action": "Otimizar",
+        "action": "Delegar",
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
@@ -255,7 +260,7 @@ _SEED_TEMPLATES = {
         "button_type": "type-selector-radio-input",
         "agent_name": "scaffolds-blueprints-updater",
         "agent_path": "agents/scaffolds-blueprints-updater.md",
-        "action": "Otimizar",
+        "action": "Atualizar scaffolds e blueprints",
         "target_path": "true",
         "target_terminal": "depende-do-radio",
     },
@@ -281,6 +286,17 @@ _SEED_TEMPLATES = {
     },
 }
 
+# A fixture NAO pode inventar identidade. Antes desta trava a chave
+# `02-search-in.md` convivia com o canonico `02-pesquisar.md`: a suite passava
+# com 24 seeds porque o loader descobria por PREFIXO, e um loader por
+# membership teria apontado o canonico como ausente. Divergir aqui agora
+# quebra a coleta, nao um assert perdido no meio de um teste.
+assert tuple(_SEED_TEMPLATES) == CANONICAL_SEED_FILENAMES, (
+    "chaves de _SEED_TEMPLATES divergem de CANONICAL_SEED_FILENAMES: "
+    f"{sorted(set(_SEED_TEMPLATES) ^ set(CANONICAL_SEED_FILENAMES))}"
+)
+
+
 
 def _frontmatter(d: dict) -> str:
     lines = ["---"]
@@ -289,7 +305,11 @@ def _frontmatter(d: dict) -> str:
             lines.append(f"{k}: {v}")
         else:
             lines.append(f'{k}: "{v}"')
-    lines.append("---\n\n# body\n")
+    lines.append(
+        "---\n\n# body\n\n"
+        "## Prompt canonico\n\n"
+        "Corpo canonico sintetico da fixture.\n"
+    )
     return "\n".join(lines)
 
 
@@ -297,7 +317,7 @@ def _write_seeds(tmp_path: Path, overrides: dict[str, dict | None] | None = None
     """Materializa 24 seeds (+ personas) em tmp_path. Overrides[fname]=None remove o seed."""
     overrides = overrides or {}
     repo_root = tmp_path / "repo"
-    seeds_dir = repo_root / "blacksmith" / "brainstorm-mcp"
+    seeds_dir = repo_root / BRAINSTORM_SEEDS_RELDIR
     agents_dir = repo_root / "agents"
     seeds_dir.mkdir(parents=True)
     agents_dir.mkdir(parents=True)
@@ -327,8 +347,6 @@ class _FakeMainWindow:
     (PySide6 QMainWindow + setup pesado).
     """
 
-    _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
-
     def __init__(self, repo_root: Path) -> None:
         self._fake_root = repo_root
 
@@ -337,6 +355,11 @@ class _FakeMainWindow:
 
     def _brainstorm_seeds_dir(self) -> Path:
         return MainWindow._brainstorm_seeds_dir(self)  # type: ignore[arg-type]
+
+    def _load_one_brainstorm_seed(self, path, root):
+        return MainWindow._load_one_brainstorm_seed(  # type: ignore[arg-type]
+            self, path, root
+        )
 
     def _load_brainstorm_seeds(self):
         return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
@@ -348,7 +371,8 @@ class _FakeMainWindow:
 def test_load_seeds_happy_path_24_valid(tmp_path):
     repo_root = _write_seeds(tmp_path)
     fake = _FakeMainWindow(repo_root)
-    seeds = fake._load_brainstorm_seeds()
+    seeds, issues = fake._load_brainstorm_seeds()
+    assert issues == []
     assert len(seeds) == 24
     expected_order = [
         "criar-md",
@@ -389,15 +413,23 @@ def test_load_seeds_happy_path_24_valid(tmp_path):
         assert "seed_path" in s
 
 
-def test_brainstorm_grid_contract_is_4x6():
-    assert MainWindow._BRAINSTORM_SEED_COUNT == 24
-    assert MainWindow._BRAINSTORM_GRID_COLUMNS == 4
+def test_brainstorm_grid_contract_is_cardinality_not_geometry():
+    """O contrato da grade e a CARDINALIDADE, nunca `4x6`.
+
+    A versao anterior fixava `_BRAINSTORM_GRID_COLUMNS == 4` e transformava a
+    geometria em contrato: mudar o fallback de layout quebrava a suite mesmo
+    com a ordem visual correta, e a grade nao e `4x6` em producao. A ordem de
+    insercao (row-major) e provada em
+    `tests/test_brainstorm_seed_degradation.py`.
+    """
+    assert CANONICAL_SEED_COUNT == len(CANONICAL_SEED_FILENAMES)
+    assert len(set(CANONICAL_SEED_FILENAMES)) == CANONICAL_SEED_COUNT
 
 
-# Cenario 2: yaml malformado -> erro fail-fast
+# Cenario 2: yaml malformado -> issue por item, grade degradada (C3 Task 10)
 
 
-def test_load_seeds_malformed_yaml_raises(tmp_path):
+def test_load_seeds_malformed_yaml_degrades_single_item(tmp_path):
     bad_body = (
         "---\n"
         "slug: criar-md\n"
@@ -409,11 +441,13 @@ def test_load_seeds_malformed_yaml_raises(tmp_path):
         overrides={"01-criar-md.md": {"__raw_body__": bad_body}},
     )
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="01-criar-md"):
-        fake._load_brainstorm_seeds()
+    seeds, issues = fake._load_brainstorm_seeds()
+    assert len(seeds) == 23
+    assert [i["filename"] for i in issues] == ["01-criar-md.md"]
+    assert "yaml malformado" in issues[0]["reason"]
 
 
-# Cenario 3: agent_path inexistente -> G6 fail
+# Cenario 3: agent_path inexistente -> G6 vira issue, os outros 23 sobem
 
 
 def test_load_seeds_missing_agent_path_g6(tmp_path):
@@ -421,8 +455,11 @@ def test_load_seeds_missing_agent_path_g6(tmp_path):
     # Remove o arquivo de persona apos materializar os seeds
     (repo_root / "agents" / "criar-md-rules.md").unlink()
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="G6"):
-        fake._load_brainstorm_seeds()
+    seeds, issues = fake._load_brainstorm_seeds()
+    assert len(seeds) == 23
+    assert all("criar-md" != s["slug"] for s in seeds)
+    assert len(issues) == 1
+    assert "G6" in issues[0]["reason"]
 
 
 # Cenario 4: debounce 300ms -> click duplo rapido emite 1 publish
@@ -574,24 +611,57 @@ def test_compat_layer_target_path_boolean(tmp_path):
         },
     )
     fake = _FakeMainWindow(repo_root)
-    seeds = fake._load_brainstorm_seeds()
+    seeds, issues = fake._load_brainstorm_seeds()
+    assert issues == []
     s01 = next(s for s in seeds if s["slug"] == "criar-md")
     assert s01["target_path_edit_inplace"] is False
     assert s01["target_terminal"] == "terminal-interactive-output"
 
 
-# Cenario 6: seed faltante -> grade bloqueada
+# Cenario 6: seed renomeado -> issue de ausencia, grade degradada
 
 
-def test_glob_rejects_renamed_seed(tmp_path):
+def test_glob_reports_renamed_seed(tmp_path):
+    """Seed renomeado sai da grade e vira issue; ele NAO carrega.
+
+    A versao anterior esperava `len(seeds) == 24` apos renomear
+    `24-performance-engineer.md` para `25-performance-engineer.md`,
+    legitimando descoberta por padrao de nome: o arquivo renomeado virava
+    botao e a suite ratificava um seed canonico ausente como grade completa.
+    """
     repo_root = _write_seeds(tmp_path)
-    # Renomeia 24 -> 25, quebrando a sequencia canonica de prefixos (01..24).
-    old = repo_root / "blacksmith" / "brainstorm-mcp" / "24-performance-engineer.md"
-    new = old.parent / "25-performance-engineer.md"
-    old.rename(new)
+    old = repo_root / BRAINSTORM_SEEDS_RELDIR / "24-performance-engineer.md"
+    old.rename(old.parent / "25-performance-engineer.md")
     fake = _FakeMainWindow(repo_root)
-    with pytest.raises(_BrainstormSeedError, match="esperado exatamente 24"):
-        fake._load_brainstorm_seeds()
+    seeds, issues = fake._load_brainstorm_seeds()
+
+    # Task 29: `25-performance-engineer.md` tem forma valida e CARREGA como
+    # seed nao-canonico. O slug volta a existir na grade -- por isso o teste
+    # afirma sobre a ISSUE de ausencia, que e a garantia real, e nao sobre a
+    # contagem, que a cardinalidade aberta deixou de fixar.
+    ausentes = [i for i in issues if "ausente" in i["reason"]]
+    assert [i["filename"] for i in ausentes] == ["24-performance-engineer.md"]
+    assert "25-performance-engineer.md" not in [
+        p.name for p in [s["seed_path"] for s in seeds if s["slug"] != "performance-engineer"]
+    ]
+
+
+def test_same_prefix_rename_is_also_reported(tmp_path):
+    """Substituir um canonico por outro nome de MESMO prefixo tambem falha.
+
+    Caso irmao do anterior e o mais perigoso dos dois: a contiguidade de
+    prefixos continuava intacta (`14` presente), entao o criterio antigo nao
+    tinha nada a reportar.
+    """
+    repo_root = _write_seeds(tmp_path)
+    old = repo_root / BRAINSTORM_SEEDS_RELDIR / "14-visual-design.md"
+    old.rename(old.parent / "14-outra-coisa.md")
+    fake = _FakeMainWindow(repo_root)
+    seeds, issues = fake._load_brainstorm_seeds()
+
+    ausentes = [i for i in issues if "ausente" in i["reason"]]
+    assert [i["filename"] for i in ausentes] == ["14-visual-design.md"]
+    assert "visual-design" not in [s["slug"] for s in seeds]
 
 
 # Cenario extra: testid_slug do widget gera brainstorm-mcp-btn-{slug}
@@ -662,8 +732,6 @@ class _PageStub(QObject):
     """
 
     _BRAINSTORM_GRID_COLUMNS = 4
-    _BRAINSTORM_SEED_COUNT = 24
-    _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
 
     _brainstorm_grid_invalidated = Signal()
 
@@ -705,8 +773,16 @@ class _PageStub(QObject):
 
     def _load_brainstorm_seeds(self):
         if self.seed_error is not None:
-            raise _BrainstormSeedError(self.seed_error)
+            return [], [{"filename": "injetado", "reason": self.seed_error}]
         return MainWindow._load_brainstorm_seeds(self)  # type: ignore[arg-type]
+
+    def _load_one_brainstorm_seed(self, path, root):
+        return MainWindow._load_one_brainstorm_seed(  # type: ignore[arg-type]
+            self, path, root
+        )
+
+    def _apply_brainstorm_seed_issues(self, issues) -> None:
+        MainWindow._apply_brainstorm_seed_issues(self, issues)
 
     def _brainstorm_seeds_dir(self) -> Path:
         return MainWindow._brainstorm_seeds_dir(self)  # type: ignore[arg-type]
@@ -761,7 +837,9 @@ def sem_specs_suplementares(monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ["seed", "builder"])
-def test_grid_refs_cached_even_when_initial_build_fails(qapp, tmp_path, failure):
+def test_grid_refs_cached_even_when_initial_build_fails(
+    qapp, tmp_path, failure, sem_specs_suplementares
+):
     """E-02: as refs da grade sao cacheadas ANTES dos early returns de falha.
 
     Sem isso, uma falha no build inicial deixa `_brainstorm_grid_layout`
@@ -823,3 +901,21 @@ def test_rebuild_without_layout_is_not_silent(qapp, tmp_path):
     assert len(toasts) == 1
     assert toasts[0][1] == "error"
     assert "layout indisponivel" in toasts[0][0]
+
+
+def test_a_fixture_dos_24_descreve_os_seeds_reais():
+    """`_SEED_TEMPLATES` nao pode divergir do frontmatter em disco.
+
+    Era o bug (Codex R2 #2, gemeo do achado #18 no gear): a fixture dizia
+    `Revisar` para `07-questioner`, `Otimizar` para `19-delegador` e
+    `22-scaffolds-blueprints-updater` e `depende-do-radio` para
+    `16-analise-complexidade`. Todo teste deste arquivo exercitava o loader
+    sobre um conjunto de seeds que nao existe -- e as `action` erradas eram
+    justamente as tres que G7 usa para julgar coerencia persona<->action.
+
+    O guard compara so o que o loader LE. `title` e `agent_path` ficam de
+    fora de proposito: o primeiro guarda a numeracao historica do botao (ver
+    os comentarios de posicao na fixture) e o segundo tem de apontar para
+    dentro da `tmp_path`.
+    """
+    assert_fixture_bate_com_os_seeds_reais(_SEED_TEMPLATES, "_SEED_TEMPLATES")

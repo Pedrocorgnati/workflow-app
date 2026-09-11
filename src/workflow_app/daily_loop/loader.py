@@ -40,6 +40,7 @@ Design:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import uuid
@@ -864,72 +865,201 @@ def _resolve_run_default_model_effort(
 _SIZING_ANCHOR_WAIVER_KEY = "sizing_anchor_waiver"
 
 
-def _require_run_anchor(
+def _extract_sizing_decision(raw_config: dict[str, Any] | None) -> dict[str, Any] | str | None:
+    """Le `metadata.individual_analysis_summary.sizing_decision`, se existir.
+
+    O marcador e gravado por `/loop:individual-analysis` (PASSO 3.7) quando a
+    analise deliberadamente deixa o sizing all-null. Ele NAO libera o gate: e
+    escrito pelo proprio produtor, entao honra-lo automaticamente desarmaria a
+    guarda exatamente para a populacao que ela existe para pegar. Serve so para
+    a mensagem de erro dizer ao operador que a decisao ja esta documentada e
+    que falta apenas o waiver correspondente.
+
+    Aceita `dict` E `str`: no corpus real de `blacksmith/loop-archives/` as duas
+    formas convivem -- 10 loops gravaram a decisao como frase corrida e 8 como
+    objeto, medido em 2026-08-25 sobre os 90 `_LOOP-CONFIG.json` da arvore
+    (70 na raiz, 18 em `done/`, 1 em `_fixtures/`, 1 em `output/wbs/`).
+    Restringir a `dict` fazia justamente os loops mais antigos cairem na
+    mensagem generica, que e a populacao que mais precisa da especifica.
+    """
+    if not isinstance(raw_config, dict):
+        return None
+    for escopo in (raw_config, raw_config.get("daily_loop")):
+        if not isinstance(escopo, dict):
+            continue
+        metadata = escopo.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        resumo = metadata.get("individual_analysis_summary")
+        if not isinstance(resumo, dict):
+            continue
+        decisao = resumo.get("sizing_decision")
+        if isinstance(decisao, dict) and decisao:
+            return decisao
+        if isinstance(decisao, str) and decisao.strip():
+            return decisao.strip()
+    return None
+
+
+def _rotulo_sizing_decision(decisao: dict[str, Any] | str) -> str:
+    """Rotulo curto e de uma linha para a decisao ja documentada.
+
+    So existe para a mensagem de erro. Nao interpreta a decisao nem decide
+    nada com ela: o gate continua exigindo o waiver.
+    """
+    if isinstance(decisao, str):
+        texto = decisao
+    else:
+        texto = ""
+        for chave in ("outcome", "override", "mode", "applied", "heuristic_result", "reason"):
+            valor = decisao.get(chave)
+            if isinstance(valor, str) and valor.strip():
+                texto = f"{chave}={valor.strip()}"
+                break
+        if not texto:
+            texto = "decisao registrada sem rotulo textual"
+    texto = " ".join(texto.split())
+    return texto if len(texto) <= 120 else texto[:117] + "..."
+
+
+@dataclass(frozen=True)
+class RunAnchorVerdict:
+    """Veredito compartilhado pelo loader e pelo W13 de `/loop:workflow-app`.
+
+    `status`:
+      - ``explicit``: um item grava model E effort;
+      - ``waiver``: all-null com `sizing_anchor_waiver` valido;
+      - ``not_applicable``: produtor nao tocou sizing (V2 / fixture);
+      - ``invalid_waiver``: waiver presente mas incompleto;
+      - ``missing``: produtor tocou sizing, all-null, sem waiver.
+
+    W13 imprime este objeto. O loader so converte os dois status de erro em
+    ``DailyLoopConfigError``. As mensagens sao as mesmas nos dois lados para
+    que o operador veja no preparo o texto que o clique na fila repetiria.
+    """
+
+    status: str
+    message: str = ""
+    warning: str = ""
+    waiver_snippet: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"explicit", "waiver", "not_applicable"}
+
+
+def classify_run_anchor(
     daily_loop: dict[str, Any],
     anchor: tuple[ModelName | None, EffortLevel | None],
-) -> None:
-    """Exige run anchor explicito em config V3, salvo waiver humano registrado.
+    raw_config: dict[str, Any] | None = None,
+) -> RunAnchorVerdict:
+    """Predicado unico do gate de run-anchor. Sem efeito colateral.
 
-    Escopo estreito de proposito. O gate so dispara quando o PRODUTOR ja tocou
-    sizing, ou seja, quando ao menos uma entrada de `items_index` declara a
-    chave `model` ou `effort` (mesmo com valor `null`) — que e a assinatura de
-    `/loop:individual-analysis` ter rodado. Config que nunca menciona sizing
-    (V2 legada, ou fixture minima) continua semeando do bucket, sem mudanca de
-    comportamento.
-
-    - passa assim que UM item carrega `model` E `effort` explicitos;
-    - falha quando o produtor gravou sizing all-null, que e o caso real que
-      derruba a heranca para o default do bucket;
-    - o waiver `daily_loop.sizing_anchor_waiver` (com `motivo` e `autor`)
-      libera o loop, deixando a decisao rastreada no proprio config.
-
-    Raises:
-        DailyLoopConfigError: sizing declarado porem all-null, sem waiver valido.
+    `_require_run_anchor` e o W13 de `/loop:workflow-app` consomem este
+    retorno. Reimplementar o teste no comando e o que a Task 39 existe para
+    impedir: as duas versoes divergem no primeiro ajuste.
     """
     if anchor[0] is not None and anchor[1] is not None:
-        return
+        return RunAnchorVerdict("explicit")
 
     items_index = daily_loop.get("items_index")
     if not isinstance(items_index, dict) or not items_index:
-        return  # V2 legado: seed pelo bucket, comportamento preservado
+        return RunAnchorVerdict("not_applicable")
 
     produtor_tocou_sizing = any(
         isinstance(entry, dict) and ("model" in entry or "effort" in entry)
         for entry in items_index.values()
     )
     if not produtor_tocou_sizing:
-        return  # sizing nunca declarado: nada a ancorar, seed pelo bucket
+        return RunAnchorVerdict("not_applicable")
 
     waiver = daily_loop.get(_SIZING_ANCHOR_WAIVER_KEY)
     if isinstance(waiver, dict):
         motivo = str(waiver.get("motivo", "") or "").strip()
         autor = str(waiver.get("autor", "") or "").strip()
         if motivo and autor:
-            import sys
-
-            print(
-                f"[daily-loop] WARN: run sem anchor explicito, liberado por "
-                f"{_SIZING_ANCHOR_WAIVER_KEY} (autor={autor!r}, motivo={motivo!r})",
-                file=sys.stderr,
+            return RunAnchorVerdict(
+                "waiver",
+                warning=(
+                    f"[daily-loop] WARN: run sem anchor explicito, liberado por "
+                    f"{_SIZING_ANCHOR_WAIVER_KEY} (autor={autor!r}, motivo={motivo!r})"
+                ),
             )
-            return
-        raise DailyLoopConfigError(
-            f"daily_loop.{_SIZING_ANCHOR_WAIVER_KEY} exige 'motivo' e 'autor' "
-            "nao vazios para liberar um run sem anchor."
+        return RunAnchorVerdict(
+            "invalid_waiver",
+            message=(
+                f"daily_loop.{_SIZING_ANCHOR_WAIVER_KEY} exige 'motivo' e 'autor' "
+                "nao vazios para liberar um run sem anchor."
+            ),
         )
 
-    raise DailyLoopConfigError(
-        "run sem anchor de sizing: nenhum item de items_index grava model E "
-        "effort explicitos.\n"
-        "  Sem anchor a fila inteira herda o default do bucket, que e o bug do "
-        "incidente 05-25-rede-micro-sites.\n"
-        "  Remedie de UM destes jeitos:\n"
-        "    1) rodar /loop:individual-analysis (o mapeamento score -> "
-        "(model, effort) sempre resolve um par); ou\n"
-        "    2) gravar model+effort em pelo menos um item de items_index; ou\n"
-        "    3) registrar daily_loop.sizing_anchor_waiver = "
-        '{"motivo": "...", "autor": "..."} quando a ausencia for deliberada.'
+    decisao = _extract_sizing_decision(raw_config)
+    if decisao is not None:
+        rotulo = _rotulo_sizing_decision(decisao)
+        snippet = json.dumps(
+            {
+                "motivo": (
+                    f"sizing all-null deliberado ({rotulo}); ver "
+                    "metadata.individual_analysis_summary.sizing_decision"
+                ),
+                "autor": "<seu nome>",
+            },
+            ensure_ascii=False,
+        )
+        return RunAnchorVerdict(
+            "missing",
+            waiver_snippet=snippet,
+            message=(
+                "run sem anchor de sizing: nenhum item de items_index grava model E "
+                "effort explicitos.\n"
+                "  Este config JA documenta a decisao em "
+                f"metadata.individual_analysis_summary.sizing_decision ({rotulo}),\n"
+                "  ou seja, o all-null foi deliberado - mas o marcador e escrito pelo "
+                "proprio produtor e por isso nao libera o gate.\n"
+                "  Falta so o registro que o loader le. Cole em daily_loop, ao lado de "
+                '"buckets":\n'
+                f'    "{_SIZING_ANCHOR_WAIVER_KEY}": {snippet}\n'
+                "  Alternativa equivalente: gravar model+effort em UM item de "
+                "items_index (o par vira semente do run inteiro)."
+            ),
+        )
+
+    snippet = '{"motivo": "...", "autor": "..."}'
+    return RunAnchorVerdict(
+        "missing",
+        waiver_snippet=snippet,
+        message=(
+            "run sem anchor de sizing: nenhum item de items_index grava model E "
+            "effort explicitos.\n"
+            "  Sem anchor a fila inteira herda o default do bucket, que e o bug do "
+            "incidente 05-25-rede-micro-sites.\n"
+            "  Remedie de UM destes jeitos:\n"
+            "    1) rodar /loop:individual-analysis (o mapeamento score -> "
+            "(model, effort) sempre resolve um par); ou\n"
+            "    2) gravar model+effort em pelo menos um item de items_index; ou\n"
+            "    3) registrar daily_loop.sizing_anchor_waiver = "
+            f"{snippet} quando a ausencia for deliberada."
+        ),
     )
+
+
+def _require_run_anchor(
+    daily_loop: dict[str, Any],
+    anchor: tuple[ModelName | None, EffortLevel | None],
+    raw_config: dict[str, Any] | None = None,
+) -> None:
+    """Exige run anchor explicito em config V3, salvo waiver humano registrado.
+
+    Delegado a ``classify_run_anchor`` (Task 39 / W13). A semantica e a mesma
+    de antes: passa, avisa no stderr, ou levanta ``DailyLoopConfigError``.
+    """
+    veredito = classify_run_anchor(daily_loop, anchor, raw_config)
+    if veredito.status == "waiver" and veredito.warning:
+        print(veredito.warning, file=sys.stderr)
+        return
+    if veredito.ok:
+        return
+    raise DailyLoopConfigError(veredito.message)
 
 
 def _resolve_effective_sizing(
@@ -1507,7 +1637,7 @@ def build_daily_loop_specs(
     # explicito do loop, NAO o bucket. Independente da emissao; nao resetado por
     # /clear (esse reset zera apenas a re-emissao de /model e /effort).
     active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
-    _require_run_anchor(daily_loop, (active_model, active_effort))
+    _require_run_anchor(daily_loop, (active_model, active_effort), raw_config)
 
     for idx, item in enumerate(pending):
         # Opt-in: drop a /clear between items (after the prior :review-done,
@@ -2169,7 +2299,7 @@ def build_loop_specs(
     # explicito do loop, NAO o bucket. Independente da emissao; nao resetado por
     # /clear (esse reset zera apenas a re-emissao de /model e /effort).
     active_model, active_effort = _resolve_run_default_model_effort(daily_loop)
-    _require_run_anchor(daily_loop, (active_model, active_effort))
+    _require_run_anchor(daily_loop, (active_model, active_effort), raw_config)
 
     for idx, item in enumerate(pending):
         if clear_between_items and idx > 0:

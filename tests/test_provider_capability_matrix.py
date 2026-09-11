@@ -12,7 +12,6 @@ Paths frozen in BASELINE.md Bloco 4 (C-01..C-03):
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +22,8 @@ import yaml
 
 from workflow_app.provider_capability_loader import (
     AUTHORIAL_PATH as LOADER_AUTHORIAL_PATH,
+)
+from workflow_app.provider_capability_loader import (
     ProviderCapabilityLoader,
     reset_singleton,
 )
@@ -83,6 +84,48 @@ class TestAuthorialYaml:
                     f"{provider_name}/{role_name} missing capabilities"
                 )
                 assert isinstance(role_spec["capabilities"], list)
+
+    @pytest.mark.parametrize(
+        ("provider", "expected", "unexpected"),
+        [
+            (
+                "claude",
+                {"tool_execution", "file_write", "mcp_access", "shell_execution"},
+                set(),
+            ),
+            (
+                "codex",
+                {"tool_execution", "file_write", "mcp_access", "shell_execution"},
+                set(),
+            ),
+            (
+                "grok",
+                {"tool_execution", "file_write", "mcp_access", "shell_execution"},
+                set(),
+            ),
+            (
+                "qwen",
+                {"tool_execution", "file_write", "mcp_access", "shell_execution"},
+                set(),
+            ),
+            (
+                "kimi",
+                {"tool_execution", "file_write", "shell_execution"},
+                {"mcp_access"},
+            ),
+        ],
+    )
+    def test_main_runtime_capabilities_match_supported_surfaces(
+        self, provider: str, expected: set[str], unexpected: set[str]
+    ) -> None:
+        """Perfis Main refletem tools, escrita, shell e host MCP reais."""
+        with open(AUTHORIAL_PATH) as f:
+            data = yaml.safe_load(f)
+        capabilities = set(
+            data["providers"][provider]["roles"]["main"]["capabilities"]
+        )
+        assert expected <= capabilities
+        assert capabilities.isdisjoint(unexpected)
 
 
 # --- ST002/ST003: Gerador e modo --check ---
@@ -443,12 +486,24 @@ class Test_get_mapped_capabilities:
         assert mapped
         assert mapped["file_write"] == "disponivel"
 
-    def test_mapped_command_preserves_indisponivel_status(self) -> None:
-        """Status diferente de 'disponivel' chega CRU, sem fail-closed."""
+    @pytest.mark.parametrize(
+        ("provider", "expected"),
+        [
+            ("claude", "disponivel"),
+            ("codex", "disponivel"),
+            ("grok", "disponivel"),
+            ("qwen", "disponivel"),
+            ("kimi", "indisponivel"),
+        ],
+    )
+    def test_mapped_command_preserves_main_mcp_status(
+        self, provider: str, expected: str
+    ) -> None:
+        """Status MCP de cada Main chega CRU, inclusive indisponivel."""
         loader = ProviderCapabilityLoader(SNAPSHOT_PATH)
-        mapped = loader.get_mapped_capabilities("/create-task", "codex", "main")
+        mapped = loader.get_mapped_capabilities("/create-task", provider, "main")
         assert mapped is not None
-        assert mapped["mcp_access"] == "indisponivel"
+        assert mapped["mcp_access"] == expected
 
     def test_unknown_command_returns_none(self) -> None:
         """Comando fora da matriz: `None`, nao 'indisponivel'."""
@@ -475,7 +530,8 @@ class Test_get_mapped_capabilities:
         ("command", "provider", "capability", "expected"),
         [
             ("/auto-flow", "claude", "file_write", True),
-            ("/create-task", "codex", "mcp_access", False),
+            ("/create-task", "codex", "mcp_access", True),
+            ("/create-task", "kimi", "mcp_access", False),
             ("/nonexistent-command-xyz", "claude", "file_write", False),
         ],
     )

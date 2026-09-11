@@ -101,7 +101,7 @@ _DEFAULT_BRAINSTORM_ENTRY = """_BRAINSTORM_AGENT_SPECS: Final[tuple[BrainstormAg
         action="Otimizar",
         agent_name="investigador de ambiente de producao",
         agent_path="ai-forge/MCP/agents/search-prod.md",
-        prompt_path="blacksmith/brainstorm-mcp/search-prod.md",
+        prompt_path="blacksmith/brainstorm-mcp/seeds/supplemental/search-prod.md",
         target_terminal=None,
         target_path_edit_inplace=True,
     ),

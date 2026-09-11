@@ -154,3 +154,110 @@ def test_propagation_on_inline_checkbox_click(
     assert received == [], (
         "clique no checkbox embutido NAO deveria emitir prompt_requested"
     )
+
+
+# ---------------------------------------------------------------------------
+# Action fora do catalogo: fail-safe (Task 29 abriu o vocabulario)
+# ---------------------------------------------------------------------------
+
+
+def test_action_desconhecida_e_guardada_por_debounce(
+    qtbot,
+    mcp_prompt_button_factory,
+    codex_alive_factory,
+    frozen_clock,
+):
+    """Rotulo novo digitado no gear NAO burla o debounce.
+
+    Enquanto o gate de action era enum fechado, `_GUARDED_ACTIONS` como
+    whitelist exata era completa: so existiam as 12 actions do catalogo.
+    A Task 29 abriu o gate (qualquer string nao-vazia passa) e a whitelist
+    ficou para tras -- entao "Deploy", "Executar tudo" ou qualquer rotulo
+    que o operador inventasse na engrenagem caia no ramo SEM debounce.
+    Quanto menos se sabe sobre a action, menos protecao ela tinha.
+    """
+    codex_alive_factory(True)
+    _, btn = mcp_prompt_button_factory(
+        button_type="Claude",
+        action="Deploy",
+        target_path="terminal-interactive-output",
+    )
+    recebidos: list[dict] = []
+    btn.prompt_requested.connect(lambda p: recebidos.append(p))
+
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert len(recebidos) == 1
+
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert len(recebidos) == 1, "action desconhecida deveria ter debounce"
+
+    frozen_clock(900)
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert len(recebidos) == 2
+
+
+def test_action_desconhecida_exige_confirmacao_no_re_disparo(
+    qtbot,
+    monkeypatch,
+    mcp_prompt_button_factory,
+    codex_alive_factory,
+    frozen_clock,
+):
+    """Re-disparo de action desconhecida com checkbox marcado pergunta antes."""
+    codex_alive_factory(True)
+    _, btn = mcp_prompt_button_factory(
+        button_type="Claude",
+        action="Deploy",
+        target_path="terminal-interactive-output",
+    )
+    recebidos: list[dict] = []
+    btn.prompt_requested.connect(lambda p: recebidos.append(p))
+
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert len(recebidos) == 1
+    btn.mark_dispatch_result(True)
+    frozen_clock(900)
+
+    perguntas: list[str] = []
+
+    def _recusa(*args, **kwargs):
+        perguntas.append("perguntou")
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", _recusa)
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert perguntas == ["perguntou"]
+    assert len(recebidos) == 1, "recusa na confirmacao nao deveria despachar"
+
+
+def test_actions_conhecidas_e_nao_destrutivas_seguem_sem_guarda(
+    qtbot,
+    mcp_prompt_button_factory,
+    codex_alive_factory,
+):
+    """O default seguro nao pode pedagiar as 12 actions do catalogo.
+
+    Se `_acao_guardada` fosse "guarda tudo", cada clique em `Criar arquivo`
+    ou `Questionar` passaria a custar 800ms e um dialogo -- o oposto do
+    fluxo de brainstorm, que e clicar varios botoes em sequencia.
+    """
+    from workflow_app.widgets.mcp_prompt_button import (
+        VALID_ACTIONS_PTBR,
+        _acao_guardada,
+    )
+
+    codex_alive_factory(True)
+    livres = sorted(VALID_ACTIONS_PTBR - {"Executar", "Revisar execucao"})
+    assert len(livres) == 10
+    assert [a for a in livres if _acao_guardada(a)] == []
+
+    _, btn = mcp_prompt_button_factory(
+        button_type="Claude",
+        action="Questionar",
+        target_path="terminal-interactive-output",
+    )
+    recebidos: list[dict] = []
+    btn.prompt_requested.connect(lambda p: recebidos.append(p))
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert len(recebidos) == 2, "action livre nao deveria sofrer debounce"

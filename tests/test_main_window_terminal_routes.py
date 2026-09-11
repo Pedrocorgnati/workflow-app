@@ -144,12 +144,41 @@ def _ancestor_testids(widget) -> list[str]:
     return chain
 
 
+class _TeActionHandle:
+    """Proxy clicavel de uma alternativa do select Thinking/Execution."""
+
+    def __init__(self, combo, index: int) -> None:
+        self._combo = combo
+        self._index = index
+
+    def click(self) -> None:
+        self._combo.setCurrentIndex(self._index)
+        self._combo.textActivated.emit(self._combo.itemText(self._index))
+
+    def text(self) -> str:
+        return self._combo.itemText(self._index)
+
+    def parentWidget(self):
+        return self._combo
+
+    def property(self, name: str):
+        data = self._combo.itemData(self._index) or {}
+        if isinstance(data, dict) and name in data:
+            return data[name]
+        return self._combo.property(name)
+
+
 def _button_by_testid(win, testid: str):
-    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QComboBox, QPushButton
 
     for btn in win.findChildren(QPushButton):
         if btn.property("testid") == testid:
             return btn
+    for combo in win.findChildren(QComboBox):
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if isinstance(data, dict) and data.get("testid") == testid:
+                return _TeActionHandle(combo, i)
     raise AssertionError(f"botao nao encontrado: {testid}")
 
 

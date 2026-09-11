@@ -61,7 +61,7 @@ class TokenTracker:
         Returns:
             Custo estimado em USD para este comando.
         """
-        cost = self._calculate_cost(tokens_in, tokens_out, model)
+        cost = calculate_cost(tokens_in, tokens_out, model, self._prices)
 
         with self._db.get_session() as session:
             from workflow_app.db.models import CommandExecution
@@ -69,8 +69,6 @@ class TokenTracker:
             if cmd is not None:
                 cmd.tokens_input = (cmd.tokens_input or 0) + tokens_in
                 cmd.tokens_output = (cmd.tokens_output or 0) + tokens_out
-                # Note: cost_usd lives on PipelineExecution, not CommandExecution.
-                # Accumulate on pipeline level via get_session_total().
 
         return cost
 
@@ -95,7 +93,23 @@ class TokenTracker:
 
             total_in = sum((c.tokens_input or 0) for c in commands)
             total_out = sum((c.tokens_output or 0) for c in commands)
-            total_cost = sum((c.cost_usd or 0.0) for c in commands)
+            total_cost = 0.0
+            for c in commands:
+                stored = getattr(c, "cost_usd", None)
+                if isinstance(stored, (int, float)) and stored:
+                    total_cost += float(stored)
+                    continue
+                raw_model = getattr(c, "model", None)
+                if not isinstance(raw_model, str):
+                    modelo = ModelType.SONNET
+                else:
+                    try:
+                        modelo = ModelType(raw_model)
+                    except ValueError:
+                        modelo = ModelType.SONNET
+                total_cost += calculate_cost(
+                    c.tokens_input or 0, c.tokens_output or 0, modelo, self._prices
+                )
 
         return total_in, total_out, total_cost
 
@@ -118,12 +132,7 @@ class TokenTracker:
         self, tokens_in: int, tokens_out: int, model: ModelType
     ) -> float:
         """Calcula custo em USD baseado no modelo e na tabela de preços."""
-        model_key = model.value if isinstance(model, ModelType) else str(model)
-        price_in, price_out = self._prices.get(
-            model_key, (3.0, 15.0)  # fallback para preço do sonnet
-        )
-        cost = (tokens_in * price_in + tokens_out * price_out) / 1_000_000
-        return round(cost, 6)
+        return calculate_cost(tokens_in, tokens_out, model, self._prices)
 
     def update_prices(self, new_prices: dict[str, tuple[float, float]]) -> None:
         """Atualiza a tabela de preços em runtime (p.ex. após mudança no AppConfig)."""
@@ -135,3 +144,16 @@ class TokenTracker:
         if cost_usd < 0.01:
             return f"${cost_usd:.4f}"
         return f"${cost_usd:.2f}"
+
+
+def calculate_cost(
+    tokens_in: int,
+    tokens_out: int,
+    model: ModelType | str,
+    prices: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Custo em USD. Nao precisa de banco: o caminho vivo da fila usa isto."""
+    tabela = {**_DEFAULT_PRICES, **(prices or {})}
+    model_key = model.value if isinstance(model, ModelType) else str(model)
+    price_in, price_out = tabela.get(model_key, (3.0, 15.0))
+    return round((tokens_in * price_in + tokens_out * price_out) / 1_000_000, 6)

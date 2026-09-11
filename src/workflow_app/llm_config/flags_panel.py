@@ -34,8 +34,8 @@ from workflow_app.config.llm_flags import (
 _FLAG_ORDER: list[str] = list(_FLAG_CANONICAL_ORDER)
 
 _COLUMN_LABEL_QSS = (
-    "QLabel { color: #A1A1AA; font-size: 9px; font-weight: 700;"
-    "  letter-spacing: 0.5px; background: transparent; border: none; }"
+    "QLabel { color: #A1A1AA; font-size: 11px; font-weight: 700;"
+    "  background: transparent; border: none; }"
 )
 
 # Tooltip default para flags habilitadas.
@@ -113,10 +113,10 @@ class FlagsPanel(QWidget):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(2)
 
-        thinking_lbl = QLabel("thinking")
+        thinking_lbl = QLabel("Thinking")
         thinking_lbl.setProperty("testid", "queue-div-flag-thinking")
         thinking_lbl.setStyleSheet(_COLUMN_LABEL_QSS)
-        execution_lbl = QLabel("execution")
+        execution_lbl = QLabel("Execution")
         execution_lbl.setProperty("testid", "queue-div-flag-execution")
         execution_lbl.setStyleSheet(_COLUMN_LABEL_QSS)
         grid.addWidget(thinking_lbl, 0, 0)

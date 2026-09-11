@@ -18,6 +18,7 @@ import pytest
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -50,9 +51,10 @@ from workflow_app.signal_bus import signal_bus
 # `tests/test_llm_config_tab.py`, que roda os dois estados em subprocesso porque
 # `feature_flags` e boot-frozen (resolve `os.environ` no import, sem reset).
 _LLM_CONFIG_V2 = llm_config_v2_enabled()
+_TE_V2 = mcp_think_exec_v2_enabled()
 
 _ANCHOR_ACTION = (
-    "output-mcp-action-thinking-codex-ultra" if _LLM_CONFIG_V2 else "output-mcp-action-main"
+    "output-mcp-action-execution-codex" if _TE_V2 else "output-mcp-action-main"
 )
 _ACTION_TESTIDS = (
     (
@@ -229,6 +231,41 @@ def _set_route(win, *, t1: bool, t2: bool, t3: bool) -> None:
     win._terminal_route_group.setExclusive(True)
 
 
+class _TeActionHandle:
+    """Proxy clicavel de uma alternativa do select Thinking/Execution."""
+
+    def __init__(self, combo: QComboBox, index: int) -> None:
+        self._combo = combo
+        self._index = index
+
+    def click(self) -> None:
+        self._combo.setCurrentIndex(self._index)
+        self._combo.textActivated.emit(self._combo.itemText(self._index))
+
+    def text(self) -> str:
+        return self._combo.itemText(self._index)
+
+    def parentWidget(self) -> QWidget:
+        return self._combo
+
+    def property(self, name: str):
+        data = self._combo.itemData(self._index) or {}
+        if isinstance(data, dict) and name in data:
+            return data[name]
+        if name == "testid":
+            return data.get("testid") if isinstance(data, dict) else None
+        return self._combo.property(name)
+
+
+def _te_action_handle(root: QWidget, testid: str) -> _TeActionHandle | None:
+    for combo in root.findChildren(QComboBox):
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if isinstance(data, dict) and data.get("testid") == testid:
+                return _TeActionHandle(combo, i)
+    return None
+
+
 def _by_testid(root: QWidget, testid: str, widget_type=None):
     """Busca por testid restrita a um tipo concreto de widget.
 
@@ -236,7 +273,8 @@ def _by_testid(root: QWidget, testid: str, widget_type=None):
     MainWindow corrompe o teardown do PySide6 (ver nota em
     test_main_window_terminal_routes.py). Para chegar num container, subir pelo
     `parentWidget()` de um leaf conhecido.
-    Sem `widget_type`, tenta QPushButton e QCheckBox (acoes MCP vs personas).
+    Sem `widget_type`, tenta QPushButton e QCheckBox (acoes MCP vs personas)
+    e, se a acao vive no select Thinking/Execution, o itemData do QComboBox.
     """
     types = (widget_type,) if widget_type is not None else (QPushButton, QCheckBox)
     assert QWidget not in types, "use _row_of/_mcp_column_of para containers"
@@ -244,6 +282,10 @@ def _by_testid(root: QWidget, testid: str, widget_type=None):
         for widget in root.findChildren(concrete):
             if widget.property("testid") == testid:
                 return widget
+    if widget_type in (None, QComboBox):
+        handle = _te_action_handle(root, testid)
+        if handle is not None:
+            return handle
     raise AssertionError(f"widget nao encontrado: {testid}")
 
 
@@ -514,7 +556,7 @@ def test_extras_da_aba_agentes_entram_depois_do_prefixo_curado(win, monkeypatch)
     reason="colunas Thinking/Execution so existem com SF_MCP_THINK_EXEC_V2=1",
 )
 def test_thinking_execution_sao_colunas_a_direita_estilo_main_llm(win):
-    """Thinking e Execution: label em cima, canto direito, estilo queue-div-main-llm."""
+    """Thinking e Execution: label em cima, select a direita, estilo queue-div-main-llm."""
     column = _mcp_column_of(win)
 
     def _group_of(leaf_testid: str, group_testid: str) -> QWidget:
@@ -538,18 +580,36 @@ def test_thinking_execution_sao_colunas_a_direita_estilo_main_llm(win):
     assert isinstance(ex_label, QLabel)
     assert th_label.text() == "Thinking"
     assert ex_label.text() == "Execution"
+    th_combo = thinking.layout().itemAt(1).widget()
+    ex_combo = execution.layout().itemAt(1).widget()
+    assert isinstance(th_combo, QComboBox)
+    assert isinstance(ex_combo, QComboBox)
+    assert th_combo.property("testid") == "output-mcp-action-thinking-select"
+    assert ex_combo.property("testid") == "output-mcp-action-execution-select"
+    assert [th_combo.itemText(i) for i in range(th_combo.count())] == [
+        "fable", "opus", "codex-ultra", "kimi-k3", "grok-xhigh",
+    ]
+    assert [ex_combo.itemText(i) for i in range(ex_combo.count())] == [
+        "grok", "sonnet", "kimi", "qwen", "codex",
+    ]
 
-    col_layout = column.layout()
-    assert isinstance(col_layout, QHBoxLayout)
-    last = col_layout.itemAt(col_layout.count() - 1).widget()
     action_row = _action_row_of(_by_testid(column, _ANCHOR_ACTION))
-    assert last is action_row
     assert thinking.parentWidget() is action_row
     assert execution.parentWidget() is action_row
+    header = action_row.parentWidget()
+    assert header is not None
+    assert header.property("testid") == "output-mcp-header-row"
+    assert th_combo.minimumWidth() == ex_combo.minimumWidth()
+    assert th_combo.minimumWidth() >= 118
+    filter_bar = getattr(win, "_mcp_persona_filter_bar", None)
+    if filter_bar is not None:
+        assert filter_bar.parentWidget() is header
     personas = _row_of(_by_testid(column, "output-mcp-persona-search-in", QCheckBox))
-    personas_idx = col_layout.indexOf(personas.parentWidget())
-    action_idx = col_layout.indexOf(action_row)
-    assert 0 <= personas_idx < action_idx
+    mcp_page = personas.parentWidget()
+    page_layout = mcp_page.layout()
+    assert isinstance(page_layout, QVBoxLayout)
+    assert page_layout.indexOf(header) == 0
+    assert page_layout.indexOf(personas) > page_layout.indexOf(header)
 
 
 # ── Composicao: so entra o que esta ativo ───────────────────────────────────

@@ -41,6 +41,7 @@ ADAPTERS_PATH = REPO_ROOT / "ai-forge" / "scripts" / "_provider_adapters.py"
 FAKE_CLAUDE_BIN = "/usr/bin/claude"
 FAKE_KIMI_BIN = "/usr/bin/kimi"
 FAKE_GROK_BIN = "/usr/bin/grok"
+FAKE_QWEN_BIN = "/usr/bin/qwen"
 
 # The prompt is an *input* to argv construction, never rendered by it.
 FROZEN_PROMPT = "PROMPT-BODY"
@@ -106,7 +107,9 @@ def which_stub(monkeypatch):
         return {
             "claude": FAKE_CLAUDE_BIN,
             "kimi": FAKE_KIMI_BIN,
+            "kimi-advisory": FAKE_KIMI_BIN,
             "grok": FAKE_GROK_BIN,
+            "qwen": FAKE_QWEN_BIN,
         }.get(name)
 
     monkeypatch.setattr("shutil.which", _which)
@@ -137,6 +140,8 @@ def _args(bridge, *argv: str):
 
 EXPECTED_CLAUDE_ARGV_LEVEL2 = [
     FAKE_CLAUDE_BIN,
+    "--safe-mode",
+    "--strict-mcp-config",
     "--print",
     "--output-format",
     "json",
@@ -152,6 +157,8 @@ EXPECTED_CLAUDE_ARGV_LEVEL2 = [
 
 EXPECTED_CLAUDE_ARGV_LEVEL3 = [
     FAKE_CLAUDE_BIN,
+    "--safe-mode",
+    "--strict-mcp-config",
     "--print",
     "--output-format",
     "json",
@@ -167,41 +174,49 @@ EXPECTED_CLAUDE_ARGV_LEVEL3 = [
 
 EXPECTED_KIMI_ARGV_LEVEL2 = [
     FAKE_KIMI_BIN,
-    "--print",
-    "--output-format",
-    "text",
-    "--max-ralph-iterations",
-    "0",
     "--model",
     "kimi-code/kimi-for-coding",
-    "--no-thinking",
+    "--output-format",
+    "text",
     "--prompt",
     FROZEN_PROMPT,
 ]
 
-EXPECTED_KIMI_ARGV_LEVEL3 = [
-    FAKE_KIMI_BIN,
-    "--print",
-    "--output-format",
-    "text",
-    "--max-ralph-iterations",
-    "0",
-    "--model",
-    "kimi-code/kimi-for-coding",
-    "--thinking",
-    "--prompt",
-    FROZEN_PROMPT,
-]
+EXPECTED_KIMI_ARGV_LEVEL3 = EXPECTED_KIMI_ARGV_LEVEL2
 
 EXPECTED_GROK_ARGV = [
     FAKE_GROK_BIN,
     "--single",
     FROZEN_PROMPT,
     "--model",
-    "grok-4.5",
+    "grok-4.6",
+    "--reasoning-effort",
+    "medium",
     "--output-format",
     "json",
-    "--always-approve",
+    "--permission-mode",
+    "plan",
+    "--tools",
+    "",
+    "--disable-web-search",
+    "--no-memory",
+    "--no-subagents",
+]
+
+EXPECTED_QWEN_ARGV = [
+    FAKE_QWEN_BIN,
+    "--safe-mode",
+    "--approval-mode",
+    "plan",
+    "--max-tool-calls",
+    "0",
+    "--model",
+    "qwen3.7-plus",
+    "--fallback-model",
+    "qwen3.6-plus",
+    "--output-format",
+    "json",
+    FROZEN_PROMPT,
 ]
 
 # sha256 of the rendered provider prompt for the frozen args below, with no
@@ -233,15 +248,39 @@ class TestST001FrozenArgv:
         assert spec.name == "kimi"
         assert spec.model == "kimi-code/kimi-for-coding"
 
-    def test_legacy_argv_kimi_thinking_frozen(self, bridge, which_stub):
+    def test_kimi_level_does_not_reintroduce_removed_flags(self, bridge, which_stub):
         args = _args(bridge, "--provider", "kimi", "--level", "3")
         spec = bridge._spec_for_provider("kimi", args, FROZEN_PROMPT)
         assert spec.command == EXPECTED_KIMI_ARGV_LEVEL3
+        assert not {
+            "--print",
+            "--max-ralph-iterations",
+            "--thinking",
+            "--no-thinking",
+        }.intersection(spec.command)
 
-    def test_legacy_argv_kimi_thinking_flag_frozen(self, bridge, which_stub):
+    def test_kimi_compat_thinking_flag_is_a_noop(self, bridge, which_stub):
         args = _args(bridge, "--provider", "kimi", "--level", "2", "--kimi-thinking")
         spec = bridge._spec_for_provider("kimi", args, FROZEN_PROMPT)
         assert spec.command == EXPECTED_KIMI_ARGV_LEVEL3
+
+    def test_bridge_argv_grok_current_default(self, bridge, which_stub):
+        args = _args(bridge, "--provider", "grok", "--level", "2")
+        spec = bridge._spec_for_provider("grok", args, FROZEN_PROMPT)
+        assert spec.command == EXPECTED_GROK_ARGV
+        assert spec.model == "grok-4.6"
+
+    def test_bridge_argv_qwen_current_default(self, bridge, which_stub):
+        args = _args(bridge, "--provider", "qwen", "--level", "2")
+        spec = bridge._spec_for_provider("qwen", args, FROZEN_PROMPT)
+        assert spec.command == EXPECTED_QWEN_ARGV
+        assert spec.model == "qwen3.7-plus"
+
+    def test_bridge_cli_exposes_external_providers_only(self, bridge):
+        for provider in ("claude", "kimi", "grok", "qwen", "dual"):
+            assert _args(bridge, "--provider", provider, "--level", "2").provider == provider
+        with pytest.raises(SystemExit):
+            _args(bridge, "--provider", "codex", "--level", "2")
 
     def test_legacy_argv_dual_frozen(self, bridge, which_stub):
         args = _args(bridge, "--provider", "dual", "--level", "2")
@@ -285,19 +324,23 @@ class TestST001FrozenArgv:
             f"provider prompt drifted; got {digest}"
         )
 
-    def test_legacy_env_claude_strips_anthropic_prefixes(self, bridge, monkeypatch):
+    def test_legacy_env_claude_uses_minimal_allowlist(self, bridge, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-stripped")
         monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
         monkeypatch.setenv("PATH_KEEPER_SENTINEL", "keep-me")
+        monkeypatch.setenv("PATH", "/usr/bin")
         env = bridge._env_for_provider("claude")
         assert "ANTHROPIC_API_KEY" not in env
         assert "CLAUDE_CODE_USE_BEDROCK" not in env
-        assert env["PATH_KEEPER_SENTINEL"] == "keep-me"
+        assert "PATH_KEEPER_SENTINEL" not in env
+        assert env["PATH"] == "/usr/bin"
 
-    def test_legacy_env_kimi_is_untouched(self, bridge, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-kept-for-kimi")
+    def test_legacy_env_kimi_strips_inherited_credentials(self, bridge, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-stripped")
+        monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
         env = bridge._env_for_provider("kimi")
-        assert env["ANTHROPIC_API_KEY"] == "sk-kept-for-kimi"
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "SSH_AUTH_SOCK" not in env
 
 
 # --------------------------------------------------------------------------
@@ -316,6 +359,19 @@ class _Completed:
         self.stderr = stderr
 
 
+def _valid_contract(summary: str = "ok") -> dict[str, Any]:
+    return {
+        "provider": "claude",
+        "model": "sonnet",
+        "verdict": "approve",
+        "summary": summary,
+        "findings": [],
+        "recommendations": [],
+        "risks": [],
+        "confidence": "high",
+    }
+
+
 class TestST002TerminalResults:
     """R-41: every way an invocation can end has its own terminal label."""
 
@@ -324,11 +380,11 @@ class TestST002TerminalResults:
             _spec(kernel),
             cwd=".",
             timeout=5,
-            runner=lambda *a, **kw: _Completed(0, json.dumps({"verdict": "approve"})),
+            runner=lambda *a, **kw: _Completed(0, json.dumps(_valid_contract())),
         )
         assert out["terminal"] == kernel.TERMINAL_OK
         assert out["ok"] is True
-        assert out["parsed"] == {"verdict": "approve"}
+        assert out["parsed"] == _valid_contract()
 
     def test_terminal_empty_parsed_is_not_ok(self, kernel):
         """C-53: rc 0 with nothing parseable is a failure, not a success."""
@@ -345,6 +401,58 @@ class TestST002TerminalResults:
         assert out["terminal"] == kernel.TERMINAL_EMPTY_PARSED
         assert out["ok"] is False
 
+    def test_terminal_rejects_incomplete_json_object(self, kernel):
+        out = kernel.run_provider(
+            _spec(kernel),
+            cwd=".",
+            timeout=5,
+            runner=lambda *a, **kw: _Completed(
+                0, json.dumps({"verdict": "approve", "summary": "missing fields"})
+            ),
+        )
+        assert out["terminal"] == kernel.TERMINAL_EMPTY_PARSED
+        assert out["ok"] is False
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            json.dumps("plain string"),
+            json.dumps([{"type": "system", "subtype": "init"}]),
+            "TextPart(type='text', text='plain string')",
+        ],
+    )
+    def test_terminal_rejects_non_object_provider_contracts(self, kernel, stdout):
+        out = kernel.run_provider(
+            _spec(kernel), cwd=".", timeout=5, runner=lambda *a, **kw: _Completed(0, stdout)
+        )
+        assert out["terminal"] == kernel.TERMINAL_EMPTY_PARSED
+        assert out["ok"] is False
+
+    def test_extract_json_unwraps_grok_text_contract(self, kernel):
+        payload = {"text": json.dumps({"verdict": "approve", "summary": "ok"})}
+        assert kernel.extract_json(json.dumps(payload)) == {
+            "verdict": "approve",
+            "summary": "ok",
+        }
+
+    def test_extract_json_unwraps_qwen_result_event(self, kernel):
+        payload = [
+            {"type": "system", "subtype": "init", "model": "qwen3.7-plus"},
+            {
+                "type": "result",
+                "is_error": False,
+                "result": json.dumps({"verdict": "approve", "summary": "ok"}),
+            },
+        ]
+        assert kernel.extract_json(json.dumps(payload)) == {
+            "verdict": "approve",
+            "summary": "ok",
+        }
+
+    def test_extract_json_rejects_plain_qwen_result_event(self, kernel):
+        payload = [{"type": "result", "is_error": False, "result": "plain text"}]
+        assert kernel.extract_json(json.dumps(payload)) is None
+
     def test_terminal_exit_nonzero(self, kernel):
         out = kernel.run_provider(
             _spec(kernel), cwd=".", timeout=5, runner=lambda *a, **kw: _Completed(2, "", "boom")
@@ -353,15 +461,33 @@ class TestST002TerminalResults:
         assert out["ok"] is False
         assert out["returncode"] == 2
 
+    def test_success_discards_provider_stderr_reasoning(self, kernel):
+        out = kernel.run_provider(
+            _spec(kernel),
+            cwd=".",
+            timeout=5,
+            runner=lambda *a, **kw: _Completed(
+                0,
+                json.dumps(_valid_contract()),
+                "hidden provider reasoning that must not enter telemetry",
+            ),
+        )
+        assert out["ok"] is True
+        assert out["stderr"] == ""
+
     def test_terminal_timeout_is_its_own_result(self, kernel):
         """R-41: a timeout must not be reported as a generic error."""
 
         def _raise(*a: Any, **kw: Any):
-            raise subprocess.TimeoutExpired(cmd=[FAKE_CLAUDE_BIN], timeout=5)
+            raise subprocess.TimeoutExpired(
+                cmd=[FAKE_CLAUDE_BIN, "SECRET_PROMPT"], timeout=5
+            )
 
         out = kernel.run_provider(_spec(kernel), cwd=".", timeout=5, runner=_raise)
         assert out["terminal"] == kernel.TERMINAL_TIMEOUT
         assert out["ok"] is False
+        assert out["stderr"] == "timeout after 5s"
+        assert "SECRET_PROMPT" not in out["stderr"]
 
     def test_terminal_binary_missing(self, kernel):
         def _raise(*a: Any, **kw: Any):
@@ -488,35 +614,59 @@ class TestST003Adapters:
         assert adapters.expand_providers("dual") == ("claude", "kimi")
         assert adapters.expand_providers("claude") == ("claude",)
 
-    def test_adapter_claude_env_strips_anthropic_prefixes(self, adapters, monkeypatch):
+    def test_adapter_claude_env_uses_minimal_allowlist(self, adapters, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-stripped")
         monkeypatch.setenv("KEEP_ME_SENTINEL", "1")
+        monkeypatch.setenv("PATH", "/usr/bin")
         env = adapters.get_adapter("claude").env()
         assert "ANTHROPIC_API_KEY" not in env
-        assert env["KEEP_ME_SENTINEL"] == "1"
+        assert "KEEP_ME_SENTINEL" not in env
+        assert env["PATH"] == "/usr/bin"
 
-    def test_adapter_env_kimi_untouched(self, adapters, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-kept-for-kimi")
-        assert adapters.get_adapter("kimi").env()["ANTHROPIC_API_KEY"] == "sk-kept-for-kimi"
+    def test_adapter_env_kimi_strips_credentials(self, adapters, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-stripped")
+        assert "ANTHROPIC_API_KEY" not in adapters.get_adapter("kimi").env()
 
     def test_adapter_grok_argv_matches_frozen(self, adapters, kernel, which_stub):
         spec = adapters.get_adapter("grok").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
         assert spec.command == EXPECTED_GROK_ARGV
         assert spec.name == "grok"
-        assert spec.model == "grok-4.5"
+        assert spec.model == "grok-4.6"
 
-    def test_adapter_grok_env_is_normalized_copy(self, adapters, monkeypatch):
-        """Grok env is a normalized copy of the base env (no secret stripping)."""
-        monkeypatch.setenv("GROK_API_KEY", "sk-kept-for-grok")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-kept-for-grok-too")
+    def test_adapter_grok_env_strips_credentials(self, adapters, monkeypatch):
+        monkeypatch.setenv("GROK_API_KEY", "sk-should-be-stripped")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-stripped-too")
         env = adapters.get_adapter("grok").env()
-        assert env["GROK_API_KEY"] == "sk-kept-for-grok"
-        assert env["ANTHROPIC_API_KEY"] == "sk-kept-for-grok-too"
+        assert "GROK_API_KEY" not in env
+        assert "ANTHROPIC_API_KEY" not in env
 
     def test_adapter_grok_missing_binary_raises_filenotfound(self, adapters, kernel, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda *a, **kw: None)
         with pytest.raises(FileNotFoundError):
             adapters.get_adapter("grok").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
+
+    def test_adapter_qwen_argv_matches_current_cli(self, adapters, kernel, which_stub):
+        spec = adapters.get_adapter("qwen").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
+        assert spec.command == EXPECTED_QWEN_ARGV
+        assert spec.name == "qwen"
+        assert spec.model == "qwen3.7-plus"
+
+    def test_adapter_qwen_env_suppresses_yolo_banner(self, adapters, monkeypatch):
+        monkeypatch.delenv("QWEN_CODE_SUPPRESS_YOLO_WARNING", raising=False)
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "secret")
+        env = adapters.get_adapter("qwen").env()
+        assert env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] == "1"
+        assert "PERPLEXITY_API_KEY" not in env
+
+    def test_adapter_binary_env_override_is_absolute_and_executable(
+        self, adapters, kernel, monkeypatch, tmp_path
+    ):
+        fake = tmp_path / "qwen"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake.chmod(0o755)
+        monkeypatch.setenv("QWEN_BIN", str(fake))
+        spec = adapters.get_adapter("qwen").build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT))
+        assert spec.command[0] == str(fake)
 
     def test_adapters_own_no_transport(self):
         """An adapter that runs a subprocess is a layering violation."""
@@ -608,12 +758,12 @@ class TestST004Telemetry:
 
     def test_telemetry_grok_outcome_has_c53_fields(self, kernel):
         """Grok invocation through the kernel carries C-53 telemetry fields."""
-        spec = kernel.ProviderSpec("grok", "grok-4.5", EXPECTED_GROK_ARGV)
+        spec = kernel.ProviderSpec("grok", "grok-4.6", EXPECTED_GROK_ARGV)
         out = kernel.run_provider(
             spec,
             cwd=".",
             timeout=5,
-            runner=lambda *a, **kw: _Completed(0, json.dumps({"verdict": "approve"})),
+            runner=lambda *a, **kw: _Completed(0, json.dumps(_valid_contract())),
         )
         assert out["terminal"] == kernel.TERMINAL_OK
         assert out["ok"] is True
@@ -649,6 +799,22 @@ class TestST005WrapperEquivalence:
             .command
         )
 
+    def test_wrapper_argv_equivalence_grok(self, bridge, adapters, kernel, which_stub):
+        args = _args(bridge, "--provider", "grok", "--level", "2")
+        assert bridge._spec_for_provider("grok", args, FROZEN_PROMPT).command == (
+            adapters.get_adapter("grok")
+            .build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT, level=2))
+            .command
+        )
+
+    def test_wrapper_argv_equivalence_qwen(self, bridge, adapters, kernel, which_stub):
+        args = _args(bridge, "--provider", "qwen", "--level", "2")
+        assert bridge._spec_for_provider("qwen", args, FROZEN_PROMPT).command == (
+            adapters.get_adapter("qwen")
+            .build_spec(kernel.SpecParams(prompt=FROZEN_PROMPT, level=2))
+            .command
+        )
+
     def test_wrapper_argv_equivalence_dual(self, bridge, which_stub):
         args = _args(bridge, "--provider", "dual", "--level", "2")
         commands = [
@@ -667,7 +833,7 @@ class TestST005WrapperEquivalence:
         args = _args(bridge, "--provider", "claude", "--level", "2", "--prompt", "hi")
         monkeypatch.setattr(
             "subprocess.run",
-            lambda *a, **kw: _Completed(0, json.dumps({"verdict": "approve", "summary": "ok"})),
+            lambda *a, **kw: _Completed(0, json.dumps(_valid_contract())),
         )
         monkeypatch.setattr(bridge, "parse_args", lambda argv: args)
         args.telemetry_dir = ""
@@ -689,7 +855,7 @@ class TestST005WrapperEquivalence:
         ok_args.telemetry_dir = ""
         monkeypatch.setattr(
             "subprocess.run",
-            lambda *a, **kw: _Completed(0, json.dumps({"verdict": "approve", "summary": "ok"})),
+            lambda *a, **kw: _Completed(0, json.dumps(_valid_contract())),
         )
         monkeypatch.setattr(bridge, "parse_args", lambda argv: ok_args)
         assert bridge.main([]) == 0

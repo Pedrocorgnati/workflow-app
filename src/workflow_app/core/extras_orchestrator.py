@@ -76,6 +76,11 @@ class ExtrasOrchestrator(QObject):
     # API pública (chamada pelo PipelineManager)
     # ------------------------------------------------------------------
 
+    def persist_pipeline_totals(self, pipeline_id: int) -> None:
+        """Persiste totais no PipelineExecution sem acessar `_tokens` privado."""
+        if self._tokens is not None:
+            self._tokens.persist_pipeline_totals(pipeline_id)
+
     def on_command_completed(
         self,
         pipeline_id: int,
@@ -87,6 +92,8 @@ class ExtrasOrchestrator(QObject):
         """Chamado após cada comando concluído.
 
         Registra tokens e dispara leitura de git info em background.
+        tokens_in/out default 0: a guarda abaixo recusa emitir custo zero
+        como se fosse medicao. Sem numero observado, nao ha evento de custo.
         """
         # 1. Tokens
         if self._tokens is not None and (tokens_in > 0 or tokens_out > 0):

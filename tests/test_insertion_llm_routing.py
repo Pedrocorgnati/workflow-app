@@ -470,11 +470,95 @@ class TestPublishInsertionLlmAware:
         win._corgly_class_select.setCurrentIndex(index)
 
         _button_by_testid(win, "output-btn-corgly-class-review").click()
+        _button_by_testid(win, "output-btn-corgly-vocab-text-review").click()
         _button_by_testid(win, "output-btn-corgly-class-create").click()
 
         assert pastes == [
             (f'/corgly:class-review "{filename}"',),
+            (f'/corgly:vocab-text-review "{filename}"',),
             ("/corgly:class-create",),
+        ]
+
+    def test_corgly_command_tab_buttons_insert_like_class_create(
+        self, qapp, qtbot
+    ):
+        """Botoes das abas corgly/corgly2: paste sem Enter, combo so se o hint aceitar .docx.
+
+        A sub-aba `corgly` hospeda o curso legado e a `corgly2` os comandos
+        `corgly2-*`; o comportamento de insercao e o mesmo nas duas.
+        """
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_claude_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        runs = _capture(signal_bus.run_command_in_terminal)
+
+        filename = "5 - Eu, minha família e minha rotina.docx"
+        index = win._corgly_class_select.findText(filename)
+        assert index > 0
+        win._corgly_class_select.setCurrentIndex(index)
+
+        class_create = _button_by_testid(win, "output-btn-corgly-class-create")
+        flow_host = class_create.parentWidget()
+        assert flow_host is not None
+        assert flow_host.property("testid") == "output-toolbar-corgly-flow"
+
+        for testid, host_testid in (
+            ("output-btn-corgly-change-vocabulary-order", "output-toolbar-corgly-flow"),
+            ("output-btn-corgly-enrich-vocabulary", "output-toolbar-corgly-flow"),
+            ("output-btn-corgly-clean-progress", "output-toolbar-corgly-flow"),
+            (
+                "output-btn-corgly-corgly2-divide-vocabulary",
+                "output-toolbar-corgly2-flow",
+            ),
+            (
+                "output-btn-corgly-corgly2-optimize-phrases",
+                "output-toolbar-corgly2-flow",
+            ),
+            (
+                "output-btn-corgly-corgly2-put-false-friends",
+                "output-toolbar-corgly2-flow",
+            ),
+            ("output-btn-corgly-class-create", "output-toolbar-corgly-flow"),
+        ):
+            btn = _button_by_testid(win, testid)
+            assert btn.parentWidget().property("testid") == host_testid
+            btn.click()
+
+        assert pastes == [
+            (f'/corgly:change-vocabulary-order "{filename}"',),
+            (f'/corgly:enrich-vocabulary "{filename}"',),
+            ("/corgly:clean-progress",),
+            ("/corgly:corgly2-divide-vocabulary",),
+            ("/corgly:corgly2-optimize-phrases",),
+            ("/corgly:corgly2-put-false-friends",),
+            ("/corgly:class-create",),
+        ]
+        assert runs == []
+
+    def test_corgly2_all_enqueues_queue_and_does_not_insert(
+        self, qapp, qtbot, tmp_path
+    ):
+        from workflow_app.db.database_manager import db_manager
+
+        db_manager.setup(db_path=str(tmp_path / "test_workflow.db"))
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_claude_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        runs = _capture(signal_bus.run_command_in_terminal)
+
+        _button_by_testid(win, "output-btn-corgly-corgly2-all").click()
+
+        assert pastes == []
+        assert runs == []
+        assert [item.command_text() for item in win._command_queue._items] == [
+            "/corgly:corgly2-divide-vocabulary",
+            "/clear",
+            "/corgly:corgly2-put-false-friends",
+            "/clear",
+            "/corgly:corgly2-optimize-phrases",
+            "/clear",
         ]
 
     def test_empty_corgly_class_selection_keeps_command_without_argument(

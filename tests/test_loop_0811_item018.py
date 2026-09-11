@@ -12,9 +12,8 @@ from __future__ import annotations
 import json
 import os
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from workflow_app.command_queue.command_item_widget import (
     _PROVIDER_BTN_STYLE,
@@ -23,10 +22,9 @@ from workflow_app.command_queue.command_item_widget import (
 )
 from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 from workflow_app.command_queue.provider_router import (
-    Provider,
     _PROVIDER_FAMILIES,
+    Provider,
 )
-
 
 # --------------------------------------------------------------------------- #
 # main_radio — radios de selecao de Main com persistencia                      #
@@ -452,6 +450,28 @@ class TestCapabilityPreflight:
             {"/prd-create": {"claude": {"main": {"file_write": "disponivel"}}}},
         )
         assert self._run(qtbot, loader, ["/prd-create"]) == []
+
+    def test_codex_mcp_queue_is_silent_for_repeated_create_task(self, qtbot):
+        """Main Codex com MCP nao alerta nem multiplica 202 /create-task."""
+        from workflow_app.domain import CommandSpec
+        from workflow_app.provider_capability_loader import ProviderCapabilityLoader
+
+        loader = ProviderCapabilityLoader(
+            Path(__file__).resolve().parents[3]
+            / "ai-forge/schemas/provider-capability-matrix.json"
+        )
+        widget = CommandQueueWidget()
+        qtbot.addWidget(widget)
+        specs = [
+            CommandSpec(name="/create-task TASK-1.md", position=position)
+            for position in range(1, 203)
+        ]
+        with self._with_loader(loader), patch.object(
+            CommandQueueWidget,
+            "_resolve_interactive_main_llm",
+            return_value="codex",
+        ):
+            assert widget._capability_preflight_specs(specs) is None
 
     def test_directives_and_clear_are_skipped(self, qtbot, tmp_path):
         """`/model`, `/effort` e `/clear` nao vao a capability nenhuma."""

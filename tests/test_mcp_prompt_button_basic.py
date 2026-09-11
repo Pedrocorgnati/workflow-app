@@ -170,8 +170,11 @@ def test_modal_opens_on_right_click(qtbot, monkeypatch):
     assert modal.property("testid") == "mcp-prompt-config-modal"
     values = modal.values()
     assert values["label"] == "Configure"
-    assert values["prompt"] == "initial prompt"
     assert values["target_path"] == "terminal-workspace-output"
+    # Task 31 (D15): o prompt saiu de `values()` porque a chave ERA o caminho
+    # de escrita. Continua visivel, como previa somente-leitura.
+    assert "prompt" not in values
+    assert modal.prompt_preview() == "initial prompt"
 
 
 def test_size_hint_cabe_o_label_inteiro(qtbot):

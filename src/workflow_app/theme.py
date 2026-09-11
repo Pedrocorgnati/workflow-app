@@ -111,12 +111,16 @@ QPushButton {
     border-radius: 4px;
     padding: 6px 10px;
     font-weight: 500;
-    text-align: left;
+    text-align: center;
 }
 
 QPushButton:hover {
     background-color: #52525B;
     border-color: #71717A;
+}
+
+QPushButton:focus {
+    border-color: #FBBF24;
 }
 
 QPushButton:pressed {
@@ -180,7 +184,7 @@ QLineEdit, QComboBox, QTextEdit {
     selection-background-color: #3F3F46;
 }
 
-QLineEdit:focus, QTextEdit:focus {
+QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
     border-color: #FBBF24;
     outline: none;
 }

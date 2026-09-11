@@ -175,6 +175,10 @@ class SignalBus(QObject):
     # Generic PTY sessions bound to a concrete terminal channel.
     # channel values used by the app: "interactive" | "workspace"
     terminal_output_chunk_received = Signal(str, str)  # channel, chunk
+    # Observacao read-only do PTY vivo (Task 33). NUNCA reentra no painel:
+    # `terminal_output_chunk_received` alimenta o render; este sinal so
+    # acumula texto para parse de usage no desfecho do item.
+    terminal_output_observed = Signal(str, str)  # channel, chunk
     terminal_session_started = Signal(str)             # channel
     terminal_session_finished = Signal(str)            # channel
     terminal_worker_changed = Signal(str, object)      # channel, runner

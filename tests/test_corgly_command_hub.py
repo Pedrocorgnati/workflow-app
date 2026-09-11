@@ -13,17 +13,24 @@ from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 
 SYSTEMFORGE_ROOT = Path(__file__).resolve().parents[3]
 COMMAND_ROOT = SYSTEMFORGE_ROOT / ".claude" / "commands" / "corgly"
-LEGACY_ROOT = SYSTEMFORGE_ROOT / "corgly-classes" / ".claude" / "commands"
+CORGLY_ROOT = SYSTEMFORGE_ROOT / "corgly" / "corgly-desktop" / "corgly-classes"
+LEGACY_ROOT = CORGLY_ROOT / ".claude" / "commands"
 RESOLVER = COMMAND_ROOT / "_shared" / "resolve_corgly_context.py"
 KIMI_MATRIX = SYSTEMFORGE_ROOT / "blacksmith" / "claude-to-kimi" / "corgly-command-matrix.md"
 
 COMMANDS: tuple[tuple[str, str], ...] = (
+    ("change-vocabulary-order.md", "/corgly:change-vocabulary-order"),
     ("class-create.md", "/corgly:class-create"),
     ("class-generate.md", "/corgly:class-generate"),
     ("class-review.md", "/corgly:class-review"),
     ("class-update.md", "/corgly:class-update"),
+    ("clean-progress.md", "/corgly:clean-progress"),
     ("cmd/autocast-put.md", "/corgly:cmd:autocast-put"),
+    ("corgly2-divide-vocabulary.md", "/corgly:corgly2-divide-vocabulary"),
+    ("corgly2-optimize-phrases.md", "/corgly:corgly2-optimize-phrases"),
+    ("corgly2-put-false-friends.md", "/corgly:corgly2-put-false-friends"),
     ("dual-update.md", "/corgly:dual-update"),
+    ("enrich-vocabulary.md", "/corgly:enrich-vocabulary"),
     ("funny-rebase.md", "/corgly:funny-rebase"),
     ("grammar-adjust.md", "/corgly:grammar-adjust"),
     ("mcp/codex.md", "/corgly:mcp:codex"),
@@ -31,6 +38,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("mcp/kimi.md", "/corgly:mcp:kimi"),
     ("questions-rebase.md", "/corgly:questions-rebase"),
     ("tools/auq-interview.md", "/corgly:tools:auq-interview"),
+    ("vocab-text-review.md", "/corgly:vocab-text-review"),
 )
 
 LEGACY_SLUGS = (
@@ -47,6 +55,7 @@ LEGACY_SLUGS = (
     "mcp:grok",
     "mcp:kimi",
     "tools:auq-interview",
+    "vocab-text-review",
 )
 
 
@@ -58,7 +67,7 @@ def _command_markdown_files(root: Path) -> list[Path]:
     )
 
 
-def test_catalog_has_exactly_the_thirteen_canonical_commands() -> None:
+def test_catalog_has_exactly_the_twenty_canonical_commands() -> None:
     expected = [COMMAND_ROOT / rel for rel, _slash in COMMANDS]
     assert _command_markdown_files(COMMAND_ROOT) == sorted(expected)
     assert all(path.is_file() and path.stat().st_size > 0 for path in expected)
@@ -70,7 +79,7 @@ def test_legacy_command_tree_has_no_markdown_source_of_truth() -> None:
 
 
 def test_all_corgly_slugs_resolve_from_the_parent_repository(monkeypatch) -> None:
-    monkeypatch.chdir(SYSTEMFORGE_ROOT / "corgly-classes")
+    monkeypatch.chdir(CORGLY_ROOT)
     for rel, slash in COMMANDS:
         resolved = CommandQueueWidget._resolve_claude_command_file(slash[1:])
         assert resolved is not None
@@ -92,6 +101,17 @@ def test_migrated_commands_have_no_legacy_roots_or_unnamespaced_cross_refs() -> 
             violations.append(f"{command_file}: unnamespaced Corgly cross-reference")
         if "${corgly_root}/corgly:" in body or ".claude/commands/corgly:" in body:
             violations.append(f"{command_file}: slash namespace leaked into a file path")
+        if "${corgly_root}/._backup_" in body or "$corgly_root/._backup_" in body:
+            violations.append(
+                f"{command_file}: backup written at pedagogical root instead of $backup_root"
+            )
+        if (
+            "ls -1d ${corgly_root}/._backup_" in body
+            or "Glob ${corgly_root}/._backup_" in body
+        ):
+            violations.append(
+                f"{command_file}: backup search still points at pedagogical root"
+            )
         if "## KIMI QUICKSTART" not in body:
             violations.append(f"{command_file}: missing KIMI QUICKSTART")
         if (
@@ -99,19 +119,29 @@ def test_migrated_commands_have_no_legacy_roots_or_unnamespaced_cross_refs() -> 
             not in body
         ):
             violations.append(f"{command_file}: missing corgly-root resolver fallback")
+        if (
+            "resolver=../../../.claude/commands/corgly/_shared/resolve_corgly_context.py"
+            not in body
+        ):
+            violations.append(
+                f"{command_file}: missing nested corgly-classes resolver fallback"
+            )
     assert not violations, "\n".join(violations)
 
 
 def test_context_resolver_reports_parent_and_corgly_roots() -> None:
     proc = subprocess.run(
         [sys.executable, str(RESOLVER), "--json"],
-        cwd=SYSTEMFORGE_ROOT / "corgly-classes",
+        cwd=CORGLY_ROOT,
         check=True,
         capture_output=True,
         text=True,
     )
     assert f'"systemforge_root": "{SYSTEMFORGE_ROOT}"' in proc.stdout
-    assert f'"corgly_root": "{SYSTEMFORGE_ROOT / "corgly-classes"}"' in proc.stdout
+    assert f'"corgly_root": "{CORGLY_ROOT}"' in proc.stdout
+    desktop_root = SYSTEMFORGE_ROOT / "corgly" / "corgly-desktop"
+    assert f'"desktop_root": "{desktop_root}"' in proc.stdout
+    assert f'"backup_root": "{CORGLY_ROOT / ".backups"}"' in proc.stdout
 
 
 def test_quickstart_locator_works_from_parent_and_corgly_roots() -> None:
@@ -120,14 +150,16 @@ if [ -f .claude/commands/corgly/_shared/resolve_corgly_context.py ]; then
   resolver=.claude/commands/corgly/_shared/resolve_corgly_context.py
 elif [ -f ../.claude/commands/corgly/_shared/resolve_corgly_context.py ]; then
   resolver=../.claude/commands/corgly/_shared/resolve_corgly_context.py
+elif [ -f ../../../.claude/commands/corgly/_shared/resolve_corgly_context.py ]; then
+  resolver=../../../.claude/commands/corgly/_shared/resolve_corgly_context.py
 else
   exit 3
 fi
 eval "$(python3 "$resolver" --sh)"
 printf '%s\\n%s\\n' "$systemforge_root" "$corgly_root"
 """
-    expected = f"{SYSTEMFORGE_ROOT}\n{SYSTEMFORGE_ROOT / 'corgly-classes'}\n"
-    for cwd in (SYSTEMFORGE_ROOT, SYSTEMFORGE_ROOT / "corgly-classes"):
+    expected = f"{SYSTEMFORGE_ROOT}\n{CORGLY_ROOT}\n"
+    for cwd in (SYSTEMFORGE_ROOT, CORGLY_ROOT):
         proc = subprocess.run(
             ["bash", "-c", shell],
             cwd=cwd,
@@ -161,7 +193,7 @@ def test_autocast_scope_is_parent_owned_corgly_only() -> None:
 def test_mcp_configs_have_all_providers_without_old_root() -> None:
     for path in (
         SYSTEMFORGE_ROOT / ".claude" / ".mcp.json",
-        SYSTEMFORGE_ROOT / "corgly-classes" / ".mcp.json",
+        CORGLY_ROOT / ".mcp.json",
     ):
         raw = path.read_text(encoding="utf-8")
         config = json.loads(raw)
@@ -191,13 +223,13 @@ def test_executor_render_has_one_final_notify_owner_per_provider() -> None:
     assert "DO NOT execute that literal target block" in codex.text
 
 
-def test_kimi_matrix_has_exactly_thirteen_complete_command_rows() -> None:
+def test_kimi_matrix_has_exactly_twenty_complete_command_rows() -> None:
     rows = [
         line
         for line in KIMI_MATRIX.read_text(encoding="utf-8").splitlines()
         if re.match(r"^\| \d+ \| `/corgly:", line)
     ]
-    assert len(rows) == 13
+    assert len(rows) == 20
     assert {f"`{slash}`" for _rel, slash in COMMANDS} == {
         row.split("|")[2].strip() for row in rows
     }

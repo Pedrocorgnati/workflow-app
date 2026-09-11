@@ -78,6 +78,11 @@ def test_import_nao_muta_catalogos_de_origem():
     """Importar o modulo nao altera VALID_ACTIONS/BUTTON_TYPES/TERMINALS."""
     import workflow_app.agent_integration_specs as mod
 
+    # Snapshot deliberado do catalogo: a igualdade estrita e o guarda contra
+    # mutacao no import. Quando o bloco C6 especializou tres personas que antes
+    # caiam no literal generico `Otimizar` (o delegador, o questionador e o
+    # atualizador de scaffolds/blueprints), o catalogo passou de 9 para 12
+    # acoes e este snapshot precisou acompanhar no mesmo movimento.
     assert VALID_ACTIONS == {"send", "queue", "config"} | {
         "Criar arquivo",
         "Otimizar",
@@ -88,6 +93,10 @@ def test_import_nao_muta_catalogos_de_origem():
         "Revisar execucao",
         "Loop prepare",
         "Analisar complexidade",
+        # Acoes especializadas introduzidas pelo bloco C6.
+        "Questionar",
+        "Delegar",
+        "Atualizar scaffolds e blueprints",
     }
     assert "Otimizar" in ACTION_LITERALS
     assert mod.VALID_BUTTON_TYPES_FROZEN == frozenset(VALID_BUTTON_TYPES)

@@ -540,9 +540,10 @@ _SECTION_HEADER_STYLE = (
 _SECTION_BTN_STYLE = (
     "QPushButton { background-color: #3F3F46; color: #D4D4D8;"
     "  border: 1px solid #52525B; border-radius: 4px;"
-    "  font-size: 10px; font-weight: 600; padding: 1px 3px; }"
+    "  font-size: 10px; font-weight: 600; padding: 3px 8px; }"
     "QPushButton:hover { background-color: #52525B; color: #FAFAFA; }"
     "QPushButton:pressed { background-color: #FBBF24; color: #18181B; border-color: #FBBF24; }"
+    "QPushButton:focus { border-color: #FBBF24; }"
 )
 
 _TAB_ACTIVE_STYLE = (
@@ -980,6 +981,11 @@ class CommandQueueWidget(QWidget):
         # pos-fence) e `autocast_abort_requested` (falha de listener).
         # `None` = "nenhum despacho em voo", nunca "concluido".
         self._pending_item_outcome: dict | None = None
+        # Task 33: totais da sessao viva (caminho do terminal, nao PipelineManager).
+        # Acumulados so quando observe_usage devolve numero > 0.
+        self._usage_session_in: int = 0
+        self._usage_session_out: int = 0
+        self._usage_session_cost: float = 0.0
         # Tasks 19/20: binding vivo com o `_ROCKSMASH-STATE.json` da fila
         # rocksmash corrente. `None` em qualquer outra fila — e a maioria delas.
         self._rocksmash_cursor: RocksmashRuntimeCursor | None = None
@@ -3115,8 +3121,8 @@ class CommandQueueWidget(QWidget):
         # `_sec_contents` (quem controla a visibilidade e o seletor de secoes).
         self.personas_content = _personas_tab
 
-        # Default: Workflow active (index 0)
-        self._active_section = 0
+        # Default: LOOPs active (index 1)
+        self._active_section = 1
         self._apply_section_styles()
 
         # Exposed so MainWindow can place it as a sibling of output-toolbar.
@@ -3832,6 +3838,13 @@ class CommandQueueWidget(QWidget):
         # que uma reordenacao futura da construcao nao volte a deixar a
         # MetricsBar cega EM SILENCIO. Emissao dupla e inofensiva.
         QTimer.singleShot(0, self._emit_worker_occupancy)
+        # Mesma armadilha, agora no eixo Main: o restore do radio (QSettings)
+        # roda ANTES dos `toggled.connect` logo acima, entao ele NAO emite
+        # `main_llm_changed`. Sem este emit de boot, um Main Kimi/Qwen
+        # restaurado ficava invisivel para a MetricsBar (prompt de
+        # auto-recuperacao com a persona errada) e para as OutputPanels
+        # (piso do Enter submissor curto demais para a TUI do gemini-cli).
+        QTimer.singleShot(0, self._emit_main_llm_boot)
 
         main_layout.addWidget(self._play_bar)
 
@@ -4067,6 +4080,9 @@ class CommandQueueWidget(QWidget):
         signal_bus.config_unloaded.connect(self._on_config_unloaded_for_governance)
         signal_bus.listener_authoritative_idle.connect(
             self._on_listener_authoritative_idle
+        )
+        signal_bus.terminal_output_observed.connect(
+            self._on_terminal_output_observed
         )
         # Task 24: pausa/retomada da fila viram evento. Os dois sinais ja
         # existiam e nao tinham consumidor de telemetria — a fila parava e o
@@ -8799,8 +8815,16 @@ class CommandQueueWidget(QWidget):
         lbl_json = QLabel("JSON")
         lbl_json.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: 600; padding-left: 4px;")
         lbl_json.setFixedWidth(40)
+        lbl_main_llm = QLabel("Main llm")
+        lbl_main_llm.setStyleSheet("color: #22C55E; font-size: 11px; font-weight: 600; padding-left: 4px;")
+        lbl_main_llm.setFixedWidth(70)
+        lbl_prompt = QLabel("prompt")
+        lbl_prompt.setStyleSheet("color: #A78BFA; font-size: 11px; font-weight: 600; padding-left: 4px;")
+        lbl_prompt.setFixedWidth(60)
         header_row.addWidget(lbl_cmd)
         header_row.addWidget(lbl_json)
+        header_row.addWidget(lbl_main_llm)
+        header_row.addWidget(lbl_prompt)
         layout.addLayout(header_row)
 
         inputs_and_checks = []
@@ -8818,15 +8842,29 @@ class CommandQueueWidget(QWidget):
             chk.setToolTip("Anexar caminho do project.json ao comando")
             chk.setFixedWidth(40)
             chk.setStyleSheet("QCheckBox { color: #FBBF24; }")
+            chk_main_llm = QCheckBox(dialog)
+            chk_main_llm.setProperty("testid", f"queue-add-main-llm-{i + 1}")
+            chk_main_llm.setToolTip("Forçar Main LLM (seta verde) ou permitir Parallel LLM (seta azul)")
+            chk_main_llm.setFixedWidth(70)
+            chk_main_llm.setChecked(True)  # Default: checked
+            chk_main_llm.setStyleSheet("QCheckBox { color: #22C55E; }")
+            chk_prompt = QCheckBox(dialog)
+            chk_prompt.setProperty("testid", f"queue-add-prompt-{i + 1}")
+            chk_prompt.setToolTip("Enviar como prompt simples (texto raw sem transformações)")
+            chk_prompt.setFixedWidth(60)
+            chk_prompt.setChecked(True)  # Default: checked
+            chk_prompt.setStyleSheet("QCheckBox { color: #A78BFA; }")
             row.addWidget(inp)
             row.addWidget(chk)
+            row.addWidget(chk_main_llm)
+            row.addWidget(chk_prompt)
             layout.addLayout(row)
             layout.addSpacing(4)
-            inputs_and_checks.append((inp, chk))
+            inputs_and_checks.append((inp, chk, chk_main_llm, chk_prompt))
 
-        line_edit_1, chk_1 = inputs_and_checks[0]
-        line_edit_2, chk_2 = inputs_and_checks[1]
-        line_edit_3, chk_3 = inputs_and_checks[2]
+        line_edit_1, chk_1, chk_main_llm_1, chk_prompt_1 = inputs_and_checks[0]
+        line_edit_2, chk_2, chk_main_llm_2, chk_prompt_2 = inputs_and_checks[1]
+        line_edit_3, chk_3, chk_main_llm_3, chk_prompt_3 = inputs_and_checks[2]
 
         layout.addSpacing(8)
         layout.addWidget(QLabel("Posicao de insercao:"))
@@ -8871,25 +8909,29 @@ class CommandQueueWidget(QWidget):
                 json_path = str(_app_state.config.config_path)
 
         filled = []
-        for line_edit, chk in [(line_edit_1, chk_1), (line_edit_2, chk_2), (line_edit_3, chk_3)]:
+        for line_edit, chk, chk_main_llm, chk_prompt in [(line_edit_1, chk_1, chk_main_llm_1, chk_prompt_1), (line_edit_2, chk_2, chk_main_llm_2, chk_prompt_2), (line_edit_3, chk_3, chk_main_llm_3, chk_prompt_3)]:
             text = line_edit.text().strip()
             if not text:
                 continue
             if chk.isChecked() and json_path:
                 text = f"{text} {json_path}"
-            filled.append(text)
+            force_main = chk_main_llm.isChecked()
+            is_prompt = chk_prompt.isChecked()
+            filled.append((text, force_main, is_prompt))
 
         if not filled:
             return
         position = "last" if radio_last.isChecked() else "next"
-        for text in filled:
-            self._inject_next_command(text, position=position)
+        for text, force_main, is_prompt in filled:
+            self._inject_next_command(text, position=position, force_main_llm=force_main, is_prompt=is_prompt)
 
-    def _inject_next_command(self, text: str, position: str = "next") -> None:
+    def _inject_next_command(self, text: str, position: str = "next", force_main_llm: bool = True, is_prompt: bool = True) -> None:
         """Cria CommandSpec transiente e insere conforme a posicao.
 
         position="next" (default): apos sent/injected items (proximo a rodar).
         position="last": no final da fila (apos todos os items existentes).
+        force_main_llm: Se True, forca CLAUDE (verde/T1); se False, permite workers (azul/T2/T3).
+        is_prompt: Se True, envia texto raw sem transformacoes (sem /slash-executor, /skill:, etc.).
         kimi_eligible=True forca a seta azul visivel independente do
         whitelist (ver CommandItemWidget._setup_ui).
         """
@@ -8898,6 +8940,8 @@ class CommandQueueWidget(QWidget):
             model=ModelName.SONNET,
             interaction_type=InteractionType.AUTO,
             kimi_eligible=True,
+            force_main_llm=force_main_llm,
+            is_prompt=is_prompt,
         )
         item = self._make_item(spec)
         item._is_injected = True
@@ -9265,6 +9309,15 @@ class CommandQueueWidget(QWidget):
         Ver blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §11.1/D1.
         """
         return self._resolve_interactive_main_llm()
+
+    def _emit_main_llm_boot(self) -> None:
+        """Publica o Main LLM restaurado do QSettings uma vez, no boot.
+
+        Os handlers dos radios so existem depois do restore, entao sem este
+        emit os consumidores de `main_llm_changed` nasciam presos no default
+        `claude` ate o operador clicar em algum radio.
+        """
+        signal_bus.main_llm_changed.emit(self._resolve_interactive_main_llm())
 
     def _persist_main_llm_selection(self) -> None:
         """Item 018: salva o radio Main LLM selecionado no QSettings.
@@ -11400,6 +11453,7 @@ class CommandQueueWidget(QWidget):
                 "provider": nome_provider,
                 "started_at": self._last_dispatch_started_at,
                 "channel": None,
+                "output_buf": [],
             }
             self._last_lifecycle_event = build_lifecycle_event(
                 event_type="item_dispatched",
@@ -11413,6 +11467,33 @@ class CommandQueueWidget(QWidget):
             self._persist_lifecycle(self._last_lifecycle_event)
         except Exception:  # noqa: BLE001 — telemetria nunca derruba dispatch
             self._last_lifecycle_event = None
+
+    def _on_terminal_output_observed(self, channel: str, chunk: str) -> None:
+        """Acumula PTY do canal do despacho em voo. Sem canal ainda, ignora."""
+        pendente = self._pending_item_outcome
+        if pendente is None or not chunk:
+            return
+        canal = pendente.get("channel")
+        if canal is not None and canal != channel:
+            return
+        buf = pendente.setdefault("output_buf", [])
+        buf.append(chunk)
+
+    def _observe_pending_usage(self, pendente: dict):
+        """Task 33: so devolve ObservedUsage com numero > 0."""
+        try:
+            from pathlib import Path
+
+            from workflow_app.telemetry.usage_observer import observe_usage
+        except Exception:  # noqa: BLE001
+            return None
+        texto = "".join(pendente.get("output_buf") or [])
+        return observe_usage(
+            terminal_text=texto,
+            provider=pendente.get("provider"),
+            cwd=Path.cwd(),
+            since_ts=pendente.get("started_at"),
+        )
 
     def _close_pending_item_outcome(
         self,
@@ -11460,10 +11541,35 @@ class CommandQueueWidget(QWidget):
         ctx = pendente.get("ctx")
         spec = pendente.get("spec")
 
-        # Sidecar do rocksmash ANTES da telemetria: o cursor decide retomada
-        # (efeito) e a telemetria descreve historia (leitura). Se algo falhar no
-        # meio, e melhor ter o progresso gravado sem o evento do que o inverso.
+        # Sidecar ANTES da telemetria (R20). Observer de custo e opcional e
+        # nao pode impedir o desfecho da subfase.
         self._finish_rocksmash_subphase(ctx, failed=failed, cause=cause)
+
+        usage_tokens = None
+        cost = None
+        try:
+            visto = self._observe_pending_usage(pendente)
+            if visto is not None:
+                usage_tokens = visto.usage_tokens
+                provider = str(pendente.get("provider") or "").lower()
+                # Preco Anthropic so vale para Claude. Outro provider: conta
+                # tokens e deixa cost nulo (nao observado), nunca tarifa errada.
+                if provider == "claude":
+                    from workflow_app.core.token_tracker import calculate_cost
+
+                    modelo = getattr(spec, "model", None)
+                    modelo_key = getattr(modelo, "value", None) or str(modelo or "sonnet")
+                    cost = calculate_cost(visto.tokens_in, visto.tokens_out, modelo_key)
+                    self._usage_session_cost += cost
+                self._usage_session_in += visto.tokens_in
+                self._usage_session_out += visto.tokens_out
+                signal_bus.token_update.emit(
+                    self._usage_session_in,
+                    self._usage_session_out,
+                    self._usage_session_cost,
+                )
+        except Exception:  # noqa: BLE001 - telemetria nunca aborta o sidecar
+            logger.exception("[loop] observer de usage falhou apos desfecho")
 
         try:
             from workflow_app.telemetry.loop_lifecycle_event import (
@@ -11490,6 +11596,8 @@ class CommandQueueWidget(QWidget):
                 model_effective=spec.model.value,
                 effort_effective=spec.effort.value,
                 duration=duracao,
+                usage_tokens=usage_tokens,
+                cost=cost,
             )
             self._persist_lifecycle(self._last_lifecycle_event)
         except Exception:  # noqa: BLE001 - telemetria nunca derruba a fila
@@ -11797,8 +11905,16 @@ class CommandQueueWidget(QWidget):
 
         return _emit
 
-    def _dispatch_codex_command(self, cmd_text: str, *, to_t1: bool = False) -> bool:
+    def _dispatch_codex_command(self, cmd_text: str, *, to_t1: bool = False, is_prompt: bool = False) -> bool:
         """Dispatch a command to Codex. Returns False when validation aborts."""
+        # Prompt simples: envia texto raw sem transformacoes
+        if is_prompt:
+            channel = "interactive" if to_t1 else "workspace_xterm"
+            emit = self._terminal_emitter(channel, route="codex-main-prompt")
+            emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+
         channel = "interactive" if to_t1 else "workspace_xterm"
         emit = self._terminal_emitter(channel, route="codex-main")
         head = self._command_head(cmd_text)
@@ -11886,7 +12002,7 @@ class CommandQueueWidget(QWidget):
         return True
 
     def _dispatch_kimi_main_command(
-        self, cmd_text: str, *, llm_label: str = "Kimi", dialect: str = "kimi"
+        self, cmd_text: str, *, llm_label: str = "Kimi", dialect: str = "kimi", is_prompt: bool = False
     ) -> bool:
         """Dispatch through the skill-runtime Main LLM path (Kimi / Qwen).
 
@@ -11895,6 +12011,12 @@ class CommandQueueWidget(QWidget):
         (`dialect="qwen"`) publishes native `/slash-executor /<claude-command>`.
         `llm_label` appears only in abort toasts. Returns False on abort.
         """
+        # Prompt simples: envia texto raw sem transformacoes
+        if is_prompt:
+            self._publish_to_terminal("interactive", route="kimi-main-prompt", text=cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+
         build_executor = (
             self._build_qwen_slash_executor_invocation
             if dialect == "qwen"
@@ -11979,13 +12101,19 @@ class CommandQueueWidget(QWidget):
         self._on_run_command(cmd_text)
         return True
 
-    def _dispatch_qwen_main_command(self, cmd_text: str) -> bool:
+    def _dispatch_qwen_main_command(self, cmd_text: str, *, is_prompt: bool = False) -> bool:
         """Dispatch through the Main LLM Qwen path.
 
         Qwen TUI resolves `/slash-executor` natively (no `/skill:` prefix).
         The compiled PromptCompiler envelope is not used here.
         Returns False on abort (runtime unavailable or unknown slash).
         """
+        # Prompt simples: envia texto raw sem transformacoes
+        if is_prompt:
+            self._publish_to_terminal("interactive", route="qwen-main-prompt", text=cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+
         head = self._command_head(cmd_text)
         # Diretivas e /clear nao dependem do daemon: pulsam / vao raw como Kimi.
         if not is_directive_line(cmd_text) and head != "/clear":
@@ -12015,7 +12143,7 @@ class CommandQueueWidget(QWidget):
         """
         return True
 
-    def _dispatch_grok_main_command(self, cmd_text: str, *, to_t1: bool = True) -> bool:
+    def _dispatch_grok_main_command(self, cmd_text: str, *, to_t1: bool = True, is_prompt: bool = False) -> bool:
         """Dispatch through the Grok native `/slash-executor` (Main T1 or Worker T3).
 
         Payload: `/slash-executor --delegation-runtime=grok /<comando> <args>`.
@@ -12026,6 +12154,14 @@ class CommandQueueWidget(QWidget):
         `to_t1=True` -> T1 interactive (Main Grok). `to_t1=False` -> T3
         workspace_xterm (worker Grok). Returns False on abort.
         """
+        # Prompt simples: envia texto raw sem transformacoes
+        if is_prompt:
+            channel = "interactive" if to_t1 else "workspace_xterm"
+            emit = self._terminal_emitter(channel, route="grok-main-prompt")
+            emit(cmd_text)
+            self._on_run_command(cmd_text)
+            return True
+
         channel = "interactive" if to_t1 else "workspace_xterm"
         emit = self._terminal_emitter(channel, route="grok-main")
         llm_label = "Grok" if to_t1 else "Worker Grok (T3)"
@@ -12997,13 +13133,13 @@ class CommandQueueWidget(QWidget):
             self._last_workspace_dispatch_was_clear = False
             return
         if use_codex:
-            if self._dispatch_codex_command(cmd_text):  # to_t1=False → T3 xterm
+            if self._dispatch_codex_command(cmd_text, to_t1=False, is_prompt=spec.is_prompt):  # to_t1=False → T3 xterm
                 next_item._mark_as_sent()
             return
         if use_grok:
             # Worker T3 Grok uses the same native `/slash-executor` builder
             # as Main Grok. Envelope Codex fica so no worker Codex.
-            if self._dispatch_grok_main_command(cmd_text, to_t1=False):
+            if self._dispatch_grok_main_command(cmd_text, to_t1=False, is_prompt=spec.is_prompt):
                 next_item._mark_as_sent()
             return
 
@@ -13017,15 +13153,15 @@ class CommandQueueWidget(QWidget):
         # `_dispatch_green_arrow`, que ja lia `_main_*_radio.isChecked()`.
         _main = self._resolve_interactive_main_llm()
         if _main == "codex":
-            if self._dispatch_codex_command(cmd_text, to_t1=True):
+            if self._dispatch_codex_command(cmd_text, to_t1=True, is_prompt=spec.is_prompt):
                 next_item._mark_as_sent()
             return
         if _main == "kimi":
-            if self._dispatch_kimi_main_command(cmd_text):
+            if self._dispatch_kimi_main_command(cmd_text, is_prompt=spec.is_prompt):
                 next_item._mark_as_sent()
             return
         if _main == "qwen":
-            if self._dispatch_qwen_main_command(cmd_text):
+            if self._dispatch_qwen_main_command(cmd_text, is_prompt=spec.is_prompt):
                 next_item._mark_as_sent()
             return
         if _main == "grok":
@@ -13033,7 +13169,7 @@ class CommandQueueWidget(QWidget):
             # abaixo: o comando ia para T1 no formato do Claude enquanto o
             # radio marcado dizia Grok. `_dispatch_green_arrow` ja roteava
             # certo — era so o "Rodar proximo" que divergia.
-            if self._dispatch_grok_main_command(cmd_text):
+            if self._dispatch_grok_main_command(cmd_text, is_prompt=spec.is_prompt):
                 next_item._mark_as_sent()
             return
 

@@ -471,3 +471,62 @@ def test_picker_cancel_preserves_existing_selection(qapp, monkeypatch, tmp_path)
     assert window._brainstorm_md_path == str(selected_md)
     assert md_btn.text() == "selecionado.md"
     assert md_btn.toolTip() == str(selected_md)
+
+
+def test_picker_listing_no_longer_shows_the_canonical_seeds(
+    qapp, monkeypatch, tmp_path
+):
+    """Causa raiz de A3: os seeds poluiam a listagem do picker.
+
+    Ate a migracao C3 (Task 08) os N seeds canonicos moravam soltos em
+    `blacksmith/brainstorm-mcp/`, exatamente o diretorio inicial do
+    dialogo — o operador abria o picker para escolher UMA nota e recebia
+    a grade inteira como ruido, e um clique errado alimentava o prompt
+    com o proprio seed.
+
+    O picker segue abrindo no canonico (contrato de §7.5 preservado); o
+    que mudou e que os seeds vivem um nivel abaixo, em `seeds/`, entao
+    a listagem NAO-RECURSIVA do dialogo nao os enxerga mais.
+    """
+    from workflow_app.brainstorm_seed_contract import (
+        BRAINSTORM_SEEDS_RELDIR,
+        CANONICAL_SEED_FILENAMES,
+    )
+    from workflow_app.main_window import MainWindow
+
+    window = MainWindow()
+    monkeypatch.setattr(
+        MainWindow, "_systemforge_root", staticmethod(lambda: tmp_path)
+    )
+
+    # Estado pos-Task 08: seeds em seeds/, nota do operador na raiz canonica.
+    seeds_dir = tmp_path / BRAINSTORM_SEEDS_RELDIR
+    seeds_dir.mkdir(parents=True)
+    for fname in CANONICAL_SEED_FILENAMES:
+        (seeds_dir / fname).write_text("---\nslug: x\n---\n", encoding="utf-8")
+
+    canonical = tmp_path / "blacksmith" / "brainstorm-mcp"
+    nota = canonical / "08-24-analise.md"
+    nota.write_text("# nota do operador\n", encoding="utf-8")
+
+    captured_dirs: list[str] = []
+    listagem: list[list[str]] = []
+
+    def fake_get_open_file_name(parent, title, start_dir, file_filter):
+        captured_dirs.append(start_dir)
+        # O QFileDialog lista o diretorio inicial sem recursao.
+        listagem.append(sorted(p.name for p in Path(start_dir).glob("*.md")))
+        return (str(nota), "")
+
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+        fake_get_open_file_name,
+    )
+
+    _find_md_btn(window).click()
+
+    assert captured_dirs == [str(canonical)], "picker deixou de abrir no canonico"
+    assert listagem == [["08-24-analise.md"]]
+    poluicao = set(listagem[0]) & set(CANONICAL_SEED_FILENAMES)
+    assert not poluicao, f"seeds ainda poluem a listagem do picker: {sorted(poluicao)}"
+    assert window._brainstorm_md_path == str(nota)

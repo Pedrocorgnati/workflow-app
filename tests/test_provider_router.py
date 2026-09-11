@@ -195,6 +195,96 @@ def test_kimi_command_ignored_when_only_codex_worker_on():
 
 
 # --------------------------------------------------------------------------- #
+# Regra 0: force_main_llm sobrepoe o roteamento normal                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_rule0_force_main_llm_true_ignores_workers():
+    # Com comando Kimi-compativel, worker Kimi ativo, mas force_main_llm=True -> CLAUDE
+    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True, force_main_llm=True)
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.CLAUDE
+
+
+def test_rule0_force_main_llm_true_ignores_codex_worker():
+    # Com comando Codex-compativel, worker Codex ativo, mas force_main_llm=True -> CLAUDE
+    spec = CommandSpec(name=CODEX_CMD, kind="slash", force_main_llm=True)
+    assert classify_provider(spec, _state(kimi=False, codex=True)) is Provider.CLAUDE
+
+
+def test_rule0_force_main_llm_true_ignores_both_workers():
+    # Com comando elegivel a ambos workers, mas force_main_llm=True -> CLAUDE
+    spec = CommandSpec(name=CODEX_CMD, kind="slash", kimi_eligible=True, force_main_llm=True)
+    assert classify_provider(spec, _state(kimi=True, codex=True)) is Provider.CLAUDE
+
+
+def test_rule0_force_main_llm_false_respects_kimi_worker():
+    # Com force_main_llm=False, o roteamento normal funciona: Kimi worker -> KIMI
+    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True, force_main_llm=False)
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.KIMI
+
+
+def test_rule0_force_main_llm_false_respects_codex_worker():
+    # Com force_main_llm=False, o roteamento normal funciona: Codex worker -> CODEX
+    spec = CommandSpec(name=CODEX_CMD, kind="slash", force_main_llm=False)
+    assert classify_provider(spec, _state(kimi=False, codex=True)) is Provider.CODEX
+
+
+def test_rule0_force_main_llm_false_fallback_claude():
+    # Com force_main_llm=False e comando nao elegivel -> fallback CLAUDE
+    spec = CommandSpec(name=OTHER_CMD, kind="slash", force_main_llm=False)
+    assert classify_provider(spec, _state(kimi=True, codex=True)) is Provider.CLAUDE
+
+
+def test_rule0_force_main_llm_default_is_true():
+    # Valor default de force_main_llm e True (comportamento compativel)
+    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True)
+    # Nao especifica force_main_llm, deve usar o default True
+    assert spec.force_main_llm is True
+    # Com worker ativo, mas force_main_llm default=True -> CLAUDE
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.CLAUDE
+
+
+def test_rule0_is_prompt_true_always_claude():
+    # is_prompt=True roteia para CLAUDE independente de workers
+    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True, is_prompt=True)
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.CLAUDE
+
+
+def test_rule0_is_prompt_true_ignores_codex_worker():
+    # is_prompt=True ignora worker Codex
+    spec = CommandSpec(name=CODEX_CMD, kind="slash", is_prompt=True)
+    assert classify_provider(spec, _state(kimi=False, codex=True)) is Provider.CLAUDE
+
+
+def test_rule0_is_prompt_true_ignores_both_workers():
+    # is_prompt=True ignora ambos workers
+    spec = CommandSpec(name=CODEX_CMD, kind="slash", kimi_eligible=True, is_prompt=True)
+    assert classify_provider(spec, _state(kimi=True, codex=True)) is Provider.CLAUDE
+
+
+def test_rule0_is_prompt_true_takes_precedence_over_force_main_llm():
+    # is_prompt=True tem precedencia sobre force_main_llm
+    spec = CommandSpec(name=CODEX_CMD, kind="slash", is_prompt=True, force_main_llm=False)
+    # Mesmo com force_main_llm=False e workers ativos, is_prompt=True -> CLAUDE
+    assert classify_provider(spec, _state(kimi=True, codex=True)) is Provider.CLAUDE
+
+
+def test_rule0_is_prompt_false_respects_kimi_worker():
+    # is_prompt=False segue roteamento normal: Kimi worker -> KIMI
+    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True, is_prompt=False)
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.KIMI
+
+
+def test_rule0_is_prompt_default_is_true():
+    # Valor default de is_prompt e True (comportamento compativel)
+    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True)
+    # Nao especifica is_prompt, deve usar o default True
+    assert spec.is_prompt is True
+    # Com worker ativo, mas is_prompt default=True -> CLAUDE
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.CLAUDE
+
+
+# --------------------------------------------------------------------------- #
 # Contrato do tipo Provider / RoutingState                                     #
 # --------------------------------------------------------------------------- #
 

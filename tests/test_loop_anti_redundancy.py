@@ -60,9 +60,10 @@ def test_loop_both_no_redundant_model_effort(qapp):
     widget = CommandQueueWidget()
     names = _capture_loop_specs(widget, "/loop --both tasks.md")
     _assert_anti_redundant(names)
-    # --both = 9 fases
+    # --both = 10 fases (manifesto vigente: /loop:feature-design entrou entre
+    # review e integrated-architecture; ver CLAUDE.md, lane loop = 8/7/10).
     reals = [n for n in names if not n.startswith(("/clear", "/model ", "/effort "))]
-    assert len(reals) == 9, names
+    assert len(reals) == 10, names
     widget.deleteLater()
 
 
@@ -70,8 +71,9 @@ def test_loop_task_no_redundant_model_effort(qapp):
     widget = CommandQueueWidget()
     names = _capture_loop_specs(widget, "/loop --task tasks.md")
     _assert_anti_redundant(names)
+    # --task = 8 fases (idem: feature-design roda em --task e --both, nao em --cmd).
     reals = [n for n in names if not n.startswith(("/clear", "/model ", "/effort "))]
-    assert len(reals) == 7, names
+    assert len(reals) == 8, names
     widget.deleteLater()
 
 
@@ -92,6 +94,7 @@ def test_loop_cmd_no_redundant_model_effort(qapp):
                 "/loop:individual-analysis --name 06-01-x",
                 "/loop:integration --name 06-01-x",
                 "/loop:review --name 06-01-x",
+                "/loop:feature-design --name 06-01-x",
                 "/loop:integrated-architecture --loop-slug 06-01-x",
                 "/loop:workflow-app --name 06-01-x",
                 "/loop:friendly-resume --name 06-01-x",
@@ -116,6 +119,7 @@ def test_loop_cmd_no_redundant_model_effort(qapp):
                 "/loop:individual-analysis --both --name 06-01-x",
                 "/loop:integration --both --name 06-01-x",
                 "/loop:review --both --name 06-01-x",
+                "/loop:feature-design --name 06-01-x",
                 "/loop:integrated-architecture --loop-slug 06-01-x",
                 "/loop:mark-type --name 06-01-x",
                 "/loop:check-tasks-and-cmd --name 06-01-x",

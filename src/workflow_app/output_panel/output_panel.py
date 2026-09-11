@@ -247,6 +247,21 @@ class OutputPanel(QWidget):
         self._dispatch_ts: float | None = None
         self._bytes_since_dispatch: int = 0
 
+        # Enter submissor com gate de eco (ver `_schedule_submit_enter`).
+        # `_submit_epoch` invalida gate e reenvios pendentes assim que um
+        # dispatch novo assume o painel — um `\r` atrasado de um comando
+        # velho cairia em cima do comando novo.
+        self._submit_epoch: int = 0
+        # Espelho do radio Main LLM (`queue-div-main-llm`). So pesa no T1:
+        # e ele que decide o piso do Enter (Claude/Ink aceita o paste em
+        # ~250ms; kimi-code/qwen-code repintam a TUI inteira e precisam de
+        # 1s, +2s na janela logo depois de um `/clear`).
+        self._main_llm: str = "claude"
+        # Head do dispatch ANTERIOR neste canal, para reconhecer a janela
+        # "primeiro comando depois do /clear" — a mesma que
+        # `_KIMI_AFTER_CLEAR_EXTRA_DELAY_MS` cobre no T2.
+        self._last_dispatch_head: str | None = None
+
         self._setup_ui()
         self._connect_signals()
 
@@ -395,6 +410,10 @@ class OutputPanel(QWidget):
         signal_bus.terminal_session_started.connect(self._on_terminal_session_started)
         signal_bus.terminal_session_finished.connect(self._on_terminal_session_finished)
         signal_bus.terminal_worker_changed.connect(self._on_terminal_worker_changed)
+        # Eixo Main LLM: vale para os tres paineis assinarem (o valor so e
+        # consumido quando `self._channel == "interactive"`), assim um panel
+        # promovido a T1 nao nasce com o cache preso em "claude".
+        signal_bus.main_llm_changed.connect(self._on_main_llm_changed)
         if not self._workspace_mode:
             signal_bus.output_cleared.connect(self.clear)
             signal_bus.pipeline_started.connect(self._on_pipeline_started)
@@ -467,6 +486,47 @@ class OutputPanel(QWidget):
     # named delay makes the Enter land reliably. Ver workflow-app-listeners.md
     # §2.6b (anti command-stacking).
     _ENTER_SUBMIT_DELAY_MS: int = 250
+    # Piso do Enter quando o T1 NAO e Claude. kimi-code e qwen-code sao
+    # forks do gemini-cli (Ink/React): repintam a TUI inteira e so leem o
+    # stdin quando o event loop do Node esta livre, entao 250ms chega no
+    # meio do repaint. Espelha `_KIMI_BLUE_ARROW_DEFAULT_DELAY_MS` do
+    # command_queue_widget, que ja resolvia isso no T2.
+    _ENTER_SUBMIT_DELAY_SLOW_MS: int = 1_000
+    # Extra na janela "primeiro comando depois do /clear": o repaint pos
+    # clear e o mais caro de todos. Espelha
+    # `_KIMI_AFTER_CLEAR_EXTRA_DELAY_MS` (T2).
+    _ENTER_AFTER_CLEAR_EXTRA_MS: int = 2_000
+    # Main LLMs que aceitam o piso curto. Codex fica de fora de proposito:
+    # o T3 ja usa 1000ms em `MainWindow._xterm_inject_text` pelo mesmo
+    # motivo (Ink engole Enter colado perto demais do paste).
+    _FAST_ENTER_MAIN_LLMS: frozenset[str] = frozenset({"claude"})
+
+    def _on_main_llm_changed(self, llm: str) -> None:
+        """Cacheia qual CLI ocupa o T1 (fonte: radio `queue-div-main-llm`)."""
+        if llm:
+            self._main_llm = llm
+
+    def _enter_submit_delay_ms(self, command: str) -> int:
+        """Piso (nao teto) do Enter submissor para este dispatch.
+
+        E so o PISO: o gate de eco (`_schedule_submit_enter`) pode adiar
+        mais, se a TUI ainda nao renderizou o paste quando o piso vence.
+        """
+        if self._channel != "interactive":
+            return self._ENTER_SUBMIT_DELAY_MS
+        if self._main_llm in self._FAST_ENTER_MAIN_LLMS:
+            return self._ENTER_SUBMIT_DELAY_MS
+        delay = self._ENTER_SUBMIT_DELAY_SLOW_MS
+        if self._last_dispatch_head == "/clear":
+            delay += self._ENTER_AFTER_CLEAR_EXTRA_MS
+        return delay
+
+    @staticmethod
+    def _dispatch_head(command: str) -> str | None:
+        stripped = command.strip()
+        if not stripped:
+            return None
+        return stripped.split(None, 1)[0].lower()
 
     @staticmethod
     def _is_helper_command(cmd: str) -> bool:
@@ -484,6 +544,8 @@ class OutputPanel(QWidget):
         singleShot guarantees the Enter lands as a standalone keypress in both
         BP and non-BP modes.
         """
+        # Novo dispatch: mata gate e reenvios pendentes do comando anterior.
+        self._submit_epoch += 1
         if self._shell is None:
             dispatch_telemetry.record_pty_write(
                 channel=self._channel, command=command,
@@ -495,13 +557,21 @@ class OutputPanel(QWidget):
         bracketed = _BRACKETED_PASTE_MODE in self._screen.mode
         if bracketed:
             data = b"\x1b[200~" + data + b"\x1b[201~"
+        min_delay_ms = self._enter_submit_delay_ms(command)
+        self._last_dispatch_head = self._dispatch_head(command)
         written = self._shell.send_raw(data)
         seq = dispatch_telemetry.record_pty_write(
             channel=self._channel, command=command,
             requested=len(data), written=written, bracketed=bracketed,
         )
-        QTimer.singleShot(self._ENTER_SUBMIT_DELAY_MS, self._send_enter_to_shell)
-        self._schedule_echo_confirmation(seq, command)
+        self._schedule_submit_enter(command, min_delay_ms=min_delay_ms)
+        # A auditoria de eco tem que cair DEPOIS do Enter, senao um piso
+        # longo (kimi/qwen pos-/clear) faria ela acusar "engolido" so por
+        # ter olhado a tela cedo demais. Mesma formula do blue-arrow.
+        self._schedule_echo_confirmation(
+            seq, command,
+            delay_ms=max(self._ECHO_CONFIRM_DELAY_MS, min_delay_ms + 1_250),
+        )
         # Camada 3: marca o dispatch para o early-exit watcher. Reset do
         # ultimo reason tambem — novo dispatch, nova janela de erro.
         # Helpers (/clear, /model, /effort, cd, CLI launches) are exempt:
@@ -548,12 +618,198 @@ class OutputPanel(QWidget):
         self._last_failure_reason = None
 
     def _send_enter_to_shell(self) -> None:
+        """Slot dos sinais `submit_enter_to_*` — Enter avulso, sem gate."""
+        self._write_enter("signal")
+
+    def _write_enter(self, reason: str) -> None:
         """Send a bare \r to the persistent shell if it is still alive."""
         if self._shell is None:
-            dispatch_telemetry.record_enter(channel=self._channel, written=None)
+            dispatch_telemetry.record_enter(
+                channel=self._channel, written=None, reason=reason
+            )
             return
         written = self._shell.send_raw(b"\r")
-        dispatch_telemetry.record_enter(channel=self._channel, written=written)
+        dispatch_telemetry.record_enter(
+            channel=self._channel, written=written, reason=reason
+        )
+
+    # ──────────────────── Enter submissor condicionado ao eco ───────── #
+    # O Enter viajava como `singleShot` fixo de 250ms, sem nenhuma prova de
+    # que a TUI do outro lado tinha renderizado o paste. Node so le o stdin
+    # quando o event loop dele esta livre: durante o repaint completo que
+    # vem depois de um `/clear` (ou durante streaming), o bloco de bracketed
+    # paste e o `\r` sao drenados no MESMO tick, e o handler do submit
+    # resolve o texto do buffer contra o closure PRE-paste (o React so
+    # atualiza o state no re-render). O submit e descartado em silencio: o
+    # `/clear` fica na linha e o item seguinte cola em cima, produzindo
+    # `/clear /skill:...` — comando inexistente.
+    #
+    # Aqui o Enter passa a ser condicionado ao ECO. Depois do write fazemos
+    # poll da tela do pyte procurando o texto colado e so mandamos `\r`
+    # quando ele APARECE (houve render, logo o closure nao esta mais velho)
+    # ou quando estoura o teto. Depois do Enter, conferimos se o texto
+    # continua na linha do cursor; se continuar, o submit nao passou e
+    # reenviamos. Enter em prompt vazio e no-op, entao o reenvio e seguro.
+    _ENTER_GATE_POLL_MS: int = 50
+    # Teto do gate, contado A PARTIR do piso. Estourou, manda o Enter do
+    # mesmo jeito: pior caso = comportamento antigo, nunca um item mudo.
+    _ENTER_GATE_TIMEOUT_MS: int = 4_000
+    _ENTER_VERIFY_DELAY_MS: int = 700
+    _ENTER_MAX_RESENDS: int = 2
+    # Abaixo disto o token nao identifica o dispatch na tela. Bem mais
+    # frouxo que `_ECHO_MIN_NEEDLE_CHARS` (8) de proposito: la um falso
+    # positivo mentiria na telemetria; aqui ele so devolve o comportamento
+    # antigo (Enter no piso), e `/clear` — o comando do bug — tem 6 chars.
+    _SUBMIT_GATE_MIN_CHARS: int = 4
+    _SUBMIT_GATE_MAX_CHARS: int = 12
+    # Acima disto (ou com quebra de linha) a TUI NAO ecoa o texto: Claude
+    # Code colapsa o bloco em `[Pasted text #1 +N lines]` e os forks do
+    # gemini-cli fazem o mesmo. Esperar um eco que nunca vem so pagaria o
+    # teto do gate em cada prompt longo (blue arrow do Kimi, seeds de
+    # brainstorm), entao esses caem direto no piso — comportamento antigo.
+    # Os dois bugs que este gate existe para matar vivem no dispatch de
+    # UMA linha (`/clear`, `/skill:...`, `/slash-executor ...`).
+    _SUBMIT_GATE_MAX_COMMAND_CHARS: int = 400
+    # Quantas linhas acima do cursor ainda contam como "linha de prompt"
+    # (a caixa de input do Ink quebra o paste em varias linhas).
+    _SUBMIT_CURSOR_LOOKBACK_ROWS: int = 3
+
+    @classmethod
+    def _submit_gate_needle(cls, command: str) -> str | None:
+        """Trecho do comando que procuramos na tela para liberar o Enter.
+
+        None desliga o gate (Enter no piso, como antes do fix).
+        """
+        if "\n" in command or "\r" in command:
+            return None
+        if len(command) > cls._SUBMIT_GATE_MAX_COMMAND_CHARS:
+            return None
+        tokens = [t for t in command.split() if t]
+        if not tokens:
+            return None
+        # Preferimos o ULTIMO token, e pelo FIM dele. E o token que fica
+        # sob o cursor, e e ele que decide o estado do autocomplete das
+        # TUIs do gemini-cli: com o token ainda pela metade na tela, o fzf
+        # do `useCommandSuggestions` casa por subsequencia e deixa a lista
+        # de sugestoes aberta — foi assim que um Enter virou "aceitar
+        # sugestao" e duplicou o `/slash-executor`. Ver o sufixo na tela
+        # prova que o token chegou INTEIRO ao render.
+        candidate = tokens[-1]
+        if len(candidate) < cls._SUBMIT_GATE_MIN_CHARS:
+            candidate = max(tokens, key=len)
+        if len(candidate) < cls._SUBMIT_GATE_MIN_CHARS:
+            return None
+        return candidate[-cls._SUBMIT_GATE_MAX_CHARS :]
+
+    def _screen_rows(self) -> list[str] | None:
+        try:
+            return list(self._screen.display)
+        except Exception:  # noqa: BLE001 — pyte indisponivel/instavel
+            return None
+
+    def _screen_needle_count(self, needle: str) -> int | None:
+        """Ocorrencias do needle na tela visivel. None = indecidivel.
+
+        Alem do blob por linhas, olhamos a versao "desdobrada" (linhas
+        concatenadas sem o trailing space): a TUI quebra o paste em
+        qualquer coluna e um token partido no wrap nao apareceria no
+        primeiro blob.
+        """
+        rows = self._screen_rows()
+        if rows is None:
+            return None
+        joined = "\n".join(r.rstrip() for r in rows)
+        dewrapped = "".join(r.rstrip() for r in rows)
+        return max(joined.count(needle), dewrapped.count(needle))
+
+    def _needle_at_cursor(self, needle: str) -> bool:
+        """O texto colado ainda esta na linha do prompt (= nao submeteu)?
+
+        Buscamos SO na vizinhanca do cursor, nao na tela toda: depois de um
+        submit bem-sucedido o comando continua visivel no transcript, mas
+        sai da linha de input. Indecidivel conta como "submeteu" — no
+        reenvio o falso negativo (nao reenviar) e mais barato que o falso
+        positivo (um Enter extra em cima de um dialogo).
+        """
+        rows = self._screen_rows()
+        if rows is None:
+            return False
+        try:
+            cursor_y = int(self._screen.cursor.y)
+        except Exception:  # noqa: BLE001 — pyte instavel
+            return False
+        top = max(0, cursor_y - self._SUBMIT_CURSOR_LOOKBACK_ROWS)
+        window = rows[top : cursor_y + 1]
+        if not window:
+            return False
+        joined = "\n".join(r.rstrip() for r in window)
+        dewrapped = "".join(r.rstrip() for r in window)
+        return needle in joined or needle in dewrapped
+
+    def _schedule_submit_enter(self, command: str, *, min_delay_ms: int) -> None:
+        """Arma o gate de eco do Enter submissor deste dispatch."""
+        needle = self._submit_gate_needle(command)
+        # Baseline ANTES do render: o gate exige que a contagem AUMENTE, e
+        # nao que o needle exista. Sem isso, um `/clear` que ainda estivesse
+        # ecoado na tela do ciclo anterior liberaria o Enter na hora.
+        baseline = None if needle is None else self._screen_needle_count(needle)
+        deadline = time.monotonic() + (
+            min_delay_ms + self._ENTER_GATE_TIMEOUT_MS
+        ) / 1000.0
+        QTimer.singleShot(
+            min_delay_ms,
+            self,
+            functools.partial(
+                self._poll_submit_gate,
+                needle, baseline, deadline, self._submit_epoch,
+            ),
+        )
+
+    def _poll_submit_gate(
+        self,
+        needle: str | None,
+        baseline: int | None,
+        deadline: float,
+        epoch: int,
+    ) -> None:
+        if epoch != self._submit_epoch:
+            return  # dispatch mais novo assumiu o painel
+        rendered = needle is None or baseline is None
+        if not rendered:
+            count = self._screen_needle_count(needle)
+            rendered = count is None or count > baseline
+        if not rendered and time.monotonic() < deadline:
+            QTimer.singleShot(
+                self._ENTER_GATE_POLL_MS,
+                self,
+                functools.partial(
+                    self._poll_submit_gate, needle, baseline, deadline, epoch
+                ),
+            )
+            return
+        self._write_enter("gated" if rendered else "gate-timeout")
+        if needle is not None:
+            QTimer.singleShot(
+                self._ENTER_VERIFY_DELAY_MS,
+                self,
+                functools.partial(self._verify_submitted, needle, epoch, 1),
+            )
+
+    def _verify_submitted(self, needle: str, epoch: int, attempt: int) -> None:
+        """Reenvia o Enter enquanto o comando continuar na linha de prompt."""
+        if epoch != self._submit_epoch or self._shell is None:
+            return
+        if not self._needle_at_cursor(needle):
+            return  # saiu da linha de input: submeteu
+        self._write_enter(f"resend-{attempt}")
+        if attempt < self._ENTER_MAX_RESENDS:
+            QTimer.singleShot(
+                self._ENTER_VERIFY_DELAY_MS,
+                self,
+                functools.partial(
+                    self._verify_submitted, needle, epoch, attempt + 1
+                ),
+            )
 
     # ─────────────────────────── Confirmacao de eco do dispatch ─────── #
     # Terceira perna da telemetria (ver `workflow_app.dispatch_telemetry`).
@@ -639,6 +895,7 @@ class OutputPanel(QWidget):
         the dispatch is subsequent to /clear (Kimi takes longer to render
         the prompt right after a clear because the TUI repaints fully).
         """
+        self._submit_epoch += 1
         if self._shell is None:
             dispatch_telemetry.record_pty_write(
                 channel=self._channel, command=prompt,
@@ -650,12 +907,15 @@ class OutputPanel(QWidget):
         bracketed = _BRACKETED_PASTE_MODE in self._screen.mode
         if bracketed:
             data = b"\x1b[200~" + data + b"\x1b[201~"
+        self._last_dispatch_head = self._dispatch_head(prompt)
         written = self._shell.send_raw(data)
         seq = dispatch_telemetry.record_pty_write(
             channel=self._channel, command=prompt,
             requested=len(data), written=written, bracketed=bracketed,
         )
-        QTimer.singleShot(delay_ms, self, self._send_enter_to_shell)
+        # `delay_ms` do caller vira o PISO; o gate de eco pode adiar mais e
+        # o verify reenvia se o prompt do Kimi engolir o Enter mesmo assim.
+        self._schedule_submit_enter(prompt, min_delay_ms=delay_ms)
         self._schedule_echo_confirmation(seq, prompt, delay_ms=delay_ms + 1250)
 
     def _on_terminal_output_chunk(self, channel: str, chunk: str) -> None:
@@ -753,6 +1013,7 @@ class OutputPanel(QWidget):
         if not self._runner_active and self._channel in ("interactive", "workspace_xterm"):
             self._idle_timer.start()
         signal_bus.terminal_activity.emit(self._channel)
+        signal_bus.terminal_output_observed.emit(self._channel, chunk)
         if self._dispatch_ts is not None:
             self._bytes_since_dispatch += len(chunk)
         self._scan_chunk_for_fatal(chunk)

@@ -482,6 +482,73 @@ class TestNaoObservavel:
             assert evento["usage_tokens"] is None
             assert evento["cost"] is None
 
+    def test_usage_observado_chega_ao_evento_e_ao_token_update(
+        self, qapp, qtbot, sink_tmp, monkeypatch
+    ):
+        """Task 33: numero > 0 observado deixa de ser None. Zero continua ausente."""
+        received: list[tuple] = []
+        signal_bus.token_update.connect(lambda a, b, c: received.append((a, b, c)))
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        spec = _spec()
+        w.load_pipeline([spec])
+        w._record_loop_dispatch(spec, "claude")
+        w._on_terminal_output_observed(
+            "interactive",
+            '{"usage": {"input_tokens": 1000, "output_tokens": 500}}',
+        )
+        w._close_pending_item_outcome(failed=False)
+        completed = [e for e in _eventos(w) if e["event_type"] == "item_completed"]
+        assert completed
+        assert completed[-1]["usage_tokens"] == 1500
+        assert completed[-1]["cost"] is not None and completed[-1]["cost"] > 0
+        assert received
+        assert received[-1][0] == 1000
+        assert received[-1][1] == 500
+
+    def test_provider_nao_claude_conta_tokens_e_deixa_custo_nulo(
+        self, qapp, qtbot, sink_tmp
+    ):
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        spec = _spec()
+        w.load_pipeline([spec])
+        w._record_loop_dispatch(spec, "codex")
+        w._on_terminal_output_observed(
+            "workspace_xterm",
+            '{"usage": {"input_tokens": 1000, "output_tokens": 500}}',
+        )
+        w._close_pending_item_outcome(failed=False)
+        completed = [e for e in _eventos(w) if e["event_type"] == "item_completed"]
+        assert completed[-1]["usage_tokens"] == 1500
+        assert completed[-1]["cost"] is None
+
+    def test_falha_do_observer_nao_impede_sidecar(self, qapp, qtbot, sink_tmp):
+        """Blocker Codex: telemetria nao pode abortar `_finish_rocksmash_subphase`."""
+        w = CommandQueueWidget()
+        qtbot.addWidget(w)
+        spec = _spec()
+        w.load_pipeline([spec])
+        w._record_loop_dispatch(spec, "claude")
+        chamado = {"n": 0}
+
+        def _boom(_pendente):
+            raise RuntimeError("observer quebrou")
+
+        w._observe_pending_usage = _boom  # type: ignore[method-assign]
+
+        orig = w._finish_rocksmash_subphase
+
+        def _spy(ctx, *, failed, cause=None):
+            chamado["n"] += 1
+            return orig(ctx, failed=failed, cause=cause)
+
+        w._finish_rocksmash_subphase = _spy  # type: ignore[method-assign]
+        assert w._close_pending_item_outcome(failed=False) is True
+        assert chamado["n"] == 1
+        completed = [e for e in _eventos(w) if e["event_type"] == "item_completed"]
+        assert completed, "desfecho de item continua mesmo com observer quebrado"
+
     def test_duration_so_existe_com_despacho_observado(self, qapp, qtbot, sink_tmp):
         w = CommandQueueWidget()
         qtbot.addWidget(w)

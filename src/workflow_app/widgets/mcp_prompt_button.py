@@ -9,7 +9,7 @@ Uso seed-driven (brainstorm grade):
     btn = MCPPromptButton(
         label="Criar md",
         button_type="Claude",
-        prompt=Path("blacksmith/brainstorm-mcp/01-criar-md.md"),
+        prompt=Path("blacksmith/brainstorm-mcp/seeds/01-criar-md.md"),
         agent_name="estruturador de ideias",
         agent_path="ai-forge/MCP/agents/criar-md-rules.md",
         action="Criar arquivo",
@@ -50,24 +50,27 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app import brainstorm_telemetry
 from workflow_app.signal_bus import signal_bus
 
 logger = logging.getLogger(__name__)
 
 ButtonType = Literal["Claude", "Codex", "Kimi", "type-selector-radio-input"]
-ActionType = Literal[
-    "send",
-    "queue",
-    "config",
-    "Criar arquivo",
-    "Otimizar",
-    "Criar tasks",
-    "Revisar tasks",
-    "Revisar",
-    "Executar",
-    "Revisar execucao",
-    "Loop prepare",
-]
+#: Vocabulario de action: ABERTO desde a Task 29.
+#:
+#: Era um `Literal[...]` de 15 membros -- a QUARTA copia da lista de actions,
+#: depois de `ACTION_LITERALS`, `ACTION_COHERENCE` e `VALID_ACTIONS_PTBR`, e a
+#: unica que nenhum teste conseguia consertar sozinha porque um `Literal` so
+#: existe para o type checker. Fechar o tipo tambem significava que ganhar uma
+#: action nova exigia editar Python, exatamente o que a Task 29 removeu do
+#: caminho do operador.
+#:
+#: O que continua fechado, e por que basta: o par persona-action
+#: (`brainstorm_seed_contract.validate_persona_action`) segue reprovando
+#: action incoerente em persona CONHECIDA, e `mcp_prompt_actions.build_prompt`
+#: segue exigindo a action no catalogo quando o seed nao traz o proprio bloco
+#: `## Prompt canonico`. O gate mudou de lugar; nao evaporou.
+ActionType = str
 
 # Catalogos canonicos compartilhados (widget + loader em main_window).
 VALID_BUTTON_TYPES: set[str] = {
@@ -87,6 +90,9 @@ VALID_ACTIONS_PTBR: set[str] = {
     "Revisar execucao",
     "Loop prepare",
     "Analisar complexidade",
+    "Questionar",
+    "Delegar",
+    "Atualizar scaffolds e blueprints",
 }
 VALID_ACTIONS: set[str] = VALID_ACTIONS_LEGACY | VALID_ACTIONS_PTBR
 
@@ -141,6 +147,32 @@ _TYPE_BORDER: dict[str, str] = {
 _DEBOUNCE_NS = 800_000_000  # 800 ms
 _GUARDED_ACTIONS: frozenset[str] = frozenset({"Executar", "Revisar execucao"})
 
+
+def _acao_guardada(action: str) -> bool:
+    """True quando esta action merece debounce e confirmacao de re-disparo.
+
+    Duas fontes, nao uma:
+
+    - `_GUARDED_ACTIONS` -- as duas actions CONHECIDAMENTE destrutivas, que
+      mandam o modelo executar uma task ou revisar uma execucao. Sempre
+      guardadas, como desde o hardening T7.
+    - tudo que esta FORA de `VALID_ACTIONS` -- action que ninguem mediu.
+
+    O segundo ramo nasceu com a Task 29. Enquanto o gate de action era um
+    enum fechado, "action fora do catalogo" nao existia e a whitelist exata
+    era completa por construcao. Abrindo o combo do gear, um rotulo novo
+    ("Executar tudo", "Deploy") passa a ser digitavel -- e caia direto no
+    ramo sem guarda nenhuma: sem debounce contra duplo-clique e sem
+    confirmacao ao re-disparar. Quanto MENOS se sabe sobre a action, MENOS
+    protecao ela tinha.
+
+    As 12 actions conhecidas e nao destrutivas seguem disparando direto: elas
+    estao em `VALID_ACTIONS` e fora de `_GUARDED_ACTIONS`. O custo do
+    default seguro recai so sobre rotulo novo, e e 800 ms mais um "confirma?"
+    no segundo clique.
+    """
+    return action in _GUARDED_ACTIONS or action not in VALID_ACTIONS
+
 # Gate T7 (task-008 loop 05-21-implantation-tasklist-aba-brainstorm).
 # Testid canonico do terminal Codex (T3). Quando ausente da arvore Qt, botoes
 # Codex (fixos OU radio-driven com radio=Codex) NAO publicam: fixos ficam
@@ -153,6 +185,21 @@ _CODEX_TOAST_CANONICAL = (
     "auditoria de provider. Nao havera fallback automatico para Claude/Kimi."
 )
 _CODEX_TOAST_SHORT = "Codex bloqueado: T3 ausente."
+
+#: Quantas chars do prompt entram no tooltip de preview. Constante e nao
+#: literal porque o valor aparecia em SEIS lugares (tres cortes e tres
+#: comparacoes de comprimento) nos tres construtores duplicados que a
+#: Task 30 fundiu.
+_TOOLTIP_PREVIEW_LEN = 80
+
+#: Texto da UI que diz de onde vem a previa do prompt e onde se edita. Sem
+#: ele o campo travado parece defeito, e o operador procura o bug em vez do
+#: gear (Task 31, D15).
+_PROMPT_PREVIEW_HINT = (
+    "Somente leitura. Este texto e o bloco `## Prompt canonico` do seed. "
+    "Para edita-lo, use a engrenagem da aba Brainstorm "
+    "(Configurar seeds brainstorm-mcp)."
+)
 
 # Estado checkbox/debounce e per-widget-instance; rebuild da grade (T4) ou
 # restart do QApplication resetam tudo — alinhado a "sem memoria, nao persiste
@@ -228,7 +275,28 @@ class _InlineCheckBox(QCheckBox):
 
 
 class MCPPromptConfigModal(QDialog):
-    """Modal de edicao da config do botao MCP (right-click)."""
+    """Modal de config do botao MCP (right-click). Prompt e PREVIA, nao campo.
+
+    D15 -- escritor unico, leitor derivado (Task 31).
+
+    Ate aqui este modal tinha um `QPlainTextEdit` editavel com o prompt, e
+    aceitar o dialogo fazia `self._prompt = values["prompt"]` no botao. Isso
+    criava uma SEGUNDA superficie de escrita sobre o mesmo campo que o gear
+    (`brainstorm_mcp_config_dialog`) grava no bloco `## Prompt canonico` do
+    seed. Duas superficies de escrita sobre o mesmo dado nao "competem": elas
+    produzem last-write-wins silencioso, e neste caso o silencio era pior que
+    o normal, porque a escrita do modal nao ia para o disco. Quando o botao
+    nasce de um seed, `_prompt` e um `Path`; aceitar o modal trocava esse
+    `Path` por uma STRING com o conteudo lido. O botao passava a despachar o
+    texto congelado no momento em que alguem abriu o modal, o seed no disco
+    seguia com o texto verdadeiro, o gear continuava mostrando o do disco, e
+    nada na tela dizia que os dois tinham divergido.
+
+    A saida nao e remover o campo das duas superficies: quem abre o modal
+    precisa ver QUE prompt aquele botao dispara. Entao o campo fica, como
+    previa somente-leitura da mesma fonte, e a UI diz de onde o texto vem e
+    onde se edita. Escritor unico: o gear. Leitor derivado: este modal.
+    """
 
     def __init__(
         self,
@@ -246,14 +314,25 @@ class MCPPromptConfigModal(QDialog):
 
         form = QFormLayout(self)
         self._label_edit = QLineEdit(label, self)
+        # Previa: somente-leitura DE FATO (`setReadOnly`), nao apenas
+        # visualmente. Sem isto o operador digita, o dialogo aceita e a
+        # edicao evapora no `values()` -- pior que um campo travado, porque
+        # parece ter funcionado.
         self._prompt_edit = QPlainTextEdit(prompt, self)
+        self._prompt_edit.setReadOnly(True)
         self._prompt_edit.setMinimumHeight(120)
+        self._prompt_edit.setProperty("testid", "mcp-prompt-config-preview")
+        self._prompt_edit.setToolTip(_PROMPT_PREVIEW_HINT)
+        self._prompt_hint = QLabel(_PROMPT_PREVIEW_HINT, self)
+        self._prompt_hint.setWordWrap(True)
+        self._prompt_hint.setProperty("testid", "mcp-prompt-config-preview-hint")
         self._agent_name_edit = QLineEdit(agent_name or "", self)
         self._agent_path_edit = QLineEdit(agent_path or "", self)
         self._target_edit = QLineEdit(target_path or "", self)
 
         form.addRow("Label:", self._label_edit)
-        form.addRow("Prompt:", self._prompt_edit)
+        form.addRow("Prompt (previa):", self._prompt_edit)
+        form.addRow("", self._prompt_hint)
         form.addRow("Agent name:", self._agent_name_edit)
         form.addRow("Agent path:", self._agent_path_edit)
         form.addRow("Target terminal:", self._target_edit)
@@ -267,13 +346,23 @@ class MCPPromptConfigModal(QDialog):
         form.addRow(buttons)
 
     def values(self) -> dict[str, str]:
+        """Campos EDITAVEIS do modal. `prompt` saiu de proposito (D15).
+
+        A chave nao esta ausente por esquecimento: enquanto ela existir,
+        existe um caminho de persistencia saindo daqui, e o proximo caller a
+        escrever `self._prompt = values["prompt"]` recria a divergencia que a
+        Task 31 fechou. Para LER a previa existe `prompt_preview()`.
+        """
         return {
             "label": self._label_edit.text(),
-            "prompt": self._prompt_edit.toPlainText(),
             "agent_name": self._agent_name_edit.text() or "",
             "agent_path": self._agent_path_edit.text() or "",
             "target_path": self._target_edit.text() or "",
         }
+
+    def prompt_preview(self) -> str:
+        """Texto exibido na previa. Leitura; nao ha contraparte de escrita."""
+        return self._prompt_edit.toPlainText()
 
 
 class MCPPromptButton(QPushButton):
@@ -308,6 +397,7 @@ class MCPPromptButton(QPushButton):
         *,
         testid_slug: str | None = None,
         target_path_edit_inplace: bool = False,
+        action_literal: str | None = None,
         radio_state_getter: Callable[[], str] | None = None,
         parent=None,
     ) -> None:
@@ -322,9 +412,23 @@ class MCPPromptButton(QPushButton):
                 f"button_type invalido: {button_type!r} "
                 f"(esperado: {sorted(VALID_BUTTON_TYPES)})"
             )
-        if action not in VALID_ACTIONS:
+        # Task 29 abriu `ActionType` para `str`; este gate de pertinencia era
+        # o que ainda desfazia a abertura na pratica. Com ele, o operador
+        # digitava uma action nova no combo editavel do gear, o save dizia OK
+        # e o proximo rebuild da grade perdia o botao -- caminho de escrita e
+        # caminho de leitura discordando em silencio, que e exatamente a
+        # classe de defeito que esta C2 existe para fechar.
+        #
+        # O que substituiu o gate, e por que basta: o par persona-action
+        # (`brainstorm_seed_contract.validate_persona_action`) segue reprovando
+        # action incoerente em persona conhecida, e `build_prompt` segue
+        # exigindo o bloco `## Prompt canonico` no seed quando a action esta
+        # fora de `ACTION_LITERALS`. `VALID_ACTIONS` continua fechado onde
+        # deve: a superficie PROGRAMATICA de agentes
+        # (`agent_integration_specs.SUPPORTED_ACTIONS`) o consome como antes.
+        if not isinstance(action, str) or not action.strip():
             raise ValueError(
-                f"action invalida: {action!r} (esperado: {sorted(VALID_ACTIONS)})"
+                f"action invalida: {action!r} (esperado: str nao vazia)"
             )
         if target_path is not None and target_path not in VALID_TERMINALS:
             raise ValueError(
@@ -346,6 +450,12 @@ class MCPPromptButton(QPushButton):
         self._target_path = target_path
         self._testid_slug = testid_slug
         self._target_path_edit_inplace = bool(target_path_edit_inplace)
+        # `None` = este botao nao veio de seed (suplemento / caller
+        # programatico) e `build_prompt` deve usar `ACTION_LITERALS`.
+        # Qualquer str, inclusive vazia, e literal vindo do seed.
+        if action_literal is not None and not isinstance(action_literal, str):
+            raise TypeError("action_literal deve ser str ou None")
+        self._action_literal = action_literal
 
         # Hardening T7: estado intra-sessao (per-widget-instance; rebuild da
         # grade ou restart do QApplication reseta tudo - aceitavel).
@@ -420,13 +530,8 @@ class MCPPromptButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._sync_visual_state()
 
-        # Tooltip: primeiras 80 chars do prompt
-        prompt_preview = self._resolve_prompt_text()[:80]
-        self.setToolTip(
-            f"[{button_type}] {label}\n"
-            f"action={action} target={target_path or '-'}\n"
-            f"prompt: {prompt_preview}{'...' if len(self._resolve_prompt_text()) > 80 else ''}"
-        )
+        # Tooltip: primeiras chars do prompt (builder unico, Task 30).
+        self.setToolTip(self._build_tooltip())
 
         self.clicked.connect(self._on_clicked)
         # Filtra dispatch_result por button_id em _on_dispatch_result.
@@ -500,7 +605,7 @@ class MCPPromptButton(QPushButton):
         `button_id` propaga o objectName para que o handler externo
         possa direcionar `signal_bus.dispatch_result` ao widget de origem.
         """
-        return {
+        payload = {
             "label": self._label,
             "button_type": self._button_type,
             "prompt": str(self._prompt),
@@ -513,6 +618,12 @@ class MCPPromptButton(QPushButton):
             "testid_slug": self._testid_slug,
             "button_id": self._button_id,
         }
+        # `None` significa ausencia NO TRANSPORTE (botao suplementar, caller
+        # programatico); `""` seria presenca vazia. Emitir a chave sempre
+        # faria o suplemento nunca alcancar o fallback `ACTION_LITERALS`.
+        if self._action_literal is not None:
+            payload["action_literal"] = self._action_literal
+        return payload
 
     def mark_dispatch_result(self, success: bool) -> None:
         """Atualiza estado do checkbox conforme resultado real do disparo.
@@ -536,13 +647,65 @@ class MCPPromptButton(QPushButton):
     # Helpers
 
     def _resolve_prompt_text(self) -> str:
-        """Le prompt se for Path .md, senao retorna a string literal."""
+        """Devolve o texto que a UI mostra como previa do prompt.
+
+        O literal congelado no build VENCE a leitura do arquivo. As duas
+        superficies de previa (tooltip e modal de right-click) existem para
+        responder UMA pergunta -- "o que este botao vai mandar?" -- e a
+        resposta e `self._action_literal`, que e o que `payload()` emite e o
+        que `build_prompt` injeta em `{action}`.
+
+        Antes disto elas liam o `.md` INTEIRO, e cada divergencia era
+        visivel:
+
+        - o corte de 80 chars do tooltip caia dentro do frontmatter, entao a
+          previa era `---\nslug: criar-md\ntitle: ...` -- YAML, nunca o
+          prompt;
+        - o modal mostrava frontmatter, `## Objetivo` e `## Notas` embaixo do
+          rotulo que afirma, em `_PROMPT_PREVIEW_HINT`, ser "o bloco
+          `## Prompt canonico` do seed";
+        - editar o seed em disco POR FORA da engrenagem trocava a previa e
+          nao trocava o despacho, porque o botao ja carregava o snapshot: o
+          operador lia B e o modelo recebia A.
+
+        A leitura do arquivo sobrevive para quem nao tem literal -- caller
+        programatico e `prompt` que ja e string literal. Ai o arquivo e, de
+        fato, a unica fonte disponivel.
+        """
+        if self._action_literal is not None:
+            return self._action_literal
         if isinstance(self._prompt, Path):
             try:
                 return self._prompt.read_text(encoding="utf-8")
             except OSError:
                 return f"[erro lendo {self._prompt}]"
         return str(self._prompt)
+
+    def _build_tooltip(self) -> str:
+        """Monta o tooltip canonico de preview. Fonte UNICA dos tres caminhos.
+
+        Ate a Task 30 este texto era remontado a mao em tres lugares -- o
+        `__init__`, o `recheck_codex_availability` e o
+        `_on_codex_availability_changed`. Tres copias do mesmo f-string
+        significam que mudar a FONTE do literal (foi o que a C2 fez, tirando
+        o prompt do frontmatter e passando para o bloco `## Prompt canonico`)
+        conserta um caminho e deixa dois exibindo o texto velho, sem que
+        nenhum teste perceba: os tres produziam strings diferentes so quando
+        a fonte divergia, que e exatamente o momento em que ninguem esta
+        olhando.
+
+        Efeito colateral desejado: `_resolve_prompt_text()` e chamado UMA vez
+        por tooltip. As tres copias chamavam duas vezes cada (uma para cortar,
+        outra para medir o comprimento), o que em seed com `prompt` do tipo
+        `Path` era uma segunda leitura de disco por tooltip montado.
+        """
+        prompt = self._resolve_prompt_text()
+        reticencias = "..." if len(prompt) > _TOOLTIP_PREVIEW_LEN else ""
+        return (
+            f"[{self._button_type}] {self._label}\n"
+            f"action={self._action} target={self._target_path or '-'}\n"
+            f"prompt: {prompt[:_TOOLTIP_PREVIEW_LEN]}{reticencias}"
+        )
 
     def _is_debounced(self) -> bool:
         """True quando clique cai dentro da janela de debounce per-botao.
@@ -551,7 +714,7 @@ class MCPPromptButton(QPushButton):
         sao IGNORADOS (nao enfileirados). Per-botao explicito - debounce de
         outros widgets nao afeta este.
         """
-        if self._action not in _GUARDED_ACTIONS:
+        if not _acao_guardada(self._action):
             return False
         now = time.monotonic_ns()
         if self._last_dispatch_ns and (now - self._last_dispatch_ns) < _DEBOUNCE_NS:
@@ -565,7 +728,7 @@ class MCPPromptButton(QPushButton):
 
     def _needs_confirmation(self) -> bool:
         """True quando re-clique de action guarded com checkbox ja marcado."""
-        return self._action in _GUARDED_ACTIONS and self._checkbox_state
+        return _acao_guardada(self._action) and self._checkbox_state
 
     def _confirm_redispatch(self, md_path: str | None) -> bool:
         """Modal de confirmacao com texto literal da spec.
@@ -672,13 +835,7 @@ class MCPPromptButton(QPushButton):
             self._sync_visual_state()
             if alive:
                 # Restaura tooltip canonico de preview (sobrescreve o short).
-                prompt_preview = self._resolve_prompt_text()[:80]
-                self.setToolTip(
-                    f"[{self._button_type}] {self._label}\n"
-                    f"action={self._action} target={self._target_path or '-'}\n"
-                    f"prompt: {prompt_preview}"
-                    f"{'...' if len(self._resolve_prompt_text()) > 80 else ''}"
-                )
+                self.setToolTip(self._build_tooltip())
             else:
                 self.setToolTip(_CODEX_TOAST_SHORT)
         signal_bus.codex_availability_changed.emit(alive)
@@ -701,13 +858,7 @@ class MCPPromptButton(QPushButton):
             super().setEnabled(alive)
             self._sync_visual_state()
             if alive:
-                prompt_preview = self._resolve_prompt_text()[:80]
-                self.setToolTip(
-                    f"[{self._button_type}] {self._label}\n"
-                    f"action={self._action} target={self._target_path or '-'}\n"
-                    f"prompt: {prompt_preview}"
-                    f"{'...' if len(self._resolve_prompt_text()) > 80 else ''}"
-                )
+                self.setToolTip(self._build_tooltip())
             else:
                 self.setToolTip(_CODEX_TOAST_SHORT)
 
@@ -779,6 +930,17 @@ class MCPPromptButton(QPushButton):
             and self._button_type == "Codex"
         ):
             signal_bus.toast_requested.emit(_CODEX_TOAST_SHORT, "warning")
+            # Este -- e nao o gate de `_on_clicked` -- e o caminho DOMINANTE
+            # de `codex_unavailable` em producao: quando o T3 ja esta morto
+            # na construcao, o botao nasce `disabled`, `clicked` nunca chega
+            # ao slot e o clique morre aqui. Instrumentar so o slot media a
+            # janela rara (cache envenenado entre o enable e o clique) e
+            # deixava o caso comum contando como "botao nunca clicado" --
+            # exatamente a ambiguidade que os WIDGET_REASONS existem para
+            # desfazer, e com o sinal invertido: um botao que o operador
+            # tenta usar e nao consegue apareceria como candidato a
+            # aposentadoria.
+            self._registrar_bloqueio("codex_unavailable")
             return True
         return super().eventFilter(obj, event)
 
@@ -823,6 +985,33 @@ class MCPPromptButton(QPushButton):
         if getattr(self, "_label_widget", None) is not None:
             self._label_widget.setText(text)
 
+    def _registrar_bloqueio(self, reason: str) -> None:
+        """Um clique que morreu antes do `emit`.
+
+        Sem estes tres eventos, "zero uso" e ambiguo: o botao nunca clicado e
+        o botao clicado e barrado no gate produzem o mesmo silencio, e o
+        segundo e o oposto de um candidato a aposentadoria.
+
+        A raiz do repo vem da janela quando a janela e a MainWindow. Em teste
+        de widget isolado ela nao e, e ai `source_kind` fica `unknown` -- que
+        e a resposta honesta, nao um defeito a contornar.
+        """
+        raiz = None
+        obter_raiz = getattr(self.window(), "_systemforge_root", None)
+        if callable(obter_raiz):
+            try:
+                raiz = obter_raiz()
+            except Exception:  # noqa: BLE001
+                raiz = None
+        brainstorm_telemetry.record_click_blocked(
+            reason=reason,
+            button_id=self._button_id,
+            testid_slug=self._testid_slug,
+            action=self._action,
+            requested_provider=self._button_type,
+            source_kind=brainstorm_telemetry.source_kind_for(self._prompt, raiz),
+        )
+
     def _on_clicked(self) -> None:
         """Ordem canonica: T7 (Codex gate) -> debounce -> confirmacao
         -> update ts -> emit.
@@ -851,13 +1040,16 @@ class MCPPromptButton(QPushButton):
             and not self._is_codex_alive_cached()
         ):
             self._block_codex_unavailable(reason="t3_missing")
+            self._registrar_bloqueio("codex_unavailable")
             return
         # Gate T6: debounce
         if self._is_debounced():
+            self._registrar_bloqueio("debounced")
             return
         # Gate T6: confirmacao re-clique
         md_path = getattr(self.window(), "_brainstorm_md_path", None)
         if not self._confirm_redispatch(md_path):
+            self._registrar_bloqueio("redispatch_declined")
             return
         # atomic-ish: janela de debounce comeca aqui, antes do emit, para
         # fechar re-entrancia caso slots conectados a prompt_requested
@@ -881,7 +1073,11 @@ class MCPPromptButton(QPushButton):
             values = modal.values()
             new_label = values["label"] or self._label
             self._set_label_text(new_label)
-            self._prompt = values["prompt"]
+            # `self._prompt` NAO e reatribuido aqui (D15, Task 31). Quando o
+            # botao vem de um seed, `_prompt` e o `Path` do arquivo, e a
+            # linha que existia neste ponto o trocava por uma string com o
+            # conteudo lido: dali em diante o botao despachava um texto
+            # congelado e deixava de acompanhar o seed no disco.
             self._agent_name = values["agent_name"] or None
             self._agent_path = values["agent_path"] or None
             new_target = values["target_path"] or None
@@ -891,7 +1087,30 @@ class MCPPromptButton(QPushButton):
                     pass
                 else:
                     self._target_path = new_target
+            self._refresh_tooltip()
         event.accept()
+
+    def _refresh_tooltip(self) -> None:
+        """Re-monta o tooltip depois de uma mutacao de estado exibido.
+
+        O tooltip e a UNICA superficie que mostra `label`, `action` e
+        `target` juntos. O modal do right-click reescreve tres desses
+        campos e, ate aqui, nao remontava nada: o operador trocava o
+        destino de `terminal-interactive-output` para `terminal-codex-
+        output`, aceitava, passava o mouse por cima e lia o destino
+        VELHO. A unica confirmacao visual que ele tem de que a edicao
+        pegou afirmava que nao pegou -- e o clique seguinte ia para o
+        destino novo. Errar dos dois lados: quem confia no tooltip
+        re-edita o que ja estava certo; quem nao confia perde o
+        tooltip como fonte.
+
+        Nao sobrescreve o aviso de Codex indisponivel (`_CODEX_TOAST_
+        SHORT`): naquele estado o botao esta desabilitado e o texto de
+        preview seria uma promessa falsa de que o clique despacha.
+        """
+        if self._button_type == "Codex" and not self._is_codex_alive_cached():
+            return
+        self.setToolTip(self._build_tooltip())
 
 
 # Standalone test runner

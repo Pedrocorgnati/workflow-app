@@ -305,7 +305,7 @@ def test_auto_loop_button_in_play_container_mirrors_queue_state(qapp):
     )
     assert btn.text() == ""
     assert btn.isCheckable()
-    assert btn.width() == btn.height() == 28
+    assert btn.width() == btn.height() == 32
     assert "#C2410C" in btn.styleSheet()
     assert not btn.isChecked(), "auto-loop nasce desligado (opt-in explicito)"
 

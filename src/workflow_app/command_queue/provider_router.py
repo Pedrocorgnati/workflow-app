@@ -220,16 +220,27 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
 
     REGIME UNICO (invariante 2 preservada — `main_llm` nao participa da
     decisao):
-      1. `spec.kind == "local-action"` -> CLAUDE (invariante 8: nunca a worker).
-      2. Diretiva `/clear` | `/model` | `/effort` -> CLAUDE (nao elegivel a
+      0. `is_prompt=True` -> CLAUDE (prompt simples, texto raw sem transformacoes)
+      1. `force_main_llm=True` -> CLAUDE (verde/T1), ignora workers
+      2. `spec.kind == "local-action"` -> CLAUDE (invariante 8: nunca a worker).
+      3. Diretiva `/clear` | `/model` | `/effort` -> CLAUDE (nao elegivel a
          worker por whitelist; equivale ao fallback da regra 7).
-      3. Nenhum worker ativo -> CLAUDE.
-      4. Kimi worker ativo E (kimi_eligible OU is_kimi_compatible) -> KIMI.
-      4b. Qwen worker ativo E a mesma elegibilidade T2 -> QWEN (apos Kimi, PW-02).
-      5. Codex worker ativo E is_codex_compatible -> CODEX.
-      5b. Grok worker ativo E is_codex_compatible -> GROK (apos Codex, PW-02).
-      6. Kimi e Codex elegiveis ao mesmo tempo -> Kimi vence (regra 4 precede a 5).
-      7. Sem elegibilidade worker -> CLAUDE.
+      4. Nenhum worker ativo -> CLAUDE.
+      5. Kimi worker ativo E (kimi_eligible OU is_kimi_compatible) -> KIMI.
+      5b. Qwen worker ativo E a mesma elegibilidade T2 -> QWEN (apos Kimi, PW-02).
+      6. Codex worker ativo E is_codex_compatible -> CODEX.
+      6b. Grok worker ativo E is_codex_compatible -> GROK (apos Codex, PW-02).
+      7. Kimi e Codex elegiveis ao mesmo tempo -> Kimi vence (regra 5 precede a 6).
+      8. Sem elegibilidade worker -> CLAUDE.
+
+    Prompts simples (`is_prompt=True`) sempre roteiam para T1 sem passar por
+    workers ou transformacoes de comando. Texto e enviado raw ao terminal
+    interactive, independente do Main LLM selecionado.
+
+    O campo `force_main_llm` (addicionar comando UI) sobrepoe as regras 5-8:
+      - Se `force_main_llm=True`, sempre retorna CLAUDE (verde/T1),
+        ignorando completamente workers elegiveis.
+      - Se `force_main_llm=False`, segue o fluxo normal acima (pode ir a worker).
 
     Quando o MESMO provider ocupa Main e Worker, o **worker vence**, sempre, sem
     condicionar a switch nenhum. Ate o item 006 do loop
@@ -241,11 +252,19 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
     contradizia ``ai-forge/rules/llm-routing-div.md``, que trata "avaliar o eixo
     Main antes do eixo Worker" como anti-pattern.
 
-    A ordem de avaliacao das regras 4/4b/5/5b/6/7 nao mudou com a revogacao.
+    A ordem de avaliacao das regras 5/5b/6/6b/7/8 nao mudou com a revogacao.
 
     Assume ``spec`` e ``state`` nao-None (contrato; entrada invalida e
     comportamento indefinido).
     """
+    # Regra 0: prompt simples -> CLAUDE (texto raw, sem transformacoes)
+    if spec.is_prompt:
+        return Provider.CLAUDE
+
+    # Regra 0b: force_main_llm sobrepoe o roteamento normal
+    if spec.force_main_llm:
+        return Provider.CLAUDE
+
     # Regra 1: local-action nunca vai para terminal worker.
     if spec.kind == "local-action":
         return Provider.CLAUDE
@@ -265,24 +284,24 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
         # Regra 3 legada: sem nenhum worker ativo, so existe o destino Claude/T1.
         return Provider.CLAUDE
 
-    # Regra 4 (+ 6): Kimi tem precedencia (familia T2). is_kimi_compatible OU
+    # Regra 5 (+ 7): Kimi tem precedencia (familia T2). is_kimi_compatible OU
     # o flag herdado kimi_eligible do item de loop ja basta.
     if state.kimi_worker_enabled and (spec.kimi_eligible or is_kimi_compatible(name)):
         return Provider.KIMI
 
-    # Regra 4b: Qwen worker (familia T2, apos Kimi — PW-02).
+    # Regra 5b: Qwen worker (familia T2, apos Kimi — PW-02).
     # Mesma elegibilidade que Kimi (kimi_eligible OU is_kimi_compatible).
     if state.qwen_worker_enabled and (spec.kimi_eligible or is_kimi_compatible(name)):
         return Provider.QWEN
 
-    # Regra 5: Codex (familia T3) so quando T2 nao venceu acima.
+    # Regra 6: Codex (familia T3) so quando T2 nao venceu acima.
     if state.codex_worker_enabled and is_codex_compatible(name):
         return Provider.CODEX
 
-    # Regra 5b: Grok worker (familia T3, apos Codex — PW-02).
+    # Regra 6b: Grok worker (familia T3, apos Codex — PW-02).
     # Mesma elegibilidade que Codex (is_codex_compatible).
     if state.grok_worker_enabled and is_codex_compatible(name):
         return Provider.GROK
 
-    # Regra 7: fallback.
+    # Regra 8: fallback.
     return Provider.CLAUDE

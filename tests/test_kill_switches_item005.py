@@ -187,7 +187,7 @@ _TE_COMMANDS_PROBE = '''import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
 from workflow_app.main_window import MainWindow
 
 app = QApplication.instance() or QApplication([])
@@ -197,6 +197,11 @@ commands = {
     for button in window.findChildren(QPushButton)
     if button.property("te_command")
 }
+for combo in window.findChildren(QComboBox):
+    for i in range(combo.count()):
+        data = combo.itemData(i)
+        if isinstance(data, dict) and data.get("te_command") and data.get("testid"):
+            commands[str(data["testid"])] = str(data["te_command"])
 print(json.dumps(commands, sort_keys=True))
 window.close()
 '''

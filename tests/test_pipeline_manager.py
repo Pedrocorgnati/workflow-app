@@ -290,3 +290,31 @@ def test_phase_trigger_pending_toast_includes_write_error(manager, mock_bus):
 
 def test_check_resume_returns_none_when_no_interrupted_pipelines(manager):
     assert manager.check_resume() is None
+
+
+def test_command_completed_passa_tokens_observados_ao_extras(manager):
+    """Task 33: elo 2 deixa de omitir tokens_in/out."""
+    extras = MagicMock()
+    manager.set_extras_orchestrator(extras)
+    manager.set_queue([_spec("/cmd-1"), _spec("/cmd-2")])
+    with patch("workflow_app.pipeline.pipeline_manager.ProcessRunner"):
+        manager.start(permission_mode="acceptEdits")
+        manager._output_buf = ['{"usage": {"input_tokens": 11, "output_tokens": 7}}']
+        exec_id = manager._current_command_exec_id
+        manager._on_command_completed(exec_id, True)
+    extras.on_command_completed.assert_called()
+    kwargs = extras.on_command_completed.call_args.kwargs
+    assert kwargs["tokens_in"] == 11
+    assert kwargs["tokens_out"] == 7
+
+
+def test_extras_exception_e_logada_nao_engolida(manager, caplog):
+    extras = MagicMock()
+    extras.on_command_completed.side_effect = RuntimeError("boom")
+    manager.set_extras_orchestrator(extras)
+    manager.set_queue([_spec("/cmd-1")])
+    with patch("workflow_app.pipeline.pipeline_manager.ProcessRunner"):
+        manager.start(permission_mode="acceptEdits")
+        exec_id = manager._current_command_exec_id
+        manager._on_command_completed(exec_id, True)
+    assert "on_command_completed falhou" in caplog.text

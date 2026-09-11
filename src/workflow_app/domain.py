@@ -194,6 +194,8 @@ class CommandSpec:
     kimi_eligible: bool = False                   # True if this spec came from a kimi_eligible loop item
     kind: Literal["slash", "local-action"] = "slash"  # Dispatch mode: external slash command vs in-process Python action
     local_action_id: Optional[str] = None         # Identifier into local-actions registry (only when kind=="local-action")
+    force_main_llm: bool = True                  # When True, forces CLAUDE (green arrow); when False, allows parallel workers (blue arrow)
+    is_prompt: bool = True                      # When True, sends text raw without command transformations (no /slash-executor, /skill:, etc.)
     flags_boolean: list[str] = field(default_factory=list)
     flags_with_value: list[FlagSpec] = field(default_factory=list)
     # Correlacao de loop (Task 15). None para todo comando fora de loop —

@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from workflow_app import brainstorm_telemetry
 from workflow_app.command_queue.add_command_dialog import AddCommandDialog
 from workflow_app.command_queue.command_queue_widget import (
     _SECTION_BTN_STYLE,
@@ -90,7 +91,7 @@ from workflow_app.config.feature_flags import (
 from workflow_app.delivery.lock_bridge import (
     _find_systemforge_root as _find_delivery_systemforge_root,
 )
-from workflow_app.domain import CommandSpec
+from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 from workflow_app.errors import ConfigError
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 from workflow_app.output_panel.output_panel import OutputPanel
@@ -108,13 +109,23 @@ from workflow_app.widgets.mcp_prompt_actions import append_public_context, build
 from workflow_app.widgets.mcp_prompt_button import (
     BUTTON_V_PADDING_PX,
     SEED_TARGET_TERMINAL_RUNTIME_SENTINEL,
-    VALID_ACTIONS,
     VALID_BUTTON_TYPES,
     VALID_TERMINALS,
     MCPPromptButton,
 )
 from workflow_app.widgets.toast_notifier import ToastNotifier
 from workflow_app.widgets.version_update_banner import VersionUpdateBanner
+
+# Contrato canonico de identidade dos seeds do brainstorm MCP
+from workflow_app.brainstorm_seed_contract import (
+    BRAINSTORM_SEEDS_RELDIR,
+    CANONICAL_SEED_FILENAMES,
+    resolve_seed_dir,
+    validate_persona_action,
+    extract_action_literal,
+    seed_prefix,
+    validate_action_literal,
+)
 
 if TYPE_CHECKING:  # import Qt-free: so entra na analise estatica de tipos
     from workflow_app.agent_integration_specs import McpAgentSpec
@@ -191,7 +202,100 @@ class HeterogeneousInsertionReport:
 
 
 class _BrainstormSeedError(ValueError):
-    """Seed invalido em blacksmith/brainstorm-mcp/0[1-9]-*.md."""
+    """Seed canonico invalido.
+
+    O local e a identidade dos seeds nao sao redeclarados aqui: sao
+    `BRAINSTORM_SEEDS_RELDIR` e `CANONICAL_SEED_FILENAMES` em
+    `workflow_app.brainstorm_seed_contract`. A versao anterior desta
+    docstring citava o glob `blacksmith/brainstorm-mcp/0[1-9]-*.md`, que
+    a migracao C3 (Task 08) tornou falso em dois eixos: os seeds desceram
+    para `seeds/` e a descoberta deixou de ser por prefixo.
+    """
+
+
+def _read_action_literal(seed_path: Path | str) -> str:
+    """Le o bloco `## Prompt canonico` de um seed em disco.
+
+    Mesmo gate que `_load_brainstorm_seed` aplica aos 24 canonicos --
+    extrai, recusa bloco ausente e recusa literal invalido -- mas para os
+    seeds SUPLEMENTARES, que chegam pelo registry declarativo e nao pelo
+    glob do diretorio canonico.
+
+    Existe porque o suplemento `search-prod` tinha corpo escrito, validado
+    por teste, e mesmo assim INERTE: `brainstorm_button_kwargs` nunca
+    extraia o literal, o payload saia sem a chave e `build_prompt` caia no
+    fallback generico de `ACTION_LITERALS["Otimizar"]` ("melhore este
+    arquivo"). O operador clicava um botao de investigacao de producao e o
+    modelo recebia um pedido de melhoria de texto -- sem coleta read-only,
+    sem mascaramento de credencial, sem nenhuma das restricoes do corpo.
+
+    A leitura mora AQUI, e nao no registry, de proposito:
+    `agent_integration_specs` promete pureza ("SEM tocar o filesystem") e
+    ha teste que o chama com `repo_root=tmp_path`, onde seed nenhum existe.
+
+    Raises:
+        ValueError: arquivo ilegivel, bloco ausente, duplicado ou invalido.
+            Quem chama ja degrada com toast visivel -- o botao suplementar
+            some e os 24 canonicos seguem de pe. Sumir e melhor que
+            despachar em silencio um prompt que nao e o do botao.
+    """
+    caminho = Path(seed_path)
+    try:
+        texto = caminho.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{caminho.name}: ilegivel ({exc})") from exc
+    try:
+        literal = extract_action_literal(texto)
+    except ValueError as exc:
+        raise ValueError(f"{caminho.name}: {exc}") from exc
+    if literal is None:
+        raise ValueError(f"{caminho.name}: bloco `## Prompt canonico` ausente")
+    recusa = validate_action_literal(literal)
+    if recusa is not None:
+        raise ValueError(f"{caminho.name}: {recusa}")
+    return literal
+
+
+def _check_supplemental_agent_path(agent_path: str, root: Path, rotulo: str) -> None:
+    """G6 sobre um seed SUPLEMENTAR, que nao passa pelo loader canonico.
+
+    Os 24 seeds da grade passam por `_load_one_brainstorm_seed`, que aplica G6
+    (agent_path sem TODO, existente e dentro do repo). Suplementos entram por
+    outro caminho -- registry declarativo + `brainstorm_button_kwargs` -- e nao
+    passavam por ele. `validate_repo_relative_md` valida o path LEXICALMENTE e
+    diz, no proprio docstring, que a existencia "e responsabilidade do caller":
+    este e o caller, e ate agora ele nao assumia.
+
+    A consequencia de nao checar nao e um crash: o botao nasce, o operador
+    clica, e o modelo recebe "seguindo as regras descritas em <path>" apontando
+    para um arquivo que nao existe. Ele segue mesmo assim, sem as regras --
+    falha silenciosa, que e o modo de falhar que Zero Silencio proibe.
+
+    **G7 (coerencia do par persona-action) fica de fora daqui, por decisao.**
+    Para os canonicos ele existe porque o gear edita persona e action em
+    campos separados do MESMO arquivo, e nada impede salvar um par
+    contraditorio. A spec suplementar nasce em Python
+    (`brainstorm_agent_specs()`), ja passa por `validate_action`, e o unico
+    suplemento real tem par coerente -- checado em
+    `tests/test_seed_body_invariants.py`. Ligar G7 aqui e uma decisao
+    separada, com blast radius proprio: a fixture `_spec()` da suite usa
+    persona `enricher` sob action `Revisar`, par que G7 recusa.
+
+    Raises:
+        ValueError: quem chama ja degrada com toast; o botao suplementar some
+            e os 24 canonicos seguem de pe.
+    """
+    if "TODO" in agent_path:
+        raise ValueError(f"{rotulo}: G6 violado: TODO em agent_path")
+    agent_abs = (root / agent_path).resolve()
+    if not agent_abs.is_file():
+        raise ValueError(f"{rotulo}: G6 violado: agent_path {agent_path} inexistente")
+    try:
+        agent_abs.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(
+            f"{rotulo}: G6 violado: agent_path {agent_path} fora do repo"
+        ) from exc
 
 
 # Mapping canonico slug->display do radio de provider runtime
@@ -1279,7 +1383,7 @@ class MainWindow(QMainWindow):
         self._auto_loop_btn = QPushButton()
         self._auto_loop_btn.setProperty("testid", "main-command-queue-auto-loop-btn")
         self._auto_loop_btn.setCheckable(True)
-        self._auto_loop_btn.setFixedSize(28, 28)
+        self._auto_loop_btn.setFixedSize(32, 32)
         self._auto_loop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._auto_loop_btn.setToolTip(
             "Auto-loop: quando o listener do T1 (interactive) fica verde e a fila "
@@ -1294,9 +1398,10 @@ class MainWindow(QMainWindow):
             self._auto_loop_btn.setIconSize(QSize(16, 16))
         self._auto_loop_btn.setStyleSheet(
             "QPushButton { background-color: #C2410C; border: 1px solid #EA580C;"
-            "  border-radius: 5px; padding: 4px; }"
+            "  border-radius: 5px; padding: 0; }"
             "QPushButton:hover { background-color: #9A3412; }"
             "QPushButton:checked { background-color: #C2410C; border-color: #F97316; }"
+            "QPushButton:focus { border-color: #FBBF24; }"
         )
         # Animacao de giro quando selecionado (tamanho fixo — sem pulso).
         self._auto_loop_rotation = 0
@@ -2418,6 +2523,10 @@ class MainWindow(QMainWindow):
              "description": "Atualiza o BD Hostinger do systemforge-dashboard"},
             {"label": "SF Deploy",       "path": "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
              "description": "Valida, commita e publica o systemforge-dashboard"},
+            {"label": "Corgly DB",       "path": "ai-forge/custom-prompts/prompts-subtab/corgly-db-update.md",
+             "description": "Atualiza o banco de produção do Corgly na Hostinger"},
+            {"label": "Corgly Deploy",   "path": "ai-forge/custom-prompts/prompts-subtab/corgly-hostinger-deploy.md",
+             "description": "Valida, commita e publica o Corgly na Hostinger"},
             {"label": "only commit",     "path": "ai-forge/custom-prompts/prompts-subtab/only-commit.md",
              "description": "Commit local sem push no repositório alvo"},
             {"label": "only push",       "path": "ai-forge/custom-prompts/prompts-subtab/only-push.md",
@@ -2701,12 +2810,12 @@ class MainWindow(QMainWindow):
 
     # Aba `brainstorm`: grade seed-driven (T2 loop
     # 05-21-implantation-tasklist-aba-brainstorm). Botoes MCPPromptButton
-    # carregados de blacksmith/brainstorm-mcp/NN-*.md.
+    # carregados de blacksmith/brainstorm-mcp/seeds/NN-*.md.
     # Constantes legacy (hardcoded col styles, row labels, agents map,
     # agents prompt dir, slot por cor) removidas em T2.
+    # Cardinalidade e diretorio sao importados do contrato canonico:
+    # CANONICAL_SEED_COUNT e BRAINSTORM_SEEDS_RELDIR.
 
-    _BRAINSTORM_SEEDS_RELDIR = "blacksmith/brainstorm-mcp"
-    _BRAINSTORM_SEED_COUNT = 24
     _BRAINSTORM_GRID_COLUMNS = 4
 
     @staticmethod
@@ -2716,179 +2825,415 @@ class MainWindow(QMainWindow):
 
     def _brainstorm_seeds_dir(self) -> Path:
         """Diretorio absoluto dos seeds da grade brainstorm."""
-        return self._systemforge_root() / self._BRAINSTORM_SEEDS_RELDIR
+        return resolve_seed_dir(self._systemforge_root())
 
-    def _load_brainstorm_seeds(self) -> list[dict]:
-        """Carrega e valida os seeds da grade brainstorm.
+    def _load_one_brainstorm_seed(self, path: Path, root: Path) -> dict:
+        """Le, valida e normaliza UM seed da grade brainstorm.
 
-        Glob `blacksmith/brainstorm-mcp/NN-*.md`, parse yaml frontmatter,
-        valida schema fechado + resolvability de agent_path (gate G6),
-        retorna lista ordenada por nome de arquivo.
+        Preserva integralmente os gates da carga anterior: teto de bytes,
+        frontmatter obrigatorio, `button_type`, `action`, `target_terminal` e
+        o gate G6 de `agent_path` (sem TODO, resolvivel e dentro do repo).
 
-        Raise `_BrainstormSeedError` em qualquer falha (fail-fast all-or-nothing).
-        Caller (`_build_brainstorm_page`) e responsavel pelo toast.
+        Raise `_BrainstormSeedError` prefixado pelo filename. O caller
+        (`_load_brainstorm_seeds`) converte a excecao em `issue` estruturada e
+        degrada APENAS este item, em vez de zerar a grade (C3, G5, A3).
         """
-        root = self._systemforge_root().resolve()
-        seeds_dir = self._brainstorm_seeds_dir()
-        if not seeds_dir.is_dir():
-            raise _BrainstormSeedError(
-                f"diretorio inexistente: {self._BRAINSTORM_SEEDS_RELDIR}"
-            )
-
-        # Hardening 2026-05-24: o diretorio brainstorm-mcp/ tambem hospeda os
-        # OUTPUTS da acao "Criar arquivo" (ex: 05-24-foot-stock-....md). O
-        # prefixo de data MM- colide com o glob NN-*.md e inflava len(paths)
-        # acima do esperado -> a politica fail-fast all-or-nothing fazia a grade INTEIRA
-        # sumir (root cause das duas sumiços observadas em 2026-05-24). Defesa:
-        # exigir slug ALFABETICO logo apos o prefixo NN- (^[0-9]{2}-[a-z]...), o que
-        # exclui nomes com data (NN-NN-...) sem tocar nos seeds reais (todos
-        # kebab-alpha: criar-md, search-in, controversial, ...).
-        _seed_name_re = re.compile(r"^[0-9]{2}-[a-z][a-z0-9-]*\.md$")
-        _all_numeric = sorted(seeds_dir.glob("[0-9][0-9]-*.md"))
-        paths = [p for p in _all_numeric if _seed_name_re.match(p.name)]
-        seed_count = getattr(
-            self, "_BRAINSTORM_SEED_COUNT", MainWindow._BRAINSTORM_SEED_COUNT,
-        )
-        if len(paths) != seed_count:
-            _ignored = [p.name for p in _all_numeric if p not in paths]
-            _hint = (
-                f"; ignorados por nao casarem NN-<slug-alpha>.md (provaveis "
-                f"outputs de 'Criar arquivo'): {_ignored}"
-                if _ignored
-                else ""
-            )
-            raise _BrainstormSeedError(
-                f"esperado exatamente {seed_count} seeds canonicos "
-                f"(NN-<slug>.md), "
-                f"encontrado {len(paths)}{_hint}"
-            )
-        expected_prefixes = [f"{i:02d}" for i in range(1, seed_count + 1)]
-        actual_prefixes = [p.name[:2] for p in paths]
-        if actual_prefixes != expected_prefixes:
-            raise _BrainstormSeedError(
-                f"esperado exatamente {seed_count} seeds canonicos "
-                f"com prefixos {expected_prefixes}; encontrado {actual_prefixes}"
-            )
-
-        loaded: list[dict] = []
-        for p in paths:
-            try:
-                if p.stat().st_size > _SEED_MAX_BYTES:
-                    raise _BrainstormSeedError(
-                        f"{p.name}: tamanho > {_SEED_MAX_BYTES} bytes"
-                    )
-                text = p.read_text(encoding="utf-8-sig")
-                m = re.match(r"^\s*---\n(.*?)\n---\n?", text, re.S)
-                raw = m.group(1) if m else text
-                data = yaml.safe_load(raw) or {}
-                if not isinstance(data, dict):
-                    raise _BrainstormSeedError(
-                        f"{p.name}: root yaml nao e mapping"
-                    )
-            except yaml.YAMLError as exc:
-                raise _BrainstormSeedError(f"{p.name}: yaml malformado: {exc}") from exc
-            except OSError as exc:
-                raise _BrainstormSeedError(f"{p.name}: erro de leitura: {exc}") from exc
-
-            missing = _SEED_REQUIRED_KEYS - data.keys()
-            if missing:
+        p = path
+        try:
+            if p.stat().st_size > _SEED_MAX_BYTES:
                 raise _BrainstormSeedError(
-                    f"{p.name}: campos obrigatorios ausentes: {sorted(missing)}"
+                    f"{p.name}: tamanho > {_SEED_MAX_BYTES} bytes"
                 )
+            text = p.read_text(encoding="utf-8-sig")
+            m = re.match(r"^\s*---\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)", text, re.S)
+            if m is None:
+                # O gate de "frontmatter obrigatorio" so existe se a ausencia
+                # dos delimitadores REPROVAR. O fallback anterior
+                # (`raw = text`) entregava o documento inteiro ao YAML: um
+                # arquivo sem `---` mas com as chaves certas era aceito como
+                # seed valido, e o gate era decorativo.
+                raise _BrainstormSeedError(
+                    f"{p.name}: frontmatter ausente (bloco `---` obrigatorio)"
+                )
+            data = yaml.safe_load(m.group(1)) or {}
+            if not isinstance(data, dict):
+                raise _BrainstormSeedError(
+                    f"{p.name}: root yaml nao e mapping"
+                )
+        except yaml.YAMLError as exc:
+            raise _BrainstormSeedError(f"{p.name}: yaml malformado: {exc}") from exc
+        except OSError as exc:
+            raise _BrainstormSeedError(f"{p.name}: erro de leitura: {exc}") from exc
 
-            slug = str(data["slug"]).strip()
-            button_type = str(data["button_type"]).strip()
-            action = str(data["action"]).strip()
-            agent_name = str(data["agent_name"]).strip()
-            agent_path = str(data["agent_path"]).strip()
+        missing = _SEED_REQUIRED_KEYS - data.keys()
+        if missing:
+            raise _BrainstormSeedError(
+                f"{p.name}: campos obrigatorios ausentes: {sorted(missing)}"
+            )
 
-            # Compat layer target_path: bool (seed) -> target_path_edit_inplace
-            #                          + target_terminal (string) -> terminal widget.
-            target_path_raw = data["target_path"]
-            target_path_edit_inplace = bool(target_path_raw) if isinstance(
-                target_path_raw, bool
-            ) else str(target_path_raw).strip().lower() in ("true", "1", "yes")
+        slug = str(data["slug"]).strip()
+        button_type = str(data["button_type"]).strip()
+        action = str(data["action"]).strip()
+        agent_name = str(data["agent_name"]).strip()
+        agent_path = str(data["agent_path"]).strip()
 
-            target_terminal = data.get("target_terminal")
-            if target_terminal == _SEED_TARGET_TERMINAL_RUNTIME_SENTINEL:
-                # Resolvido em runtime pelo radio (T3). Default Claude->T1.
-                target_terminal_resolved: str | None = None
+        # Compat layer target_path: bool (seed) -> target_path_edit_inplace
+        #                          + target_terminal (string) -> terminal widget.
+        target_path_raw = data["target_path"]
+        target_path_edit_inplace = bool(target_path_raw) if isinstance(
+            target_path_raw, bool
+        ) else str(target_path_raw).strip().lower() in ("true", "1", "yes")
+
+        target_terminal = data.get("target_terminal")
+        if target_terminal == _SEED_TARGET_TERMINAL_RUNTIME_SENTINEL:
+            # Resolvido em runtime pelo radio (T3). Default Claude->T1.
+            target_terminal_resolved: str | None = None
+        else:
+            target_terminal_resolved = (
+                str(target_terminal).strip() if target_terminal else None
+            )
+
+        if button_type not in VALID_BUTTON_TYPES:
+            raise _BrainstormSeedError(
+                f"{p.name}: button_type invalido: {button_type!r}"
+            )
+        # Task 29: gate de pertinencia a `VALID_ACTIONS` removido aqui pelo
+        # mesmo motivo do widget -- ele transformava toda action nova salva
+        # pelo gear editavel em botao que desaparece no rebuild seguinte. A
+        # forma continua exigida: action vazia nunca vira botao.
+        if not action.strip():
+            raise _BrainstormSeedError(f"{p.name}: action vazia")
+        if (
+            target_terminal_resolved is not None
+            and target_terminal_resolved not in VALID_TERMINALS
+        ):
+            raise _BrainstormSeedError(
+                f"{p.name}: target_terminal invalido: {target_terminal_resolved!r}"
+            )
+
+        # G6: agent_path obrigatorio, sem TODO, resolvivel e dentro do repo.
+        if "TODO" in agent_path or "TODO" in agent_name:
+            raise _BrainstormSeedError(
+                f"{p.name}: G6 violado: TODO em agent_name/agent_path"
+            )
+        agent_abs = (root / agent_path).resolve()
+        if not agent_abs.is_file():
+            raise _BrainstormSeedError(
+                f"{p.name}: G6 violado: agent_path {agent_path} inexistente"
+            )
+        try:
+            agent_abs.relative_to(root)
+        except ValueError as exc:
+            raise _BrainstormSeedError(
+                f"{p.name}: G6 violado: agent_path {agent_path} fora do repo"
+            ) from exc
+
+        # G7: coerencia do PAR persona-action (C6). Os gates acima julgam os
+        # dois lados isoladamente -- `agent_path` existe, `action` esta no
+        # vocabulario -- e passam num seed cuja persona contradiz a propria
+        # action. O gate roda aqui dentro, e nao no caller, para que um par
+        # incoerente vire `issue` de UM item e a grade continue carregando os
+        # outros 23 (C3, G5, A3).
+        incoerencia = validate_persona_action(agent_path, action)
+        if incoerencia is not None:
+            raise _BrainstormSeedError(f"{p.name}: G7 violado: {incoerencia}")
+
+        # Label canonico. Precedencia: campo `label` explicito (editavel
+        # pelo gear `brainstorm-mcp-config-dialog`) quando preenchido;
+        # senao deriva do `title` removendo o prefixo "Seed - Botao N - "
+        # (fix T021, regex que tolera espacos extras), conforme
+        # mcp-flow-implantation-base-archive.md §4 (labels: "Criar md",
+        # "search-in", "search-out", etc. - sem numero prefixo). O fallback
+        # tambem limpa labels legados que guardaram o title inteiro.
+        explicit_label = re.sub(
+            r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "",
+            str(data.get("label") or "").strip(),
+        ).strip()
+        if explicit_label:
+            canonical_label = explicit_label
+        else:
+            raw_title = str(data.get("title") or slug).strip()
+            canonical_label = re.sub(
+                r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
+            ).strip() or slug
+
+        # C2: o bloco `## Prompt canonico` do CORPO e o texto que sera
+        # despachado ao modelo no lugar de `{action}`. Presenca da chave, e
+        # nao truthiness, e o que distingue "seed manda o literal" de "caller
+        # sem seed usa ACTION_LITERALS": literal vazio nao chega aqui (o
+        # validador recusa), mas a regra de transporte e a mesma.
+        #
+        # Seed canonico SEM o bloco nao cai em fallback silencioso: viraria
+        # mascara de corrupcao justo quando o corpo virou a fonte. Vira
+        # `issue` deste item e a grade degrada so ele.
+        body = text[m.end():]
+        try:
+            literal = extract_action_literal(body)
+        except ValueError as exc:
+            raise _BrainstormSeedError(f"{p.name}: {exc}") from exc
+        if literal is None:
+            raise _BrainstormSeedError(
+                f"{p.name}: bloco `## Prompt canonico` ausente"
+            )
+        recusa = validate_action_literal(literal)
+        if recusa is not None:
+            raise _BrainstormSeedError(f"{p.name}: {recusa}")
+        literal_kv = {"action_literal": literal}
+
+        return {
+            "slug": slug,
+            "label": canonical_label,
+            "button_type": button_type,
+            "action": action,
+            "agent_name": agent_name,
+            "agent_path": agent_path,
+            "target_terminal": target_terminal_resolved,
+            "target_path_edit_inplace": target_path_edit_inplace,
+            "seed_path": p,
+            **literal_kv,
+        }
+
+    def _load_brainstorm_seeds(self) -> tuple[list[dict], list[dict]]:
+        """Carrega os seeds da grade brainstorm DEGRADANDO POR ITEM.
+
+        DESCOBERTA ABERTA + REGISTRO DE IDENTIDADE (Task 29). Sao DOIS
+        criterios com papeis diferentes, e confundi-los ja quebrou a grade
+        nas duas direcoes:
+
+        - A CARDINALIDADE e aberta: qualquer `NN-<slug>.md` bem formado
+          dentro de `seeds/` vira alvo, com `01..N` contiguo. Acrescentar um
+          seed 25 nao exige editar Python em repositorio nenhum.
+        - A IDENTIDADE continua vindo da tupla `CANONICAL_SEED_FILENAMES`
+          (dono unico: `brainstorm_seed_contract`), agora como REGISTRO, nao
+          como lista de alvos. E ela que faz remocao doer: com cardinalidade
+          puramente aberta, apagar `24-*.md` so faria N cair de 24 para 23,
+          sem uma linha de aviso.
+
+        Por que nao so prefixo: renomear `14-visual-design.md` para
+        `14-outra-coisa.md` mantem o prefixo `14` presente e a contiguidade
+        intacta. So a tupla percebe que um seed canonico sumiu.
+
+        Por que nao so membership: era o criterio ate a Task 29, e fechava a
+        grade em exatamente 24 nomes escritos a mao em dois repositorios.
+
+        A precedencia output-antes-de-seed vive em `seed_prefix`, no
+        contrato, e nao aqui: `MM-DD-slug.md` casa com a forma de seed
+        (colisao medida em disco em 2026-05-24, quando dois outputs salvos no
+        diretorio errado apagaram botoes da grade).
+
+        Politica C3 (Task 10 do loop 08-25-systemforge-analise-fluxo-brainstorm):
+        a carga antiga era fail-fast all-or-nothing e um unico seed corrompido
+        zerava a grade inteira. Agora nenhuma falha de item propaga excecao:
+        ela vira `issue` estruturada e os demais seeds continuam de pe.
+
+        Escopo da issue (`scope`), consumido por `_rebuild_brainstorm_grid`:
+
+        - `"item"`: um seed falhou. A grade e reconstruida degradada.
+        - `"global"`: a FONTE inteira e inviavel (diretorio ausente, falha na
+          descoberta). Devolver `([], [global])` nao significa "a grade agora
+          e vazia" e sim "nao ha carga confiavel"; o caller preserva a grade
+          anterior em vez de destrui-la contra uma leitura vazia.
+
+        Returns:
+            `(seeds, issues)`. O caller renderiza as issues numa superficie
+            visivel ao operador (Zero Silencio).
+        """
+        issues: list[dict] = []
+
+        # Barreira de degradacao da DESCOBERTA. Resolver a raiz e derivar o
+        # diretorio sao operacoes de IO: um OSError aqui subia ate
+        # `_build_brainstorm_page` e abortava a aba inteira, exatamente a
+        # falha que C3 existe para eliminar.
+        try:
+            root = self._systemforge_root().resolve()
+            seeds_dir = self._brainstorm_seeds_dir()
+            dir_ok = seeds_dir.is_dir()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("brainstorm_seed_discovery_failed")
+            return [], [{
+                "filename": BRAINSTORM_SEEDS_RELDIR,
+                "reason": f"descoberta do diretorio de seeds falhou: {exc}",
+                "scope": "global",
+            }]
+
+        if not dir_ok:
+            return [], [{
+                "filename": BRAINSTORM_SEEDS_RELDIR,
+                "reason": "diretorio inexistente",
+                "scope": "global",
+            }]
+
+        canonical = set(CANONICAL_SEED_FILENAMES)
+
+        # Task 29: descoberta ABERTA em `01..N`. Ate aqui o alvo era so a
+        # tupla canonica, e acrescentar um seed 25 exigia editar Python em
+        # DOIS repositorios. Agora `seeds/` e a fonte: qualquer `NN-<slug>.md`
+        # bem formado vira alvo, e a tupla canonica deixa de ser a lista de
+        # alvos para ser o REGISTRO DE IDENTIDADE -- e o que permite detectar
+        # remocao, que uma regra puramente aberta perde de vista.
+        try:
+            present = sorted(q.name for q in seeds_dir.glob("*.md"))
+        except OSError as exc:
+            logger.exception("brainstorm_seed_enumerate_failed")
+            issues.append({
+                "filename": BRAINSTORM_SEEDS_RELDIR,
+                "reason": f"enumeracao do diretorio falhou: {exc}",
+                "scope": "item",
+            })
+            present = []
+
+        # `seed_prefix` ja aplica a precedencia output-antes-de-seed: um
+        # `MM-DD-slug.md` salvo aqui por engano devolve None e cai em intruso.
+        descobertos: dict[str, int] = {}
+        intruders: list[str] = []
+        for name in present:
+            n = seed_prefix(name)
+            if n is None:
+                intruders.append(name)
             else:
-                target_terminal_resolved = (
-                    str(target_terminal).strip() if target_terminal else None
-                )
+                descobertos[name] = n
 
-            if button_type not in VALID_BUTTON_TYPES:
-                raise _BrainstormSeedError(
-                    f"{p.name}: button_type invalido: {button_type!r}"
-                )
-            if action not in VALID_ACTIONS:
-                raise _BrainstormSeedError(
-                    f"{p.name}: action invalida: {action!r}"
-                )
-            if (
-                target_terminal_resolved is not None
-                and target_terminal_resolved not in VALID_TERMINALS
-            ):
-                raise _BrainstormSeedError(
-                    f"{p.name}: target_terminal invalido: {target_terminal_resolved!r}"
-                )
-
-            # G6: agent_path obrigatorio, sem TODO, resolvivel e dentro do repo.
-            if "TODO" in agent_path or "TODO" in agent_name:
-                raise _BrainstormSeedError(
-                    f"{p.name}: G6 violado: TODO em agent_name/agent_path"
-                )
-            agent_abs = (root / agent_path).resolve()
-            if not agent_abs.is_file():
-                raise _BrainstormSeedError(
-                    f"{p.name}: G6 violado: agent_path {agent_path} inexistente"
-                )
-            try:
-                agent_abs.relative_to(root)
-            except ValueError as exc:
-                raise _BrainstormSeedError(
-                    f"{p.name}: G6 violado: agent_path {agent_path} fora do repo"
-                ) from exc
-
-            # Label canonico. Precedencia: campo `label` explicito (editavel
-            # pelo gear `brainstorm-mcp-config-dialog`) quando preenchido;
-            # senao deriva do `title` removendo o prefixo "Seed - Botao N - "
-            # (fix T021, regex que tolera espacos extras), conforme
-            # mcp-flow-implantation-base-archive.md §4 (labels: "Criar md",
-            # "search-in", "search-out", etc. - sem numero prefixo). O fallback
-            # tambem limpa labels legados que guardaram o title inteiro.
-            explicit_label = re.sub(
-                r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "",
-                str(data.get("label") or "").strip(),
-            ).strip()
-            if explicit_label:
-                canonical_label = explicit_label
-            else:
-                raw_title = str(data.get("title") or slug).strip()
-                canonical_label = re.sub(
-                    r"^Seed\s*-\s*Botao\s*\d+\s*-\s*", "", raw_title
-                ).strip() or slug
-
-            loaded.append({
-                "slug": slug,
-                "label": canonical_label,
-                "button_type": button_type,
-                "action": action,
-                "agent_name": agent_name,
-                "agent_path": agent_path,
-                "target_terminal": target_terminal_resolved,
-                "target_path_edit_inplace": target_path_edit_inplace,
-                "seed_path": p,
+        if intruders:
+            issues.append({
+                "filename": ", ".join(intruders),
+                "reason": (
+                    "ignorado: nao tem forma de seed NN-<slug>.md (provavel "
+                    "output de 'Criar arquivo' no diretorio de seeds)"
+                ),
+                "scope": "item",
             })
 
-        # Garantia final: slugs unicos.
-        slugs = [s["slug"] for s in loaded]
-        if len(set(slugs)) != seed_count:
-            raise _BrainstormSeedError(
-                f"slugs nao unicos: {slugs}"
-            )
-        return loaded
+        # Contiguidade `01..N`: buraco na sequencia e sinal de seed removido
+        # ou renomeado, nao de numeracao esparsa deliberada.
+        #
+        # Um buraco que a tupla canonica JA explica nao vira issue aqui: a
+        # ausencia do canonico e reportada logo abaixo pelo NOME do arquivo,
+        # que e o diagnostico melhor. Reportar os dois transformaria toda
+        # remocao de canonico em ruido duplo e obrigaria quem le a cruzar
+        # prefixo com nome na mao. Este aviso fica, entao, para o unico caso
+        # que a tupla nao cobre: sumir com um seed de fora dela.
+        prefixos_canonicos_ausentes = {
+            seed_prefix(n) for n in CANONICAL_SEED_FILENAMES if n not in descobertos
+        }
+        numeros = set(descobertos.values())
+        if numeros:
+            faltando = [
+                i
+                for i in range(1, max(numeros) + 1)
+                if i not in numeros and i not in prefixos_canonicos_ausentes
+            ]
+            if faltando:
+                issues.append({
+                    "filename": BRAINSTORM_SEEDS_RELDIR,
+                    "reason": (
+                        "sequencia 01..N com buraco; prefixos faltando: "
+                        + ", ".join(f"{i:02d}" for i in faltando)
+                    ),
+                    "scope": "item",
+                })
+
+        # Alvos: canonicos NA ORDEM DO CONTRATO primeiro (a grade nao pode
+        # reordenar botoes por causa de um seed novo), depois os descobertos
+        # fora da tupla, por prefixo.
+        extras = [n for _, n in sorted(
+            (v, k) for k, v in descobertos.items() if k not in canonical
+        )]
+
+        paths: list[Path] = []
+        for name in CANONICAL_SEED_FILENAMES:
+            candidate = seeds_dir / name
+            try:
+                is_file = candidate.is_file()
+            except OSError as exc:
+                issues.append({
+                    "filename": name,
+                    "reason": f"erro ao inspecionar: {exc}",
+                    "scope": "item",
+                })
+                continue
+            if is_file:
+                paths.append(candidate)
+            else:
+                # DETECCAO DE REMOCAO. Com cardinalidade aberta, apagar o
+                # ultimo seed so faria N cair -- carga silenciosa com N-1.
+                # A tupla canonica e o que impede isso; por isso ela nao pode
+                # ser aposentada junto com a cardinalidade fechada.
+                issues.append({
+                    "filename": name,
+                    "reason": (
+                        f"seed canonico ausente em {BRAINSTORM_SEEDS_RELDIR}"
+                    ),
+                    "scope": "item",
+                })
+        paths.extend(seeds_dir / n for n in extras)
+
+        loaded: list[dict] = []
+        seen_slugs: set[str] = set()
+        for p in paths:
+            try:
+                seed = self._load_one_brainstorm_seed(p, root)
+            except _BrainstormSeedError as exc:
+                issues.append({
+                    "filename": p.name, "reason": str(exc), "scope": "item",
+                })
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # Zero Silencio: qualquer falha inesperada degrada o item, nunca
+                # a grade. O motivo fica visivel em vez de virar stack morto.
+                logger.exception("brainstorm_seed_load_unexpected: %s", p.name)
+                issues.append({
+                    "filename": p.name,
+                    "reason": f"falha inesperada: {exc}",
+                    "scope": "item",
+                })
+                continue
+            if seed["slug"] in seen_slugs:
+                issues.append({
+                    "filename": p.name,
+                    "reason": f"slug duplicado, seed ignorado: {seed['slug']!r}",
+                    "scope": "item",
+                })
+                continue
+            seen_slugs.add(seed["slug"])
+            loaded.append(seed)
+
+        return loaded, issues
+
+    def _apply_brainstorm_seed_issues(self, issues: list[dict]) -> None:
+        """Publica as `issues` da carga de seeds numa superficie visivel.
+
+        Duas superficies (Zero Silencio): o rodape `brainstorm-seed-issues` da
+        propria aba (persistente, com tooltip item a item) e um toast agregado
+        (transitorio). Lista vazia esconde o rodape.
+        """
+        self._brainstorm_seed_issues = list(issues)
+        label = getattr(self, "_brainstorm_issues_label", None)
+        if label is not None:
+            if issues:
+                label.setText(
+                    f"{len(issues)} seed(s) com problema - grade degradada"
+                )
+                label.setToolTip(
+                    "\n".join(
+                        f"{i['filename']}: {i['reason']}" for i in issues
+                    )
+                )
+                label.setVisible(True)
+            else:
+                label.setText("")
+                label.setToolTip("")
+                label.setVisible(False)
+        if not issues:
+            return
+        head = "; ".join(
+            f"{i['filename']}: {i['reason']}" for i in issues[:3]
+        )
+        extra = f" (+{len(issues) - 3})" if len(issues) > 3 else ""
+        signal_bus.toast_requested.emit(
+            f"Grade brainstorm degradada - {len(issues)} seed(s) com problema: "
+            f"{head}{extra}",
+            "warning",
+        )
 
     def _rel_to_root(self, abs_path: str) -> str:
         """Converte um path absoluto para relativo a raiz do SystemForge.
@@ -3621,8 +3966,8 @@ class MainWindow(QMainWindow):
                 "QTabBar { background: transparent; }"
                 "QTabBar::tab { background: #27272A; color: #A1A1AA;"
                 "  border: none; border-radius: 3px;"
-                "  padding: 2px 7px; font-size: 9px; font-weight: 700;"
-                "  letter-spacing: 0.4px; margin-right: 2px; }"
+                "  padding: 3px 9px; font-size: 9px; font-weight: 700;"
+                "  letter-spacing: 0.4px; margin-right: 3px; }"
                 "QTabBar::tab:selected { background: #8B5CF6; color: #FAFAFA; }"
                 "QTabBar::tab:hover:!selected { background: #3F3F46; color: #D4D4D8; }"
             )
@@ -3631,7 +3976,6 @@ class MainWindow(QMainWindow):
                 _mcp_pf_bar.addTab(_cat)
             _mcp_pf_bar.currentChanged.connect(self._on_mcp_personas_filter_changed)
             self._mcp_persona_filter_bar = _mcp_pf_bar
-            mcps_layout.addWidget(_mcp_pf_bar)
 
         mcps_layout.addWidget(persona_row)
 
@@ -3653,8 +3997,9 @@ class MainWindow(QMainWindow):
         # Item 005 (C26): o kill-switch em questao passou a ser o dedicado
         # `SF_MCP_THINK_EXEC_V2` — o gate foi MOVIDO do global
         # `SF_LLM_CONFIG_V2`, nao duplicado. Ausente/off = caminho legado
-        # Main MCP / Parallel / Dual; "1" = matriz `_TE_COMMANDS` (5 pastilhas
-        # Thinking + 5 Execution, iguais as colunas de `queue-div-flag`).
+        # Main MCP / Parallel / Dual; "1" = matriz `_TE_COMMANDS` (select
+        # Thinking + select Execution, mesmas alternativas das colunas de
+        # `queue-div-flag`).
         action_row = QWidget()
         action_row.setProperty("testid", "output-mcp-action-row")
         action_row.setStyleSheet("background: transparent; border: none;")
@@ -3666,33 +4011,25 @@ class MainWindow(QMainWindow):
         action_layout.setSpacing(6)
         action_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
 
-        _te_btn_style = (
-            "QPushButton { background-color: #334155; color: #FAFAFA;"
+        _te_combo_style = (
+            "QComboBox { background-color: #334155; color: #FAFAFA;"
             "  border: 1px solid #475569; border-radius: 5px;"
-            "  font-size: 10px; font-weight: 800; padding: 1px 8px; }"
-            "QPushButton:hover { background-color: #3F4F66; border-color: #64748B; }"
-            "QPushButton:pressed { background-color: #FBBF24; color: #18181B;"
-            "  border-color: #FBBF24; }"
-            "QPushButton:disabled { color: #71717A; border-color: #3F3F46;"
-            "  background-color: #27272A; }"
+            "  font-size: 10px; font-weight: 800; padding: 3px 8px; }"
+            "QComboBox:hover { background-color: #3F4F66; border-color: #64748B; }"
+            "QComboBox:focus { border-color: #FBBF24; }"
+            "QComboBox::drop-down { border: none; width: 16px; }"
+            "QComboBox QAbstractItemView { background-color: #334155;"
+            "  color: #FAFAFA; border: 1px solid #475569;"
+            "  selection-background-color: #3F4F66; font-size: 10px;"
+            "  font-weight: 800; padding: 2px; }"
         )
+        _TE_SELECT_WIDTH = 118
+        _TE_SELECT_HEIGHT = 22
         # Mesmo QSS de label de `queue-div-main-llm`: 11px/#A1A1AA, label em cima.
         _te_label_style = (
             "QLabel { color: #A1A1AA; font-size: 11px; font-weight: 700;"
             "  background: transparent; border: none; }"
         )
-
-        def _make_te_btn(label: str, testid: str, command: str,
-                         tooltip: str = "", enabled: bool = True) -> QPushButton:
-            btn = QPushButton(label)
-            btn.setProperty("testid", testid)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setProperty("action_id", testid)
-            btn.setProperty("te_command", command)
-            btn.setToolTip(tooltip or command)
-            btn.setEnabled(enabled)
-            btn.setStyleSheet(_te_btn_style)
-            return btn
 
         def _on_te_action(testid: str) -> None:
             command = _TE_COMMANDS.get(testid, "")
@@ -3700,7 +4037,7 @@ class MainWindow(QMainWindow):
                 self._publish_to_terminal(_compose_mcp_text(command))
 
         if mcp_think_exec_v2_enabled():
-            # TE-01: matriz fixa por botao, independente do Main LLM.
+            # TE-01: matriz fixa por alternativa do select, independente do Main LLM.
             _TE_COMMANDS: dict[str, str] = {
                 "output-mcp-action-thinking-fable": "/mcp:fable",
                 "output-mcp-action-thinking-opus": "/mcp:claude-ultra",
@@ -3717,7 +4054,7 @@ class MainWindow(QMainWindow):
             def _make_te_column(
                 testid: str, title: str, items: tuple[tuple[str, str, str], ...]
             ) -> QWidget:
-                """Coluna no estilo `queue-div-main-llm`: label em cima, botoes embaixo."""
+                """Grupo no estilo `queue-div-main-llm`: label em cima, select embaixo."""
                 group = QWidget()
                 group.setProperty("testid", testid)
                 group.setStyleSheet("background: transparent; border: none;")
@@ -3731,18 +4068,43 @@ class MainWindow(QMainWindow):
                 lbl = QLabel(title)
                 lbl.setStyleSheet(_te_label_style)
                 lay.addWidget(lbl)
-                options = QWidget()
-                options.setStyleSheet("background: transparent; border: none;")
-                opt_lay = QVBoxLayout(options)
-                opt_lay.setContentsMargins(0, 0, 0, 0)
-                opt_lay.setSpacing(7)
-                for btn_label, tid, cmd in items:
-                    btn = _make_te_btn(btn_label, tid, cmd)
-                    btn.clicked.connect(
-                        lambda _c=False, t=tid: _on_te_action(t)
+                combo = QComboBox()
+                combo.setProperty("testid", f"{testid}-select")
+                combo.setCursor(Qt.CursorShape.PointingHandCursor)
+                combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                combo.setAccessibleName(title)
+                combo.setToolTip(title)
+                combo.setStyleSheet(_te_combo_style)
+                combo.setFixedHeight(_TE_SELECT_HEIGHT)
+                combo.setFixedWidth(_TE_SELECT_WIDTH)
+                combo.setSizeAdjustPolicy(
+                    QComboBox.SizeAdjustPolicy.AdjustToContents
+                )
+                combo.view().setMinimumWidth(_TE_SELECT_WIDTH)
+                combo.setMaxVisibleItems(max(len(items), 1))
+                te_commands: dict[str, str] = {}
+                for item_label, tid, cmd in items:
+                    combo.addItem(item_label)
+                    combo.setItemData(
+                        combo.count() - 1,
+                        {"testid": tid, "te_command": cmd},
                     )
-                    opt_lay.addWidget(btn)
-                lay.addWidget(options)
+                    te_commands[tid] = cmd
+                combo.setProperty("te_commands", te_commands)
+                combo.setProperty(
+                    "action_item_testids",
+                    [tid for _label, tid, _cmd in items],
+                )
+
+                def _on_te_activated(_text: str = "", *, c=combo) -> None:
+                    data = c.itemData(c.currentIndex())
+                    tid = ""
+                    if isinstance(data, dict):
+                        tid = str(data.get("testid") or "")
+                    _on_te_action(tid)
+
+                combo.textActivated.connect(_on_te_activated)
+                lay.addWidget(combo)
                 return group
 
             # Grupo Thinking — mesma ordem da coluna thinking de queue-div-flag.
@@ -3783,6 +4145,13 @@ class MainWindow(QMainWindow):
 
             action_layout.addWidget(_thinking_group)
             action_layout.addWidget(_exec_group)
+            pair_w = max(
+                _thinking_group.sizeHint().width(),
+                _exec_group.sizeHint().width(),
+                _TE_SELECT_WIDTH,
+            )
+            _thinking_group.setMinimumWidth(pair_w)
+            _exec_group.setMinimumWidth(pair_w)
             self._mcp_action_buttons = []
         else:
             # Legado: Main MCP / Parallel / Dual (kill-switch off, G3).
@@ -3827,14 +4196,36 @@ class MainWindow(QMainWindow):
 
         _enable_height_for_width(mcps_page)
         col_layout.addWidget(mcps_page, stretch=1)
-        if mcp_think_exec_v2_enabled():
-            col_layout.addWidget(
-                action_row,
-                alignment=(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
-                ),
-            )
-        else:
+        # Header da secao MCPs: filtro de personas a esquerda, selects
+        # Thinking/Execution a direita, na mesma row. Evita a coluna morta
+        # que os selects deixavam ao lado da grade de checkboxes.
+        _filter_bar = getattr(self, "_mcp_persona_filter_bar", None)
+        _te_in_header = mcp_think_exec_v2_enabled()
+        if _filter_bar is not None or _te_in_header:
+            _mcp_header = QWidget()
+            _mcp_header.setProperty("testid", "output-mcp-header-row")
+            _mcp_header.setStyleSheet("background: transparent; border: none;")
+            _mcp_header_lay = QHBoxLayout(_mcp_header)
+            _mcp_header_lay.setContentsMargins(0, 0, 0, 0)
+            _mcp_header_lay.setSpacing(8)
+            if _filter_bar is not None:
+                _mcp_header_lay.addWidget(
+                    _filter_bar,
+                    stretch=1,
+                    alignment=Qt.AlignmentFlag.AlignBottom,
+                )
+            else:
+                _mcp_header_lay.addStretch(1)
+            if _te_in_header:
+                _mcp_header_lay.addWidget(
+                    action_row,
+                    alignment=(
+                        Qt.AlignmentFlag.AlignRight
+                        | Qt.AlignmentFlag.AlignBottom
+                    ),
+                )
+            mcps_layout.insertWidget(0, _mcp_header)
+        if not _te_in_header:
             mcps_layout.addWidget(action_row)
 
         # Secao BRAINSTORM: picker .md + grade seed-driven. Mesma moldura visual
@@ -3906,10 +4297,43 @@ class MainWindow(QMainWindow):
 
         return column, brainstorm_column
 
+    # As abas `corgly`/`corgly2` listam todo Markdown valido em
+    # `.claude/commands/corgly/`, inclusive change-vocabulary-order,
+    # enrich-vocabulary, clean-progress e corgly2-*. cmd/mcp/tools ficam fora
+    # dessa superficie.
+    _CORGLY_COMMAND_TABS_EXCLUDED_COMMANDS = frozenset({
+        "cmd/autocast-put.md",
+        "mcp/codex.md",
+        "mcp/grok.md",
+        "mcp/kimi.md",
+        "tools/auq-interview.md",
+    })
+    # Fila `corgly2-all` → `queue-command-list`. Ordem congelada do operador.
+    _CORGLY2_ALL_QUEUE: tuple[str, ...] = (
+        "/corgly:corgly2-divide-vocabulary",
+        "/clear",
+        "/corgly:corgly2-put-false-friends",
+        "/clear",
+        "/corgly:corgly2-optimize-phrases",
+        "/clear",
+    )
+
     @staticmethod
     def _corgly_commands_root() -> Path:
         """Canonical parent-owned Corgly command directory."""
         return _SYSTEMFORGE_PATH / ".claude" / "commands" / "corgly"
+
+    @staticmethod
+    def _corgly_data_root() -> Path:
+        """Pedagogical data root (corgly-classes nested under the desktop workspace)."""
+        return (
+            _SYSTEMFORGE_PATH / "corgly" / "corgly-desktop" / "corgly-classes"
+        )
+
+    @staticmethod
+    def _corgly_classes_rel() -> str:
+        """Path of corgly-classes relative to the SystemForge root."""
+        return "corgly/corgly-desktop/corgly-classes"
 
     @staticmethod
     def _corgly_class_sort_key(filename: str) -> tuple[tuple[int, int | str], ...]:
@@ -3918,6 +4342,41 @@ class MainWindow(QMainWindow):
             (0, int(part)) if part.isdigit() else (1, part.casefold())
             for part in re.split(r"(\d+)", filename)
         )
+
+    def _corgly2_all_specs(self) -> list[CommandSpec]:
+        """Specs da cadeia Corgly 2.0, na ordem pedida (comando, /clear, ...)."""
+        specs: list[CommandSpec] = []
+        for position, name in enumerate(self._CORGLY2_ALL_QUEUE, start=1):
+            specs.append(
+                CommandSpec(
+                    name=name,
+                    model=ModelName.OPUS,
+                    interaction_type=InteractionType.AUTO,
+                    position=position,
+                    effort=EffortLevel.HIGH,
+                    config_path="",
+                )
+            )
+        return specs
+
+    def _enqueue_corgly2_all(self) -> None:
+        """Renderiza a cadeia Corgly 2.0 em `queue-command-list`."""
+        signal_bus.pipeline_ready.emit(self._corgly2_all_specs())
+
+    def _make_corgly2_all_button(self) -> QPushButton:
+        """Botão de fila, não inserção: mesma div dos comandos Corgly 2.0."""
+        btn = QPushButton("CORGLY2 ALL")
+        btn.setProperty("testid", "output-btn-corgly-corgly2-all")
+        btn.setProperty("corgly_pipeline", True)
+        btn.setProperty("corgly_accepts_class", False)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(_SECTION_BTN_STYLE)
+        btn.setToolTip(
+            "Enfileira em queue-command-list, nesta ordem:\n"
+            + "\n".join(self._CORGLY2_ALL_QUEUE)
+        )
+        btn.clicked.connect(lambda _checked=False: self._enqueue_corgly2_all())
+        return btn
 
     def _corgly_command_with_selected_class(
         self, slash: str, *, accepts_class: bool
@@ -4004,6 +4463,32 @@ class MainWindow(QMainWindow):
         summary = re.sub(r"\s+", " ", summary).strip()
         return f"{title}. {summary}" if summary else title
 
+    @staticmethod
+    def _make_corgly_command_page(
+        *, page_testid: str, flow_testid: str
+    ) -> tuple[QWidget, ResponsiveButtonFlowLayout, QWidget]:
+        """Uma sub-aba de botoes de comando Corgly (`corgly` ou `corgly2`).
+
+        Devolve a pagina, o flow onde os botoes entram e o host do flow (que o
+        `eventFilter` vigia para recalcular a altura da secao).
+        """
+        page = QWidget()
+        page.setProperty("testid", page_testid)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 2, 0, 2)
+        page_layout.setSpacing(2)
+        flow_host = QWidget()
+        flow_host.setProperty("testid", flow_testid)
+        flow = ResponsiveButtonFlowLayout(
+            flow_host, spacing=4, v_spacing=1, max_lines=None
+        )
+        flow.setContentsMargins(0, 0, 0, 0)
+        _enable_height_for_width(flow_host)
+        _enable_height_for_width(page)
+        page_layout.addWidget(flow_host)
+        page_layout.addStretch(1)
+        return page, flow, flow_host
+
     def _build_corgly_column(self) -> QWidget:
         """Build the dynamic Corgly catalog without executing any command.
 
@@ -4023,23 +4508,16 @@ class MainWindow(QMainWindow):
         col_layout.setSpacing(4)
 
         command_root = self._corgly_commands_root()
-        corgly_root = command_root.parents[2] / "corgly-classes"
+        corgly_root = self._corgly_data_root()
         invalid: list[str] = []
         command_files: list[Path] = []
-        excluded_commands = {
-            "cmd/autocast-put.md",
-            "mcp/codex.md",
-            "mcp/grok.md",
-            "mcp/kimi.md",
-            "tools/auq-interview.md",
-        }
         if command_root.is_dir():
             command_files = sorted(
                 path
                 for path in command_root.rglob("*.md")
                 if "_shared" not in path.relative_to(command_root).parts
                 and path.relative_to(command_root).as_posix()
-                not in excluded_commands
+                not in self._CORGLY_COMMAND_TABS_EXCLUDED_COMMANDS
             )
         else:
             invalid.append(f"raiz ausente: {command_root}")
@@ -4057,23 +4535,25 @@ class MainWindow(QMainWindow):
             "QTabBar::tab:hover:!selected { background: #2D2D30; color: #D4D4D8; }"
         )
 
-        classes_page = QWidget()
-        classes_page.setProperty(
-            "testid", "output-toolbar-corgly-subtab-classes"
+        # Os comandos de curso ocupam DUAS sub-abas irmas: `corgly` (curso
+        # legado de 100 aulas) e `corgly2` (curso redesenhado de 300 aulas).
+        # A particao e o prefixo `corgly2-` do arquivo do comando — mesmo
+        # criterio que ja separava o bloco 2.0 dentro da aba `classes`.
+        corgly_page, flow, flow_host = self._make_corgly_command_page(
+            page_testid="output-toolbar-corgly-subtab-corgly",
+            flow_testid="output-toolbar-corgly-flow",
         )
-        classes_layout = QVBoxLayout(classes_page)
-        classes_layout.setContentsMargins(0, 2, 0, 2)
-        classes_layout.setSpacing(2)
-        flow_host = QWidget()
-        flow_host.setProperty("testid", "output-toolbar-corgly-flow")
-        flow = ResponsiveButtonFlowLayout(
-            flow_host, spacing=4, v_spacing=1, max_lines=None
+        corgly2_page, corgly2_flow, corgly2_flow_host = (
+            self._make_corgly_command_page(
+                page_testid="output-toolbar-corgly-subtab-corgly2",
+                flow_testid="output-toolbar-corgly2-flow",
+            )
         )
-        flow.setContentsMargins(0, 0, 0, 0)
-        _enable_height_for_width(flow_host)
-        _enable_height_for_width(classes_page)
 
         self._corgly_buttons: list[QPushButton] = []
+        self._corgly2_buttons: list[QPushButton] = []
+        all_btn = self._make_corgly2_all_button()
+        self._corgly2_all_button = all_btn
         for command_file in command_files:
             rel = command_file.relative_to(command_root)
             try:
@@ -4119,8 +4599,15 @@ class MainWindow(QMainWindow):
                     )
                 )
             )
-            flow.addWidget(btn)
+            if testid_suffix.startswith("corgly2-"):
+                corgly2_flow.addWidget(btn)
+                self._corgly2_buttons.append(btn)
+            else:
+                flow.addWidget(btn)
             self._corgly_buttons.append(btn)
+
+        # A cadeia `CORGLY2 ALL` fecha a aba 2.0, depois dos comandos dela.
+        corgly2_flow.addWidget(all_btn)
 
         selector_host = QWidget()
         selector_host.setProperty("testid", "output-toolbar-corgly-class-selector")
@@ -4175,11 +4662,8 @@ class MainWindow(QMainWindow):
         self._corgly_empty_label = empty
         self._corgly_error_label = error
 
-        classes_layout.addWidget(flow_host)
-        classes_layout.addWidget(empty)
-        classes_layout.addWidget(error)
-        classes_layout.addStretch(1)
-        tabs.addTab(classes_page, "classes")
+        tabs.addTab(corgly_page, "corgly")
+        tabs.addTab(corgly2_page, "corgly2")
 
         strategy_page = QWidget()
         strategy_page.setProperty(
@@ -4236,7 +4720,7 @@ class MainWindow(QMainWindow):
         for label, relative_path, description in strategy_specs:
             if not (corgly_root / relative_path).is_file():
                 continue
-            full_path = f"corgly-classes/{relative_path}"
+            full_path = f"{self._corgly_classes_rel()}/{relative_path}"
             testid_suffix = re.sub(
                 r"[^a-z0-9]+", "-", relative_path.casefold()
             ).strip("-")
@@ -4271,7 +4755,7 @@ class MainWindow(QMainWindow):
                 ).strip("-")
                 btn = self._make_corgly_path_button(
                     label=label,
-                    path=f"corgly-classes/{relative_path}",
+                    path=f"{self._corgly_classes_rel()}/{relative_path}",
                     testid=f"output-btn-corgly-rule-{testid_suffix}",
                     description=self._corgly_file_description(rule_file),
                 )
@@ -4281,9 +4765,15 @@ class MainWindow(QMainWindow):
 
         self._corgly_subtabs = tabs
         col_layout.addWidget(tabs)
+        # Vazio e catalogo parcial descrevem o catalogo INTEIRO, entao moram no
+        # rodape da coluna: com os estados presos a uma sub-aba, um erro de
+        # parse em `corgly2-*` ficaria invisivel para quem esta na aba `corgly`.
+        col_layout.addWidget(empty)
+        col_layout.addWidget(error)
         self._flow_section_pages[_TOOLBAR_SECTION_CORGLY] = (column, column)
         column.installEventFilter(self)
         flow_host.installEventFilter(self)
+        corgly2_flow_host.installEventFilter(self)
         strategy_page.installEventFilter(self)
         rules_page.installEventFilter(self)
         tabs.currentChanged.connect(lambda _index: self._sync_flow_section_height())
@@ -4551,18 +5041,30 @@ class MainWindow(QMainWindow):
                 # Codex exige terminal-codex-output (regra do widget).
                 if seed["button_type"] == "Codex":
                     target_terminal = "terminal-codex-output"
+                kwargs = {
+                    "label": seed["label"],
+                    "button_type": seed["button_type"],
+                    "prompt": seed["seed_path"],
+                    "agent_name": seed["agent_name"],
+                    "agent_path": seed["agent_path"],
+                    "action": seed["action"],
+                    "target_path": target_terminal,
+                    "testid_slug": seed["slug"],
+                    "target_path_edit_inplace": seed["target_path_edit_inplace"],
+                }
+                # Presenca, nunca truthiness (ver `_load_brainstorm_seed`).
+                #
+                # A versao anterior deste comentario dizia que "o suplemento
+                # NAO tem seed" e por isso precisava chegar sem a chave. Era
+                # falso: `seeds/supplemental/search-prod.md` existe, tem bloco
+                # `## Prompt canonico` valido e ha teste que o prova
+                # (`test_o_suplemento_tambem_esta_limpo`). A premissa falsa e
+                # exatamente o motivo de ninguem ter ligado o literal dele --
+                # o suplemento e servido pelo laco de baixo, que agora o le.
+                if "action_literal" in seed:
+                    kwargs["action_literal"] = seed["action_literal"]
                 seed_buttons.append(
-                    self._make_brainstorm_prompt_button(
-                        label=seed["label"],
-                        button_type=seed["button_type"],
-                        prompt=seed["seed_path"],
-                        agent_name=seed["agent_name"],
-                        agent_path=seed["agent_path"],
-                        action=seed["action"],
-                        target_path=target_terminal,
-                        testid_slug=seed["slug"],
-                        target_path_edit_inplace=seed["target_path_edit_inplace"],
-                    )
+                    self._make_brainstorm_prompt_button(**kwargs)
                 )
         except Exception:
             for widget in seed_buttons:
@@ -4596,6 +5098,19 @@ class MainWindow(QMainWindow):
             for spec in specs:
                 kwargs = brainstorm_button_kwargs(
                     spec, repo_root=self._systemforge_root()
+                )
+                # O suplemento tem corpo proprio como qualquer seed; sem esta
+                # extracao ele era despachado com o literal generico do
+                # catalogo. `brainstorm_button_kwargs` nao le disco por
+                # contrato, entao a leitura e daqui.
+                kwargs["action_literal"] = _read_action_literal(kwargs["prompt"])
+                # G6: pela mesma razao de a leitura acima morar aqui, o gate
+                # de EXISTENCIA da persona tambem mora aqui. O registry promete
+                # pureza; quem conhece o repo root e este metodo.
+                _check_supplemental_agent_path(
+                    str(kwargs["agent_path"]),
+                    Path(self._systemforge_root()),
+                    str(spec.slug),
                 )
                 agent_buttons.append(self._make_brainstorm_prompt_button(**kwargs))
         except Exception as exc:  # noqa: BLE001
@@ -4848,7 +5363,7 @@ class MainWindow(QMainWindow):
         self._brainstorm_codex_available = self._codex_terminal_available()
 
         # Grade seed-driven (T2 loop 05-21-implantation-tasklist-aba-brainstorm).
-        # 1 MCPPromptButton por seed em blacksmith/brainstorm-mcp/NN-*.md,
+        # 1 MCPPromptButton por seed em blacksmith/brainstorm-mcp/seeds/NN-*.md,
         # ordem deterministica por nome de arquivo.
         grid_widget = QWidget()
         grid_widget.setObjectName("BrainstormGrid")
@@ -4876,20 +5391,26 @@ class MainWindow(QMainWindow):
         self._brainstorm_grid_widget = grid_widget
         self._brainstorm_grid_layout = grid
 
+        # Rodape de issues da carga degradavel (C3 Task 10). Criado ANTES da
+        # carga para que `_apply_brainstorm_seed_issues` sempre encontre a
+        # superficie, inclusive quando a carga degrada no primeiro build.
+        issues_label = QLabel("")
+        issues_label.setProperty("testid", "brainstorm-seed-issues")
+        issues_label.setWordWrap(True)
+        issues_label.setStyleSheet(
+            "QLabel { color: #FBBF24; font-size: 10px; padding: 0px 6px; }"
+        )
+        issues_label.setVisible(False)
+        self._brainstorm_issues_label = issues_label
+
         self._brainstorm_mcp_btns = []
         self._brainstorm_agent_btns = []
-        try:
-            seeds = self._load_brainstorm_seeds()
-        except _BrainstormSeedError as exc:
-            signal_bus.toast_requested.emit(
-                f"Grade brainstorm bloqueada: {exc}",
-                "error",
-            )
-            page_layout.addWidget(grid_widget)
-            return page
+        seeds, seed_issues = self._load_brainstorm_seeds()
+        self._apply_brainstorm_seed_issues(seed_issues)
 
-        # Atomic widget construction: ou os 24 sobem, ou nenhum. Suplementos
-        # (AGENT-TASK-008) vem DEPOIS dos seeds, pelo mesmo builder do rebuild.
+        # Suplementos (AGENT-TASK-008) vem DEPOIS dos seeds, pelo mesmo builder
+        # do rebuild. A carga ja e degradavel por item; o builder segue atomico
+        # sobre a lista que sobreviveu.
         try:
             built, agent_built = self._build_brainstorm_grid_buttons(seeds)
         except Exception as exc:  # noqa: BLE001
@@ -4898,6 +5419,7 @@ class MainWindow(QMainWindow):
                 "error",
             )
             page_layout.addWidget(grid_widget)
+            page_layout.addWidget(issues_label)
             return page
 
         self._place_brainstorm_buttons(grid, built + agent_built)
@@ -4905,6 +5427,7 @@ class MainWindow(QMainWindow):
         self._brainstorm_agent_btns = agent_built
 
         page_layout.addWidget(grid_widget)
+        page_layout.addWidget(issues_label)
         # T7 (task-008): publica estado inicial de T3 para que botoes Codex
         # fixos sincronizem o cache via signal logo apos a montagem da grade.
         signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
@@ -5059,10 +5582,14 @@ class MainWindow(QMainWindow):
         dlg.open()
 
     def _rebuild_brainstorm_grid(self) -> None:
-        """Reconstroi a grade 4x6 apos save do modal de config (T4).
+        """Reconstroi a grade apos save do modal de config (T4).
 
-        Atomic: ou os 24 botoes sobem, ou a grade fica vazia com toast erro
-        (mesma politica do build inicial em `_build_brainstorm_page`).
+        Ordem canonica (C3 Task 10): **carrega os seeds e CONSTROI a grade nova
+        ANTES do teardown da antiga**. Se a construcao falhar, a grade anterior
+        permanece na tela em vez de deixar a aba vazia numa janela de erro.
+        A carga em si e degradavel por item: um seed corrompido vira `issue`
+        no rodape `brainstorm-seed-issues` e os demais continuam de pe.
+
         Desconecta signals e chama `deleteLater()` em cada botao antigo
         para evitar slots disparando em widgets em destruicao.
 
@@ -5087,62 +5614,136 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 1) Tear down dos botoes antigos (seeds + suplementos: um suplemento
-        # sobrevivente viraria duplicata do recriado no passo 3).
-        for btn in list(getattr(self, "_brainstorm_mcp_btns", []) or []) + list(
-            getattr(self, "_brainstorm_agent_btns", []) or []
-        ):
-            try:
-                btn.prompt_requested.disconnect(self._on_mcp_prompt_requested)
-            except (RuntimeError, TypeError):
-                pass
-            try:
-                grid.removeWidget(btn)
-            except RuntimeError:
-                # Widget ja destruido pelo Qt: teardown benigno, o deleteLater
-                # abaixo e no-op. Registrado para nao virar silencio total.
-                logger.debug(
-                    "brainstorm_grid_remove_widget_deleted",
-                    exc_info=True,
-                )
-            except Exception:  # noqa: BLE001
-                # Zero Silencio: qualquer outra falha aqui pode deixar a grade
-                # em estado divergente (botao orfao no layout). Preserva o
-                # diagnostico em vez de engolir.
-                logger.exception("brainstorm_grid_remove_widget_failed")
-            btn.deleteLater()
-        self._brainstorm_mcp_btns = []
-        self._brainstorm_agent_btns = []
+        # 1) Carga + construcao da grade NOVA, antes de qualquer teardown.
+        seeds, seed_issues = self._load_brainstorm_seeds()
 
-        # 2) Reload seeds (fail-fast all-or-nothing).
-        try:
-            seeds = self._load_brainstorm_seeds()
-        except _BrainstormSeedError as exc:
+        # Issue de escopo GLOBAL nao significa "a grade agora e vazia", e sim
+        # "nao ha carga confiavel". Tratar as duas como a mesma coisa fazia o
+        # sumico do diretorio de seeds destruir a grade montada: o operador
+        # perdia os botoes E o caminho de volta. Preserva o que existe e grita.
+        globais = [i for i in seed_issues if i.get("scope") == "global"]
+        if globais:
+            self._apply_brainstorm_seed_issues(seed_issues)
+            motivo = "; ".join(f"{i['filename']}: {i['reason']}" for i in globais)
+            logger.error(
+                "brainstorm_grid_rebuild_source_unavailable: %s", motivo,
+            )
             signal_bus.toast_requested.emit(
-                f"Grade brainstorm bloqueada apos save: {exc}",
+                f"Grade brainstorm nao foi reconstruida: {motivo}. "
+                "A grade anterior permanece ativa.",
                 "error",
             )
             return
 
-        # 3) Mesmo builder do build inicial (fonte unica de widgets).
         try:
             built, agent_built = self._build_brainstorm_grid_buttons(seeds)
         except Exception as exc:  # noqa: BLE001
+            # A grade antiga continua montada: nao houve teardown ainda. As
+            # issues da CARGA ja sao conhecidas e valem mesmo sem rebuild —
+            # publica-las so no caminho feliz deixava rodape e tooltip exibindo
+            # o estado da carga ANTERIOR (Zero Silencio).
+            self._apply_brainstorm_seed_issues(seed_issues)
             signal_bus.toast_requested.emit(
-                f"Grade brainstorm falhou apos save: {exc}",
+                f"Grade brainstorm nao foi reconstruida apos save: {exc}. "
+                "A grade anterior permanece ativa.",
                 "error",
             )
             return
 
-        self._place_brainstorm_buttons(grid, built + agent_built)
+        # 2) DESANEXA os antigos do layout sem destrui-los (seeds + suplementos:
+        # um suplemento sobrevivente viraria duplicata do recriado no passo 3).
+        # Enquanto a grade nova nao estiver de fato inserida, os widgets antigos
+        # vivos sao o UNICO rollback possivel — por isso o `deleteLater` e a
+        # desconexao dos sinais so acontecem no passo 4, depois da prova.
+        old_btns = list(getattr(self, "_brainstorm_mcp_btns", []) or []) + list(
+            getattr(self, "_brainstorm_agent_btns", []) or []
+        )
+        for btn in old_btns:
+            self._detach_brainstorm_button(grid, btn)
+
+        # 3) Insere a grade nova. Uma falha aqui com os antigos ja destruidos
+        # deixava o layout com parte dos botoes inserida, as listas vazias e
+        # nenhuma referencia viva: grade meio montada, irrecuperavel sem
+        # reabrir a aba.
+        try:
+            self._place_brainstorm_buttons(grid, built + agent_built)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("brainstorm_grid_place_failed")
+            for btn in built + agent_built:
+                self._detach_brainstorm_button(grid, btn)
+                self._destroy_brainstorm_button(btn)
+            try:
+                self._place_brainstorm_buttons(grid, old_btns)
+                sufixo = "A grade anterior permanece ativa."
+            except Exception:  # noqa: BLE001
+                logger.exception("brainstorm_grid_place_rollback_failed")
+                for btn in old_btns:
+                    self._destroy_brainstorm_button(btn)
+                old_btns = []
+                sufixo = "Reabra a aba Brainstorm para remontar a grade."
+            self._brainstorm_mcp_btns = [b for b in old_btns if b in (
+                getattr(self, "_brainstorm_mcp_btns", []) or []
+            )]
+            self._brainstorm_agent_btns = [b for b in old_btns if b in (
+                getattr(self, "_brainstorm_agent_btns", []) or []
+            )]
+            self._apply_brainstorm_seed_issues(seed_issues)
+            signal_bus.toast_requested.emit(
+                f"Grade brainstorm nao foi reconstruida: {exc}. {sufixo}",
+                "error",
+            )
+            return
+
+        # 4) A grade nova esta publicada: so agora os antigos podem morrer.
+        for btn in old_btns:
+            self._destroy_brainstorm_button(btn)
         self._brainstorm_mcp_btns = built
         self._brainstorm_agent_btns = agent_built
+        self._apply_brainstorm_seed_issues(seed_issues)
         # T7 (task-008): publica estado de T3 apos rebuild para resync de
         # cache em botoes Codex fixos recem-criados.
         signal_bus.codex_availability_changed.emit(self._codex_terminal_available())
         signal_bus.toast_requested.emit(
             "Seeds brainstorm-mcp atualizados.", "info",
         )
+
+    @staticmethod
+    def _detach_brainstorm_button(grid, btn) -> None:
+        """Retira um botao do layout da grade sem destrui-lo.
+
+        Nunca propaga: um teardown que aborta pela metade deixa a grade em
+        estado divergente (botao orfao no layout), que e pior que o defeito
+        que a excecao denunciaria.
+        """
+        try:
+            grid.removeWidget(btn)
+        except RuntimeError:
+            # Widget ja destruido pelo Qt: teardown benigno. Registrado para
+            # nao virar silencio total.
+            logger.debug("brainstorm_grid_remove_widget_deleted", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("brainstorm_grid_remove_widget_failed")
+
+    @staticmethod
+    def _destroy_brainstorm_button(btn) -> None:
+        """Desconecta e agenda a destruicao de um botao da grade.
+
+        `deleteLater()` ficava FORA do guard de `RuntimeError`: numa referencia
+        obsoleta o `removeWidget` levantava, o erro era capturado, e entao o
+        proprio `deleteLater()` levantava de novo e interrompia o teardown pela
+        metade. Aqui cada passo tem o seu guard.
+        """
+        try:
+            btn.prompt_requested.disconnect()
+        except (RuntimeError, TypeError, AttributeError):
+            # AttributeError: botao de agente sem o sinal. Nada a desconectar.
+            pass
+        try:
+            btn.deleteLater()
+        except RuntimeError:
+            logger.debug("brainstorm_grid_delete_later_deleted", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("brainstorm_grid_delete_later_failed")
 
     def _on_mcp_prompt_requested(self, payload: dict) -> None:
         """Slot canonico para clicks em MCPPromptButton da grade brainstorm.
@@ -5155,12 +5756,54 @@ class MainWindow(QMainWindow):
         selecionado pelo picker, emite toast warning e aborta.
         """
         if getattr(self, "_prompt_in_flight", False):
+            # Ponto cego historico: sem toast e sem `dispatch_result`, um
+            # clique engolido pelo debounce era indistinguivel de um clique
+            # que nunca chegou. Continua silencioso na UI de proposito (o
+            # segundo clique de um double-click nao merece toast), mas agora
+            # deixa rastro.
+            brainstorm_telemetry.record_dispatch(
+                reason="in_flight",
+                button_id=str(payload.get("button_id") or ""),
+                testid_slug=str(payload.get("testid_slug") or ""),
+                action=str(payload.get("action") or ""),
+                requested_provider=str(payload.get("button_type") or ""),
+            )
             return
-        self._prompt_in_flight = True
         # button_id propagado por MCPPromptButton.payload() (T7); usado
         # para direcionar signal_bus.dispatch_result ao widget de origem.
         # Fallback "" filtra sem efeito caso payload legado nao traga.
         button_id = str(payload.get("button_id") or "")
+        # Contexto acumulado do despacho. Cada etapa deposita aqui o que
+        # resolveu, e `_registrar` grava o que ja era conhecido no instante do
+        # termino. A alternativa -- repetir a lista de argumentos em cada um
+        # dos nove pontos de saida -- garante que o decimo ponto nasca com
+        # metade dos campos faltando, que e como o unico evento estruturado
+        # que existia (t3_publish_failed) acabou sendo o unico.
+        _ctx: dict[str, object] = {
+            "button_id": button_id,
+            "testid_slug": str(payload.get("testid_slug") or ""),
+            "action": str(payload.get("action") or ""),
+            "requested_provider": str(payload.get("button_type") or ""),
+        }
+        try:
+            _ctx["source_kind"] = brainstorm_telemetry.source_kind_for(
+                payload.get("prompt"), self._systemforge_root()
+            )
+        except Exception:  # noqa: BLE001
+            # Telemetria nunca decide se o clique acontece.
+            _ctx["source_kind"] = "unknown"
+
+        def _registrar(reason: str, **extra: object) -> None:
+            brainstorm_telemetry.record_dispatch(reason=reason, **{**_ctx, **extra})
+
+        # A flag sobe SO aqui, imediatamente antes do `try` que a derruba
+        # no `finally`. Enquanto ela subia antes das conversoes `str(...)`
+        # do payload acima, um caller programatico com um `__str__` que
+        # levanta deixava `_prompt_in_flight` verdadeiro para sempre: o
+        # agendamento da liberacao vive no `finally`, e a excecao escapava
+        # antes de haver `try`. Todo botao do bloco ficava morto ate o
+        # proximo restart. Nada entre esta linha e o `try` pode levantar.
+        self._prompt_in_flight = True
         try:
             edit_inplace = bool(payload.get("target_path_edit_inplace"))
             md_path = (getattr(self, "_brainstorm_md_path", None) or "").strip()
@@ -5170,11 +5813,19 @@ class MainWindow(QMainWindow):
                     "warning",
                 )
                 signal_bus.dispatch_result.emit(button_id, False)
+                _registrar("no_md_selected")
                 return
             # Revalidacao no dispatch: entre o clique no picker e o clique no
             # botao da grade o arquivo pode ter sido movido, renomeado ou
             # apagado. Publicar o prompt com `{target-path}` morto gasta uma
             # rodada de LLM para descobrir isso; aqui custa um toast.
+            if md_path:
+                try:
+                    _ctx["artifact"] = brainstorm_telemetry.artifact_id(
+                        md_path, self._systemforge_root()
+                    )
+                except Exception:  # noqa: BLE001
+                    _ctx["artifact"] = ""
             if edit_inplace and not Path(md_path).is_file():
                 signal_bus.toast_requested.emit(
                     "O .md selecionado nao existe mais. Selecione outro arquivo.",
@@ -5182,6 +5833,7 @@ class MainWindow(QMainWindow):
                 )
                 self._clear_brainstorm_md_selection()
                 signal_bus.dispatch_result.emit(button_id, False)
+                _registrar("md_missing")
                 return
 
             action = str(payload.get("action", ""))
@@ -5209,6 +5861,15 @@ class MainWindow(QMainWindow):
                     resolved_slug, str(button_type)
                 )
 
+            # O slug CRU (`resolved_slug`) continua governando o mapa de
+            # terminal abaixo, mas quem de fato executa e o provider de
+            # `resolved_type`: para Main LLM qwen/grok o rotulo degrada
+            # para "Claude" e o slug nao. Gravar o slug cru aqui escrevia
+            # `resolved_provider="qwen"` num despacho que saiu inteiro por
+            # Claude -- a degradacao que este par de campos existe para
+            # medir ficava invisivel exatamente no caso que a motivou.
+            _ctx["resolved_provider"] = resolved_type.lower()
+
             # "Criar arquivo" (botao 1 / Criar md) cria um MD NOVO a partir
             # do T1. Ele nunca deve ler, anexar ou renderizar o .md selecionado
             # no brainstorm-md-picker-row, mesmo que exista um path ativo.
@@ -5217,16 +5878,28 @@ class MainWindow(QMainWindow):
                 if action == "Criar arquivo"
                 else self._rel_to_root(md_path) if md_path else None
             )
+            if action == "Criar arquivo":
+                # O hash foi calculado la em cima, antes de a action ser
+                # conhecida, a partir do `.md` que o picker tinha ativo.
+                # Este fluxo IGNORA esse arquivo de proposito (`md_ref` e
+                # None): mante-lo faria um sucesso de criacao aparecer
+                # atribuido a um artefato que nao foi lido nem escrito, e
+                # qualquer agregacao por artefato contaria trabalho que
+                # nunca o tocou.
+                _ctx["artifact"] = ""
             seed_meta: dict[str, object] = {
                 "agent_name": agent_name,
                 "agent_path": agent_path,
                 "action": action,
                 "target_path": edit_inplace,
             }
-            for k in ("agent2_name", "agent2_path", "action2"):
-                v = payload.get(k)
-                if v:
-                    seed_meta[k] = v
+            # Presenca, nunca truthiness: `action_literal` vazio e um valor
+            # legitimo e diferente de ausente. Era o unico dos quatro
+            # pass-throughs que usava presenca; os outros tres (`agent2_name`,
+            # `agent2_path`, `action2`) sairam na Task 31 -- copiavam de um
+            # `payload` que `MCPPromptButton.payload()` nunca preenche.
+            if "action_literal" in payload:
+                seed_meta["action_literal"] = payload["action_literal"]
             seed_meta = append_public_context(
                 seed_meta,
                 project=app_state.project_config,
@@ -5236,15 +5909,20 @@ class MainWindow(QMainWindow):
             try:
                 repo_root = self._systemforge_root().resolve()
                 prompt_final = build_prompt(seed_meta, md_ref, repo_root)
+                _ctx["prompt_chars"] = len(prompt_final)
             except ValueError as exc:
                 signal_bus.toast_requested.emit(str(exc), "warning")
                 signal_bus.dispatch_result.emit(button_id, False)
+                # O texto da excecao NAO entra no registro: `build_prompt`
+                # levanta com o conteudo que rejeitou, que e prompt.
+                _registrar("prompt_rejected")
                 return
             except TypeError as exc:
                 signal_bus.toast_requested.emit(
                     f"Erro montando prompt: {exc}", "error"
                 )
                 signal_bus.dispatch_result.emit(button_id, False)
+                _registrar("prompt_build_error")
                 return
 
             # Roteamento: target_path do payload mapeia para terminal index.
@@ -5320,6 +5998,7 @@ class MainWindow(QMainWindow):
                     "error",
                 )
                 signal_bus.dispatch_result.emit(button_id, False)
+                _registrar("route_ambiguous")
                 return
             terminal_idx = targets[-1] if targets else 1
             try:
@@ -5333,6 +6012,7 @@ class MainWindow(QMainWindow):
                     f"Falha ao publicar prompt: {exc}", "error"
                 )
                 signal_bus.dispatch_result.emit(button_id, False)
+                _registrar("publish_exception", terminal=terminal_idx)
                 return
             # Fix T020 (BLOCKER 1): antes, T3 com falha silenciosa
             # (shell nao iniciado, send_raw exception) emitia
@@ -5359,9 +6039,29 @@ class MainWindow(QMainWindow):
                     },
                 )
                 signal_bus.dispatch_result.emit(button_id, False)
+                _registrar("publish_failed", terminal=terminal_idx)
                 return
             # Sucesso real: marca checkbox do botao de origem via signal_bus.
             signal_bus.dispatch_result.emit(button_id, True)
+            _registrar("ok", terminal=terminal_idx)
+        except Exception as exc:  # noqa: BLE001
+            # Termino REAL que nao tinha evento. O `try` externo so tinha
+            # `finally`, e `finally` nao registra nada: qualquer excecao
+            # fora do ValueError/TypeError de `build_prompt` (RuntimeError
+            # de `append_public_context`, KeyError na resolucao dos radios,
+            # falha de `_rel_to_root`) subia daqui deixando o sidecar mudo
+            # justamente no defeito que ninguem previu -- e a UI muda
+            # junto, sem toast e sem `dispatch_result`.
+            #
+            # RELEVANTA de proposito: engolir converteria defeito em
+            # silencio, que e o oposto do que este bloco existe para
+            # fechar. O que muda e que agora ele avisa antes de subir.
+            signal_bus.toast_requested.emit(
+                f"Falha inesperada no despacho: {exc}", "error"
+            )
+            signal_bus.dispatch_result.emit(button_id, False)
+            _registrar("handler_exception")
+            raise
         finally:
             QTimer.singleShot(300, lambda: setattr(self, "_prompt_in_flight", False))
 
@@ -5793,6 +6493,8 @@ class MainWindow(QMainWindow):
         "estrategista-delegador": "Build",
         "systemforge-db-update": "commit",
         "systemforge-hostinger-deploy": "commit",
+        "corgly-db-update": "commit",
+        "corgly-hostinger-deploy": "commit",
         "generated-command-list-comparison-whit-rules": "Review",
         "only-commit": "commit",
         "only-push": "commit",
@@ -7342,6 +8044,15 @@ class MainWindow(QMainWindow):
             _paste_path("ai-forge/rules/single-arrow-multifunction.md")
         )
 
+        mcp_flow_rules_btn = _make_btn(
+            "Mcp-flow-rules", "queue-btn-mcp-flow-rules-path",
+            "#10B981", "#059669", "#047857",
+            "Cola o path ai-forge/rules/mcp-flow-rules.md no terminal\n"
+            "(contrato canonico de invocacao de personas MCP: agent_path,\n"
+            "providers, fallback chain, telemetria e migracao de /mcp:dual)",
+        )
+        mcp_flow_rules_btn.clicked.connect(_paste_path("ai-forge/rules/mcp-flow-rules.md"))
+
         loop_rules_btn = _make_btn(
             "Loop-rules", "queue-btn-loop-rules-path",
             "#84CC16", "#65A30D", "#4D7C0F",
@@ -7450,7 +8161,7 @@ class MainWindow(QMainWindow):
             indicators_rules_btn, prompt_rules_btn,
             build_render_rules_btn, matrix_spec_rules_btn, llm_routing_rules_btn,
             main_llm_publish_rules_btn, kimi_skill_routing_rules_btn,
-            single_arrow_rules_btn,
+            single_arrow_rules_btn, mcp_flow_rules_btn,
             loop_rules_btn, rocksmash_rules_btn, multibackend_rules_btn,
             listener_amarelo_btn, listener_azul_btn, listener_verde_btn,
             listener_vermelho_btn,
@@ -9417,6 +10128,8 @@ class MainWindow(QMainWindow):
                     continue  # blog opera sobre o proprio SystemForge, sem project.json
                 if spec.name.startswith("/cmd:"):
                     continue  # /cmd:* sao META commands do SystemForge, nao dependem de project.json
+                if spec.name.startswith("/corgly:"):
+                    continue  # Corgly resolve a raiz pelo helper; project.json nao e argumento
                 if spec.name.startswith("/loop:iteraction:") or spec.name.startswith("/kimi-loop:iteraction:"):
                     continue  # per-item commands ja carregam --task <path> explicito (build_loop_specs
                     # seta config_path="" de proposito); anexar o project.json aqui mascara o argumento
@@ -9453,6 +10166,23 @@ class MainWindow(QMainWindow):
             session_factory=db_manager.session_factory,
             workspace_dir=workspace,
         )
+        # Task 33: injetar o orquestrador (corte 3 da cadeia de custo). Sem
+        # isto `self._extras` fica None e o bloco de tokens nunca executa.
+        try:
+            from workflow_app.core.extras_orchestrator import ExtrasOrchestrator
+            from workflow_app.core.git_info_reader import GitInfoReader
+            from workflow_app.core.token_tracker import TokenTracker
+
+            extras = ExtrasOrchestrator(
+                signal_bus,
+                token_tracker=TokenTracker(db_manager),
+                git_reader=GitInfoReader(),
+                parent=self,
+            )
+            extras.set_workspace_root(workspace)
+            self._pipeline_manager.set_extras_orchestrator(extras)
+        except Exception:  # noqa: BLE001
+            logger.exception("ExtrasOrchestrator nao injetado; custo da pipeline fica mudo")
         # `commands` e a lista de ENTRADA, em dialeto Claude. `load_pipeline`
         # (:8826) traduziu para o dialeto do Main corrente e renumerou as
         # positions; sob Codex/Qwen/Grok isso muda o TAMANHO da fila. Entregar

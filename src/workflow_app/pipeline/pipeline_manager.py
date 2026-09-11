@@ -76,6 +76,9 @@ class PipelineManager:
 
         # Optional ExtrasOrchestrator (token tracking, git info, notifications)
         self._extras: object | None = None
+        # Task 33: buffer do PTY do comando corrente. Sem isto tokens_in/out
+        # continuam default 0 e a guarda do orquestrador nunca dispara.
+        self._output_buf: list[str] = []
 
         # Active runners (anti-GC references)
         self._workers: list[ProcessRunner] = []
@@ -437,7 +440,8 @@ class PipelineManager:
             else str(spec.model).lower()
         )
 
-        runner.output_received.connect(self._signal_bus.output_chunk_received)
+        self._output_buf = []
+        runner.output_received.connect(self._on_runner_output)
         runner.command_completed.connect(
             lambda name, ok, _id=command_exec_id: self._on_command_completed(_id, ok)
         )
@@ -519,6 +523,23 @@ class PipelineManager:
                 f"local-action {action_id!r} returned False",
             )
 
+    def _on_runner_output(self, text: str) -> None:
+        """Espelha o chunk no bus e guarda para parse de usage no desfecho."""
+        if text:
+            self._output_buf.append(text)
+        self._signal_bus.output_chunk_received.emit(text)
+
+    def _observed_tokens(self) -> tuple[int, int]:
+        """Tokens do PTY corrente. (0, 0) se nada observavel — nao e custo zero."""
+        try:
+            from workflow_app.telemetry.usage_observer import parse_usage_from_text
+        except Exception:  # noqa: BLE001
+            return 0, 0
+        visto = parse_usage_from_text("".join(self._output_buf))
+        if visto is None or not visto.is_observed():
+            return 0, 0
+        return visto.tokens_in, visto.tokens_out
+
     # ── Internal: worker callbacks ────────────────────────────────────── #
 
     def _on_command_completed(self, command_exec_id: int, success: bool) -> None:
@@ -531,17 +552,26 @@ class PipelineManager:
             sm.result_ok()
             self._log_execution_event(command_exec_id, "completed")
             self._signal_bus.output_chunk_received.emit("\n\x1b[32m$\x1b[0m ")  # bash prompt
-            # Notify ExtrasOrchestrator (tokens + git info)
+            # Notify ExtrasOrchestrator (tokens + git info).
+            # Task 33: tokens_in/out saem do buffer do PTY; default 0 nao emite
+            # custo (guarda no orquestrador). Falha deixa de ser `pass` silencioso.
             if self._extras is not None and self._pipeline_exec_id is not None:
                 spec = self._queue[self._current_index]
+                tokens_in, tokens_out = self._observed_tokens()
                 try:
                     self._extras.on_command_completed(
                         pipeline_id=self._pipeline_exec_id,
                         command_id=command_exec_id,
                         model=spec.model.value if hasattr(spec.model, "value") else str(spec.model),
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
                     )
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.exception(
+                        "ExtrasOrchestrator.on_command_completed falhou "
+                        "(command_exec_id=%s)",
+                        command_exec_id,
+                    )
             # Try to mark progress in SYSTEM-PROGRESS.md
             spec = self._queue[self._current_index]
             if self._progress_writer is not None:
@@ -727,8 +757,9 @@ class PipelineManager:
         # Notify ExtrasOrchestrator: persist pipeline cost totals + notify done
         if self._extras is not None and self._pipeline_exec_id is not None:
             try:
-                if hasattr(self._extras, '_tokens') and self._extras._tokens is not None:
-                    self._extras._tokens.persist_pipeline_totals(self._pipeline_exec_id)
+                persist = getattr(self._extras, "persist_pipeline_totals", None)
+                if callable(persist):
+                    persist(self._pipeline_exec_id)
                 errors = sum(
                     1 for sm in self._state_machines.values()
                     if sm.current_command_status == CommandStatus.ERRO
@@ -737,7 +768,7 @@ class PipelineManager:
                     self._workspace_dir, "", errors
                 )
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("ExtrasOrchestrator.on_pipeline_done falhou")
 
     # ── Internal: persistence ─────────────────────────────────────────── #
 

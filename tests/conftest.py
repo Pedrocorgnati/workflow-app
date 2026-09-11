@@ -22,6 +22,15 @@ os.environ["WF_BLOCK_REAL_FAILURE_TELEMETRY"] = "1"
 # `SF_LOOP_LIFECYCLE_DIR`, entao teste que aponta para tmp_path grava normal.
 # Contrato: ai-forge/workflow-app/tests/test_loop_lifecycle_sink.py
 os.environ["WF_BLOCK_REAL_LIFECYCLE_TELEMETRY"] = "1"
+
+# Task 33: a leitura de ~/.claude/projects/*.jsonl so existe para custo real.
+# Sem o guard a suite somaria tokens de sessoes humanas no host.
+os.environ["WF_BLOCK_REAL_USAGE_JSONL"] = "1"
+
+# Sidecar do brainstorm (C4/Task 33): os pontos de termino agora
+# emitem, e sem esta guarda cada MainWindow construida pela suite gravaria
+# eventos de teste no ~/.workflow-app/logs do operador.
+os.environ["WF_BLOCK_REAL_BRAINSTORM_TELEMETRY"] = "1"
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
@@ -77,6 +86,7 @@ def _block_real_failure_telemetry(monkeypatch):
     que mexa em `os.environ` deixe a guarda baixada para os testes seguintes.
     """
     monkeypatch.setenv("WF_BLOCK_REAL_FAILURE_TELEMETRY", "1")
+    monkeypatch.setenv("WF_BLOCK_REAL_BRAINSTORM_TELEMETRY", "1")
 
 
 @pytest.fixture(autouse=True)

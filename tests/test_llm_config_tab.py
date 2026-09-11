@@ -1096,12 +1096,33 @@ from workflow_app.main_window import MainWindow
 
 win = MainWindow()
 
+from PySide6.QtWidgets import QComboBox, QPushButton
+
 # Collect all testids in the window
 all_testids = []
 for w in [win, *win.findChildren(_W)]:
     tid = w.property("testid")
     if tid:
         all_testids.append(tid)
+
+# Extract _TE_COMMANDS from Thinking/Execution combos (itemData) and
+# leftover QPushButton properties (legacy path).
+te_commands = {}
+for combo in win.findChildren(QComboBox):
+    for i in range(combo.count()):
+        data = combo.itemData(i)
+        if not isinstance(data, dict):
+            continue
+        tid = data.get("testid")
+        cmd = data.get("te_command")
+        if tid and cmd and str(tid).startswith("output-mcp-action-"):
+            te_commands[str(tid)] = str(cmd)
+            all_testids.append(str(tid))
+for w in win.findChildren(QPushButton):
+    tid2 = w.property("testid")
+    cmd2 = w.property("te_command")
+    if tid2 and cmd2 and str(tid2).startswith("output-mcp-action-"):
+        te_commands[str(tid2)] = str(cmd2)
 
 # Thinking group testids
 thinking_tids = [
@@ -1118,21 +1139,6 @@ has_persona_filter = "output-mcp-persona-filter-bar" in all_testids
 has_legacy_main = "output-mcp-action-main" in all_testids
 has_legacy_parallel = "output-mcp-action-parallel" in all_testids
 has_legacy_dual = "output-mcp-action-dual" in all_testids
-
-# Extract _TE_COMMANDS from closure of a Thinking/Execution button
-te_commands = {}
-for w in win.findChildren(_W):
-    tid = w.property("testid")
-    cmd = w.property("te_command")
-    if tid and cmd and tid.startswith("output-mcp-action-"):
-        te_commands[tid] = cmd
-    # Also check QCheckBox (persona filter bar is QTabBar, buttons are QPushButton)
-    from PySide6.QtWidgets import QPushButton
-    if isinstance(w, QPushButton):
-        tid2 = w.property("testid")
-        cmd2 = w.property("te_command")
-        if tid2 and cmd2 and tid2.startswith("output-mcp-action-"):
-            te_commands[tid2] = cmd2
 
 # Persona checkbox categories
 from PySide6.QtWidgets import QCheckBox
@@ -1188,10 +1194,11 @@ class TestThinkingExecutionFlagEnabled:
     """Item 023: Thinking/Execution split com os kill-switches V2 armados."""
 
     def test_thinking_group_has_5_buttons(self):
-        """Thinking group: 5 pastilhas alinhadas a queue-div-flag."""
+        """Thinking group: 5 alternativas no select, alinhadas a queue-div-flag."""
         data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-thinking",
+            "output-mcp-action-thinking-select",
             "output-mcp-action-thinking-fable",
             "output-mcp-action-thinking-opus",
             "output-mcp-action-thinking-codex-ultra",
@@ -1203,10 +1210,11 @@ class TestThinkingExecutionFlagEnabled:
         )
 
     def test_execution_group_has_5_buttons(self):
-        """Execution group: 5 pastilhas alinhadas a queue-div-flag."""
+        """Execution group: 5 alternativas no select, alinhadas a queue-div-flag."""
         data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-execution",
+            "output-mcp-action-execution-select",
             "output-mcp-action-execution-grok",
             "output-mcp-action-execution-sonnet",
             "output-mcp-action-execution-kimi",
@@ -1218,7 +1226,7 @@ class TestThinkingExecutionFlagEnabled:
         )
 
     def test_fixed_commands_in_te_commands(self):
-        """Cada botao cola o /mcp: da coluna thinking/execution."""
+        """Cada alternativa do select cola o /mcp: da coluna thinking/execution."""
         data = _run_te_probe(_TE_FLAGS_ON)
         cmds = data["te_commands"]
         assert cmds.get("output-mcp-action-thinking-fable") == "/mcp:fable"

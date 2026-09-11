@@ -357,35 +357,101 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
 ):
     win = owned_main_window
     expected = {
+        "output-btn-corgly-change-vocabulary-order",
         "output-btn-corgly-class-create",
         "output-btn-corgly-class-generate",
         "output-btn-corgly-class-review",
         "output-btn-corgly-class-update",
+        "output-btn-corgly-clean-progress",
+        "output-btn-corgly-corgly2-divide-vocabulary",
+        "output-btn-corgly-corgly2-optimize-phrases",
+        "output-btn-corgly-corgly2-put-false-friends",
         "output-btn-corgly-dual-update",
+        "output-btn-corgly-enrich-vocabulary",
         "output-btn-corgly-funny-rebase",
         "output-btn-corgly-grammar-adjust",
         "output-btn-corgly-questions-rebase",
+        "output-btn-corgly-vocab-text-review",
     }
     assert {str(btn.property("testid")) for btn in win._corgly_buttons} == expected
     tabs = _find_widget_by_testid(win, "output-toolbar-corgly-subtabs")
     assert isinstance(tabs, QTabWidget)
     assert [tabs.tabText(index) for index in range(tabs.count())] == [
-        "classes",
+        "corgly",
+        "corgly2",
         "strategy",
         "rules",
     ]
     assert tabs.widget(0).property("testid") == (
-        "output-toolbar-corgly-subtab-classes"
+        "output-toolbar-corgly-subtab-corgly"
     )
     assert tabs.widget(1).property("testid") == (
-        "output-toolbar-corgly-subtab-strategy"
+        "output-toolbar-corgly-subtab-corgly2"
     )
     assert tabs.widget(2).property("testid") == (
+        "output-toolbar-corgly-subtab-strategy"
+    )
+    assert tabs.widget(3).property("testid") == (
         "output-toolbar-corgly-subtab-rules"
     )
-    assert _find_widget_by_testid(win, "output-toolbar-corgly-flow") is not None
-    assert _find_widget_by_testid(win, "output-toolbar-corgly-empty") is not None
-    assert _find_widget_by_testid(win, "output-toolbar-corgly-error") is not None
+    flow_host = _find_widget_by_testid(win, "output-toolbar-corgly-flow")
+    corgly2_flow_host = _find_widget_by_testid(win, "output-toolbar-corgly2-flow")
+    assert flow_host is not None
+    assert corgly2_flow_host is not None
+    assert flow_host.parentWidget() is tabs.widget(0)
+    assert corgly2_flow_host.parentWidget() is tabs.widget(1)
+    class_create = _find_by_testid(win, "output-btn-corgly-class-create")
+    assert class_create is not None
+    assert class_create.parentWidget() is flow_host
+    # Particao: `corgly2-*` na aba 2.0, todo o resto na aba do curso legado.
+    corgly2_ids = {
+        "output-btn-corgly-corgly2-divide-vocabulary",
+        "output-btn-corgly-corgly2-optimize-phrases",
+        "output-btn-corgly-corgly2-put-false-friends",
+    }
+    assert {
+        str(btn.property("testid")) for btn in win._corgly2_buttons
+    } == corgly2_ids
+    for btn in win._corgly_buttons:
+        expected_host = (
+            corgly2_flow_host
+            if str(btn.property("testid")) in corgly2_ids
+            else flow_host
+        )
+        assert btn.parentWidget() is expected_host
+    corgly2_all = _find_by_testid(win, "output-btn-corgly-corgly2-all")
+    assert corgly2_all is not None
+    assert corgly2_all.parentWidget() is corgly2_flow_host
+    assert corgly2_all is win._corgly2_all_button
+    assert corgly2_all not in win._corgly_buttons
+    flow_ids = [
+        str(w.property("testid"))
+        for w in flow_host.findChildren(QPushButton)
+        if w.parentWidget() is flow_host
+    ]
+    assert not any(testid in corgly2_ids for testid in flow_ids)
+    assert "output-btn-corgly-corgly2-all" not in flow_ids
+    corgly2_flow_ids = [
+        str(w.property("testid"))
+        for w in corgly2_flow_host.findChildren(QPushButton)
+        if w.parentWidget() is corgly2_flow_host
+    ]
+    put_ff = "output-btn-corgly-corgly2-put-false-friends"
+    assert put_ff in corgly2_flow_ids
+    assert (
+        corgly2_flow_ids[corgly2_flow_ids.index(put_ff) + 1]
+        == "output-btn-corgly-corgly2-all"
+    )
+    # Vazio e catalogo parcial ficam no rodape da coluna, fora das sub-abas:
+    # um erro de parse em `corgly2-*` tem que aparecer para quem esta em
+    # `corgly` (Zero Silencio).
+    empty_label = _find_widget_by_testid(win, "output-toolbar-corgly-empty")
+    error_label = _find_widget_by_testid(win, "output-toolbar-corgly-error")
+    assert empty_label is not None
+    assert error_label is not None
+    corgly_column = _find_widget_by_testid(win, "output-toolbar-corgly")
+    assert empty_label.parentWidget() is corgly_column
+    assert error_label.parentWidget() is corgly_column
     selector_host = _find_widget_by_testid(
         win, "output-toolbar-corgly-class-selector"
     )
@@ -399,7 +465,7 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
     assert class_select.accessibleName() == "Selecionar aula DOCX"
     assert class_select.width() == 220
     assert class_select.itemText(0) == ""
-    corgly_root = win._corgly_commands_root().parents[2] / "corgly-classes"
+    corgly_root = win._corgly_data_root()
     rendered_classes = [
         class_select.itemText(index) for index in range(1, class_select.count())
     ]
@@ -413,14 +479,14 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
     assert class_select.view().minimumWidth() > class_select.width()
 
     expected_strategy_paths = {
-        "corgly-classes/CLAUDE.md",
-        "corgly-classes/README-criar-aulas.md",
-        "corgly-classes/MANIFESTO-CURSO-100.json",
-        "corgly-classes/template-aula.json",
-        "corgly-classes/glossario-aulas.md",
-        "corgly-classes/Corgly-2.0/README.md",
-        "corgly-classes/Corgly-2.0/PLANO-ESTRATEGIA-VERBAL-300-AULAS.md",
-        "corgly-classes/Corgly-2.0/ESTRUTURA-300-HISTORIAS-ENGRACADAS.md",
+        "corgly/corgly-desktop/corgly-classes/CLAUDE.md",
+        "corgly/corgly-desktop/corgly-classes/README-criar-aulas.md",
+        "corgly/corgly-desktop/corgly-classes/MANIFESTO-CURSO-100.json",
+        "corgly/corgly-desktop/corgly-classes/template-aula.json",
+        "corgly/corgly-desktop/corgly-classes/glossario-aulas.md",
+        "corgly/corgly-desktop/corgly-classes/Corgly-2.0/README.md",
+        "corgly/corgly-desktop/corgly-classes/Corgly-2.0/PLANO-ESTRATEGIA-VERBAL-300-AULAS.md",
+        "corgly/corgly-desktop/corgly-classes/Corgly-2.0/ESTRUTURA-300-HISTORIAS-ENGRACADAS.md",
     }
     assert {
         str(btn.property("corgly_path"))
@@ -434,7 +500,7 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
     assert {
         str(btn.property("corgly_path")) for btn in win._corgly_rule_buttons
     } == {
-        f"corgly-classes/rules/{path.name}"
+        f"corgly/corgly-desktop/corgly-classes/rules/{path.name}"
         for path in rules_root.iterdir()
         if path.is_file()
     }
@@ -451,13 +517,16 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
         assert "Raiz operacional:" in btn.toolTip()
 
     class_commands = {
+        "output-btn-corgly-change-vocabulary-order",
         "output-btn-corgly-class-generate",
         "output-btn-corgly-class-review",
         "output-btn-corgly-class-update",
         "output-btn-corgly-dual-update",
+        "output-btn-corgly-enrich-vocabulary",
         "output-btn-corgly-funny-rebase",
         "output-btn-corgly-grammar-adjust",
         "output-btn-corgly-questions-rebase",
+        "output-btn-corgly-vocab-text-review",
     }
     assert {
         str(btn.property("testid"))
@@ -483,6 +552,33 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
     assert win._corgly_error_label.isHidden() is False
     assert "raiz ausente" in win._corgly_error_label.text()
     missing.setParent(win)
+
+
+def test_corgly2_all_enqueues_exact_queue_command_list(owned_main_window, tmp_path):
+    from workflow_app.db.database_manager import db_manager
+
+    db_manager.setup(db_path=str(tmp_path / "test_workflow.db"))
+    win = owned_main_window
+    btn = _find_by_testid(win, "output-btn-corgly-corgly2-all")
+    assert btn is not None
+    flow_host = _find_widget_by_testid(win, "output-toolbar-corgly2-flow")
+    assert btn.parentWidget() is flow_host
+    btn.click()
+    names = [item.command_text() for item in win._command_queue._items]
+    assert names == list(win._CORGLY2_ALL_QUEUE)
+    assert names == [
+        "/corgly:corgly2-divide-vocabulary",
+        "/clear",
+        "/corgly:corgly2-put-false-friends",
+        "/clear",
+        "/corgly:corgly2-optimize-phrases",
+        "/clear",
+    ]
+    queue = _find_widget_by_testid(win, "queue-command-list")
+    assert queue is not None
+    assert win._command_queue._items
+    for item in win._command_queue._items:
+        assert queue.isAncestorOf(item)
 
 
 @_skip_under_llm_config_v2

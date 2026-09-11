@@ -213,13 +213,28 @@ def record_pty_write(
         return -1
 
 
-def record_enter(*, channel: str, written: int | None) -> None:
-    """Registra o Enter submissor, que viaja como write separado (250ms)."""
+def record_enter(
+    *, channel: str, written: int | None, reason: str = "direct"
+) -> None:
+    """Registra o Enter submissor, que viaja como write separado.
+
+    `reason` diz por que este `\r` saiu — `gated` (a tela ecoou o paste,
+    caminho normal), `gate-timeout` (o eco nao apareceu dentro do teto e
+    mandamos assim mesmo), `resend-N` (o comando continuava na linha de
+    prompt depois do Enter anterior) ou `signal` (Enter avulso, pelos
+    sinais `submit_enter_to_*`). Um `resend-*` recorrente e a assinatura
+    de uma TUI engolindo submit — e o que o incidente do `/clear` colado
+    junto do proximo item produzia em silencio.
+    """
     try:
         logger.info(
-            "[dispatch] enter channel=%s written=%s", channel, written
+            "[dispatch] enter channel=%s written=%s reason=%s",
+            channel, written, reason,
         )
-        _emit_record("enter", {"channel": channel, "written": written})
+        _emit_record(
+            "enter",
+            {"channel": channel, "written": written, "reason": reason},
+        )
     except Exception:  # noqa: BLE001
         logger.debug("[dispatch] record_enter falhou", exc_info=True)
 

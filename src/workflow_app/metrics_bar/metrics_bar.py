@@ -186,7 +186,7 @@ _INSTANCE_UNSELECTED = (
     "QPushButton {"
     "  background-color: transparent;"
     "  color: #A1A1AA;"
-    "  border: 1px solid #52525B;"
+    "  border: 2px solid #52525B;"
     "  border-radius: 4px;"
     "  padding: 2px 10px;"
     "  font-size: 11px;"
@@ -702,6 +702,8 @@ class MetricsBar(QWidget):
         _ig_layout = QGridLayout(self._instance_group)
         _ig_layout.setContentsMargins(0, 0, 0, 0)
         _ig_layout.setSpacing(4)
+        _ig_layout.setColumnStretch(0, 1)
+        _ig_layout.setColumnStretch(1, 1)
 
         for idx, name in enumerate(instance_order):
             btn = _DraggableInstanceButton(name, parent=self._instance_group)
@@ -2906,9 +2908,15 @@ class MetricsBar(QWidget):
     # yellow until Claude is realistically ready. Anti command-stacking.
     # Ver ai-forge/rules/workflow-app-listeners.md §2.6b.
     _HELPER_AUTO_IDLE_INTERACTIVE_MS: int = 2_500
-    # Extra delay added to /clear on the workspace channel: Kimi's TUI
-    # repaint after a clear takes longer than a regular helper, so the
-    # dot must stay yellow longer before hardening arms.
+    # Extra delay added to /clear whenever the channel is driven by a
+    # gemini-cli fork (kimi-code / qwen-code): the TUI repaint after a
+    # clear takes longer than a regular helper, so the dot must stay
+    # yellow longer before hardening arms. Vale no T2 SEMPRE e no T1
+    # quando o Main LLM nao e Claude — quando esta compensacao foi escrita
+    # o Kimi so existia como worker do T2, e com Kimi/Qwen no Main o
+    # `/clear` do T1 ficava sem cobertura nenhuma: o ponto abria verde
+    # antes de o Enter submissor ter chance, o autocast disparava o item
+    # seguinte e ele colava em cima (`/clear /skill:...`).
     _CLEAR_WORKSPACE_EXTRA_MS: int = 1_000
 
     def _maybe_schedule_helper_auto_idle(self, channel: str, cmd: str) -> None:
@@ -2934,23 +2942,33 @@ class MetricsBar(QWidget):
         # stale auto-idle is dropped (monotonic int — no wall-clock pitfalls).
         scheduled_seq = self._dispatch_seq.get(channel, 0)
         head = cmd.strip().split(None, 1)[0].lower() if cmd.strip() else ""
-        # Interactive holds longer so Claude Code finishes consuming the
-        # directive before the verde+verde gate fires the next item
-        # (anti command-stacking — ver _HELPER_AUTO_IDLE_INTERACTIVE_MS).
-        if channel == "interactive":
-            delay_ms = self._HELPER_AUTO_IDLE_INTERACTIVE_MS
-        else:
-            delay_ms = self._HELPER_AUTO_IDLE_MS
-        # /clear on workspace gets +1s extra because Kimi's TUI repaint
-        # after a clear is slower — the dot must stay yellow longer to
-        # cover the repaint window before hardening arms.
-        if channel == "workspace" and head == "/clear":
-            delay_ms += self._CLEAR_WORKSPACE_EXTRA_MS
+        delay_ms = self._helper_auto_idle_delay_ms(channel, head)
         QTimer.singleShot(
             delay_ms,
             self,
             lambda: self._helper_auto_idle(channel, scheduled_seq),
         )
+
+    def _helper_auto_idle_delay_ms(self, channel: str, head: str) -> int:
+        """Quanto o ponto fica amarelo depois de um helper neste canal.
+
+        Interactive segura mais tempo para o CLI terminar de consumir a
+        diretiva antes de o gate verde+verde disparar o proximo item
+        (anti command-stacking — ver `_HELPER_AUTO_IDLE_INTERACTIVE_MS`).
+        `/clear` ganha o extra onde o repaint pos-clear e lento: T2 sempre
+        (o worker e sempre um fork do gemini-cli) e T1 quando o Main LLM
+        nao e Claude.
+        """
+        if channel == "interactive":
+            delay_ms = self._HELPER_AUTO_IDLE_INTERACTIVE_MS
+        else:
+            delay_ms = self._HELPER_AUTO_IDLE_MS
+        slow_clear_channel = channel == "workspace" or (
+            channel == "interactive" and self._main_llm != "claude"
+        )
+        if slow_clear_channel and head == "/clear":
+            delay_ms += self._CLEAR_WORKSPACE_EXTRA_MS
+        return delay_ms
 
     def _is_helper_command(self, cmd: str) -> bool:
         """Delegates to the canonical predicate (workflow_app.terminal_helpers)."""
@@ -3456,10 +3474,18 @@ class MetricsBar(QWidget):
             dialog = ScheduleAutocastDialog(self)
             if dialog.exec() != ScheduleAutocastDialog.DialogCode.Accepted:
                 return
-            seconds = dialog.total_seconds()
-            if seconds <= 0:
-                return
-            self._schedule_end_at = QDateTime.currentDateTime().addSecs(seconds)
+
+            # Suporta dois modos: data/hora final ou duracao
+            if dialog.is_datetime_mode():
+                # Modo data/hora final: usa o QDateTime selecionado diretamente
+                self._schedule_end_at = dialog.end_datetime()
+            else:
+                # Modo duracao: calcula a partir do tempo atual
+                seconds = dialog.total_seconds()
+                if seconds <= 0:
+                    return
+                self._schedule_end_at = QDateTime.currentDateTime().addSecs(seconds)
+
             self._schedule_timer.start()
             self._update_schedule_visual()
             return

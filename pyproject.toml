@@ -16,6 +16,14 @@ dependencies = [
     "pydantic>=2.5",
     "PyYAML>=6.0,<7",
     "claude-agent-sdk>=0.2.0",
+    # NAO declarar `jsonschema` aqui. A dependencia entrou por causa do gate
+    # de contrato da lane brainstorm e ficou morta duas vezes: o gate vive em
+    # `ai-forge/scripts/validate-brainstorm-md.py`, que roda sob o python do
+    # sistema e nunca ve este ambiente; e esse validador decidiu, por escrito
+    # (`validate-brainstorm-md.py`, secao "VALIDACAO DE SCHEMA SEM DEPENDENCIA
+    # OPCIONAL"), avaliar o subconjunto de JSON Schema com codigo proprio,
+    # justamente para nao produzir veredito diferente conforme o pacote esteja
+    # ou nao instalado. Nada em `src/` nem em `tests/` importa jsonschema.
 ]
 
 [project.optional-dependencies]
