@@ -28,6 +28,8 @@ from workflow_app.config.llm_flags import (
     _FLAGS_BY_TERMINAL,
     _REDUNDANT_FLAG_MAINS,
     _THINKING_FLAG_ORDER,
+    MIMO_FLAG,
+    MIMO_SUPERSEDES_KIMI,
 )
 
 # Ordem estavel dos checkboxes na UI (canonica).
@@ -243,4 +245,13 @@ class FlagsPanel(QWidget):
         suffix = ""
         if target and terminals:
             suffix = f"\nDelega para {target}. Aceita em: {terminals}."
+        # Precedencia MiMo > Kimi (2026-10-02): com as duas marcadas o
+        # `--kimi` sai do payload; o tooltip avisa (Zero Silencio).
+        if flag == MIMO_FLAG:
+            suffix += "\nVence o --kimi quando os dois estao marcados."
+        elif flag in MIMO_SUPERSEDES_KIMI:
+            suffix += (
+                "\nSe --mimo tambem estiver marcado, a MiMo vence e o "
+                f"{flag} sai do payload (MiMo > Kimi)."
+            )
         return _DEFAULT_TOOLTIP.format(flag=flag) + suffix

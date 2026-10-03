@@ -458,9 +458,10 @@ class TestLLMConfigTabLayout:
             "--grok-xhigh": [5, 0],
             "--grok": [1, 1],
             "--sonnet": [2, 1],
-            "--kimi": [3, 1],
-            "--qwen": [4, 1],
-            "--codex": [5, 1],
+            "--mimo": [3, 1],
+            "--kimi": [4, 1],
+            "--qwen": [5, 1],
+            "--codex": [6, 1],
         }
 
     def test_llm_routing_is_shorter_in_row_than_in_legacy_column(self):
@@ -816,7 +817,8 @@ _LLM_FLAGS_V2_FLAG = "SF_LLM_FLAGS_V2"
 # Conjunto vigente por regime do kill-switch (item 005 do loop
 # 08-17-systemforge-multillm-gaps-refactor). Ausente/off = roster legado da
 # tabela C26; "1" = literais thinking/execution.
-_LEGACY_FLAG_LITERALS = {"--codex", "--kimi"}
+# `--mimo` entra nos dois regimes: substitui o `--kimi` (2026-10-02).
+_LEGACY_FLAG_LITERALS = {"--codex", "--mimo", "--kimi"}
 _V2_FLAG_LITERALS = {
     "--fable",
     "--opus",
@@ -825,6 +827,7 @@ _V2_FLAG_LITERALS = {
     "--grok-xhigh",
     "--grok",
     "--sonnet",
+    "--mimo",
     "--kimi",
     "--qwen",
     "--codex",
@@ -1209,14 +1212,15 @@ class TestThinkingExecutionFlagEnabled:
             f"Expected {expected}, got {data['thinking_tids']}"
         )
 
-    def test_execution_group_has_5_buttons(self):
-        """Execution group: 5 alternativas no select, alinhadas a queue-div-flag."""
+    def test_execution_group_has_6_buttons(self):
+        """Execution group: 6 alternativas no select, alinhadas a queue-div-flag."""
         data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-execution",
             "output-mcp-action-execution-select",
             "output-mcp-action-execution-grok",
             "output-mcp-action-execution-sonnet",
+            "output-mcp-action-execution-mimo",
             "output-mcp-action-execution-kimi",
             "output-mcp-action-execution-qwen",
             "output-mcp-action-execution-codex",
@@ -1236,6 +1240,7 @@ class TestThinkingExecutionFlagEnabled:
         assert cmds.get("output-mcp-action-thinking-grok-xhigh") == "/mcp:grok-xhigh"
         assert cmds.get("output-mcp-action-execution-grok") == "/mcp:grok"
         assert cmds.get("output-mcp-action-execution-sonnet") == "/mcp:sonnet"
+        assert cmds.get("output-mcp-action-execution-mimo") == "/mcp:mimo"
         assert cmds.get("output-mcp-action-execution-kimi") == "/mcp:kimi"
         assert cmds.get("output-mcp-action-execution-qwen") == "/mcp:qwen"
         assert cmds.get("output-mcp-action-execution-codex") == "/mcp:codex"

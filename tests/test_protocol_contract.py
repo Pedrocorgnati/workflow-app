@@ -289,10 +289,12 @@ _DELEGATION_NORMATIVE_TERMS = [
     ("provider claude", "claude"),
     ("provider kimi", "kimi"),
     ("provider codex", "codex"),
+    ("provider mimo", "mimo"),
     ("multi-llm-routing block", "multi-llm-routing"),
     ("fallback para Claude", "fallback inline para claude"),
     ("flag --kimi", "--kimi"),
     ("flag --codex", "--codex"),
+    ("flag --mimo", "--mimo"),
 ]
 
 

@@ -145,7 +145,11 @@ def _format_command_label(name: str, config_path: str, *, max_lines: int = 3) ->
 # Flags MCP intra-comando suportadas (eixo-flag; distinto do eixo-worker
 # queue-chk-use-*). Conjunto FECHADO canonico em config.llm_flags; qualquer
 # token fora e ignorado (Zero Assumido, MF-01, MF-02).
-from workflow_app.config.llm_flags import _SUPPORTED_MCP_FLAGS
+from workflow_app.config.llm_flags import (
+    MIMO_FLAG,
+    MIMO_SUPERSEDES_KIMI,
+    _SUPPORTED_MCP_FLAGS,
+)
 
 
 def render_with_mcp_flags(
@@ -176,6 +180,10 @@ def render_with_mcp_flags(
         nao por `for_dispatch`.
       - provider CLAUDE (T1): anexa as flags de `active_flags` (apenas literais
         suportados, dedupadas, ordem de entrada preservada) ao final da base.
+      - Precedencia MiMo > Kimi (2026-10-02): com `--mimo` ativa, `--kimi`
+        sai do sufixo. O parser v2 dos comandos nao roda o Kimi quando as
+        duas vem juntas; o payload reflete isso em vez de carregar literal
+        morto.
       - provider None (Desabilitado) ou active_flags vazio / sem literal suportado:
         retorna `spec.name` sem sufixo (regressao zero).
 
@@ -208,6 +216,10 @@ def render_with_mcp_flags(
     for flag in active_flags:
         if flag in _SUPPORTED_MCP_FLAGS and flag not in suffix_flags:
             suffix_flags.append(flag)
+
+    # Precedencia MiMo > Kimi: a MiMo substitui o Kimi na lane T2.
+    if MIMO_FLAG in suffix_flags:
+        suffix_flags = [f for f in suffix_flags if f not in MIMO_SUPERSEDES_KIMI]
 
     if not suffix_flags:
         return base

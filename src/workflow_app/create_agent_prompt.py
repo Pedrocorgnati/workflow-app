@@ -131,7 +131,7 @@ Procedimento obrigatorio:
 6. Deduplicate por proposito, entradas, procedimento, saida e restricoes.
 7. Nao sobrescreva agente existente nem crie variante sem diferencial comprovado.
 8. Grave provider_support como array nao vazio composto apenas por claude,
-   codex, kimi, qwen e grok. Se o operador disser dual, confirme e traduza para
+   codex, kimi, qwen, grok e mimo. Se o operador disser dual, confirme e traduza para
    providers explicitos; nunca grave a string dual.
 9. Antes da primeira escrita, revalide lock, slug, paths e hashes dos arquivos
    que serao modificados. Use escrita atomica para arquivos integrais e preserve

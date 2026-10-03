@@ -3772,6 +3772,13 @@ class CommandQueueWidget(QWidget):
             _flag_options_layout = QHBoxLayout(_flag_options)
             _flag_options_layout.setContentsMargins(0, 0, 0, 0)
             _flag_options_layout.setSpacing(8)
+            self._flag_mimo_chk = QCheckBox("--mimo")
+            self._flag_mimo_chk.setProperty("testid", "queue-chk-flag-mimo")
+            self._flag_mimo_chk.setToolTip(
+                "Quando marcado, anexa --mimo ao label dos itens T1 (Claude). "
+                "Lane T2: vence o --kimi quando os dois estao marcados. "
+                "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+            )
             self._flag_kimi_chk = QCheckBox("--kimi")
             self._flag_kimi_chk.setProperty("testid", "queue-chk-flag-kimi")
             self._flag_kimi_chk.setToolTip(
@@ -3784,7 +3791,11 @@ class CommandQueueWidget(QWidget):
                 "Quando marcado, anexa --codex ao label dos itens T1 (Claude). "
                 "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
             )
-            for _btn in (self._flag_kimi_chk, self._flag_codex_chk):
+            for _btn in (
+                self._flag_mimo_chk,
+                self._flag_kimi_chk,
+                self._flag_codex_chk,
+            ):
                 _btn.setStyleSheet(_control_qss)
                 _btn.toggled.connect(self._on_flag_toggled)
                 _flag_options_layout.addWidget(_btn)
@@ -10074,6 +10085,11 @@ class CommandQueueWidget(QWidget):
         # Fallback: checkboxes locais do command_queue.
         flags: list[str] = []
         if (
+            getattr(self, "_flag_mimo_chk", None) is not None
+            and self._flag_mimo_chk.isChecked()
+        ):
+            flags.append("--mimo")
+        if (
             getattr(self, "_flag_kimi_chk", None) is not None
             and self._flag_kimi_chk.isChecked()
         ):
@@ -10243,9 +10259,24 @@ class CommandQueueWidget(QWidget):
         from workflow_app.config.llm_flags import (
             _FLAG_LITERAL_TO_MAIN,
             _SUPPORTED_MCP_FLAGS,
+            MIMO_FLAG,
         )
 
         main_llm = self._resolve_interactive_main_llm()
+
+        def _t1_tooltip(flag: str) -> str:
+            # `--mimo` preserva a explicacao de precedencia do checkbox
+            # (MiMo > Kimi, 2026-10-02); sem isso o refresh a apagava.
+            precedence = (
+                "Lane T2: vence o --kimi quando os dois estao marcados. "
+                if flag == MIMO_FLAG
+                else ""
+            )
+            return (
+                "Quando marcado, anexa " + flag + " ao label dos itens T1 (Claude). "
+                + precedence
+                + "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
+            )
 
         panel = getattr(self, "_flags_panel", None)
         if panel is not None:
@@ -10271,10 +10302,7 @@ class CommandQueueWidget(QWidget):
                 continue
             if main_llm == "claude":
                 chk.setEnabled(True)
-                chk.setToolTip(
-                    "Quando marcado, anexa " + flag + " ao label dos itens T1 (Claude). "
-                    "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-                )
+                chk.setToolTip(_t1_tooltip(flag))
                 continue
             flag_main = _FLAG_LITERAL_TO_MAIN.get(flag, "")
             if flag == "--codex" and main_llm == "kimi":
@@ -10291,10 +10319,7 @@ class CommandQueueWidget(QWidget):
                 chk.setToolTip(flag + " redundante sob Main " + main_llm + ".")
             else:
                 chk.setEnabled(True)
-                chk.setToolTip(
-                    "Quando marcado, anexa " + flag + " ao label dos itens T1 (Claude). "
-                    "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
-                )
+                chk.setToolTip(_t1_tooltip(flag))
 
     # Diretorios pesquisados para resolver existencia de uma skill quando
     # --force Kimi reescreve `/cmd` como `/skill:cmd`. Caches resolvidos uma

@@ -48,6 +48,7 @@ _MCP_ACTION_LABELS = (
         "output-mcp-action-thinking-grok-xhigh": "grok-xhigh",
         "output-mcp-action-execution-grok": "grok",
         "output-mcp-action-execution-sonnet": "sonnet",
+        "output-mcp-action-execution-mimo": "mimo",
         "output-mcp-action-execution-kimi": "kimi",
         "output-mcp-action-execution-qwen": "qwen",
         "output-mcp-action-execution-codex": "codex",

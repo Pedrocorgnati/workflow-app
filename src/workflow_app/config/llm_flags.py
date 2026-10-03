@@ -14,7 +14,7 @@ conjunto passou a ser decidido pelo kill-switch dedicado, consultado aqui
 somente por ``llm_flags_v2_enabled()`` (boot-frozen, fail-closed; o nome da
 env var vive uma unica vez, em ``feature_flags``). Ausente/off = 2 literais
 legados
-(``--codex`` e ``--kimi``, tabela C26); ``"1"`` = os literais canonicos
+(``--codex`` e ``--kimi``, tabela C26) mais ``--mimo``; ``"1"`` = os literais canonicos
 de thinking/execution (capacidade de raciocinio, nao o CLI do T1).
 Todas as demais estruturas deste modulo sao DERIVADAS do conjunto vigente,
 nunca reescritas por regime — assim os dois regimes nao podem divergir.
@@ -40,6 +40,7 @@ _THINKING_FLAG_ORDER: tuple[str, ...] = (
 _EXECUTION_FLAG_ORDER: tuple[str, ...] = (
     "--grok",
     "--sonnet",
+    "--mimo",
     "--kimi",
     "--qwen",
     "--codex",
@@ -48,9 +49,18 @@ _FULL_FLAG_CANONICAL_ORDER: tuple[str, ...] = (
     _THINKING_FLAG_ORDER + _EXECUTION_FLAG_ORDER
 )
 
-# Roster legado (kill-switch ausente/off): so os 2 literais que existiam
-# antes do pacote multi-LLM.
-_LEGACY_MCP_FLAGS: frozenset[str] = frozenset({"--codex", "--kimi"})
+# Roster legado (kill-switch ausente/off): os 2 literais que existiam antes
+# do pacote multi-LLM mais `--mimo`, que entra nos DOIS regimes porque
+# substitui o `--kimi` (decisao do operador, 2026-10-02: em qualquer duvida
+# entre --mimo e --kimi, a MiMo ganha; ver `MIMO_SUPERSEDES_KIMI`).
+_LEGACY_MCP_FLAGS: frozenset[str] = frozenset({"--codex", "--mimo", "--kimi"})
+
+# Precedencia MiMo > Kimi (lane T2). Com as duas flags marcadas, o `--kimi`
+# sai do sufixo: o parser v2 dos comandos ja nao roda o Kimi nesse caso, e
+# manter o literal so confundiria o payload. Consumido por
+# `render_with_mcp_flags` e pelo FlagsPanel.
+MIMO_FLAG: str = "--mimo"
+MIMO_SUPERSEDES_KIMI: frozenset[str] = frozenset({"--kimi"})
 
 # Mapeamento flag -> provider/Main compativel (superset; filtrado abaixo).
 _FULL_FLAG_LITERAL_TO_MAIN: dict[str, str] = {
@@ -61,16 +71,17 @@ _FULL_FLAG_LITERAL_TO_MAIN: dict[str, str] = {
     "--grok-xhigh": "grok",
     "--grok": "grok",
     "--sonnet": "claude",
+    "--mimo": "mimo",
     "--kimi": "kimi",
     "--qwen": "qwen",
     "--codex": "codex",
 }
 
 # Flags por terminal de delegacao (superset; interseccionado abaixo).
-# T1 (Claude) aceita todas; T2 recebe kimi/qwen; T3 recebe codex/grok.
+# T1 (Claude) aceita todas; T2 recebe mimo/kimi/qwen; T3 recebe codex/grok.
 _FULL_FLAGS_BY_TERMINAL: dict[str, frozenset[str]] = {
     "T1": frozenset(_FULL_FLAG_CANONICAL_ORDER),
-    "T2": frozenset({"--kimi", "--kimi-k3", "--qwen"}),
+    "T2": frozenset({"--mimo", "--kimi", "--kimi-k3", "--qwen"}),
     "T3": frozenset({"--codex", "--codex-ultra", "--grok", "--grok-xhigh"}),
 }
 
@@ -78,6 +89,7 @@ _FULL_FLAGS_BY_TERMINAL: dict[str, frozenset[str]] = {
 # Variantes de claude (--fable/--opus/--sonnet) nao sao redundantes sob
 # Main claude: o Main escolhe o CLI do T1, a flag escolhe o raciocinio.
 _FULL_REDUNDANT_FLAG_MAINS: dict[str, str] = {
+    "--mimo": "mimo",
     "--kimi": "kimi",
     "--kimi-k3": "kimi",
     "--codex": "codex",
@@ -99,7 +111,7 @@ _FLAG_CANONICAL_ORDER: tuple[str, ...] = (
         flag for flag in _FULL_FLAG_CANONICAL_ORDER if flag in _SUPPORTED_MCP_FLAGS
     )
     if llm_flags_v2_enabled()
-    else ("--codex", "--kimi")
+    else ("--codex", "--mimo", "--kimi")
 )
 
 # Guarda de paridade: a ordem canonica e o conjunto fechado tem que descrever

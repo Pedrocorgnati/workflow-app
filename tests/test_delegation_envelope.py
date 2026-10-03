@@ -190,7 +190,8 @@ class TestIntraCommandFlagsPerRegime:
 
     def test_legacy_regime_two_literals(self) -> None:
         got = _run_literals_probe(None)
-        assert got["literals"] == ["--codex", "--kimi"], got
+        # `--mimo` entra nos dois regimes (precedencia MiMo > Kimi, 2026-10-02).
+        assert got["literals"] == ["--codex", "--mimo", "--kimi"], got
         # `--qwen`, `--grok` e `--kimi-k3` nao existem no regime legado.
         assert got["envelope_all"] == ["--codex", "--kimi"], got
 
@@ -204,6 +205,7 @@ class TestIntraCommandFlagsPerRegime:
             "--grok-xhigh",
             "--grok",
             "--sonnet",
+            "--mimo",
             "--kimi",
             "--qwen",
             "--codex",

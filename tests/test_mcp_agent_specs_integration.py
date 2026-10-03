@@ -65,6 +65,7 @@ _ACTION_TESTIDS = (
         "output-mcp-action-thinking-grok-xhigh",
         "output-mcp-action-execution-grok",
         "output-mcp-action-execution-sonnet",
+        "output-mcp-action-execution-mimo",
         "output-mcp-action-execution-kimi",
         "output-mcp-action-execution-qwen",
         "output-mcp-action-execution-codex",
@@ -590,7 +591,7 @@ def test_thinking_execution_sao_colunas_a_direita_estilo_main_llm(win):
         "fable", "opus", "codex-ultra", "kimi-k3", "grok-xhigh",
     ]
     assert [ex_combo.itemText(i) for i in range(ex_combo.count())] == [
-        "grok", "sonnet", "kimi", "qwen", "codex",
+        "grok", "sonnet", "mimo", "kimi", "qwen", "codex",
     ]
 
     action_row = _action_row_of(_by_testid(column, _ANCHOR_ACTION))

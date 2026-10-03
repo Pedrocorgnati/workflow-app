@@ -4394,6 +4394,27 @@ class TestRenderWithMcpFlagsHelper:
         )
         assert out == "/prd-create --kimi --codex"
 
+    def test_mimo_only_appended_on_claude(self):
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec, for_dispatch=False, provider=Provider.CLAUDE, active_flags=["--mimo"]
+        )
+        assert out == "/prd-create --mimo"
+
+    @pytest.mark.parametrize(
+        "flags",
+        [["--mimo", "--kimi"], ["--kimi", "--mimo"], ["--kimi", "--mimo", "--codex"]],
+    )
+    def test_mimo_supersedes_kimi(self, flags):
+        """Precedencia MiMo > Kimi (2026-10-02): com --mimo, --kimi sai do sufixo."""
+        spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)
+        out = render_with_mcp_flags(
+            spec, for_dispatch=False, provider=Provider.CLAUDE, active_flags=flags
+        )
+        assert "--kimi" not in out.split()
+        assert "--mimo" in out.split()
+        assert ("--codex" in out.split()) == ("--codex" in flags)
+
     def test_dedupe_repeated_flag(self):
         """Flag repetida e dedupada, mantendo uma unica ocorrencia."""
         spec = CommandSpec("/prd-create", ModelName.OPUS, position=1)

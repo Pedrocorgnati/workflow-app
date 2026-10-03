@@ -246,17 +246,23 @@ print(json.dumps({
 
 
 def test_llm_flags_v2_absent_closes_set_to_two_literals():
-    """C26: sem o switch, o conjunto fechado e `--codex` + `--kimi`."""
+    """C26: sem o switch, o conjunto fechado e `--codex` + `--kimi`, mais
+    `--mimo`, que entra nos dois regimes por substituir o `--kimi`
+    (precedencia MiMo > Kimi, 2026-10-02)."""
     got = _run_probe(_FLAGS_SET_PROBE, {"SF_LLM_FLAGS_V2": None})
-    assert got["supported"] == ["--codex", "--kimi"], got
-    assert got["order"] == ["--codex", "--kimi"], got
+    assert got["supported"] == ["--codex", "--kimi", "--mimo"], got
+    assert got["order"] == ["--codex", "--mimo", "--kimi"], got
     assert got["by_terminal"] == {
-        "T1": ["--codex", "--kimi"],
-        "T2": ["--kimi"],
+        "T1": ["--codex", "--kimi", "--mimo"],
+        "T2": ["--kimi", "--mimo"],
         "T3": ["--codex"],
     }, got
-    assert got["literal_to_main"] == {"--codex": "codex", "--kimi": "kimi"}, got
-    assert got["redundant"] == {"--codex": "codex", "--kimi": "kimi"}, got
+    assert got["literal_to_main"] == {
+        "--codex": "codex", "--mimo": "mimo", "--kimi": "kimi",
+    }, got
+    assert got["redundant"] == {
+        "--codex": "codex", "--mimo": "mimo", "--kimi": "kimi",
+    }, got
 
 
 def test_llm_flags_v2_on_opens_the_seven_canonical_literals():
@@ -264,17 +270,17 @@ def test_llm_flags_v2_on_opens_the_seven_canonical_literals():
     got = _run_probe(_FLAGS_SET_PROBE, {"SF_LLM_FLAGS_V2": "1"})
     assert got["order"] == [
         "--fable", "--opus", "--codex-ultra", "--kimi-k3", "--grok-xhigh",
-        "--grok", "--sonnet", "--kimi", "--qwen", "--codex",
+        "--grok", "--sonnet", "--mimo", "--kimi", "--qwen", "--codex",
     ], got
     assert got["by_terminal"] == {
         "T1": [
             "--codex", "--codex-ultra", "--fable", "--grok", "--grok-xhigh",
-            "--kimi", "--kimi-k3", "--opus", "--qwen", "--sonnet",
+            "--kimi", "--kimi-k3", "--mimo", "--opus", "--qwen", "--sonnet",
         ],
-        "T2": ["--kimi", "--kimi-k3", "--qwen"],
+        "T2": ["--kimi", "--kimi-k3", "--mimo", "--qwen"],
         "T3": ["--codex", "--codex-ultra", "--grok", "--grok-xhigh"],
     }, got
-    assert len(got["redundant"]) == 7, got
+    assert len(got["redundant"]) == 8, got
 
 
 def test_llm_flags_module_stays_qt_free():

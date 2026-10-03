@@ -64,7 +64,7 @@ from typing import Final
 #     | 5 | SF_GROK_SPIKE                            | opt-in     | boot-frozen | roster sem `grok` (radio Main e worker paralelo ocultos)          |
 #     | 6 | SF_MAIN_PROVIDERS_V2                     | opt-in     | boot-frozen | radios Main = `claude`, `codex`, `kimi` (sem qwen/opus/sonnet/k3) |
 #     | 7 | SF_PARALLEL_WORKERS_V2                   | opt-in     | boot-frozen | workers = `kimi` (T2) e `codex` (T3), 2 no total                  |
-#     | 8 | SF_LLM_FLAGS_V2                          | opt-in     | boot-frozen | conjunto fechado de 2 literais: `--codex` e `--kimi`              |
+#     | 8 | SF_LLM_FLAGS_V2                          | opt-in     | boot-frozen | 3 literais: `--codex`, `--mimo` e `--kimi` (MiMo vence o Kimi)    |
 #     | 9 | SF_MCP_THINK_EXEC_V2                     | opt-in     | boot-frozen | action row legada Main MCP / Parallel / Dual (sem TE-01)          |
 #     |10 | removido: wrappers Kimi por variante     | -          | -           | Thinking Kimi sempre publica `/mcp:kimi-k3`                       |
 #
@@ -436,8 +436,9 @@ def parallel_workers_v2_enabled() -> bool:
 
 # ── Kill-switch: conjunto fechado de literais de flag (C26 / item 005) ── #
 # Item 005 do mesmo loop. Ausente = 2 literais legados (`--kimi`,
-# `--codex`, tabela C26 em source.md:1251). Somente "1" liga os 7
-# literais canonicos. Consumido por `workflow_app.config.llm_flags`, que e
+# `--codex`, tabela C26 em source.md:1251) mais `--mimo` (a MiMo substitui
+# o Kimi, 2026-10-02). Somente "1" liga os 11 literais canonicos de
+# `_FULL_FLAG_CANONICAL_ORDER`. Consumido por `workflow_app.config.llm_flags`, que e
 # um modulo puro (sem Qt) — o import de `feature_flags` a partir dele e
 # legitimo porque `config/__init__.py` e Qt-free por PEP 562.
 #
