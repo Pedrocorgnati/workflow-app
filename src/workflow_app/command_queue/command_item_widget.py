@@ -272,6 +272,7 @@ class CommandItemWidget(QWidget):
     run_in_terminal_requested = Signal(str) # command name (Claude — interactive terminal)
     run_in_kimi_terminal_requested = Signal(str)  # Kimi-adapted prompt (workspace terminal)
     run_in_codex_terminal_requested = Signal(str)  # Codex prompt (T3 codex-output terminal)
+    run_in_mimo_terminal_requested = Signal(str)   # MiMo prompt cru (T2 workspace, rota propria — mark-as-sent e do slot da fila)
     run_local_action_requested = Signal(object)    # CommandSpec — in-process local-action (kind=="local-action"); queue widget owns dispatch
     kimi_adaptation_failed = Signal(str)    # command_text whose adapt_to_kimi raised ValueError (queue widget toasts — Zero Silencio)
     sent_state_changed = Signal(bool)       # _is_sent toggled (drives queue-progress-ring)
@@ -695,6 +696,25 @@ class CommandItemWidget(QWidget):
             return
         self.run_in_codex_terminal_requested.emit(self.command_text())
 
+    def _on_mimo_clicked(self) -> None:
+        """Despacha o item a MiMo (T2) pela rota propria. NAO marca enviado aqui.
+
+        Espelha _on_codex_clicked: emite o sinal dedicado consumido pelo slot do
+        queue widget `_on_single_button_mimo_dispatch`, que so marca o item como
+        enviado depois que `_dispatch_mimo_blue_arrow` devolve True (host guard
+        fail-closed passou E o payload foi emitido ao T2). Marcar aqui de forma
+        incondicional deixaria o item ambar mesmo num abort (host ausente,
+        payload com "!`") — mesma razao do finding F2 do Codex.
+
+        O texto e o comando cru (`command_text()`), sem adaptacao Kimi: item
+        roteado a worker nao leva sufixo de flags (decisao D1 de
+        ai-forge/rules/llm-routing-div.md) e o builder MiMo produz o executor
+        nativo `/slash-executor --delegation-runtime=mimo` (item 006).
+        """
+        if self._is_sent:
+            return
+        self.run_in_mimo_terminal_requested.emit(self.command_text())
+
     # ─────────────────────────── Provider (botao unico) ──────────────────── #
 
     def effective_provider(self) -> Provider | None:
@@ -801,7 +821,9 @@ class CommandItemWidget(QWidget):
         (Desabilitado) -> nao despacha; apenas reafirma o estado cinza.
 
         Roteamento do clique: `KIMI` e `QWEN` (familia T2, seta azul) ->
-        `_on_kimi_clicked`; `CODEX` -> `_on_codex_clicked`; `CLAUDE` (e
+        `_on_kimi_clicked`; `MIMO` (T2, rota propria) -> `_on_mimo_clicked`
+        (nunca `_on_kimi_clicked`, que marca enviado incondicional);
+        `CODEX` -> `_on_codex_clicked`; `CLAUDE` (e
         default, inclusive Grok-as-Main via verde) -> `_on_run_clicked`."""
         if self._is_sent:
             self.reset_to_pending()
@@ -823,6 +845,10 @@ class CommandItemWidget(QWidget):
         # via `_on_kimi_clicked` — divergencia clique vs step.
         if prov in (Provider.KIMI, Provider.QWEN):
             self._on_kimi_clicked()
+        elif prov is Provider.MIMO:
+            # Rota propria da MiMo (item 007): o mark-as-sent e do slot da
+            # fila, depois do envio confirmado (host guard fail-closed).
+            self._on_mimo_clicked()
         elif prov is Provider.CODEX:
             self._on_codex_clicked()
         else:

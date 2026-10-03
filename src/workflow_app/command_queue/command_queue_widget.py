@@ -4307,8 +4307,56 @@ class CommandQueueWidget(QWidget):
         de publicar num terminal inexistente (Zero Silencio)."""
         self._codex_t3_available = bool(alive)
 
+    # Painel canonico do T2 e o OutputPanel `terminal-workspace` (main_window):
+    # so ele tem `_shell` (PTY). O testid `terminal-workspace-output` e do
+    # TerminalCanvas interno, que nao tem `_shell` — a sonda devolveria None
+    # sempre (item 007).
+    _T2_OUTPUT_TESTID = "terminal-workspace"
     _T3_OUTPUT_TESTID = "terminal-codex-output"
     _GROK_CLI_BASENAME = "grok"
+
+    def _find_t2_output_panel(self) -> QWidget | None:
+        """Locate the canonical T2 widget (`terminal-workspace`).
+
+        Returns None when this queue is not embedded in MainWindow (unit
+        tests) or when T2 has not been built yet.
+        """
+        win = self.window()
+        if win is None:
+            return None
+        for child in win.findChildren(QWidget):
+            if child.property("testid") == self._T2_OUTPUT_TESTID:
+                return child
+        return None
+
+    def _t2_pty_hosts_cli(self, cli: str) -> bool | None:
+        """Whether the T2 PTY session currently hosts ``cli``.
+
+        Returns:
+          - True when a descendant process of the T2 PTY matches ``cli``
+          - False when the PTY is inspectable but ``cli`` is not running
+            (zsh idle, outro binario)
+          - None when there is no PTY to inspect (headless / unit tests).
+            Chamadores decidem o que fazer com None: o guard MiMo bloqueia
+            (fail-closed, item 007); o guard Grok libera (fail-open legado).
+        """
+        panel = self._find_t2_output_panel()
+        if panel is None:
+            return None
+        shell = getattr(panel, "_shell", None)
+        if shell is None:
+            return None
+        pid_fn = getattr(shell, "pid", None)
+        pid = pid_fn() if callable(pid_fn) else None
+        if pid is None:
+            return None
+        hosts_fn = getattr(shell, "hosts_cli", None)
+        if not callable(hosts_fn):
+            return None
+        try:
+            return bool(hosts_fn(cli))
+        except OSError:
+            return None
 
     def _find_t3_output_panel(self) -> QWidget | None:
         """Locate the canonical T3 widget (`terminal-codex-output`).
@@ -4352,6 +4400,39 @@ class CommandQueueWidget(QWidget):
             return bool(hosts_fn(cli))
         except OSError:
             return None
+
+    def _ensure_t2_mimo_host(self) -> bool:
+        """Gate Worker T2 MiMo: ocupacao viva + processo `mimo` no PTY do T2.
+
+        FAIL-CLOSED (item 007): diferente do guard Grok
+        (`_ensure_t3_grok_host`, que libera quando o PTY nao e inspecionavel),
+        so libera o envio quando a ocupacao viva do T2 e `mimo` E o PTY do T2
+        hospeda de fato um processo `mimo` (`PersistentShell.hosts_cli('mimo')`).
+        Qualquer outro estado (ocupacao diferente, processo ausente, PTY nao
+        inspecionavel, headless) bloqueia com toast de `warning` e devolve False
+        (Zero Silencio). NUNCA ha `return True` no ramo None da sonda.
+        """
+        if self._resolve_worker_occupancy()[0] != "mimo":
+            signal_bus.toast_requested.emit(
+                "Worker MiMo (T2): o T2 nao esta ocupado pela MiMo - envio bloqueado.",
+                "warning",
+            )
+            return False
+        hosted = self._t2_pty_hosts_cli("mimo")
+        if hosted is False:
+            signal_bus.toast_requested.emit(
+                "Worker MiMo (T2): processo mimo ausente no terminal T2 (rode mimod no T2) - envio bloqueado.",
+                "warning",
+            )
+            return False
+        if hosted is None:
+            # Fail-closed: PTY nao inspecionavel NUNCA libera envio.
+            signal_bus.toast_requested.emit(
+                "Worker MiMo (T2): terminal T2 nao inspecionavel (sem PTY) - envio bloqueado.",
+                "warning",
+            )
+            return False
+        return True
 
     def _ensure_t3_grok_host(self) -> bool:
         """Gate Worker T3 Grok: widget + occupancy + PTY process.
@@ -9331,6 +9412,12 @@ class CommandQueueWidget(QWidget):
         item.run_in_codex_terminal_requested.connect(
             lambda cmd, it=item: self._on_single_button_codex_dispatch(it, cmd)
         )
+        # Rota propria da MiMo (T2, item 007): mark-as-sent fica no slot,
+        # depois do envio confirmado pelo host guard fail-closed. Nao passa
+        # pelo `_dispatch_blue_arrow` do Kimi/Qwen (caminho antigo preservado).
+        item.run_in_mimo_terminal_requested.connect(
+            lambda cmd, it=item: self._on_single_button_mimo_dispatch(it, cmd)
+        )
         item.sent_state_changed.connect(self._on_item_sent_state_changed)
         # --force Kimi pode estar ativo no momento da criacao do item: aplica
         # imediatamente a regra de visibilidade da seta de worker para o item
@@ -9394,6 +9481,22 @@ class CommandQueueWidget(QWidget):
         if self._dispatch_codex_command(cmd_text):
             item._mark_as_sent()
 
+    def _on_single_button_mimo_dispatch(
+        self, item: CommandItemWidget, cmd_text: str
+    ) -> None:
+        """Slot do botao unico (azul) para a MiMo/T2 (rota propria, item 007).
+
+        So marca o item como enviado quando `_dispatch_mimo_blue_arrow` devolve
+        True (host guard fail-closed passou E o payload foi emitido ao T2). Em
+        qualquer abort (ocupacao errada, processo mimo ausente, PTY nao
+        inspecionavel, payload com "!`") o item permanece pendente e o toast do
+        dispatcher e o feedback visivel (Zero Silencio). Espelha
+        `_on_single_button_codex_dispatch`; label e highlight usam o texto
+        original do item (`cmd_text`), como a seta verde."""
+        if self._dispatch_mimo_blue_arrow(cmd_text):
+            self._on_run_command(cmd_text)
+            item._mark_as_sent()
+
     def _on_item_sent_state_changed(self, _is_sent: bool) -> None:
         """Item toggled the amber-dot (sent) state — refresh queue-progress-ring."""
         self._emit_progress_metrics()
@@ -9403,6 +9506,59 @@ class CommandQueueWidget(QWidget):
     # Extra delay added when the previous workspace dispatch was /clear:
     # Kimi takes longer to repaint the prompt after a full TUI clear.
     _KIMI_AFTER_CLEAR_EXTRA_DELAY_MS: int = 2_000
+
+    def _dispatch_mimo_blue_arrow(self, cmd_text: str) -> bool:
+        """Despacha a seta azul da MiMo ao T2; True so quando publicou o payload.
+
+        Caminho PROPRIO da MiMo (item 007): nao passa por `_dispatch_blue_arrow`
+        (Kimi/Qwen) nem por `_route_blue_arrow_through_universal` — o builder
+        `_build_mimo_slash_executor_invocation` ja produz o executor nativo
+        `/slash-executor --delegation-runtime=mimo`. Gates nesta ordem:
+
+          1. texto vazio/so espacos -> toast `warning` + False;
+          2. `_ensure_t2_mimo_host()` (fail-closed) -> False ja com toast;
+          3. builder (recusa de "!`" -> ValueError) -> toast `warning` + False.
+
+        Delay igual ao do `_dispatch_blue_arrow`: `_KIMI_BLUE_ARROW_DEFAULT_DELAY_MS`,
+        mais `_KIMI_AFTER_CLEAR_EXTRA_DELAY_MS` quando a ultima dispatch do
+        workspace foi /clear (flag consumida aqui para False). O retorno bool e a
+        definicao de "envio confirmado" usada pelo slot
+        `_on_single_button_mimo_dispatch` (mark-as-sent gated, mesma semantica de
+        `_dispatch_codex_command`)."""
+        if not cmd_text or not cmd_text.strip():
+            signal_bus.toast_requested.emit(
+                "Worker MiMo: comando vazio - dispatch abortado.",
+                "warning",
+            )
+            return False
+        if not self._ensure_t2_mimo_host():
+            return False
+        try:
+            payload = self._build_mimo_slash_executor_invocation(cmd_text)
+        except ValueError as exc:
+            signal_bus.toast_requested.emit(
+                f"Worker MiMo: {exc} - dispatch abortado.",
+                "warning",
+            )
+            return False
+        if self._last_workspace_dispatch_was_clear:
+            delay = (
+                self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+                + self._KIMI_AFTER_CLEAR_EXTRA_DELAY_MS
+            )
+            self._last_workspace_dispatch_was_clear = False  # consumed
+        else:
+            delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+        dispatch_telemetry.open_dispatch(
+            route="blue-arrow",
+            channel="workspace",
+            command=payload,
+            position=self._dispatch_position(),
+            after_clear=self._last_dispatch_head.get("workspace") == "/clear",
+        )
+        self._last_dispatch_head["workspace"] = self._command_head(payload)
+        signal_bus.kimi_blue_arrow_dispatched.emit(payload, delay)
+        return True
 
     def _dispatch_blue_arrow(self, kimi_prompt: str) -> None:
         """Forward a blue-arrow click to `kimi_blue_arrow_dispatched` with
@@ -13659,6 +13815,10 @@ class CommandQueueWidget(QWidget):
             self._last_classified_provider is Provider.QWEN
             and next_item.is_worker_arrow_visible()
         )
+        use_mimo = (
+            self._last_classified_provider is Provider.MIMO
+            and next_item.is_worker_arrow_visible()
+        )
 
         # use_codex e governado SO pelo router: Provider.CODEX significa worker
         # Codex ativo E comando na whitelist Codex (is_codex_compatible) E Kimi
@@ -13745,6 +13905,14 @@ class CommandQueueWidget(QWidget):
             # para `/slash-executor` nativo.
             next_item._on_kimi_clicked()
             self._last_workspace_dispatch_was_clear = False
+            return
+        if use_mimo:
+            # Seta azul T2 com rota propria MiMo (item 007): o clique
+            # per-item (`_on_exec_clicked` com Provider.MIMO) e o step
+            # compartilham `_on_mimo_clicked` -> `_dispatch_mimo_blue_arrow`.
+            # O mark-as-sent fica no slot, depois do envio confirmado; o
+            # `_last_workspace_dispatch_was_clear` e consumido no dispatcher.
+            next_item._on_mimo_clicked()
             return
         if use_codex:
             if self._dispatch_codex_command(cmd_text, to_t1=False, is_prompt=spec.is_prompt):  # to_t1=False → T3 xterm
