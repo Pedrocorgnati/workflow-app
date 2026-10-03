@@ -1,0 +1,51 @@
+# t=8.445 cursor=25,66 modes={'bp2004': False, 'alt1049': False, 'm1000': True, 'm1002': True, 'm1003': True, 'sgr1006': True, 'focus1004': False, 'cur25': True, 'sync2026': False}
+00|
+01|                                                            ✦
+02|
+03|
+04|                                                                                                                 ✦
+05|                                                                                                      ✦
+06|
+07|                                                                                                                                                                                            ✧
+08|                                                                                                                  ✧       ✧                                                                          ✧
+09|                                                                                                            ✦
+10|
+11|                                                                                                                                                ✦
+12|
+13|
+14|
+15|
+16|
+17|                                                                                                                  Xiaomi                                                    ✧
+18|                                                                      ✧
+19|                                                                                 ▀▀▄▀▀ ▀ ▀▀▄▀▀ ▀▀▀▀   ▀▀▀ ▀▀▀▀ ▀▀▀▄ ▀▀▀▀
+20|                                                                                 ▀ ▀ ▀ ▀ ▀ ▀ ▀ ▀  ▀   ▀   ▀  ▀ ▀  ▀ ▀▀▀
+21|                                                                                 ▀   ▀ ▀ ▀   ▀ ▀▀▀▀   ▀▀▀ ▀▀▀▀ ▀▀▀  ▀▀▀▀
+22|
+23|                                                                    ✦                                                        ✧
+24|                                                               ┃
+25|                                                               ┃  Type your message... (type / for commands)                                                          ✧
+26|                                                               ┃
+27|                                                               ┃  Build · Pong Spike Fake                                                 ✧
+28|                                                               ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                                                ✧
+29|                                            ✧                   tab switch mode  ctrl+p settings     @ attach file  $ subagent  / commands
+30|                                                                                                                                                              ✧
+31|                                                                                                                                                                   ✦
+32|
+33|                                                                     ● Tip Run /models or Ctrl+X M to switch between available models                                                 ✧
+34|
+35|
+36|
+37|
+38|                                                                                                                                ✦
+39|
+40|
+41|
+42|                                                                ✧
+43|                                                                                                ✦
+44|                                       ✧                                                                                                                                             ✧
+45|                                          ✦                                                           ✧
+46|                                                                                                                                      ✦                                         ✦
+47|                                                                                                    ✧                               ✧     ✦
+48|  /tmp/claude-1000/-home-pedro-Reposit-rios-systemForge/00000000-0000-0000-0000-000000000000/scratchpad/spike-mimo/proj:main                                                                    0.1.15
+49|                                                                                                                                   ✦

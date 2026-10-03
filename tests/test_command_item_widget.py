@@ -343,6 +343,22 @@ class TestQwenWorkerBlueArrow:
         assert _PROVIDER_BTN_STYLE[Provider.KIMI] == _T2_BLUE
         assert _PROVIDER_BTN_STYLE[Provider.QWEN] == _PROVIDER_BTN_STYLE[Provider.KIMI]
 
+    def test_mimo_shares_t2_blue_with_own_label_and_dest(self):
+        """MiMo (Q9) ocupa o mesmo T2: seta azul, rotulo e destino proprios.
+
+        Sem as tres entradas `refresh_provider` levantaria KeyError ao pintar
+        um item roteado para `Provider.MIMO`.
+        """
+        from workflow_app.command_queue.command_item_widget import (
+            _PROVIDER_DEST,
+            _PROVIDER_LABEL,
+        )
+
+        assert _PROVIDER_BTN_STYLE[Provider.MIMO] == _T2_BLUE
+        assert _PROVIDER_BTN_STYLE[Provider.MIMO] == _PROVIDER_BTN_STYLE[Provider.KIMI]
+        assert _PROVIDER_LABEL[Provider.MIMO] == "MiMo worker"
+        assert _PROVIDER_DEST[Provider.MIMO] == "T2 terminal-workspace (mimo)"
+
     def test_qwen_provider_paints_blue(self, qtbot):
         item = self._qwen_item(qtbot)
         assert "#3B82F6" in item._exec_btn.styleSheet()

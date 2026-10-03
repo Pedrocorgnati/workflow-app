@@ -61,6 +61,7 @@ _ACTION_TESTIDS = (
         "output-mcp-action-thinking-fable",
         "output-mcp-action-thinking-opus",
         "output-mcp-action-thinking-codex-ultra",
+        "output-mcp-action-thinking-mimo-pro",
         "output-mcp-action-thinking-kimi",
         "output-mcp-action-thinking-grok-xhigh",
         "output-mcp-action-execution-grok",
@@ -89,7 +90,8 @@ _ACTION_BASE_PAIRS = (
     if _LLM_CONFIG_V2
     else [
         ("output-mcp-action-main", "/mcp:codex"),
-        ("output-mcp-action-parallel", "/mcp:kimi"),
+        # Q9/D1: o Parallel sob Main Claude e a lane T2 = MiMo (o Kimi saiu).
+        ("output-mcp-action-parallel", "/mcp:mimo"),
         ("output-mcp-action-dual", "/mcp:dual"),
     ]
 )
@@ -588,7 +590,7 @@ def test_thinking_execution_sao_colunas_a_direita_estilo_main_llm(win):
     assert th_combo.property("testid") == "output-mcp-action-thinking-select"
     assert ex_combo.property("testid") == "output-mcp-action-execution-select"
     assert [th_combo.itemText(i) for i in range(th_combo.count())] == [
-        "fable", "opus", "codex-ultra", "kimi-k3", "grok-xhigh",
+        "fable", "opus", "codex-ultra", "mimo-pro", "kimi-k3", "grok-xhigh",
     ]
     assert [ex_combo.itemText(i) for i in range(ex_combo.count())] == [
         "grok", "sonnet", "mimo", "kimi", "qwen", "codex",

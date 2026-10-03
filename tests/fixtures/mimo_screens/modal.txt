@@ -1,0 +1,51 @@
+# t=47.274 cursor=16,101 modes={'bp2004': True, 'alt1049': False, 'm1000': False, 'm1002': False, 'm1003': False, 'sgr1006': False, 'focus1004': False, 'cur25': True, 'sync2026': False}
+00|                                                                                                                                                            ▶
+01|  ┃                                                                                                                                                             lat250
+02|  ┃  Responda apenas com a palavra PONG seguida dos argumentos: lat250
+03|  ┃                                                                                                                                                             Context
+04|                                                                                                                                                                2 tokens
+05|     PONG lat250                                                                                                                                                0% used
+06|                                                                                                                                                                limit 128K
+07|     ▣  Build · Pong · 1.2s                                                                                                                     ⎘ copy          <1 t/s
+08|                                                                                                                                                                $0.00 spent
+09|
+10|                                                                                                                                                                Working Directory
+11|                                                                                                                                                                /tmp/claude-1000/-home-pedro-Reposit-
+12|                                                                                                                                                                rios-systemForge/00000000-0000-0000-
+13|                                                                                                                                                                0000-000000000000/scratchpad/spike-
+14|                                                                          Select agent                                     esc                                  mimo/proj2
+15|
+16|                                                                          /echo-test !`printf SHELLX`                                                           Instructions
+17|                                                                                                                                                                • AGENTS.md
+18|                                                                                                                                                                • CLAUDE.md
+19|                                                                          No results found
+20|                                                                                                                                                                LSP
+21|                                                                                                                                                                LSPs will activate as files are read
+22|
+23|
+24|
+25|
+26|
+27|
+28|
+29|
+30|
+31|
+32|
+33|
+34|
+35|
+36|
+37|
+38|
+39|
+40|
+41|
+42|
+43|  ┃                                                                                                                                                             /tmp/claude-1000/-home-pedro-Reposit-
+44|  ┃   raceraw                                                                                                                                                   rios-systemForge/00000000-0000-0000-
+45|  ┃                                                                                                                                                             0000-000000000000/scratchpad/spike-
+46|  ┃  Build · Pong Spike Fake «never-ask»                                                                                                                        mimo/proj2:main
+47|
+48|   2/115K (0%)  tab switch mode  ctrl+p settings                                                                    @ attach file  $ subagent  / commands       • MiMoCode 0.1.15
+49|

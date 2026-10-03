@@ -624,6 +624,33 @@ def test_os_dois_eixos_de_provider_sao_gravados(monkeypatch, tmp_path):
     assert ev["resolved_provider"] == "kimi"
 
 
+def test_main_mimo_grava_mimo_sem_degradar(monkeypatch, tmp_path):
+    """Espelho do caso qwen: Main=MiMo tem rotulo de brainstorm proprio.
+
+    MiMo esta em `_BRAINSTORM_PROVIDER_LABELS`, entao o resolvido e o proprio
+    slug e nao a queda para Claude que qwen/grok sofrem. Sem toggles de rota,
+    o fallback do radio manda o despacho ao terminal do worker (o mesmo do
+    kimi), nunca ao T1 de Claude.
+    """
+    sinais = _install_fakes(monkeypatch)
+    stub = _Stub(tmp_path, str(_md_real(tmp_path)))
+    stub._current_llm_provider = lambda: "mimo"  # type: ignore[assignment]
+    payload = dict(_PAYLOAD, button_type="type-selector-radio-input")
+
+    MainWindow._on_mcp_prompt_requested(stub, payload)  # type: ignore[arg-type]
+
+    (ev,) = _eventos()
+    assert ev["reason"] == "ok"
+    assert ev["requested_provider"] == "type-selector-radio-input"
+    assert ev["resolved_provider"] == "mimo", (
+        "MiMo tem rotulo de brainstorm: o registro grava o slug que executou, "
+        "sem a degradacao para Claude reservada a qwen/grok"
+    )
+    assert ev["terminal"] == 2, "sem toggles, Main MiMo herda o terminal do worker"
+    assert [terminal for _, terminal in stub.publish_calls] == [2]
+    assert sinais.dispatch == [("mcp-prompt-btn-otimizar", True)]
+
+
 _PROMPT_MARCADO = (
     "CABECALHO-DO-PROMPT-QUE-NAO-PODE-VAZAR\n"
     "corpo com segredo ghp_" + "C" * 36 + "\n"
@@ -824,8 +851,9 @@ def test_degradacao_qwen_para_claude_e_gravada_como_claude(monkeypatch, tmp_path
     `resolved_provider="qwen"` num despacho que saiu inteiro por Claude --
     invertendo justamente a medicao que o par de campos existe para fazer.
 
-    O teste antigo usava Kimi, o unico slug em que o cru e o resolvido
-    coincidem, e por isso passava com o defeito no lugar.
+    O teste antigo usava Kimi, um slug com persona de brainstorm (como MiMo)
+    em que o cru e o resolvido coincidem, e por isso passava com o defeito no
+    lugar.
     """
     _install_fakes(monkeypatch)
     stub = _Stub(tmp_path, str(_md_real(tmp_path)))

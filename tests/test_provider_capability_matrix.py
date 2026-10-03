@@ -113,6 +113,11 @@ class TestAuthorialYaml:
                 {"tool_execution", "file_write", "shell_execution"},
                 {"mcp_access"},
             ),
+            (
+                "mimo",
+                {"tool_execution", "file_write", "mcp_access", "shell_execution"},
+                set(),
+            ),
         ],
     )
     def test_main_runtime_capabilities_match_supported_surfaces(
@@ -494,6 +499,7 @@ class Test_get_mapped_capabilities:
             ("grok", "disponivel"),
             ("qwen", "disponivel"),
             ("kimi", "indisponivel"),
+            ("mimo", "disponivel"),
         ],
     )
     def test_mapped_command_preserves_main_mcp_status(
@@ -532,6 +538,7 @@ class Test_get_mapped_capabilities:
             ("/auto-flow", "claude", "file_write", True),
             ("/create-task", "codex", "mcp_access", True),
             ("/create-task", "kimi", "mcp_access", False),
+            ("/create-task", "mimo", "mcp_access", True),
             ("/nonexistent-command-xyz", "claude", "file_write", False),
         ],
     )

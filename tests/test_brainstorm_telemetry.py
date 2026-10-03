@@ -251,6 +251,10 @@ _PROIBIDOS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"[^\s'\"]{8,}"
     )),
     ("token hex longo", re.compile(r"\b[A-Fa-f0-9]{32,}\b")),
+    # MiMo (2026-10-02): chave do Token Plan, `tp-` + alfanumericos longos.
+    # Lookbehind ASCII do hook, nao `\b`: este e Unicode e pouparia `tp-`
+    # colado a letra acentuada.
+    ("token plan mimo", re.compile(r"(?<![A-Za-z0-9_])tp-[A-Za-z0-9]{40,}")),
     # Um path absoluto de UM componente (`/segredo`) nao tem barra interna
     # e escapava de todo padrao de path do catalogo.
     ("path absoluto posix", re.compile(r"(?<![\w.])/[A-Za-z0-9._-]+")),
@@ -263,6 +267,10 @@ def test_nenhum_valor_gravado_casa_padrao_de_segredo_ou_de_path_absoluto():
     """O chamador tenta vazar em TODO campo string da allowlist; nada passa."""
     veneno = (
         "/home/pedro/Repositorios/systemForge/blacksmith/nota.md "
+        # MiMo: chave do Token Plan (amostra SINTETICA, nao-hex, montada por
+        # concatenacao). Logo no inicio de proposito: sem o mascaramento ela
+        # sobreviveria inteira ao teto de `_MAX_VALUE_CHARS` e o gate acusaria.
+        "tp-" + "zx7" * 16 + " "
         "sk-ant-api03-" + "A" * 90 + " ghp_" + "B" * 36 +
         " Bearer abcdefghijklmnop forjasistemas.suporte@gmail.com "
         "password=supersecreta C:\\Users\\pedro\\segredo.txt "
@@ -352,6 +360,10 @@ def test_toda_classe_do_hook_de_segredos_e_mascarada_aqui():
         "auth-header": "Authorization: Bearer " + "A" * 24,
         "password-inline": "password=trocaisso123",
         "secret-inline": "secret=trocaisso123",
+        # Classe MiMo do hook (2026-10-02). Amostra nao-hex de proposito: uma
+        # so de [a-f0-9] seria mascarada pelo `hex-token` e o gate passaria
+        # mesmo sem a classe `mimo-token-plan` no modulo.
+        "mimo-token-plan": "tp-" + "zx7" * 16,
     }
     classes = _classes_do_hook()
     faltando_amostra = sorted(set(classes) - set(amostras))

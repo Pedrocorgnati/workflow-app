@@ -37,7 +37,8 @@ class TestMainRadioExistence:
     Main deixou de ser so provider. A lista canonica fechada em `source.md:1196`
     tem 7 slugs com semantica family+variant (opus, sonnet, codex, kimi,
     kimi-k3, qwen, grok), mais o radio `claude` (family nua) que permanece o
-    default do regime legado — 8 radios instanciados.
+    default do regime legado — 8 radios instanciados. MiMo (2026-10-02)
+    acrescentou o slug `mimo`, visivel so com o switch proprio do roster MiMo.
 
     O teste antigo `test_main_llm_container_has_four_radios` afirmava "quatro"
     listando quatro atributos: a contagem era da propria lista literal, nao do
@@ -49,9 +50,11 @@ class TestMainRadioExistence:
     def test_main_llm_group_has_all_canonical_radios(self, qtbot):
         """Contagem real, lida do QButtonGroup, nao de uma lista literal.
 
-        A INSTANCIACAO dos 8 radios independe de flag — quem depende de
-        `llm_config_v2_enabled()`/`grok_spike_enabled()` e a VISIBILIDADE
-        (coberta por `test_variant_radios_visibility_follows_gate`).
+        A INSTANCIACAO dos radios independe de flag — quem depende de
+        `llm_config_v2_enabled()`/`grok_spike_enabled()` e do switch do roster
+        MiMo e a VISIBILIDADE (coberta por
+        `test_variant_radios_visibility_follows_gate` e, para `mimo`, por
+        `tests/test_mimo_queue_ui.py`).
         """
         from workflow_app.command_queue.command_queue_widget import (
             _MAIN_LLM_VARIANTS,
@@ -59,8 +62,12 @@ class TestMainRadioExistence:
 
         w = CommandQueueWidget()
         qtbot.addWidget(w)
-        assert len(w._main_llm_group.buttons()) == 8
-        # os 7 canonicos + `claude`, cada um alcancavel pelo slug
+        # Literal de proposito (roster do item 004 mais `mimo`, 2026-10-02):
+        # derivar de `_MAIN_LLM_VARIANTS` faria a contagem concordar com
+        # qualquer mapa que o modulo produzisse.
+        assert len(w._main_llm_group.buttons()) == 9
+        # os slugs canonicos (`mimo` incluso) + `claude`, cada um alcancavel
+        # pelo slug
         assert set(w._main_radio_map) == set(_MAIN_LLM_VARIANTS) | {"claude"}
         for slug, radio in w._main_radio_map.items():
             assert radio in w._main_llm_group.buttons(), slug
@@ -634,11 +641,12 @@ class TestMapParity:
         assert enum_set == self._families_keys() == self._btn_style_keys() == self._label_keys() == self._dest_keys()
 
     def test_four_providers_present(self):
-        """Os cinco providers (claude, kimi, codex, qwen, grok) estao presentes.
+        """O censo de providers esta presente e fechado.
 
-        Item 020 adicionou grok ao Provider enum e mapas (DUP-01).
+        Item 020 adicionou grok ao Provider enum e mapas (DUP-01); Q9
+        (2026-10-02) adicionou mimo.
         """
-        expected = {"claude", "kimi", "codex", "qwen", "grok"}
+        expected = {"claude", "kimi", "codex", "qwen", "grok", "mimo"}
         assert self._enum_members() == expected
 
     def test_grok_in_maps(self):
@@ -646,3 +654,11 @@ class TestMapParity:
         assert "grok" in self._enum_members()
         assert "grok" in self._families_keys()
         assert "grok" in self._btn_style_keys()
+
+    def test_mimo_in_maps(self):
+        """MiMo entra em todos os mapas com o enum (Q9, 2026-10-02)."""
+        assert "mimo" in self._enum_members()
+        assert "mimo" in self._families_keys()
+        assert "mimo" in self._btn_style_keys()
+        assert "mimo" in self._label_keys()
+        assert "mimo" in self._dest_keys()

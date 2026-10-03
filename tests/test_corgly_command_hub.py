@@ -36,6 +36,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("mcp/codex.md", "/corgly:mcp:codex"),
     ("mcp/grok.md", "/corgly:mcp:grok"),
     ("mcp/kimi.md", "/corgly:mcp:kimi"),
+    ("mcp/mimo.md", "/corgly:mcp:mimo"),
     ("questions-rebase.md", "/corgly:questions-rebase"),
     ("tools/auq-interview.md", "/corgly:tools:auq-interview"),
     ("vocab-text-review.md", "/corgly:vocab-text-review"),
@@ -67,7 +68,7 @@ def _command_markdown_files(root: Path) -> list[Path]:
     )
 
 
-def test_catalog_has_exactly_the_twenty_canonical_commands() -> None:
+def test_catalog_has_exactly_the_canonical_commands() -> None:
     expected = [COMMAND_ROOT / rel for rel, _slash in COMMANDS]
     assert _command_markdown_files(COMMAND_ROOT) == sorted(expected)
     assert all(path.is_file() and path.stat().st_size > 0 for path in expected)
@@ -223,13 +224,13 @@ def test_executor_render_has_one_final_notify_owner_per_provider() -> None:
     assert "DO NOT execute that literal target block" in codex.text
 
 
-def test_kimi_matrix_has_exactly_twenty_complete_command_rows() -> None:
+def test_kimi_matrix_has_one_complete_row_per_canonical_command() -> None:
     rows = [
         line
         for line in KIMI_MATRIX.read_text(encoding="utf-8").splitlines()
         if re.match(r"^\| \d+ \| `/corgly:", line)
     ]
-    assert len(rows) == 20
+    assert len(rows) == len(COMMANDS)
     assert {f"`{slash}`" for _rel, slash in COMMANDS} == {
         row.split("|")[2].strip() for row in rows
     }

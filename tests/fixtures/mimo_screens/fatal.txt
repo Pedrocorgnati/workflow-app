@@ -1,0 +1,41 @@
+# t=36.082 cursor=35,47 modes={'bp2004': False, 'alt1049': False, 'm1000': False, 'm1002': False, 'm1003': False, 'sgr1006': False, 'focus1004': False, 'cur25': False, 'sync2026': False}
+00|
+01|Please report an issue.  Copy issue URL (exception info pre-filled)
+02|
+03|
+04|
+05|A fatal error occurred!   Reset TUI    Exit
+06|
+07|
+08|TypeError: A.split is not a function. (In 'A.split("/")', 'A.split' is undefined)                  █
+09|    at JM (/$bunfs/root/src/index.js:825:13795)                                                    █
+10|    at Ml (/$bunfs/root/src/index.js:825:13883)                                                    █
+11|    at <anonymous> (/$bunfs/root/src/index.js:825:17320)                                           █
+12|    at Q_ (/$bunfs/root/src/index.js:820:61318)                                                    █
+13|    at o9 (/$bunfs/root/src/index.js:820:61082)                                                    █
+14|    at X_ (/$bunfs/root/src/index.js:820:60000)                                                    █
+15|    at J (/$bunfs/root/src/index.js:825:15294)                                                     █
+16|    at <anonymous> (/$bunfs/root/src/index.js:825:17762)                                           █
+17|    at Q_ (/$bunfs/root/src/index.js:820:61318)                                                    █
+18|    at o9 (/$bunfs/root/src/index.js:820:61082)                                                    █
+19|    at m (/$bunfs/root/src/index.js:820:54962)                                                     █
+20|    at <anonymous> (/$bunfs/root/src/index.js:825:17730)                                           █
+21|    at init (/$bunfs/root/src/index.js:825:16773)                                                  █
+22|    at provider (/$bunfs/root/src/index.js:822:11249)
+23|    at $8 (/$bunfs/root/src/index.js:820:57692)
+24|    at Q_ (/$bunfs/root/src/index.js:820:61318)
+25|    at o9 (/$bunfs/root/src/index.js:820:61082)
+26|    at F_ (/$bunfs/root/src/index.js:820:59098)
+27|    at children (/$bunfs/root/src/index.js:822:11383)
+28|    at <anonymous> (/$bunfs/root/src/index.js:820:66159)
+29|    at Q_ (/$bunfs/root/src/index.js:820:61318)
+30|    at o9 (/$bunfs/root/src/index.js:820:61082)
+31|    at m (/$bunfs/root/src/index.js:820:54962)
+32|    at IF (/$bunfs/root/src/index.js:820:59479)
+33|    at $8 (/$bunfs/root/src/index.js:820:57692)
+34|    at <anonymous> (/$bunfs/root/src/index.js:820:66099)
+35|    at Q_ (/$bunfs/root/src/index.js:820:61318)
+36|
+37|A.split is not a function. (In 'A.split("/")', 'A.split' is undefined)
+38|
+39|

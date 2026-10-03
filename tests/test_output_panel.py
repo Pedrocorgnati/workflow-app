@@ -231,6 +231,9 @@ class TestOutputPanelHelperEarlyExitExemption:
             "codex-high",
             "  /MODEL opus",
             "/CLEAR",
+            "/clear ",
+            "mimod",
+            "MIMOD",
         ],
     )
     def test_helper_classified_true(self, cmd):

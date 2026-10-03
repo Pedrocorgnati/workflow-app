@@ -1036,6 +1036,24 @@ class TestMetricsBarAuthoritativeIdle:
         mb = MetricsBar(bus)
         bus.listener_helper_pulse.emit("does-not-exist")  # must not raise
 
+    def test_listener_hold_keeps_dot_yellow_without_auto_idle(self, qapp):
+        """Main Kimi /clear: hold amarelo imediato, fence alta, sem auto-idle."""
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.listener_hold.emit("interactive")
+        assert mb._dot_interactive.is_busy is True
+        assert mb._idle_locked["interactive"] is False
+        assert mb._awaiting_notify["interactive"] is True
+        # Sem auto-idle: o hardening so arma quando o /clear real chega.
+        assert not mb._idle_timer_interactive.isActive()
+
+    def test_listener_hold_ignores_unknown_channel(self, qapp):
+        from workflow_app.signal_bus import SignalBus
+        bus = SignalBus()
+        mb = MetricsBar(bus)
+        bus.listener_hold.emit("does-not-exist")
+
     def test_helper_auto_idle_skipped_when_newer_command_dispatched(self, qapp):
         """Race: /clear at t=0, real command at t=0.5 → /clear's auto-idle at
         t=1 must NOT flip the dot green over the running real command."""
@@ -1855,7 +1873,7 @@ class Test_qsettings_migration:
         from PySide6.QtCore import QSettings
         from workflow_app.signal_bus import SignalBus
         from workflow_app.metrics_bar.metrics_bar import (
-            _CANONICAL_INSTANCE_NAMES,
+            _enabled_instance_names,
             _INSTANCE_ORDER_SETTINGS_KEY,
             _INSTANCE_SCHEMA_VERSION_KEY,
             _INSTANCE_SCHEMA_VERSION_CURRENT,
@@ -1878,9 +1896,10 @@ class Test_qsettings_migration:
         result = bar._load_instance_order()
 
         # Ordem preservada (reconciliada com canonico): aliases canonicos novos
-        # sao anexados ao final sem perturbar a ordem do usuario.
+        # sao anexados ao final sem perturbar a ordem do usuario. A base e o
+        # conjunto HABILITADO (o `mimod` depende do switch da MiMo).
         expected = custom_order + [
-            n for n in _CANONICAL_INSTANCE_NAMES if n not in custom_order
+            n for n in _enabled_instance_names() if n not in custom_order
         ]
         assert result == expected
 
@@ -1903,7 +1922,7 @@ class Test_qsettings_migration:
         from PySide6.QtCore import QSettings
         from workflow_app.signal_bus import SignalBus
         from workflow_app.metrics_bar.metrics_bar import (
-            _CANONICAL_INSTANCE_NAMES,
+            _enabled_instance_names,
             _INSTANCE_ORDER_SETTINGS_KEY,
             _INSTANCE_SCHEMA_VERSION_KEY,
             _INSTANCE_SCHEMA_VERSION_CURRENT,
@@ -1929,7 +1948,7 @@ class Test_qsettings_migration:
         # Runtime result e reconciliado com o canonico (aliases novos sao
         # anexados), mas o payload armazenado permanece inalterado.
         expected = v2_payload["order"] + [
-            n for n in _CANONICAL_INSTANCE_NAMES if n not in v2_payload["order"]
+            n for n in _enabled_instance_names() if n not in v2_payload["order"]
         ]
         assert result == expected
 
@@ -1944,7 +1963,7 @@ class Test_qsettings_migration:
         from PySide6.QtCore import QSettings
         from workflow_app.signal_bus import SignalBus
         from workflow_app.metrics_bar.metrics_bar import (
-            _CANONICAL_INSTANCE_NAMES,
+            _enabled_instance_names,
             _INSTANCE_ORDER_SETTINGS_KEY,
         )
 
@@ -1959,7 +1978,7 @@ class Test_qsettings_migration:
         bar._instance_order_settings = settings
 
         result = bar._load_instance_order()
-        assert result == list(_CANONICAL_INSTANCE_NAMES)
+        assert result == _enabled_instance_names()
 
     def test_future_schema_fallback_canonical(self, qapp):
         """Schema version > 2 resulta em ordem canonica."""
@@ -1968,7 +1987,7 @@ class Test_qsettings_migration:
         from PySide6.QtCore import QSettings
         from workflow_app.signal_bus import SignalBus
         from workflow_app.metrics_bar.metrics_bar import (
-            _CANONICAL_INSTANCE_NAMES,
+            _enabled_instance_names,
             _INSTANCE_ORDER_SETTINGS_KEY,
             _INSTANCE_SCHEMA_VERSION_KEY,
         )
@@ -1985,4 +2004,4 @@ class Test_qsettings_migration:
         bar._instance_order_settings = settings
 
         result = bar._load_instance_order()
-        assert result == list(_CANONICAL_INSTANCE_NAMES)
+        assert result == _enabled_instance_names()

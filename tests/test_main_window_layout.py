@@ -364,13 +364,16 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
         "output-btn-corgly-class-update",
         "output-btn-corgly-clean-progress",
         "output-btn-corgly-corgly2-divide-vocabulary",
+        "output-btn-corgly-corgly2-look4translation",
         "output-btn-corgly-corgly2-optimize-phrases",
         "output-btn-corgly-corgly2-put-false-friends",
         "output-btn-corgly-dual-update",
         "output-btn-corgly-enrich-vocabulary",
         "output-btn-corgly-funny-rebase",
         "output-btn-corgly-grammar-adjust",
+        "output-btn-corgly-picture-parts",
         "output-btn-corgly-questions-rebase",
+        "output-btn-corgly-update-vocab-layout",
         "output-btn-corgly-vocab-text-review",
     }
     assert {str(btn.property("testid")) for btn in win._corgly_buttons} == expected
@@ -379,6 +382,7 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
     assert [tabs.tabText(index) for index in range(tabs.count())] == [
         "corgly",
         "corgly2",
+        "corgly-desktop",
         "strategy",
         "rules",
     ]
@@ -389,23 +393,32 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
         "output-toolbar-corgly-subtab-corgly2"
     )
     assert tabs.widget(2).property("testid") == (
-        "output-toolbar-corgly-subtab-strategy"
+        "output-toolbar-corgly-subtab-corgly-desktop"
     )
     assert tabs.widget(3).property("testid") == (
+        "output-toolbar-corgly-subtab-strategy"
+    )
+    assert tabs.widget(4).property("testid") == (
         "output-toolbar-corgly-subtab-rules"
     )
     flow_host = _find_widget_by_testid(win, "output-toolbar-corgly-flow")
     corgly2_flow_host = _find_widget_by_testid(win, "output-toolbar-corgly2-flow")
+    desktop_flow_host = _find_widget_by_testid(
+        win, "output-toolbar-corgly-desktop-flow"
+    )
     assert flow_host is not None
     assert corgly2_flow_host is not None
+    assert desktop_flow_host is not None
     assert flow_host.parentWidget() is tabs.widget(0)
     assert corgly2_flow_host.parentWidget() is tabs.widget(1)
+    assert desktop_flow_host.parentWidget() is tabs.widget(2)
     class_create = _find_by_testid(win, "output-btn-corgly-class-create")
     assert class_create is not None
     assert class_create.parentWidget() is flow_host
     # Particao: `corgly2-*` na aba 2.0, todo o resto na aba do curso legado.
     corgly2_ids = {
         "output-btn-corgly-corgly2-divide-vocabulary",
+        "output-btn-corgly-corgly2-look4translation",
         "output-btn-corgly-corgly2-optimize-phrases",
         "output-btn-corgly-corgly2-put-false-friends",
     }
@@ -442,6 +455,26 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
         corgly2_flow_ids[corgly2_flow_ids.index(put_ff) + 1]
         == "output-btn-corgly-corgly2-all"
     )
+    desktop_ids = {
+        "output-btn-corgly-desktop-1-subastantives-next-word",
+        "output-btn-corgly-desktop-2-subastantives-identify",
+        "output-btn-corgly-desktop-3-substantive-base",
+        "output-btn-corgly-desktop-4-substantive-polissemia",
+        "output-btn-corgly-desktop-5-substantives-examples",
+        "output-btn-corgly-desktop-6-substantives-translation",
+        "output-btn-corgly-desktop-7-substantives-checkboxes",
+        "output-btn-corgly-desktop-8-substantives-finalize",
+        "output-btn-corgly-desktop-adjectives-next",
+        "output-btn-corgly-desktop-next-verb-phase",
+    }
+    assert {
+        str(btn.property("testid")) for btn in win._corgly_desktop_buttons
+    } == desktop_ids
+    assert all(btn.parentWidget() is desktop_flow_host for btn in win._corgly_desktop_buttons)
+    substantives = _find_by_testid(win, "output-btn-corgly-substantives")
+    assert substantives is win._corgly_substantives_button
+    assert substantives.parentWidget() is desktop_flow_host
+    assert substantives not in win._corgly_desktop_buttons
     # Vazio e catalogo parcial ficam no rodape da coluna, fora das sub-abas:
     # um erro de parse em `corgly2-*` tem que aparecer para quem esta em
     # `corgly` (Zero Silencio).
@@ -525,7 +558,9 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
         "output-btn-corgly-enrich-vocabulary",
         "output-btn-corgly-funny-rebase",
         "output-btn-corgly-grammar-adjust",
+        "output-btn-corgly-picture-parts",
         "output-btn-corgly-questions-rebase",
+        "output-btn-corgly-update-vocab-layout",
         "output-btn-corgly-vocab-text-review",
     }
     assert {
@@ -547,6 +582,9 @@ def test_corgly_catalog_has_exact_buttons_and_observable_states(
 
     missing_root = tmp_path / "missing"
     monkeypatch.setattr(win, "_corgly_commands_root", lambda: missing_root)
+    monkeypatch.setattr(
+        win, "_corgly_desktop_commands_root", lambda: missing_root
+    )
     missing = win._build_corgly_column()
     assert win._corgly_empty_label.isHidden() is False
     assert win._corgly_error_label.isHidden() is False
@@ -579,6 +617,44 @@ def test_corgly2_all_enqueues_exact_queue_command_list(owned_main_window, tmp_pa
     assert win._command_queue._items
     for item in win._command_queue._items:
         assert queue.isAncestorOf(item)
+
+
+def test_substantives_enqueues_exact_queue_command_list(owned_main_window, tmp_path):
+    from workflow_app.db.database_manager import db_manager
+
+    db_manager.setup(db_path=str(tmp_path / "test_workflow.db"))
+    win = owned_main_window
+    btn = _find_by_testid(win, "output-btn-corgly-substantives")
+    assert btn is not None
+    flow_host = _find_widget_by_testid(win, "output-toolbar-corgly-desktop-flow")
+    assert btn.parentWidget() is flow_host
+
+    btn.click()
+
+    names = [item.command_text() for item in win._command_queue._items]
+    assert names == list(win._SUBSTANTIVES_ALL_QUEUE)
+    assert names == [
+        "/corgly-desktop:1-subastantives-next-word",
+        "/clear",
+        "/corgly-desktop:2-subastantives-identify",
+        "/clear",
+        "/corgly-desktop:3-substantive-base",
+        "/clear",
+        "/corgly-desktop:4-substantive-polissemia",
+        "/clear",
+        "/corgly-desktop:5-substantives-examples",
+        "/clear",
+        "/corgly-desktop:6-substantives-translation",
+        "/clear",
+        "/corgly-desktop:7-substantives-checkboxes",
+        "/clear",
+        "/corgly-desktop:8-substantives-finalize",
+        "/clear",
+    ]
+    queue = _find_widget_by_testid(win, "queue-command-list")
+    assert queue is not None
+    assert win._command_queue._items
+    assert all(queue.isAncestorOf(item) for item in win._command_queue._items)
 
 
 @_skip_under_llm_config_v2

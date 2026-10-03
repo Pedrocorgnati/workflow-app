@@ -1,0 +1,51 @@
+# t=30.544 cursor=44,5 modes={'bp2004': False, 'alt1049': False, 'm1000': True, 'm1002': True, 'm1003': True, 'sgr1006': True, 'focus1004': False, 'cur25': True, 'sync2026': False}
+00|                                                                                                                                                        █   ▶
+01|  ┃                                                                                                                                                     █       abc
+02|  ┃  Responda apenas com a palavra PONG seguida dos argumentos: abc                                                                ┃                    ┃
+03|  ┃                                                                                                                                ┃  Loaded AGENTS.md  ┃       Context
+04|                                                                                                                                   ┃                    ┃       0 tokens
+05|     ▣  Build · Pong                                                                                                                                    █       0% used
+06|                                                                                                                                                        █       $0.00 spent
+07|                                                                                                                                                        █
+08|                                                                                                                                                        █       Working Directory
+09|                                                                                                                                                        █       /tmp/claude-1000/-home-pedro-Reposit-
+10|                                                                                                                                                        █       rios-systemForge/00000000-0000-0000-
+11|                                                                                                                                                        █       0000-000000000000/scratchpad/spike-
+12|                                                                                                                                                        █       mimo/proj
+13|                                                                                                                                                        █
+14|                                                                                                                                                        █       Instructions
+15|                                                                                                                                                        █       • AGENTS.md
+16|                                                                                                                                                        █
+17|                                                                                                                                                        █       LSP
+18|                                                                                                                                                        █       LSPs will activate as files are read
+19|                                                                                                                                                        █
+20|                                                                                                                                                        █
+21|                                                                                                                                                        █
+22|                                                                                                                                                        █
+23|                                                                                                                                                        █
+24|                                                                                                                                                        █
+25|                                                                                                                                                        █
+26|                                                                                                                                                        █
+27|                                                                                                                                                        █
+28|                                                                                                                                                        █
+29|                                                                                                                                                        █
+30|                                                                                                                                                        █
+31|                                                                                                                                                        █
+32|                                                                                                                                                        █
+33|                                                                                                                                                        █
+34|                                                                                                                                                        █
+35|                                                                                                                                                        █
+36|                                                                                                                                                        █
+37|                                                                                                                                                        █
+38|                                                                                                                                                        █
+39|                                                                                                                                                        █
+40|                                                                                                                                                        █
+41|                                                                                                                                                        █
+42|
+43|  ┃                                                                                                                                                             /tmp/claude-1000/-home-pedro-Reposit-
+44|  ┃                                                                                                                                                             rios-systemForge/00000000-0000-0000-
+45|  ┃                                                                                                                                                             0000-000000000000/scratchpad/spike-
+46|  ┃  Build · Pong Spike Fake                                                                                                                                    mimo/proj:main
+47|  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+48|           ·˙∙·˙🛸  esc interrupt                                            tab switch mode  ctrl+p settings                                                   • MiMoCode 0.1.15
+49|

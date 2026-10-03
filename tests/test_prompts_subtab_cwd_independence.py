@@ -88,6 +88,11 @@ def test_systemforge_prompts_delegate_to_exact_canonical_invocations():
             "/commit:nextjs-hostinger systemforge-dashboard",
             ".claude/commands/commit/nextjs-hostinger.md",
         ),
+        "systemforge-fix-503.md": (
+            "title: SF 503",
+            "/hostinger:fix-503 .claude/projects/systemforge-dashboard.json",
+            ".claude/commands/hostinger/fix-503.md",
+        ),
         "corgly-db-update.md": (
             "title: Corgly DB",
             "/hostinger:update-bd corgly-app",
@@ -281,6 +286,10 @@ def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot, monkeypat
                 "SF Deploy",
                 "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
             ),
+            "output-btn-prompt-sf-503": (
+                "SF 503",
+                "ai-forge/custom-prompts/prompts-subtab/systemforge-fix-503.md",
+            ),
             "output-btn-prompt-corgly-db": (
                 "Corgly DB",
                 "ai-forge/custom-prompts/prompts-subtab/corgly-db-update.md",
@@ -323,6 +332,7 @@ def test_systemforge_commit_prompts_are_registered_and_filtered(qtbot, monkeypat
         _set_prompt_filter(win, "commit")
         assert not _button_by_testid(win, "output-btn-prompt-sf-db").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-sf-deploy").isHidden()
+        assert not _button_by_testid(win, "output-btn-prompt-sf-503").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-corgly-db").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-corgly-deploy").isHidden()
         assert not _button_by_testid(win, "output-btn-prompt-only-commit").isHidden()
@@ -361,6 +371,9 @@ def test_systemforge_commit_labels_survive_old_qsettings(qtbot):
         "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md"
     ] == "SF Deploy"
     assert labels_by_path[
+        "ai-forge/custom-prompts/prompts-subtab/systemforge-fix-503.md"
+    ] == "SF 503"
+    assert labels_by_path[
         "ai-forge/custom-prompts/prompts-subtab/corgly-db-update.md"
     ] == "Corgly DB"
     assert labels_by_path[
@@ -378,6 +391,21 @@ def test_systemforge_commit_labels_survive_old_qsettings(qtbot):
     assert labels_by_path[
         "ai-forge/custom-prompts/prompts-subtab/commit-push.md"
     ] == "commit & push"
+
+
+def test_systemforge_503_is_third_systemforge_prompt(qtbot):
+    win = _new_window(qtbot)
+
+    paths = [entry["path"] for entry in win._prompt_entries]
+    sf_block = [
+        "ai-forge/custom-prompts/prompts-subtab/systemforge-db-update.md",
+        "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
+        "ai-forge/custom-prompts/prompts-subtab/systemforge-fix-503.md",
+    ]
+    start = paths.index(sf_block[0])
+
+    assert paths[start:start + 3] == sf_block
+    assert _button_by_testid(win, "output-btn-prompt-sf-503").text() == "SF 503"
 
 
 def test_create_agent_prompt_keeps_frontmatter_label_when_qsettings_is_old(qtbot):

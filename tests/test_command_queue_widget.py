@@ -611,11 +611,18 @@ class TestForceKimi:
         llm_box = widget._llm_box
         assert llm_box is not None
         assert llm_box.property("testid") == "queue-div-llm-routing"
-        # Layout agora vertical (Main LLM / Parallel Worker / MCP Flags / ...):
-        # secoes empilhadas, cada uma com label+inputs em row. Sem altura fixa;
-        # o box cresce para acomodar as secoes empilhadas.
-        from PySide6.QtWidgets import QVBoxLayout
-        assert isinstance(llm_box.layout(), QVBoxLayout)
+        # Orientacao segue o kill-switch SF_LLM_CONFIG_V2 (d95a576, C-04):
+        # flag ON -> QHBoxLayout (3 secoes lado a lado na aba LLM Routing);
+        # flag OFF -> QVBoxLayout (coluna na top-row). A flag e boot-frozen,
+        # entao aqui so o regime deste processo e exercitado; os dois regimes
+        # em subprocesso ficam em tests/test_llm_config_tab.py
+        # (test_llm_routing_is_qhboxlayout_when_flag_enabled e o ST003 legado).
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+
+        from workflow_app.config import llm_config_v2_enabled
+
+        esperado = QHBoxLayout if llm_config_v2_enabled() else QVBoxLayout
+        assert type(llm_box.layout()) is esperado
         assert widget._main_claude_radio.isChecked() is True
         assert widget._main_codex_radio.text() == "codex"
         assert widget._use_codex_chk.property("testid") == "queue-chk-use-codex"
@@ -836,8 +843,9 @@ class TestForceKimi:
     # ---- /clear vai SO para interactive ---------------------------------
 
     def test_force_on_clear_per_item_goes_only_to_interactive(
-        self, force_kimi_widget, clear_specs
+        self, force_kimi_widget, clear_specs, qtbot
     ):
+        force_kimi_widget._CLEAR_KIMI_MAIN_SEND_DELAY_MS = 20
         emitted_interactive: list[str] = []
         emitted_workspace: list[str] = []
         signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
@@ -846,6 +854,7 @@ class TestForceKimi:
             force_kimi_widget._force_kimi_chk.setChecked(True)
             force_kimi_widget.load_pipeline(clear_specs)
             force_kimi_widget._items[0]._on_run_clicked()
+            qtbot.waitUntil(lambda: emitted_interactive == ["/clear"], timeout=1_000)
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
@@ -853,8 +862,9 @@ class TestForceKimi:
         assert emitted_workspace == [], "/clear nao pode ir para T2 em Main LLM Kimi"
 
     def test_force_on_clear_step_btn_goes_only_to_interactive(
-        self, force_kimi_widget, clear_specs
+        self, force_kimi_widget, clear_specs, qtbot
     ):
+        force_kimi_widget._CLEAR_KIMI_MAIN_SEND_DELAY_MS = 20
         emitted_interactive: list[str] = []
         emitted_workspace: list[str] = []
         signal_bus.run_command_in_terminal.connect(emitted_interactive.append)
@@ -863,6 +873,7 @@ class TestForceKimi:
             force_kimi_widget._force_kimi_chk.setChecked(True)
             force_kimi_widget.load_pipeline(clear_specs)
             force_kimi_widget._on_step_btn_clicked()
+            qtbot.waitUntil(lambda: emitted_interactive == ["/clear"], timeout=1_000)
         finally:
             signal_bus.run_command_in_terminal.disconnect(emitted_interactive.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(emitted_workspace.append)
@@ -1077,6 +1088,106 @@ class TestForceKimi:
         # Item deve estar destacado (highlighted) — comparacao internal usa
         # cmd_text original `/create-task`, NAO `/skill:slash-executor /create-task`.
         assert force_kimi_widget._items[0]._highlighted is True
+
+
+class TestKimiMainClearSendDelay:
+    """Main Kimi: `/clear` espera 5s antes de ir ao T1. Outras Mains nao."""
+
+    def test_kimi_main_does_not_emit_clear_immediately(self, widget):
+        widget._force_kimi_chk.setChecked(True)
+        sent: list[str] = []
+        holds: list[str] = []
+        signal_bus.run_command_in_terminal.connect(sent.append)
+        signal_bus.listener_hold.connect(holds.append)
+        try:
+            widget._publish_to_terminal(
+                "interactive", route="test/clear", text="/clear"
+            )
+            assert sent == []
+            assert holds == ["interactive"]
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(sent.append)
+            signal_bus.listener_hold.disconnect(holds.append)
+
+    def test_kimi_main_emits_clear_after_delay(self, widget, qtbot):
+        widget._force_kimi_chk.setChecked(True)
+        widget._CLEAR_KIMI_MAIN_SEND_DELAY_MS = 20
+        sent: list[str] = []
+        signal_bus.run_command_in_terminal.connect(sent.append)
+        try:
+            widget._publish_to_terminal(
+                "interactive", route="test/clear", text="/clear"
+            )
+            assert sent == []
+            qtbot.waitUntil(lambda: sent == ["/clear"], timeout=1_000)
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(sent.append)
+
+    def test_claude_main_emits_clear_immediately(self, widget):
+        widget._main_claude_radio.setChecked(True)
+        sent: list[str] = []
+        signal_bus.run_command_in_terminal.connect(sent.append)
+        try:
+            widget._publish_to_terminal(
+                "interactive", route="test/clear", text="/clear"
+            )
+            assert sent == ["/clear"]
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(sent.append)
+
+    def test_codex_main_emits_clear_immediately(self, widget):
+        widget._main_codex_radio.setChecked(True)
+        sent: list[str] = []
+        signal_bus.run_command_in_terminal.connect(sent.append)
+        try:
+            widget._publish_to_terminal(
+                "interactive", route="test/clear", text="/clear"
+            )
+            assert sent == ["/clear"]
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(sent.append)
+
+    def test_kimi_main_does_not_delay_non_clear(self, widget):
+        widget._force_kimi_chk.setChecked(True)
+        sent: list[str] = []
+        signal_bus.run_command_in_terminal.connect(sent.append)
+        try:
+            widget._publish_to_terminal(
+                "interactive", route="test/skill", text="/skill:foo"
+            )
+            assert sent == ["/skill:foo"]
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(sent.append)
+
+    def test_later_interactive_dispatch_cancels_pending_clear(self, widget, qtbot):
+        widget._force_kimi_chk.setChecked(True)
+        widget._CLEAR_KIMI_MAIN_SEND_DELAY_MS = 80
+        sent: list[str] = []
+        signal_bus.run_command_in_terminal.connect(sent.append)
+        try:
+            widget._publish_to_terminal(
+                "interactive", route="test/clear", text="/clear"
+            )
+            widget._publish_to_terminal(
+                "interactive", route="test/skill", text="/skill:foo"
+            )
+            assert sent == ["/skill:foo"]
+            qtbot.wait(200)
+            assert sent == ["/skill:foo"]
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(sent.append)
+
+    def test_workspace_clear_is_not_delayed_under_main_kimi(self, widget):
+        widget._force_kimi_chk.setChecked(True)
+        sent: list[str] = []
+        signal_bus.run_command_in_workspace_terminal.connect(sent.append)
+        try:
+            widget._publish_to_terminal(
+                "workspace", route="test/clear", text="/clear"
+            )
+            assert sent == ["/clear"]
+        finally:
+            signal_bus.run_command_in_workspace_terminal.disconnect(sent.append)
 
 
 class TestCodexLlmRouting:
@@ -1821,7 +1932,7 @@ class TestLoopActionHandlersUseLoopSlot:
             ]
         captured = {"build_loop_specs": None, "loop_root": None}
 
-        def _build(raw, loop_root, project_workspace_root=None):
+        def _build(raw, loop_root, project_workspace_root=None, simple=False):
             captured["build_loop_specs"] = raw
             captured["loop_root"] = str(loop_root)
             return loop_specs
@@ -3939,11 +4050,15 @@ class TestSingleButtonDispatchFailureConditions:
         assert t3 == [], "T3 indisponivel: /clear nao espelhado (D-7)"
         assert any("nao esta pronto" in m for m, _ in toasts)
 
-    def test_d2_clear_mirrors_to_worker_under_main_kimi(self, disp_widget):
+    def test_d2_clear_mirrors_to_worker_under_main_kimi(self, disp_widget, qtbot):
         """D-2/D-7 ressalva (close-out): `/clear` sob Main Kimi + Worker Kimi
         deve espelhar ao T2 (paridade com o step `clear_both`). Antes, o
         early-return de Main Kimi em `_mirror_clear_to_workspace_if_kimi_checked`
-        pulava o espelhamento e divergia do step."""
+        pulava o espelhamento e divergia do step.
+
+        Main Kimi segura o `/clear` do T1 por `_CLEAR_KIMI_MAIN_SEND_DELAY_MS`
+        (ver TestKimiMainClearSendDelay); o espelho ao T2 nao espera."""
+        disp_widget._CLEAR_KIMI_MAIN_SEND_DELAY_MS = 20
         disp_widget._main_kimi_radio.setChecked(True)  # alias _force_kimi_chk
         disp_widget._use_kimi_chk.setChecked(True)
         t1: list[str] = []
@@ -3952,6 +4067,9 @@ class TestSingleButtonDispatchFailureConditions:
         signal_bus.run_command_in_workspace_terminal.connect(t2.append)
         try:
             ok = disp_widget._dispatch_green_arrow("/clear")
+            assert t1 == [], "/clear ao T1 sob Main Kimi sai so depois do hold"
+            assert t2 == ["/clear"], "espelho ao T2 e imediato"
+            qtbot.waitUntil(lambda: t1 == ["/clear"], timeout=1_000)
         finally:
             signal_bus.run_command_in_terminal.disconnect(t1.append)
             signal_bus.run_command_in_workspace_terminal.disconnect(t2.append)
@@ -5955,8 +6073,9 @@ class TestMapParity:
         o item 026 promoveu Grok a Main publico por D-30/D-49 e ampliou o
         roster para cinco. A assercao de censo continua viva, so que no mundo
         certo — remove-la deixaria o enum crescer sem ninguem olhando.
+        2026-10-02 (Q9): `mimo` entra no censo como provider T2 e Main.
         """
-        expected = {"claude", "kimi", "codex", "qwen", "grok"}
+        expected = {"claude", "kimi", "codex", "qwen", "grok", "mimo"}
         assert self._enum_members() == expected
 
     def test_map_parity_grok_fully_wired(self):
@@ -5973,6 +6092,19 @@ class TestMapParity:
         assert "grok" in self._btn_style_keys()
         assert "grok" in self._label_keys()
         assert "grok" in self._dest_keys()
+
+    def test_map_parity_mimo_fully_wired(self):
+        """MiMo (Q9, 2026-10-02) presente em TODOS os mapas, nunca pela metade.
+
+        Mesma garantia do Grok: um membro de `Provider` sem estilo, rotulo ou
+        destino deixaria o item da fila sem cor/legenda no instante em que o
+        router devolvesse MIMO.
+        """
+        assert "mimo" in self._enum_members()
+        assert "mimo" in self._families_keys()
+        assert "mimo" in self._btn_style_keys()
+        assert "mimo" in self._label_keys()
+        assert "mimo" in self._dest_keys()
 
 
 # ── Item 012 (D5): estado vivo como regime unico de dispatch ───────────── #
@@ -6199,7 +6331,10 @@ class TestLiveStateAtDispatch:
         ("radio_attr", "dispatcher_attr", "flag_attr", "flag_literal"),
         [
             ("_main_codex_radio", "_dispatch_codex_command", "_flag_kimi_chk", "--kimi"),
-            ("_main_kimi_radio", "_dispatch_kimi_main_command", "_flag_codex_chk", "--codex"),
+            # Sob Main Kimi o `--codex` e auto-proxy: desabilitado E fora do
+            # payload (F2-corretude-1). A flag viva que sobra para provar o
+            # sufixo e o `--mimo`.
+            ("_main_kimi_radio", "_dispatch_kimi_main_command", "_flag_mimo_chk", "--mimo"),
             ("_main_qwen_radio", "_dispatch_qwen_main_command", "_flag_kimi_chk", "--kimi"),
             ("_main_grok_radio", "_dispatch_grok_main_command", "_flag_kimi_chk", "--kimi"),
         ],
@@ -6659,7 +6794,7 @@ class TestMainLlmVariantRadios:
         assert widget._resolve_interactive_main_llm() == "kimi"
 
     def test_family_slugs_keep_variant_none(self, widget, _v2):
-        """Regressao dos 5 slugs legados: nada de variante fantasma."""
+        """Regressao dos slugs de family legados: nada de variante fantasma."""
         for slug in ("claude", "codex", "kimi", "qwen", "grok"):
             widget._main_radio_map[slug].setChecked(True)
             family, variant = widget._resolve_interactive_main_llm_pair()
@@ -6667,10 +6802,10 @@ class TestMainLlmVariantRadios:
             assert widget._resolve_interactive_main_llm() == slug
 
     def test_variant_emits_family_on_main_llm_changed(self, widget, _v2):
-        """ST006: os 4 rosters externos sao fechados em 5 slugs de provider.
+        """ST006: os rosters externos de Main so aceitam slugs de family.
 
         `metrics_bar._on_main_llm_changed` IGNORA slug desconhecido em silencio
-        (deixa o cache no Main ANTERIOR) e os outros 3 clampam para `claude`.
+        (deixa o cache no Main ANTERIOR) e os demais clampam para `claude`.
         Emitir `opus` la seria descartar a selecao; emitimos a family.
         """
         received: list[str] = []
@@ -6704,6 +6839,29 @@ class TestMainLlmVariantRadios:
             widget._main_radio_map[slug].setChecked(True)
             assert widget._resolve_interactive_main_llm() in MW_SLUGS
             assert widget._resolve_interactive_main_llm() in MB_SLUGS
+
+    def test_main_rosters_externos_iguais_com_mimo(self):
+        """Paridade dos rosters de Main, com MiMo, em qualquer regime.
+
+        `main_window._MAIN_LLM_SLUGS`, `MetricsBar._MAIN_LLM_SLUGS` e
+        `channel_llm.MAIN_ROSTER` sao o MESMO conjunto: slug presente num e
+        ausente noutro vira `claude` no clamp (ou deixa a metrics bar no Main
+        anterior). Toda family que o widget emite (as de `_MAIN_LLM_VARIANTS`
+        mais a family nua `claude`) cabe nesse conjunto, MiMo inclusive. Sem
+        o fixture `_v2`: a paridade e de constantes e roda no regime default.
+        """
+        from workflow_app.command_queue.command_queue_widget import (
+            _MAIN_LLM_VARIANTS,
+        )
+        from workflow_app.main_window import _MAIN_LLM_SLUGS as MW_SLUGS
+        from workflow_app.metrics_bar.channel_llm import MAIN_ROSTER
+        from workflow_app.metrics_bar.metrics_bar import MetricsBar
+
+        assert set(MW_SLUGS) == set(MetricsBar._MAIN_LLM_SLUGS)
+        assert set(MW_SLUGS) == set(MAIN_ROSTER)
+        families = {fam for fam, _ in _MAIN_LLM_VARIANTS.values()} | {"claude"}
+        assert "mimo" in families
+        assert families <= set(MAIN_ROSTER)
 
     def test_persist_keeps_raw_variant_slug(self, widget, _v2):
         """Persistir a family reabriria a sessao seguinte em `claude`."""
@@ -6777,7 +6935,80 @@ class TestMainLlmVariantRadios:
     def test_variant_is_not_a_provider(self):
         """MF-01: `Provider` nao pode ser inflado com variante."""
         assert {p.value for p in Provider} == {
-            "claude", "kimi", "codex", "qwen", "grok",
+            "claude", "kimi", "codex", "qwen", "grok", "mimo",
         }
-        for slug in ("opus", "sonnet", "kimi-k3"):
+        for slug in ("opus", "sonnet", "kimi-k3", "mimo-pro"):
             assert slug not in _PROVIDER_FAMILIES
+
+
+class TestMainLlmStepAutocastParity:
+    """D-8 (2026-09-11): clique per-item, step (`queue-btn-play-next`) e autocast
+    (`autocast-btn` -> `autocast_step_requested` -> `_play_btn.click()`) publicam
+    o MESMO payload no T1 sob Main nao-Claude.
+
+    Regressao: `CommandSpec.is_prompt` nasceu com default True. O step, que
+    repassa `is_prompt=spec.is_prompt`, publicava `/comando` cru no T1 enquanto o
+    clique (que nao repassava) adaptava para `/slash-executor`.
+    """
+
+    _CASES = [
+        ("qwen", "/create-task", "/slash-executor /create-task"),
+        (
+            "grok",
+            "/create-task",
+            "/slash-executor --delegation-runtime=grok /create-task",
+        ),
+        (
+            "kimi",
+            "/blog:init-strategy --x y",
+            "/skill:slash-executor /blog:init-strategy --x y",
+        ),
+    ]
+    _PATHS = ["click", "step", "autocast"]
+
+    @staticmethod
+    def _select_main(widget, main: str) -> None:
+        {
+            "qwen": widget._main_qwen_radio,
+            "grok": widget._main_grok_radio,
+            "kimi": widget._force_kimi_chk,
+        }[main].setChecked(True)
+
+    @staticmethod
+    def _run_path(widget, path: str, spec: CommandSpec) -> list[str]:
+        emitted: list[str] = []
+        signal_bus.run_command_in_terminal.connect(emitted.append)
+        try:
+            widget.load_pipeline([spec])
+            if path == "click":
+                widget._items[0]._on_run_clicked()
+            elif path == "step":
+                widget._play_btn.click()
+            else:
+                # O `autocast-btn` arma o timer da MetricsBar, que emite o sinal
+                # global `autocast_step_requested`. Chamar o slot direto testa o
+                # mesmo elo sem acordar widgets de outros testes ainda vivos.
+                widget._on_autocast_step_requested()
+        finally:
+            signal_bus.run_command_in_terminal.disconnect(emitted.append)
+        return emitted
+
+    @pytest.mark.parametrize("main,cmd,expected", _CASES)
+    @pytest.mark.parametrize("path", _PATHS)
+    def test_pipeline_item_gets_main_adaptation_on_every_path(
+        self, widget, path, main, cmd, expected
+    ):
+        self._select_main(widget, main)
+        spec = CommandSpec(cmd, ModelName.SONNET, position=1)
+        assert spec.is_prompt is False
+        assert spec.force_main_llm is False
+        assert self._run_path(widget, path, spec) == [expected]
+        assert widget._items[0]._is_sent is True
+
+    @pytest.mark.parametrize("path", _PATHS)
+    def test_explicit_prompt_goes_raw_on_every_path(self, widget, path):
+        self._select_main(widget, "qwen")
+        spec = CommandSpec(
+            "/create-task", ModelName.SONNET, position=1, is_prompt=True
+        )
+        assert self._run_path(widget, path, spec) == ["/create-task"]

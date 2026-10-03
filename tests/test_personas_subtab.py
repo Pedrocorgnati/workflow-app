@@ -735,7 +735,7 @@ _FRONTMATTER_SCHEMA_PATH = (
 #: um deles precisam continuar validas (nao-quebra de persona existente).
 _LEGACY_PROVIDERS = ["claude", "codex", "kimi"]
 #: Conjunto canonico pos-expansao, na ordem em que o schema o declara.
-_EXPANDED_PROVIDERS = ["claude", "codex", "kimi", "qwen", "grok"]
+_EXPANDED_PROVIDERS = ["claude", "codex", "kimi", "qwen", "grok", "mimo"]
 
 
 def _agent_provider_support_items_enum() -> list[str]:
@@ -774,7 +774,7 @@ def _providers_enumerated_in_create_agent_prompt() -> list[str]:
 def test_provider_support_items_enum_covers_qwen_grok_and_keeps_legacy():
     items_enum = _agent_provider_support_items_enum()
 
-    # Expansao: os cinco providers, exatamente, sem duplicata.
+    # Expansao: os seis providers (MiMo incluida), exatamente, sem duplicata.
     assert items_enum == _EXPANDED_PROVIDERS, (
         f"items_enum de provider_support divergiu do canonico: {items_enum}"
     )

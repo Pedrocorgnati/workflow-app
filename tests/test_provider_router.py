@@ -235,13 +235,15 @@ def test_rule0_force_main_llm_false_fallback_claude():
     assert classify_provider(spec, _state(kimi=True, codex=True)) is Provider.CLAUDE
 
 
-def test_rule0_force_main_llm_default_is_true():
-    # Valor default de force_main_llm e True (comportamento compativel)
+def test_rule0_force_main_llm_and_is_prompt_default_to_false():
+    # Os dois campos sao opt-in do dialogo "Adicionar comando", que os passa
+    # explicitos. Um spec de pipeline (sem os campos) segue o roteamento
+    # canonico: worker Kimi ativo + comando elegivel -> KIMI. Com default True
+    # o eixo Worker morria e o step publicava `/comando` cru sob Main nao-Claude.
     spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True)
-    # Nao especifica force_main_llm, deve usar o default True
-    assert spec.force_main_llm is True
-    # Com worker ativo, mas force_main_llm default=True -> CLAUDE
-    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.CLAUDE
+    assert spec.force_main_llm is False
+    assert spec.is_prompt is False
+    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.KIMI
 
 
 def test_rule0_is_prompt_true_always_claude():
@@ -273,15 +275,6 @@ def test_rule0_is_prompt_false_respects_kimi_worker():
     # is_prompt=False segue roteamento normal: Kimi worker -> KIMI
     spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True, is_prompt=False)
     assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.KIMI
-
-
-def test_rule0_is_prompt_default_is_true():
-    # Valor default de is_prompt e True (comportamento compativel)
-    spec = CommandSpec(name=KIMI_CMD, kind="slash", kimi_eligible=True)
-    # Nao especifica is_prompt, deve usar o default True
-    assert spec.is_prompt is True
-    # Com worker ativo, mas is_prompt default=True -> CLAUDE
-    assert classify_provider(spec, _state(kimi=True, codex=False)) is Provider.CLAUDE
 
 
 # --------------------------------------------------------------------------- #

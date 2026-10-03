@@ -44,6 +44,7 @@ _MCP_ACTION_LABELS = (
         "output-mcp-action-thinking-fable": "fable",
         "output-mcp-action-thinking-opus": "opus",
         "output-mcp-action-thinking-codex-ultra": "codex-ultra",
+        "output-mcp-action-thinking-mimo-pro": "mimo-pro",
         "output-mcp-action-thinking-kimi": "kimi-k3",
         "output-mcp-action-thinking-grok-xhigh": "grok-xhigh",
         "output-mcp-action-execution-grok": "grok",
@@ -623,6 +624,72 @@ def test_mcp_toolbar_codex_persona_prompt_has_single_spacing(qtbot, monkeypatch)
             False,
         )
     ]
+
+
+@_skip_under_te_v2
+def test_mcp_toolbar_main_mimo_avisa_sem_colar_e_tooltip_indisponivel(
+    qtbot, monkeypatch,
+):
+    """Main MiMo nao tem linha legada: a pill avisa e NAO cola comando.
+
+    O CLI MiMo nao tem /skill: nem servidores MCP. As pills legadas viram
+    toast warning (Zero Silencio) em vez de cair no fallback de Claude, que
+    colaria /mcp:codex dentro do mimocode, e o tooltip recalculado na troca
+    de Main avisa a indisponibilidade antes do clique. O Main vem do acessor
+    publico `current_main_llm()`: o radio MiMo da fila depende do switch de
+    `feature_flags.mimo_v1_enabled()`, desligado no regime de teste.
+    """
+    import workflow_app.main_window as mw
+
+    win = _new_window(qtbot)
+    _set_route(win, t1=True, t2=False, t3=False)
+    assert "mimo" not in win._mcp_toolbar_commands, (
+        "Main MiMo nao ganha linha legada: o comando colado seria de Claude"
+    )
+
+    monkeypatch.setattr(win._command_queue, "current_main_llm", lambda: "mimo")
+    assert win._current_llm_provider() == "mimo"
+    assert win._get_brainstorm_runtime_provider() == "MiMo"
+
+    action_ids = ("main", "parallel", "dual")
+    win._on_main_llm_changed("mimo")
+    for action_id in action_ids:
+        tip = _button_by_testid(win, f"output-mcp-action-{action_id}").toolTip()
+        assert "\nMain LLM: MiMo" in tip
+        assert "Indisponivel com Main MiMo" in tip
+        assert "Comando atual" not in tip, "nenhum comando legado vale sob MiMo"
+
+    publicados: list[str] = []
+    xterm_calls: list[tuple[str, bool]] = []
+    coladas: list[str] = []
+    toasts: list[tuple[str, str]] = []
+    monkeypatch.setattr(win, "_publish_to_terminal", publicados.append)
+    monkeypatch.setattr(
+        win,
+        "_xterm_inject_text",
+        lambda text, with_enter=False: xterm_calls.append((text, with_enter)) or True,
+    )
+
+    def _on_toast(msg: str, level: str) -> None:
+        toasts.append((msg, level))
+
+    signal_bus.toast_requested.connect(_on_toast)
+    signal_bus.paste_text_in_terminal.connect(coladas.append)
+    signal_bus.paste_text_in_workspace_terminal.connect(coladas.append)
+    try:
+        for action_id in action_ids:
+            _button_by_testid(win, f"output-mcp-action-{action_id}").click()
+    finally:
+        signal_bus.toast_requested.disconnect(_on_toast)
+        signal_bus.paste_text_in_terminal.disconnect(coladas.append)
+        signal_bus.paste_text_in_workspace_terminal.disconnect(coladas.append)
+
+    assert toasts == [(mw._MCP_LEGACY_UNSUPPORTED_TOAST, "warning")] * len(
+        action_ids
+    ), "um aviso por clique, nenhum clique engolido"
+    assert publicados == []
+    assert coladas == []
+    assert xterm_calls == []
 
 
 def test_publish_routes_to_t1_only(qtbot, monkeypatch):

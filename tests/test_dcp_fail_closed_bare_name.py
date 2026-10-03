@@ -489,3 +489,108 @@ def test_derive_queue_inmemory_fail_closed_on_invalid_matrix(
     assert popup_titles[0].startswith("MATRIX_INVALID")
     body = popup_bodies[0]
     assert "DCP-COMMAND-MATRIX.json" in body or "matrix" in body.lower()
+
+
+# --- C5: remediacao por origem da fila (matrix vs disco) -------------------- #
+
+
+def test_validate_no_bare_names_disk_source_does_not_point_to_dcp_build(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """C5 - com `source="disk"` o popup NAO manda regerar a matrix.
+
+    Os botoes `queue-btn-build-execute-modules` e
+    `queue-btn-create-execute-all-modules` derivam a fila direto do disco e nao
+    leem DCP-COMMAND-MATRIX.json nem SPECIFIC-FLOW.json. Mandar o operador rodar
+    [DCP Build] nessa falha seria mandar reconstruir um artefato que nao
+    participa dela; a remediacao correta aponta para o disco e para
+    [Modules (Creation)].
+    """
+    from workflow_app.config.app_state import app_state
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    cfg = _make_config(tmp_path, wbs_root)
+
+    popup_bodies: List[str] = []
+    popup_titles: List[str] = []
+
+    def _exec_capture(box_self, *_a, **_kw):
+        try:
+            popup_bodies.append(box_self.text())
+            popup_titles.append(box_self.windowTitle())
+        except Exception:
+            popup_bodies.append("")
+            popup_titles.append("")
+        return 0
+
+    pr_calls, pr_disconnect = _capture_pipeline_ready()
+    try:
+        widget = _setup_widget(qapp, monkeypatch, cfg)
+        try:
+            with patch("PySide6.QtWidgets.QMessageBox.exec", new=_exec_capture):
+                result = widget._validate_no_bare_names(
+                    [_bare_spec("/create-task")], "module-1-x", source="disk"
+                )
+        finally:
+            widget.deleteLater()
+    finally:
+        app_state.clear_config()
+        pr_disconnect()
+
+    assert result is False
+    assert pr_calls == []
+    assert len(popup_bodies) == 1
+    body = popup_bodies[0]
+
+    # O eixo do teste: o popup nunca MANDA regerar a matrix. Citar [DCP Build]
+    # para dizer que ele nao corrige nada aqui e o oposto disso e permitido,
+    # porque o reflexo do operador diante da fila vermelha e clicar nele.
+    assert "nao corrige nada aqui" in body
+    assert "Regere a matrix" not in body
+    assert "Build Module Pipeline" not in body
+    assert "validate-dcp-matrix-canonical" not in body
+
+    # A remediacao real aponta para o disco.
+    assert "module-1-x" in body
+    assert "/create-task" in body
+    assert "TASK-" in body
+    assert "Modules (Creation)" in body
+    assert "QUEUE_INVALID" in popup_titles[0]
+
+
+def test_validate_no_bare_names_matrix_source_keeps_dcp_build_remediation(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """C5b - o default (`source="matrix"`) preserva a remediacao historica."""
+    from workflow_app.config.app_state import app_state
+
+    wbs_root = tmp_path / "wbs"
+    wbs_root.mkdir()
+    cfg = _make_config(tmp_path, wbs_root)
+
+    popup_bodies: List[str] = []
+
+    def _exec_capture(box_self, *_a, **_kw):
+        try:
+            popup_bodies.append(box_self.text())
+        except Exception:
+            popup_bodies.append("")
+        return 0
+
+    try:
+        widget = _setup_widget(qapp, monkeypatch, cfg)
+        try:
+            with patch("PySide6.QtWidgets.QMessageBox.exec", new=_exec_capture):
+                result = widget._validate_no_bare_names(
+                    [_bare_spec("/create-task")], "module-1-x"
+                )
+        finally:
+            widget.deleteLater()
+    finally:
+        app_state.clear_config()
+
+    assert result is False
+    body = popup_bodies[0]
+    assert "DCP: Build Module Pipeline" in body
+    assert "DCP Execute ABORTADO" in body

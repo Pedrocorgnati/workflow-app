@@ -256,19 +256,23 @@ def test_payload_as_null_rejected():
         WsEnvelope.from_dict(env)
 
 
-# ── Delegação semântica — congruência entre 4 documentos (item 011 + Grok) ──
+# ── Delegação semântica — congruência entre os documentos de delegação ──
 #
 # Os documentos de roteamento multi-LLM devem declarar o mesmo
 # vocabulário normativo de delegação. Este teste lê todos e falha se
 # qualquer termo normativo estiver ausente em algum deles.
 #
-# Documentos:
-#   1. ai-forge/rules/llm-routing-div.md
-#   2. ai-forge/MCP/agents/executor-de-slash-commands-rules.md
-#   3. .agents/skills/slash-executor.md
-#   4. .grok/commands/slash-executor.md
+# Documentos (a ordem importa: os testes posicionais usam os índices
+# [0]-[3], então documento novo entra SEMPRE no fim da lista):
+#   - ai-forge/rules/llm-routing-div.md (regra canônica)
+#   - ai-forge/MCP/agents/executor-de-slash-commands-rules.md (executor Codex)
+#   - .agents/skills/slash-executor.md (executor Kimi)
+#   - .grok/commands/slash-executor.md (executor Grok)
+#   - .qwen/skills/slash-executor/SKILL.md (executor Qwen)
+#   - .mimocode/commands/slash-executor.md (executor MiMo)
 
 import pathlib
+import re
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
@@ -277,9 +281,11 @@ _DELEGATION_DOCS = [
     _REPO_ROOT / "ai-forge" / "MCP" / "agents" / "executor-de-slash-commands-rules.md",
     _REPO_ROOT / ".agents" / "skills" / "slash-executor.md",
     _REPO_ROOT / ".grok" / "commands" / "slash-executor.md",
+    _REPO_ROOT / ".qwen" / "skills" / "slash-executor" / "SKILL.md",
+    _REPO_ROOT / ".mimocode" / "commands" / "slash-executor.md",
 ]
 
-# Termos normativos que TODOS os três documentos devem conter.
+# Termos normativos que TODOS os documentos devem conter.
 # Cada termo é uma tuple (label, pattern) onde pattern é buscado como substring
 # case-insensitive no conteúdo do documento.
 _DELEGATION_NORMATIVE_TERMS = [
@@ -295,6 +301,7 @@ _DELEGATION_NORMATIVE_TERMS = [
     ("flag --kimi", "--kimi"),
     ("flag --codex", "--codex"),
     ("flag --mimo", "--mimo"),
+    ("flag --mimo-pro", "--mimo-pro"),
 ]
 
 
@@ -350,3 +357,100 @@ def test_delegation_executor_grok_has_delegation_mode_clause():
         assert term in lowered, (
             f".grok/commands/slash-executor.md missing '{term}'"
         )
+
+
+def test_delegation_executors_declare_mimo_runtime():
+    """Todo executor (`_DELEGATION_DOCS[1:]`) reconhece `--delegation-runtime=mimo`.
+
+    O worker MiMo chega ao executor nativo com `--delegation-runtime=mimo`; os
+    demais executores declaram o mesmo valor no enum de runtime para que o
+    payload continue válido quando trafega entre lanes.
+    """
+    missing = [
+        str(doc_path.relative_to(_REPO_ROOT))
+        for doc_path in _DELEGATION_DOCS[1:]
+        if "--delegation-runtime=mimo" not in _read_doc(doc_path)
+    ]
+    assert not missing, f"Executores sem '--delegation-runtime=mimo': {missing}"
+
+
+def test_no_executor_doc_mentions_mimo_cli_kill_switch():
+    """Nenhum executor (`_DELEGATION_DOCS[1:]`) cita o kill-switch do CLI MiMo.
+
+    O literal mora só em `config/feature_flags.py`: quem decide se as
+    superfícies do CLI MiMo existem é o app, no boot, nunca o executor. O
+    literal é montado por concatenação para o próprio teste não violar a regra.
+    """
+    literal = "SF_" + "MIMO_V1"
+    offenders = [
+        str(doc_path.relative_to(_REPO_ROOT))
+        for doc_path in _DELEGATION_DOCS[1:]
+        if literal in _read_doc(doc_path)
+    ]
+    assert not offenders, f"Executores citando o kill-switch do CLI MiMo: {offenders}"
+
+
+# ── Lane MiMo — executor nativo `.mimocode/commands/slash-executor.md` ──
+#
+# O template de comando do MiMo CLI (fork do opencode) substitui `$ARGUMENTS`
+# em TODAS as ocorrências e também `$1`..`$9`, executa "!`cmd`" no host e
+# resolve `@caminho` anexando o arquivo ao prompt, tudo ANTES de o modelo ver
+# o texto. O executor só é seguro com uma única porta de entrada
+# (`$ARGUMENTS`) e nenhum dos outros gatilhos. Frontmatter só com
+# `description`: `model:` derruba o comando com "Model not found" (o modelo
+# vem do launcher `mimod`, nunca do executor).
+
+_MIMO_EXECUTOR_DOC = _REPO_ROOT / ".mimocode" / "commands" / "slash-executor.md"
+
+
+def _frontmatter_keys(content: str) -> list[str]:
+    """Chaves de topo do frontmatter YAML (entre as duas primeiras linhas `---`)."""
+    lines = content.splitlines()
+    assert lines and lines[0].strip() == "---", "documento sem frontmatter"
+    closing = [i for i in range(1, len(lines)) if lines[i].strip() == "---"]
+    assert closing, "frontmatter sem a linha de fechamento '---'"
+    keys = []
+    for line in lines[1 : closing[0]]:
+        if not line.strip() or line.lstrip().startswith("#") or line[:1].isspace():
+            continue  # linha vazia, comentário ou continuação de valor
+        keys.append(line.split(":", 1)[0].strip())
+    return keys
+
+
+def test_mimo_executor_is_a_delegation_doc():
+    """O executor MiMo participa da congruência normativa de delegação."""
+    assert _MIMO_EXECUTOR_DOC in _DELEGATION_DOCS
+
+
+def test_mimo_executor_has_single_arguments_placeholder():
+    """`$ARGUMENTS` aparece exatamente uma vez no executor MiMo.
+
+    O template substitui TODAS as ocorrências: um segundo `$ARGUMENTS`, mesmo
+    em prosa explicativa, duplicaria o payload do operador no prompt.
+    """
+    content = _read_doc(_MIMO_EXECUTOR_DOC)
+    assert content.count("$ARGUMENTS") == 1
+
+
+def test_mimo_executor_has_no_host_shell_expansion():
+    """Zero "!`" no executor MiMo: o CLI executaria o trecho no shell do host."""
+    content = _read_doc(_MIMO_EXECUTOR_DOC)
+    assert "!`" not in content
+
+
+def test_mimo_executor_has_no_positional_placeholders():
+    """Zero `$1`..`$9` no executor MiMo: o template os troca por palavras do payload."""
+    hits = re.findall(r"\$[1-9]", _read_doc(_MIMO_EXECUTOR_DOC))
+    assert not hits, f"Placeholders posicionais no executor MiMo: {hits}"
+
+
+def test_mimo_executor_has_no_at_file_references():
+    """Zero `@caminho` no executor MiMo: o CLI anexaria o arquivo ao prompt."""
+    hits = re.findall(r"(?<![\w.])@[\w./~-]+", _read_doc(_MIMO_EXECUTOR_DOC))
+    assert not hits, f"Referências @caminho no executor MiMo: {hits}"
+
+
+def test_mimo_executor_frontmatter_only_description():
+    """Frontmatter do executor MiMo só com `description` (sem `model:`)."""
+    keys = _frontmatter_keys(_read_doc(_MIMO_EXECUTOR_DOC))
+    assert keys == ["description"], f"Chaves de frontmatter inesperadas: {keys}"

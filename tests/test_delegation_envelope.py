@@ -158,7 +158,7 @@ from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
 print(json.dumps({
     "literals": list(CommandQueueWidget._intra_command_flag_literals()),
     "envelope_all": CommandQueueWidget._intra_command_flags(
-        "/foo --opus --sonnet --codex --kimi --kimi-k3 --qwen --grok"
+        "/foo --opus --sonnet --codex --kimi --kimi-k3 --mimo-pro --qwen --grok"
     ),
 }, sort_keys=True))
 """
@@ -188,19 +188,21 @@ def _run_literals_probe(value: str | None) -> dict:
 class TestIntraCommandFlagsPerRegime:
     """O envelope acompanha o conjunto vigente nos DOIS regimes de SF_LLM_FLAGS_V2."""
 
-    def test_legacy_regime_two_literals(self) -> None:
+    def test_legacy_regime_literals(self) -> None:
         got = _run_literals_probe(None)
         # `--mimo` entra nos dois regimes (precedencia MiMo > Kimi, 2026-10-02).
         assert got["literals"] == ["--codex", "--mimo", "--kimi"], got
-        # `--qwen`, `--grok` e `--kimi-k3` nao existem no regime legado.
+        # `--qwen`, `--grok`, `--kimi-k3` e `--mimo-pro` nao existem no regime
+        # legado.
         assert got["envelope_all"] == ["--codex", "--kimi"], got
 
-    def test_v2_regime_seven_literals(self) -> None:
+    def test_v2_regime_literals(self) -> None:
         got = _run_literals_probe("1")
         assert got["literals"] == [
             "--fable",
             "--opus",
             "--codex-ultra",
+            "--mimo-pro",
             "--kimi-k3",
             "--grok-xhigh",
             "--grok",
@@ -217,6 +219,7 @@ class TestIntraCommandFlagsPerRegime:
             "--codex",
             "--kimi",
             "--kimi-k3",
+            "--mimo-pro",
             "--qwen",
             "--grok",
         ], got

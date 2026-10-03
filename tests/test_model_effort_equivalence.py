@@ -2,7 +2,7 @@
 
 Contrato coberto:
   - Main `claude`                     -> identidade byte-a-byte
-  - Main `codex|kimi|qwen|grok`       -> as linhas `/model` e `/effort` somem
+  - Main `codex|kimi|qwen|grok|mimo`  -> as linhas `/model` e `/effort` somem
   - Main desconhecido / vazio         -> identidade (fail-open)
   - residuo de dialeto estrangeiro    -> reconhecido, nunca despachado
 
@@ -87,10 +87,12 @@ class TestIdentityPaths:
 class TestRemovalUnderEveryNonClaudeMain:
     """Codex e Kimi entraram no mesmo conjunto de Qwen/Grok em 2026-08-17.
 
-    Motivo unico para os quatro: nenhum tem diretiva textual de modelo/effort.
+    Motivo unico para todos: nenhum tem diretiva textual de modelo/effort.
     Nos dois primeiros o `/model` existe, mas como picker interativo que
     DESCARTA o argumento — colar `/model k3` no Kimi ainda abre o picker e
-    engole a proxima linha da fila.
+    engole a proxima linha da fila. A MiMo entrou em 2026-10-02 pelo mesmo
+    motivo: o TUI dela nao tem `/model`, `/effort` nem `/reasoning`, so os
+    pickers `/models` e `/variants`.
     """
 
     @pytest.mark.parametrize("main", sorted(PROVIDERS_WITHOUT_MODEL_DIRECTIVES))
@@ -100,7 +102,7 @@ class TestRemovalUnderEveryNonClaudeMain:
 
     @pytest.mark.parametrize("main", sorted(PROVIDERS_WITHOUT_MODEL_DIRECTIVES))
     def test_codex_and_kimi_are_in_the_set(self, main):
-        assert {"codex", "kimi", "qwen", "grok"} == set(
+        assert {"codex", "kimi", "qwen", "grok", "mimo"} == set(
             PROVIDERS_WITHOUT_MODEL_DIRECTIVES
         )
 
@@ -296,9 +298,11 @@ class TestSpecFieldsSurvive:
 class TestIsSuppressedDirective:
     """Item 012 (R-J5): o predicado que o badge de dialeto consome.
 
-    Ele NAO decide dispatch — espelha o que os cinco dispatchers ja fazem, para
+    Ele NAO decide dispatch — espelha o guard de diretiva dos dispatchers, para
     que o aviso da UI diga a mesma verdade que o terminal. Por isso cada caso
-    abaixo esta amarrado ao guard equivalente do dispatcher.
+    abaixo esta amarrado ao guard equivalente do dispatcher; o caso `mimo`
+    trava a obrigacao do despacho do Main MiMo (testar `is_directive_line`
+    antes de qualquer ramo que publique no PTY ou aborte).
     """
 
     @pytest.mark.parametrize(

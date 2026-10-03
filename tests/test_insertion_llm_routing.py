@@ -482,7 +482,7 @@ class TestPublishInsertionLlmAware:
     def test_corgly_command_tab_buttons_insert_like_class_create(
         self, qapp, qtbot
     ):
-        """Botoes das abas corgly/corgly2: paste sem Enter, combo so se o hint aceitar .docx.
+        """Botoes das abas Corgly: paste sem Enter, combo so se o hint aceitar .docx.
 
         A sub-aba `corgly` hospeda o curso legado e a `corgly2` os comandos
         `corgly2-*`; o comportamento de insercao e o mesmo nas duas.
@@ -507,8 +507,13 @@ class TestPublishInsertionLlmAware:
             ("output-btn-corgly-change-vocabulary-order", "output-toolbar-corgly-flow"),
             ("output-btn-corgly-enrich-vocabulary", "output-toolbar-corgly-flow"),
             ("output-btn-corgly-clean-progress", "output-toolbar-corgly-flow"),
+            ("output-btn-corgly-picture-parts", "output-toolbar-corgly-flow"),
             (
                 "output-btn-corgly-corgly2-divide-vocabulary",
+                "output-toolbar-corgly2-flow",
+            ),
+            (
+                "output-btn-corgly-corgly2-look4translation",
                 "output-toolbar-corgly2-flow",
             ),
             (
@@ -518,6 +523,46 @@ class TestPublishInsertionLlmAware:
             (
                 "output-btn-corgly-corgly2-put-false-friends",
                 "output-toolbar-corgly2-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-1-subastantives-next-word",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-2-subastantives-identify",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-3-substantive-base",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-4-substantive-polissemia",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-5-substantives-examples",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-6-substantives-translation",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-7-substantives-checkboxes",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-8-substantives-finalize",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-adjectives-next",
+                "output-toolbar-corgly-desktop-flow",
+            ),
+            (
+                "output-btn-corgly-desktop-next-verb-phase",
+                "output-toolbar-corgly-desktop-flow",
             ),
             ("output-btn-corgly-class-create", "output-toolbar-corgly-flow"),
         ):
@@ -529,9 +574,21 @@ class TestPublishInsertionLlmAware:
             (f'/corgly:change-vocabulary-order "{filename}"',),
             (f'/corgly:enrich-vocabulary "{filename}"',),
             ("/corgly:clean-progress",),
+            (f'/corgly:picture-parts "{filename}"',),
             ("/corgly:corgly2-divide-vocabulary",),
+            ("/corgly:corgly2-look4translation",),
             ("/corgly:corgly2-optimize-phrases",),
             ("/corgly:corgly2-put-false-friends",),
+            ("/corgly-desktop:1-subastantives-next-word",),
+            ("/corgly-desktop:2-subastantives-identify",),
+            ("/corgly-desktop:3-substantive-base",),
+            ("/corgly-desktop:4-substantive-polissemia",),
+            ("/corgly-desktop:5-substantives-examples",),
+            ("/corgly-desktop:6-substantives-translation",),
+            ("/corgly-desktop:7-substantives-checkboxes",),
+            ("/corgly-desktop:8-substantives-finalize",),
+            ("/corgly-desktop:adjectives-next",),
+            ("/corgly-desktop:next-verb-phase",),
             ("/corgly:class-create",),
         ]
         assert runs == []
@@ -560,6 +617,26 @@ class TestPublishInsertionLlmAware:
             "/corgly:corgly2-optimize-phrases",
             "/clear",
         ]
+
+    def test_substantives_enqueues_queue_and_does_not_insert(
+        self, qapp, qtbot, tmp_path
+    ):
+        from workflow_app.db.database_manager import db_manager
+
+        db_manager.setup(db_path=str(tmp_path / "test_workflow.db"))
+        win = _new_window(qtbot)
+        _set_route(win, t1=True, t2=False, t3=False)
+        win._command_queue._main_claude_radio.setChecked(True)
+        pastes = _capture(signal_bus.paste_text_in_terminal)
+        runs = _capture(signal_bus.run_command_in_terminal)
+
+        _button_by_testid(win, "output-btn-corgly-substantives").click()
+
+        assert pastes == []
+        assert runs == []
+        assert [item.command_text() for item in win._command_queue._items] == list(
+            win._SUBSTANTIVES_ALL_QUEUE
+        )
 
     def test_empty_corgly_class_selection_keeps_command_without_argument(
         self, qapp, qtbot

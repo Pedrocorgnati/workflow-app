@@ -18,6 +18,14 @@
       "cause": "Item 026 do mesmo loop promoveu o Grok de spike privado (D-41) a provider publico (D-30/D-49). O membro novo nasce no enum, que e observavel pelo probe.",
       "why_this_is_not_a_regression": "A clausula 'corrigir o codigo, nunca a fixture' protege o COMPORTAMENTO do caminho legado, e ele nao mudou: as 26 saidas de classify_provider, provider_is_str_enum, routing_state_frozen, normalize_command_name, public_symbols e whitelist_verdicts continuam identicas byte a byte. O unico delta e um membro ADITIVO de enum, decidido em D-30/D-49 e implementado no item 026 — mudanca intencional posterior a captura, nao deriva silenciosa. Congelar o censo aqui obrigaria a reverter uma decisao do proprio loop para satisfazer um oraculo capturado antes dela.",
       "guard_kept": "Qualquer divergencia em campo que NAO seja este censo permanece regressao e reprova o teste."
+    },
+    {
+      "date": "2026-10-02",
+      "field": "snapshot.provider_enum_members",
+      "change": "MIMO='mimo' adicionado ao censo do enum Provider.",
+      "cause": "Q9 (ai-forge/rules/mcp-quota-fallback.md): a MiMo substitui o Kimi como worker T2 e como Main. O membro novo nasce no enum, que e observavel pelo probe.",
+      "why_this_is_not_a_regression": "O comportamento do caminho legado nao mudou: classify_provider, provider_is_str_enum, routing_state_frozen, normalize_command_name, public_symbols e whitelist_verdicts continuam identicos byte a byte. public_symbols fica igual por construcao: o conjunto T2 e privado (`_T2_PROVIDERS`, exposto como `T2_PROVIDERS` via PEP 562, fora de dir()), a elegibilidade T2 entra como alias privado (`_is_t2_eligible`) e `is_kimi_compatible` continua importado. O campo novo de RoutingState (`mimo_worker_enabled`) tem default False e vem depois dos tres posicionais, entao as construcoes do probe produzem o mesmo estado. O unico delta e um membro ADITIVO de enum, mudanca intencional posterior a captura.",
+      "guard_kept": "Qualquer divergencia em campo que NAO seja este censo permanece regressao e reprova o teste."
     }
   ],
   "snapshot": {
@@ -64,6 +72,7 @@
       "CODEX": "codex",
       "GROK": "grok",
       "KIMI": "kimi",
+      "MIMO": "mimo",
       "QWEN": "qwen"
     },
     "provider_is_str_enum": true,

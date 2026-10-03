@@ -1,0 +1,51 @@
+# t=10.816 cursor=48,109 modes={'bp2004': True, 'alt1049': False, 'm1000': False, 'm1002': False, 'm1003': False, 'sgr1006': False, 'focus1004': False, 'cur25': False, 'sync2026': False}
+00|                                                                                                                                                            ▶
+01|  ┃                                                                                                                                                             abc
+02|  ┃  Responda apenas com a palavra PONG seguida dos argumentos: abc                                                     ┃                               ┃
+03|  ┃                                                                                                                     ┃  Loaded AGENTS.md, CLAUDE.md  ┃       Context
+04|                                                                                                                        ┃                               ┃       0 tokens
+05|     → Asked 1 question                                                                                                                                         0% used
+06|                                                                                                                                                                $0.00 spent
+07|     ▣  Build · Pong
+08|                                                                                                                                                                Working Directory
+09|                                                                                                                                                                /tmp/claude-1000/-home-pedro-Reposit-
+10|                                                                                                                                                                rios-systemForge/00000000-0000-0000-
+11|                                                                                                                                                                0000-000000000000/scratchpad/spike-
+12|                                                                                                                                                                mimo/proj2
+13|
+14|                                                                                                                                                                Instructions
+15|                                                                                                                                                                • AGENTS.md
+16|                                                                                                                                                                • CLAUDE.md
+17|
+18|                                                                                                                                                                LSP
+19|                                                                                                                                                                LSPs will activate as files are read
+20|
+21|
+22|
+23|
+24|
+25|
+26|
+27|
+28|
+29|
+30|
+31|
+32|
+33|
+34|
+35|
+36|
+37|
+38|  ┃
+39|  ┃  SPIKE-Q qual opcao escolher?
+40|  ┃
+41|  ┃  1. Opcao A
+42|  ┃     primeira opcao
+43|  ┃  2. Opcao B                                                                                                                                                 /tmp/claude-1000/-home-pedro-Reposit-
+44|  ┃     segunda opcao                                                                                                                                           rios-systemForge/00000000-0000-0000-
+45|  ┃  3. Type your own answer                                                                                                                                    0000-000000000000/scratchpad/spike-
+46|  ┃                                                                                                                                                             mimo/proj2:main
+47|  ┃  ↑↓ select  enter submit  esc dismiss
+48|  ┃                                                                                                                                                             • MiMoCode 0.1.15
+49|

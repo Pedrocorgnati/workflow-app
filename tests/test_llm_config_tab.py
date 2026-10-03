@@ -30,6 +30,11 @@ _FLAG_NAME = "SF_LLM_CONFIG_V2"
 # testes depois do item 005.
 _TE_FLAG_NAME = "SF_MCP_THINK_EXEC_V2"
 
+# Switch das superficies do CLI MiMo (`feature_flags.mimo_v1_enabled()`). Pelo
+# contrato D3 ele NAO gateia a matriz TE; `_run_te_probe` o remove do ambiente
+# herdado para que um switch ligado no shell do operador nao decida o cenario.
+_MIMO_FLAG_NAME = "SF_MIMO_V1"
+
 # Regime "V2 ligado" como o operador o ve: aba LLM Config nova (global) MAIS a
 # matriz Thinking/Execution. O wrapper `kimi-k3` de Thinking e fixo: nao ha gate
 # separado para rebaixar o botao para `/mcp:kimi`.
@@ -96,6 +101,7 @@ main_radios = {
     "sonnet": win._command_queue._main_sonnet_radio,
     "kimi-k3": win._command_queue._main_kimi_k3_radio,
     "qwen": win._command_queue._main_qwen_radio,
+    "mimo": win._command_queue._main_mimo_radio,
 }
 main_options_layout = next(iter(main_radios.values())).parentWidget().layout()
 main_radio_positions = {}
@@ -412,12 +418,15 @@ class TestLLMConfigTabLayout:
             }
         )
         assert data["main_options_layout_type"] == "QGridLayout"
+        # `mimo` ocupa (2, 1) no grid em qualquer regime: a posicao e de
+        # layout, a visibilidade fica com o switch proprio do roster MiMo.
         assert data["main_radio_positions"] == {
             "claude": [0, 0],
             "codex": [0, 1],
             "kimi": [1, 0],
             "grok": [1, 1],
             "qwen": [2, 0],
+            "mimo": [2, 1],
         }
 
     def test_routing_uses_four_columns_with_internal_two_column_grids(self):
@@ -442,7 +451,14 @@ class TestLLMConfigTabLayout:
         assert data["parallel_column_orders"] == {
             "t2": {
                 "layout": "QVBoxLayout",
-                "order": ["T2:", "queue-chk-use-kimi", "queue-chk-use-qwen"],
+                # O worker MiMo fecha a coluna T2 em qualquer regime; oculto
+                # quando o switch do roster MiMo esta off.
+                "order": [
+                    "T2:",
+                    "queue-chk-use-kimi",
+                    "queue-chk-use-qwen",
+                    "queue-chk-use-mimo",
+                ],
             },
             "t3": {
                 "layout": "QVBoxLayout",
@@ -454,8 +470,9 @@ class TestLLMConfigTabLayout:
             "--fable": [1, 0],
             "--opus": [2, 0],
             "--codex-ultra": [3, 0],
-            "--kimi-k3": [4, 0],
-            "--grok-xhigh": [5, 0],
+            "--mimo-pro": [4, 0],
+            "--kimi-k3": [5, 0],
+            "--grok-xhigh": [6, 0],
             "--grok": [1, 1],
             "--sonnet": [2, 1],
             "--mimo": [3, 1],
@@ -592,6 +609,20 @@ class TestParallelWorkersExclusivity:
         from workflow_app.command_queue.command_queue_widget import CommandQueueWidget
         return CommandQueueWidget()
 
+    @staticmethod
+    def _arm_parallel_workers_v2(monkeypatch):
+        """Arma o roster v2 de workers (qwen/grok visiveis) antes do widget.
+
+        O restore so remarca worker visivel pela intencao de boot
+        (`_worker_visible`): com o roster v2 off, qwen/grok nascem ocultos e
+        um `worker/t2_selected=qwen` herdado nao volta a ocupar o par. Os
+        testes de sobrevivencia ao restore precisam do roster armado.
+        """
+        monkeypatch.setattr(
+            "workflow_app.config.feature_flags.parallel_workers_v2_enabled",
+            lambda: True,
+        )
+
     def test_qwen_checkbox_exists_with_correct_testid(self, qapp):
         w = self._make_widget()
         assert w._use_qwen_chk.property("testid") == "queue-chk-use-qwen"
@@ -668,8 +699,9 @@ class TestParallelWorkersExclusivity:
         w._use_kimi_chk.setChecked(True)
         assert w._use_kimi_chk.isChecked(), "kimi should be checkable after qwen unchecked"
 
-    def test_worker_persistence_t2_qwen_survives_restore(self, qapp):
+    def test_worker_persistence_t2_qwen_survives_restore(self, qapp, monkeypatch):
         from PySide6.QtCore import QSettings
+        self._arm_parallel_workers_v2(monkeypatch)
         w = self._make_widget()
         w._use_qwen_chk.setChecked(True)
         w._persist_worker_selection()
@@ -682,8 +714,9 @@ class TestParallelWorkersExclusivity:
         stg.remove("worker/t3_selected")
         stg.sync()
 
-    def test_worker_persistence_t3_grok_survives_restore(self, qapp):
+    def test_worker_persistence_t3_grok_survives_restore(self, qapp, monkeypatch):
         from PySide6.QtCore import QSettings
+        self._arm_parallel_workers_v2(monkeypatch)
         w = self._make_widget()
         w._use_grok_chk.setChecked(True)
         w._persist_worker_selection()
@@ -733,7 +766,7 @@ class TestParallelWorkersExclusivity:
         finally:
             signal_bus.worker_occupancy_changed.disconnect()
 
-    def test_occupancy_emitted_on_restore_outside_blocksignals(self, qapp):
+    def test_occupancy_emitted_on_restore_outside_blocksignals(self, qapp, monkeypatch):
         """O restore usa blockSignals, entao os toggles NAO rodam no boot.
 
         Sem um emit proprio, a MetricsBar ficaria cega justamente na sessao
@@ -742,6 +775,7 @@ class TestParallelWorkersExclusivity:
         from PySide6.QtCore import QSettings
 
         from workflow_app.signal_bus import signal_bus
+        self._arm_parallel_workers_v2(monkeypatch)
         stg = QSettings("systemForge", "workflow-app")
         stg.setValue("worker/t2_selected", "qwen")
         stg.setValue("worker/t3_selected", "grok")
@@ -814,15 +848,20 @@ class TestParallelWorkersExclusivity:
 
 _LLM_FLAGS_V2_FLAG = "SF_LLM_FLAGS_V2"
 
-# Conjunto vigente por regime do kill-switch (item 005 do loop
-# 08-17-systemforge-multillm-gaps-refactor). Ausente/off = roster legado da
-# tabela C26; "1" = literais thinking/execution.
+# Roster vigente por regime do kill-switch (item 005 do loop
+# 08-17-systemforge-multillm-gaps-refactor), na ordem canonica do regime (a
+# ordem do sufixo T1). Ausente/off = roster legado (tabela C26 mais
+# `--mimo`); "1" = colunas thinking + execution.
 # `--mimo` entra nos dois regimes: substitui o `--kimi` (2026-10-02).
-_LEGACY_FLAG_LITERALS = {"--codex", "--mimo", "--kimi"}
-_V2_FLAG_LITERALS = {
+# `--mimo-pro` so existe no v2 (thinking, antes do `--kimi-k3`).
+# Escritos a mao DE PROPOSITO: derivar de `llm_flags` faria o teste
+# concordar com qualquer roster que o modulo produzisse.
+_LEGACY_FLAG_ORDER_EXPECTED: tuple[str, ...] = ("--codex", "--mimo", "--kimi")
+_V2_FLAG_ORDER_EXPECTED: tuple[str, ...] = (
     "--fable",
     "--opus",
     "--codex-ultra",
+    "--mimo-pro",
     "--kimi-k3",
     "--grok-xhigh",
     "--grok",
@@ -831,7 +870,9 @@ _V2_FLAG_LITERALS = {
     "--kimi",
     "--qwen",
     "--codex",
-}
+)
+_LEGACY_FLAG_LITERALS = frozenset(_LEGACY_FLAG_ORDER_EXPECTED)
+_V2_FLAG_LITERALS = frozenset(_V2_FLAG_ORDER_EXPECTED)
 
 
 @contextmanager
@@ -844,10 +885,11 @@ def _llm_flags_regime(v2_enabled: bool):
     `llm_flags` deriva o conjunto vigente no corpo do modulo e o `FlagsPanel`
     congela `_FLAG_ORDER` a partir dele no import.
 
-    Afirmar 7 literais sem armar a flag e o defeito que estes testes tinham:
-    o default do processo e o regime LEGADO (2 literais), entao a assercao
-    descrevia um regime que nao estava vigente. O `finally` devolve o processo
-    ao regime herdado do ambiente para nao contaminar os testes seguintes.
+    Afirmar o roster v2 (`_V2_FLAG_ORDER_EXPECTED`) sem armar a flag e o
+    defeito que estes testes tinham: o default do processo e o regime LEGADO
+    (`_LEGACY_FLAG_ORDER_EXPECTED`), entao a assercao descrevia um regime que
+    nao estava vigente. O `finally` devolve o processo ao regime herdado do
+    ambiente para nao contaminar os testes seguintes.
     """
     import importlib
 
@@ -881,29 +923,32 @@ class TestFlagsPanelSupportedFlags:
     """Testes do FlagsPanel (aba LLM Config) e do conjunto fechado."""
 
     @pytest.mark.parametrize(
-        ("v2_enabled", "expected"),
+        ("v2_enabled", "expected_order"),
         [
-            pytest.param(False, _LEGACY_FLAG_LITERALS, id="legado"),
-            pytest.param(True, _V2_FLAG_LITERALS, id="v2"),
+            pytest.param(False, _LEGACY_FLAG_ORDER_EXPECTED, id="legado"),
+            pytest.param(True, _V2_FLAG_ORDER_EXPECTED, id="v2"),
         ],
     )
-    def test_supported_flags_match_kill_switch_regime(self, v2_enabled, expected):
-        """O conjunto fechado e funcao do regime, nao uma constante de 7.
+    def test_supported_flags_match_kill_switch_regime(self, v2_enabled, expected_order):
+        """Conjunto fechado e ordem canonica sao funcao do regime, nao constantes.
 
         Os dois regimes ficam travados aqui de proposito: afirmar so o v2
         deixava o regime default (legado) sem cobertura, que foi como o
-        conjunto pode encolher para 2 literais sem nenhum teste reclamar.
+        roster legado pode encolher sem nenhum teste reclamar.
+
+        A ordem e afirmada contra a tupla escrita a mao, e nao contra o
+        conjunto: no modulo os dois saem da MESMA tupla do regime, entao
+        compara-los entre si nunca falhava. A ordem tambem e contrato (vira a
+        ordem do sufixo T1, com a MiMo antes do Kimi), e so a tupla esperada
+        pega uma troca de posicao.
         """
         with _llm_flags_regime(v2_enabled):
             # `importlib.reload` reaproveita o mesmo objeto de modulo, entao o
             # import comum ja enxerga o conjunto recomputado.
             import workflow_app.config.llm_flags as lf_mod
 
-            assert lf_mod._SUPPORTED_MCP_FLAGS == expected
-            assert len(lf_mod._SUPPORTED_MCP_FLAGS) == len(expected)
-            # Paridade derivada: ordem canonica e conjunto descrevem os mesmos
-            # literais em QUALQUER regime.
-            assert frozenset(lf_mod._FLAG_CANONICAL_ORDER) == lf_mod._SUPPORTED_MCP_FLAGS
+            assert lf_mod._SUPPORTED_MCP_FLAGS == frozenset(expected_order)
+            assert lf_mod._FLAG_CANONICAL_ORDER == expected_order
 
     def test_flags_panel_has_exactly_supported_flags(self, qapp):
         from workflow_app.config.llm_flags import _SUPPORTED_MCP_FLAGS
@@ -922,8 +967,8 @@ class TestFlagsPanelSupportedFlags:
         """Matriz de incompatibilidade sob o regime v2 (thinking/execution).
 
         O corpo enumera literais que so existem no roster v2. Sem armar o
-        kill-switch o painel nasce com os 2 literais legados e a enumeracao
-        estourava KeyError.
+        kill-switch o painel nasce com o roster legado
+        (`_LEGACY_FLAG_ORDER_EXPECTED`) e a enumeracao estourava KeyError.
         """
         with _llm_flags_regime(True) as fp_mod:
             self._assert_incompatibility_matrix(fp_mod.FlagsPanel())
@@ -1000,8 +1045,9 @@ class TestFlagsPanelSupportedFlags:
                 )
 
             # Main nao-Claude: TODAS as flags do roster vigente caem, com
-            # motivo visivel (C-57). Sao 7 sob SF_LLM_FLAGS_V2=1 e 2 no
-            # regime legado; a assercao itera o painel para nao fixar numero.
+            # motivo visivel (C-57). O roster muda com SF_LLM_FLAGS_V2
+            # (`_V2_FLAG_ORDER_EXPECTED` ou `_LEGACY_FLAG_ORDER_EXPECTED`); a
+            # assercao itera o painel para nao fixar numero.
             for main in ("kimi", "codex", "qwen", "grok"):
                 panel.set_main_llm(main)
                 for flag, chk in panel._checkboxes.items():
@@ -1039,7 +1085,10 @@ class TestFlagsPanelSupportedFlags:
         assert all(chk.isEnabled() for chk in panel._checkboxes.values())
 
     def test_flags_panel_under_legacy_regime_exposes_only_legacy_flags(self, qapp):
-        """Regime legado: o painel expoe SO `--codex` e `--kimi`.
+        """Regime legado: o painel expoe SO o roster legado.
+
+        O roster e `_LEGACY_FLAG_ORDER_EXPECTED`: a tabela C26 mais `--mimo`,
+        que entra nos dois regimes (MiMo > Kimi, 2026-10-02).
 
         Este e o regime default do processo (kill-switch ausente), e ate aqui
         ele nao tinha nenhuma cobertura de painel: os testes existentes so
@@ -1171,9 +1220,10 @@ def _run_te_probe(env_override: dict[str, str] | None = None) -> dict:
     env["QT_QPA_PLATFORM"] = "offscreen"
     if env_override:
         env.update(env_override)
-    # Sanear os DOIS kill-switches: o ambiente herdado nao pode decidir o regime
-    # (o gate da matriz TE mora em _TE_FLAG_NAME desde o item 005).
-    for flag in (_FLAG_NAME, _TE_FLAG_NAME):
+    # Sanear os kill-switches: o ambiente herdado nao pode decidir o regime
+    # (o gate da matriz TE mora em _TE_FLAG_NAME desde o item 005; o switch
+    # MiMo sai junto, mesmo sem gatear a matriz, para o cenario ser o pedido).
+    for flag in (_FLAG_NAME, _TE_FLAG_NAME, _MIMO_FLAG_NAME):
         if env_override is None or flag not in env_override:
             env.pop(flag, None)
 
@@ -1196,8 +1246,12 @@ def _run_te_probe(env_override: dict[str, str] | None = None) -> dict:
 class TestThinkingExecutionFlagEnabled:
     """Item 023: Thinking/Execution split com os kill-switches V2 armados."""
 
-    def test_thinking_group_has_5_buttons(self):
-        """Thinking group: 5 alternativas no select, alinhadas a queue-div-flag."""
+    def test_thinking_group_has_expected_buttons(self):
+        """Thinking group: alternativas do select alinhadas a queue-div-flag.
+
+        Conjunto exato (sem contagem no nome): a thinking `mimo-pro` entra
+        entre `codex-ultra` e `kimi`, sem gate do switch MiMo.
+        """
         data = _run_te_probe(_TE_FLAGS_ON)
         expected = sorted([
             "output-mcp-action-thinking",
@@ -1205,6 +1259,7 @@ class TestThinkingExecutionFlagEnabled:
             "output-mcp-action-thinking-fable",
             "output-mcp-action-thinking-opus",
             "output-mcp-action-thinking-codex-ultra",
+            "output-mcp-action-thinking-mimo-pro",
             "output-mcp-action-thinking-kimi",
             "output-mcp-action-thinking-grok-xhigh",
         ])
@@ -1236,6 +1291,7 @@ class TestThinkingExecutionFlagEnabled:
         assert cmds.get("output-mcp-action-thinking-fable") == "/mcp:fable"
         assert cmds.get("output-mcp-action-thinking-opus") == "/mcp:claude-ultra"
         assert cmds.get("output-mcp-action-thinking-codex-ultra") == "/mcp:codex-ultra"
+        assert cmds.get("output-mcp-action-thinking-mimo-pro") == "/mcp:mimo-pro"
         assert cmds.get("output-mcp-action-thinking-kimi") == "/mcp:kimi-k3"
         assert cmds.get("output-mcp-action-thinking-grok-xhigh") == "/mcp:grok-xhigh"
         assert cmds.get("output-mcp-action-execution-grok") == "/mcp:grok"

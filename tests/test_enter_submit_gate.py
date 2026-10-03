@@ -255,6 +255,36 @@ class TestListenerClearCompensationOnT1:
             bar._HELPER_AUTO_IDLE_INTERACTIVE_MS + bar._CLEAR_WORKSPACE_EXTRA_MS
         )
 
+    def test_codex_on_t1_keeps_the_non_claude_clear_hold(self, bar):
+        bar._main_llm = "codex"
+        assert bar._helper_auto_idle_delay_ms("interactive", "/clear") == (
+            bar._HELPER_AUTO_IDLE_INTERACTIVE_MS + bar._CLEAR_WORKSPACE_EXTRA_MS
+        )
+
+    def test_qwen_on_t1_keeps_the_non_claude_clear_hold(self, bar):
+        bar._main_llm = "qwen"
+        assert bar._helper_auto_idle_delay_ms("interactive", "/clear") == (
+            bar._HELPER_AUTO_IDLE_INTERACTIVE_MS + bar._CLEAR_WORKSPACE_EXTRA_MS
+        )
+
+    def test_grok_on_t1_keeps_the_non_claude_clear_hold(self, bar):
+        bar._main_llm = "grok"
+        assert bar._helper_auto_idle_delay_ms("interactive", "/clear") == (
+            bar._HELPER_AUTO_IDLE_INTERACTIVE_MS + bar._CLEAR_WORKSPACE_EXTRA_MS
+        )
+
+    def test_kimi_main_does_not_change_workspace_clear(self, bar):
+        bar._main_llm = "kimi"
+        assert bar._helper_auto_idle_delay_ms("workspace", "/clear") == (
+            bar._HELPER_AUTO_IDLE_MS + bar._CLEAR_WORKSPACE_EXTRA_MS
+        )
+
+    def test_kimi_main_does_not_change_non_clear_helper(self, bar):
+        bar._main_llm = "kimi"
+        assert bar._helper_auto_idle_delay_ms("interactive", "/model") == (
+            bar._HELPER_AUTO_IDLE_INTERACTIVE_MS
+        )
+
     def test_workspace_clear_extra_is_preserved(self, bar):
         assert bar._helper_auto_idle_delay_ms("workspace", "/clear") == (
             bar._HELPER_AUTO_IDLE_MS + bar._CLEAR_WORKSPACE_EXTRA_MS
@@ -304,3 +334,18 @@ class TestGateSkipsPastesTheTuiDoesNotEcho:
         assert OutputPanel._submit_gate_needle(
             "/slash-executor /corgly:questions-rebase"
         ) is not None
+
+
+class TestEnterFloorMimoMain:
+    """MiMo no Main (fork do opencode): mesmo piso lento do T1 que os forks
+    do gemini-cli. Classe propria para `test_gemini_cli_forks_get_the_long_floor`
+    continuar dizendo a verdade no nome."""
+
+    def test_mimo_gets_the_long_floor(self, panel):
+        panel._main_llm = "mimo"
+        assert panel._enter_submit_delay_ms("/loop") == 1_000
+
+    def test_mimo_after_clear_gets_extra(self, panel):
+        panel._main_llm = "mimo"
+        panel._last_dispatch_head = "/clear"
+        assert panel._enter_submit_delay_ms("/skill:slash-executor /loop") == 3_000

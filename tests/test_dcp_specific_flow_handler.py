@@ -1609,7 +1609,7 @@ def test_build_execute_modules_golden_fixture_exact_sequence(
         "/clear",
         "/model opus",
         "/effort high",
-        f"/review-executed-module {wbs}/modules/module-1-a",
+        f"/review-executed-module {wbs}/modules/module-1-a --auto-close",
         "/clear",
         f"/create-task {wbs}/modules/module-2-b/TASK-1.md",
         f"/review-created-task {wbs}/modules/module-2-b/TASK-1.md",
@@ -1621,7 +1621,7 @@ def test_build_execute_modules_golden_fixture_exact_sequence(
         "/clear",
         "/model opus",
         "/effort high",
-        f"/review-executed-module {wbs}/modules/module-2-b",
+        f"/review-executed-module {wbs}/modules/module-2-b --auto-close",
     ]
     assert names == expected, (
         "emitted sequence diverges from golden fixture:\n"
