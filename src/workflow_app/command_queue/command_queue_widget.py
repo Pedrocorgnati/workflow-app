@@ -9955,9 +9955,15 @@ class CommandQueueWidget(QWidget):
                     base, recovery_mode=True
                 )
             elif llm == "mimo":
-                payload = self._build_mimo_slash_executor_invocation(
-                    base, recovery_mode=True
-                )
+                try:
+                    payload = self._build_mimo_slash_executor_invocation(
+                        base, recovery_mode=True
+                    )
+                except ValueError as exc:
+                    self._reject_recovery_command(
+                        channel, f"Auto-recuperacao abortada: {exc}"
+                    )
+                    return
             elif llm == "kimi":
                 payload = self._build_kimi_slash_executor_invocation(
                     base, recovery_mode=True
@@ -10739,6 +10745,10 @@ class CommandQueueWidget(QWidget):
     # Main MiMo (T1): executor nativo `.mimocode/commands/slash-executor.md`.
     # Contrato do payload em ai-forge/rules/mimo-code-cli-contract.md.
     _MIMO_DELEGATION_RUNTIME_FLAG = "--delegation-runtime=mimo"
+    # O loader do CLI mimocode expande shell no host ao carregar o template de
+    # comando customizado (contrato, secao 7): payload slash com este token e
+    # recusado no builder, antes de qualquer transformacao.
+    _MIMO_SHELL_EXPANSION_TOKEN = "!`"
     # Slug normalizado (namespace, com `:`) do comando de auto-recuperacao do
     # red-listener. O dispatch de recuperacao (`_on_request_recovery_command`)
     # sinaliza recovery_mode EXPLICITAMENTE aos executores Codex/Kimi para este
@@ -11023,9 +11033,21 @@ class CommandQueueWidget(QWidget):
         `--delegation-runtime=mimo`. Contrato do CLI
         (ai-forge/rules/mimo-code-cli-contract.md): o payload termina com
         exatamente UM espaco, que fecha o popup de autocomplete do TUI e
-        preserva o texto; o Enter vai num write separado (output_panel). Texto
-        que nao e slash volta inalterado.
+        preserva o texto, e nenhum no inicio; o Enter vai num write separado
+        (output_panel). Texto que nao e slash volta inalterado.
+
+        Levanta ValueError quando o texto slash contem "!`": o CLI expande
+        shell no host ao carregar o template (contrato, secao 7).
         """
+        if (
+            cmd_text.lstrip().startswith("/")
+            and cls._MIMO_SHELL_EXPANSION_TOKEN in cmd_text
+        ):
+            raise ValueError(
+                f'payload slash com "{cls._MIMO_SHELL_EXPANSION_TOKEN}" recusado: '
+                "o CLI mimocode expande shell no host ao carregar o template do "
+                "comando (ver ai-forge/rules/mimo-code-cli-contract.md)."
+            )
         wrapped = cls._build_grok_slash_executor_invocation(
             cmd_text,
             recovery_mode=recovery_mode,
@@ -11033,7 +11055,7 @@ class CommandQueueWidget(QWidget):
         )
         if not wrapped.lstrip().startswith("/"):
             return wrapped
-        return wrapped.rstrip() + " "
+        return wrapped.strip() + " "
 
     @classmethod
     def _wrap_grok_slash_executor(
@@ -12658,7 +12680,8 @@ class CommandQueueWidget(QWidget):
         (um espaco no fim, Enter em write separado). `/clear` vai cru e sem
         espaco (com espaco o TUI nao limpa). Diretivas `/model`/`/effort` nao
         existem no TUI da MiMo: pulsam o listener, como no Grok. Retorna False
-        no abort (comando/skill inexistente), mantendo o item pendente.
+        no abort (comando/skill inexistente ou payload com "!`" recusado pelo
+        builder), mantendo o item pendente.
         """
         channel = "interactive"
         if is_prompt:
@@ -12701,12 +12724,18 @@ class CommandQueueWidget(QWidget):
                 )
                 return False
 
-        transformed = self._build_mimo_slash_executor_invocation(
-            cmd_text,
-            recovery_mode=(
-                self._normalized_slash_slug(cmd_text) == self._RECOVERY_SLUG
-            ),
-        )
+        try:
+            transformed = self._build_mimo_slash_executor_invocation(
+                cmd_text,
+                recovery_mode=(
+                    self._normalized_slash_slug(cmd_text) == self._RECOVERY_SLUG
+                ),
+            )
+        except ValueError as exc:
+            signal_bus.toast_requested.emit(
+                f"Main LLM MiMo: {exc} - dispatch abortado.", "warning"
+            )
+            return False
         if not transformed or not transformed.strip():
             signal_bus.toast_requested.emit(
                 "Main LLM MiMo: adaptacao retornou texto vazio — dispatch abortado.",
