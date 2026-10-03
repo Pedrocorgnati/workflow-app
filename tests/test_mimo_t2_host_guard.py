@@ -216,6 +216,61 @@ def test_step_com_host_ausente_nao_envia(widget, monkeypatch):
     assert len(sig.warnings()) == 1
 
 
+def _spy_lifecycle(widget, monkeypatch) -> list[str]:
+    """Registra as chamadas de lifecycle do step sem alterar o desfecho."""
+    calls: list[str] = []
+    begin = widget._begin_rocksmash_subphase
+    record = widget._record_loop_dispatch
+
+    def _begin(spec):
+        calls.append("begin_rocksmash_subphase")
+        return begin(spec)
+
+    def _record(spec, provider):
+        calls.append("record_loop_dispatch")
+        return record(spec, provider)
+
+    monkeypatch.setattr(widget, "_begin_rocksmash_subphase", _begin)
+    monkeypatch.setattr(widget, "_record_loop_dispatch", _record)
+    return calls
+
+
+def test_step_com_host_ausente_nao_abre_lifecycle(widget, monkeypatch):
+    """Recusa do host guard acontece ANTES do lifecycle: nenhuma subfase
+    rocksmash vai para `in_flight` e nenhum `item_dispatched` fantasma nasce
+    (review-executed item 007, finding step-gate-apos-lifecycle)."""
+    monkeypatch.setattr(widget, "_t2_pty_hosts_cli", lambda _cli: False)
+    calls = _spy_lifecycle(widget, monkeypatch)
+    with _Signals() as sig:
+        widget._on_step_btn_clicked()
+    assert calls == []
+    assert sig.blue == []
+    assert len(sig.warnings()) == 1
+
+
+def test_step_com_payload_recusado_nao_abre_lifecycle(qapp, qtbot, monkeypatch):
+    """Recusa do builder ("!`") tambem precede o lifecycle no step."""
+    w = _build_widget(qapp, qtbot, monkeypatch, name="/qa:prep !`printf X`")
+    monkeypatch.setattr(w, "_t2_pty_hosts_cli", lambda _cli: True)
+    calls = _spy_lifecycle(w, monkeypatch)
+    item = w._find_next_pending()
+    with _Signals() as sig:
+        w._on_step_btn_clicked()
+    assert calls == []
+    assert sig.blue == []
+    assert item.is_pending_run() is True
+    assert len(sig.warnings()) == 1
+
+
+def test_step_com_host_presente_abre_lifecycle_uma_vez(widget, monkeypatch):
+    monkeypatch.setattr(widget, "_t2_pty_hosts_cli", lambda _cli: True)
+    calls = _spy_lifecycle(widget, monkeypatch)
+    with _Signals() as sig:
+        widget._on_step_btn_clicked()
+    assert calls == ["begin_rocksmash_subphase", "record_loop_dispatch"]
+    assert sig.blue == [(EXPECTED_PAYLOAD, EXPECTED_DELAY_MS)]
+
+
 # ─────────────────────── item isolado (sem queue widget) ───────────────── #
 
 

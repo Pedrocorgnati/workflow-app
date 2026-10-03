@@ -9507,6 +9507,37 @@ class CommandQueueWidget(QWidget):
     # Kimi takes longer to repaint the prompt after a full TUI clear.
     _KIMI_AFTER_CLEAR_EXTRA_DELAY_MS: int = 2_000
 
+    def _prepare_mimo_blue_arrow(self, cmd_text: str) -> str | None:
+        """Gates recusaveis da seta azul MiMo; devolve o payload ou None.
+
+        Sem efeito colateral alem do toast de recusa: nao publica, nao abre
+        telemetria, nao consome `_last_workspace_dispatch_was_clear`. Por isso o
+        step pode avalia-lo ANTES de `_begin_rocksmash_subphase` e
+        `_record_loop_dispatch` (review-executed item 007, finding
+        step-gate-apos-lifecycle): recusa aqui nao deixa subfase `in_flight`
+        nem `item_dispatched` de um item que nunca saiu. Gates nesta ordem:
+
+          1. texto vazio/so espacos -> toast `warning` + None;
+          2. `_ensure_t2_mimo_host()` (fail-closed) -> None ja com toast;
+          3. builder (recusa de "!`" -> ValueError) -> toast `warning` + None.
+        """
+        if not cmd_text or not cmd_text.strip():
+            signal_bus.toast_requested.emit(
+                "Worker MiMo: comando vazio - dispatch abortado.",
+                "warning",
+            )
+            return None
+        if not self._ensure_t2_mimo_host():
+            return None
+        try:
+            return self._build_mimo_slash_executor_invocation(cmd_text)
+        except ValueError as exc:
+            signal_bus.toast_requested.emit(
+                f"Worker MiMo: {exc} - dispatch abortado.",
+                "warning",
+            )
+            return None
+
     def _dispatch_mimo_blue_arrow(self, cmd_text: str) -> bool:
         """Despacha a seta azul da MiMo ao T2; True so quando publicou o payload.
 
@@ -9525,21 +9556,8 @@ class CommandQueueWidget(QWidget):
         definicao de "envio confirmado" usada pelo slot
         `_on_single_button_mimo_dispatch` (mark-as-sent gated, mesma semantica de
         `_dispatch_codex_command`)."""
-        if not cmd_text or not cmd_text.strip():
-            signal_bus.toast_requested.emit(
-                "Worker MiMo: comando vazio - dispatch abortado.",
-                "warning",
-            )
-            return False
-        if not self._ensure_t2_mimo_host():
-            return False
-        try:
-            payload = self._build_mimo_slash_executor_invocation(cmd_text)
-        except ValueError as exc:
-            signal_bus.toast_requested.emit(
-                f"Worker MiMo: {exc} - dispatch abortado.",
-                "warning",
-            )
+        payload = self._prepare_mimo_blue_arrow(cmd_text)
+        if payload is None:
             return False
         if self._last_workspace_dispatch_was_clear:
             delay = (
@@ -13783,6 +13801,19 @@ class CommandQueueWidget(QWidget):
                 " so o Codex gera imagem. Ative o Worker Codex e tente de novo.",
                 "warning",
             )
+            return
+
+        # Review-executed item 007 (finding step-gate-apos-lifecycle): a seta
+        # azul MiMo tem gates recusaveis proprios (host guard fail-closed e
+        # recusa de "!`" no builder). Eles rodam AQUI, antes do lifecycle, pelo
+        # mesmo `_prepare_mimo_blue_arrow` que o dispatcher usa; recusar depois
+        # de `_begin_rocksmash_subphase`/`_record_loop_dispatch` deixava a
+        # subfase `in_flight` e um `item_dispatched` de item que nunca saiu.
+        if (
+            self._last_classified_provider is Provider.MIMO
+            and next_item.is_worker_arrow_visible()
+            and self._prepare_mimo_blue_arrow(next_item.command_text()) is None
+        ):
             return
 
         # Tasks 19/20: marcar a subfase rocksmash como `in_flight` e o ULTIMO
