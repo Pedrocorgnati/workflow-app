@@ -35,7 +35,7 @@ def linux_descendant_exec_basenames(root_pid: int) -> frozenset[str]:
     """Basenames of descendant processes of ``root_pid`` (Linux ``/proc``).
 
     The root pid itself (the PTY shell) is omitted: callers look for the
-    CLI hosted *inside* the shell (``grok``, ``codex``, ...). Unreadable
+    CLI hosted *inside* the shell (``grok``, ``codex``, ``mimo``, ...). Unreadable
     ``/proc`` entries are skipped. Returns empty on non-Linux or if the
     pid has already exited.
     """
@@ -119,7 +119,7 @@ class PersistentShell(QObject):
         self._shell = shell or _SHELL
         # Extra env merged into the spawned shell's environ. Used by OutputPanel
         # to inject `WF_CHANNEL_OVERRIDE` per-channel so that any Bash subprocess
-        # the embedded CLI (Claude/Kimi) spawns inherits the correct channel
+        # the embedded CLI (Claude/Kimi/MiMo) spawns inherits the correct channel
         # without each command/wrapper having to set it manually. See
         # ai-forge/rules/workflow-app-listeners.md §2.4.
         self._extra_env: dict[str, str] = dict(extra_env) if extra_env else {}
@@ -274,7 +274,12 @@ class PersistentShell(QObject):
         return linux_descendant_exec_basenames(current)
 
     def hosts_cli(self, cli: str) -> bool:
-        """True when a descendant of this PTY matches the CLI basename."""
+        """True when a descendant of this PTY matches the CLI basename.
+
+        Launchers that ``exec`` the real binary keep its basename: ``mimod``
+        ends as a ``mimo`` process, so ``hosts_cli("mimo")`` holds while the
+        MiMo TUI runs (already during its boot, before the input is ready).
+        """
         return cli_name_in_exec_basenames(cli, self.descendant_exec_basenames())
 
     def terminate(self) -> None:

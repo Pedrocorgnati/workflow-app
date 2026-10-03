@@ -21,6 +21,7 @@ Input:
 from __future__ import annotations
 
 import functools
+import logging
 import pathlib
 import re
 import time
@@ -43,6 +44,8 @@ from workflow_app.output_panel.persistent_shell import PersistentShell
 from workflow_app.output_panel.terminal_canvas import Cell, TerminalCanvas
 from workflow_app.signal_bus import signal_bus
 from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
+
+logger = logging.getLogger(__name__)
 
 
 def _find_systemforge_root() -> str | None:
@@ -137,6 +140,64 @@ _FATAL_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
 )
 
+# Sequencias de escape removidas antes do scan escopado por CLI: CSI (CUP,
+# SGR, modos), OSC terminado em BEL ou ST e ESC de dois bytes. Um CSI
+# incompleto na fronteira do chunk NAO casa, sobrevive na cauda e completa
+# com o chunk seguinte.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]"
+)
+
+# Padroes fatais ESCOPADOS POR CLI: (cli, reason, pattern). Diferente de
+# _FATAL_PATTERNS, so disparam quando o PTY deste painel hospeda o CLI dono
+# do padrao (`PersistentShell.hosts_cli(cli)`, basename exato), e casam
+# sobre o texto SEM ANSI de `_cli_fatal_tail + chunk`: a MiMo (fork do
+# opencode) pinta o toast de erro fatiado por CUP/SGR e o status do 401 pode
+# cair na fronteira entre dois chunks, coisa que o scan por chunk cru de
+# _FATAL_PATTERNS nunca ve. Todos sao "hard" por construcao (o gate do host
+# substitui a janela early-crash).
+#
+# Os reasons REUSAM os de _FATAL_PATTERNS (contrato com MetricsBar) e ficam
+# fora de RECOVERY_REASONS: chave ausente ou invalida nao se auto-recupera.
+# O 429 da MiMo e retryable (o proprio CLI tenta de novo) e NAO entra aqui.
+#
+# As frases-gatilho ficam FATIADAS (`\s*` entre as palavras): a fonte deste
+# modulo nunca contem a frase literal, entao exibir este arquivo num painel
+# que hospeda a MiMo nao vira falso vermelho. Mesma regra para testes e docs.
+_CLI_SCOPED_FATAL_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    (
+        "mimo",
+        "AUTH_INVALID_API_KEY",
+        re.compile(
+            r"Invalid\s*API\s*Key:\s*Please\s*provide\s*valid\s*API\s*Key"
+            r"|status\s*401\s*·\s*non-retryable",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "mimo",
+        "AUTH_API_KEY_REQUIRED",
+        re.compile(
+            r"Free\s*API\s*service\s*ended"
+            r"|Model\s*xiaomi[\w.-]*/[\w.-]+\s*is\s*not\s*valid",
+            re.IGNORECASE,
+        ),
+    ),
+)
+# Cauda (chars, ja sem ANSI) guardada entre chunks para o scan escopado.
+_CLI_FATAL_TAIL_CHARS = 256
+# Heads de helper que sobem um CLI com padroes escopados: digitar um deles
+# rearma o latch (`rearm_fatal_scan`) mesmo sendo helper, senao um vermelho
+# da sessao anterior do mesmo CLI deixaria o relaunch cego.
+_CLI_LAUNCH_REARM_HEADS: frozenset[str] = frozenset({"mimod"})
+
+# Borda vertical das caixas de input de TUI (a da MiMo e `┃` seguida de
+# padding curto). Removida das linhas antes de procurar a agulha do gate de
+# eco: a borda partia a agulha quando o paste quebrava de linha e o gate
+# so liberava no timeout.
+_TUI_BORDER_LEFT_RE = re.compile(r"^\s*[┃│║]\s{0,2}")
+_TUI_BORDER_RIGHT_RE = re.compile(r"\s*[┃│║]?\s*$")
+
 
 class OutputPanel(QWidget):
     """Terminal panel: persistent shell + optional pipeline runner overlay."""
@@ -185,7 +246,7 @@ class OutputPanel(QWidget):
         # Detects "PTY went silent for 2s" → fires terminal_force_idle.
         # Used by Claude (interactive/T1) and Codex (workspace_xterm/T3),
         # both of which go genuinely silent post-command. NOT used by the
-        # plain workspace channel (Kimi/T2) — see `_on_chunk` gate.
+        # plain workspace channel (Kimi or MiMo in T2) — see `_on_chunk` gate.
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
         self._idle_timer.setInterval(2_000)
@@ -209,7 +270,7 @@ class OutputPanel(QWidget):
         self._shell: PersistentShell | None = None
         # Per-channel WF_CHANNEL_OVERRIDE binding. Injected at PTY spawn so
         # every Bash subprocess the embedded CLI starts (Claude in T1, Kimi
-        # in T2) inherits the correct channel. Without this, the bash block
+        # or MiMo in T2) inherits the correct channel. Without this, the bash block
         # in `## FASE FINAL — Autocast contract` defaults to `interactive`
         # and the workspace listener never receives the workspace notify
         # (canonical bug: listener-workspace stuck yellow after a Kimi run).
@@ -238,6 +299,18 @@ class OutputPanel(QWidget):
         # repetidamente enquanto o mesmo erro permanecer na tela. Reset em
         # nova sessao do pipeline (_on_pipeline_started) e ao limpar pyte.
         self._last_failure_reason: str | None = None
+        # Latch por janela de erro: todo reason ja emitido desde o ultimo
+        # `rearm_fatal_scan`. Com um slot so, o disparo de OUTRO reason trocava
+        # o latch e o erro anterior, ainda na tela ou na cauda do scan
+        # escopado, reemitia no chunk seguinte (ping-pong). Ver `_fire_fatal`.
+        self._fired_reasons: set[str] = set()
+        # Cauda sem ANSI do scan escopado por CLI (`_scan_chunk_for_cli_fatal`),
+        # limitada a _CLI_FATAL_TAIL_CHARS. Zerada a cada disparo
+        # (`_fire_fatal`) e em `rearm_fatal_scan`.
+        self._cli_fatal_tail: str = ""
+        # `_on_chunk` loga a primeira excecao do feed do pyte e silencia as
+        # seguintes: um parser quebrado repetiria o traceback a cada chunk.
+        self._feed_error_logged: bool = False
 
         # Early-exit watcher (Camada 3): quando um dispatch programatico
         # acontece, registramos o instante e o volume de bytes recebidos
@@ -254,8 +327,9 @@ class OutputPanel(QWidget):
         self._submit_epoch: int = 0
         # Espelho do radio Main LLM (`queue-div-main-llm`). So pesa no T1:
         # e ele que decide o piso do Enter (Claude/Ink aceita o paste em
-        # ~250ms; kimi-code/qwen-code repintam a TUI inteira e precisam de
-        # 1s, +2s na janela logo depois de um `/clear`).
+        # ~250ms; kimi-code/qwen-code e a MiMo, fork do opencode, repintam a
+        # TUI inteira e precisam de 1s, +2s na janela logo depois de um
+        # `/clear`).
         self._main_llm: str = "claude"
         # Head do dispatch ANTERIOR neste canal, para reconhecer a janela
         # "primeiro comando depois do /clear" — a mesma que
@@ -491,6 +565,12 @@ class OutputPanel(QWidget):
     # stdin quando o event loop do Node esta livre, entao 250ms chega no
     # meio do repaint. Espelha `_KIMI_BLUE_ARROW_DEFAULT_DELAY_MS` do
     # command_queue_widget, que ja resolvia isso no T2.
+    # A MiMo (fork do opencode, nao do gemini-cli) cai neste mesmo piso
+    # quando ocupa o T1: a TUI dela tambem repinta a tela inteira. O
+    # `/clear` que ela recebe e cru, e `"/clear "` com espaco da a mesma
+    # head, entao a janela pos-clear abaixo vale igual. No T2 o piso segue
+    # `_ENTER_SUBMIT_DELAY_MS` qualquer que seja o ocupante (Kimi ou MiMo):
+    # quem segura o Enter ali e o gate de eco.
     _ENTER_SUBMIT_DELAY_SLOW_MS: int = 1_000
     # Extra na janela "primeiro comando depois do /clear": o repaint pos
     # clear e o mais caro de todos. Espelha
@@ -498,7 +578,8 @@ class OutputPanel(QWidget):
     _ENTER_AFTER_CLEAR_EXTRA_MS: int = 2_000
     # Main LLMs que aceitam o piso curto. Codex fica de fora de proposito:
     # o T3 ja usa 1000ms em `MainWindow._xterm_inject_text` pelo mesmo
-    # motivo (Ink engole Enter colado perto demais do paste).
+    # motivo (Ink engole Enter colado perto demais do paste). `mimo` tambem
+    # NAO entra: o piso curto chegaria no meio do repaint da TUI dela.
     _FAST_ENTER_MAIN_LLMS: frozenset[str] = frozenset({"claude"})
 
     def _on_main_llm_changed(self, llm: str) -> None:
@@ -566,7 +647,7 @@ class OutputPanel(QWidget):
         )
         self._schedule_submit_enter(command, min_delay_ms=min_delay_ms)
         # A auditoria de eco tem que cair DEPOIS do Enter, senao um piso
-        # longo (kimi/qwen pos-/clear) faria ela acusar "engolido" so por
+        # longo (kimi/qwen/mimo pos-/clear) faria ela acusar "engolido" so por
         # ter olhado a tela cedo demais. Mesma formula do blue-arrow.
         self._schedule_echo_confirmation(
             seq, command,
@@ -581,11 +662,32 @@ class OutputPanel(QWidget):
         if not self._is_helper_command(command):
             self._dispatch_ts = time.monotonic()
             self._bytes_since_dispatch = 0
-            self._last_failure_reason = None
+            self.rearm_fatal_scan()
         else:
             # Disarma explicitamente: um _dispatch_ts stale de um comando
             # real anterior nao pode false-firar EARLY_EXIT durante o helper.
             self._dispatch_ts = None
+            # Launcher de CLI com padroes escopados (mimod): rearma o latch
+            # sem abrir a janela early-exit, senao o vermelho da sessao
+            # anterior deixaria o relaunch cego.
+            if self._dispatch_head(command) in _CLI_LAUNCH_REARM_HEADS:
+                self.rearm_fatal_scan()
+
+    def rearm_fatal_scan(self) -> None:
+        """Reabre o scan de padroes fatais para uma nova janela de erro.
+
+        Zera o latch (`_last_failure_reason` e `_fired_reasons`, que impedem
+        reemitir um reason enquanto o erro segue na tela) e a cauda do scan
+        escopado por CLI. Chamado em todo dispatch nao-helper, no launcher de
+        CLI com padroes escopados (`_CLI_LAUNCH_REARM_HEADS`), em
+        `_on_pipeline_started` e em `_reset_pyte`. Publico porque a seta azul
+        do T2 (`_run_kimi_blue_arrow`) e outros dispatchers que escrevem no
+        PTY por fora de `_run_shell_command` tambem precisam reabrir: sem
+        isso o latch do T2 nunca reabre apos o primeiro fatal.
+        """
+        self._last_failure_reason = None
+        self._fired_reasons.clear()
+        self._cli_fatal_tail = ""
 
     def arm_dispatch_window(self, command: str) -> None:
         """Arma a janela do early-exit watcher (Camada 3) para um dispatch
@@ -612,10 +714,14 @@ class OutputPanel(QWidget):
             # Disarma: um _dispatch_ts stale de um comando real anterior nao
             # pode false-firar EARLY_EXIT durante o helper.
             self._dispatch_ts = None
+            # Paridade com `_run_shell_command`: launcher de CLI com padroes
+            # escopados rearma o latch sem abrir a janela early-exit.
+            if self._dispatch_head(command) in _CLI_LAUNCH_REARM_HEADS:
+                self.rearm_fatal_scan()
             return
         self._dispatch_ts = time.monotonic()
         self._bytes_since_dispatch = 0
-        self._last_failure_reason = None
+        self.rearm_fatal_scan()
 
     def _send_enter_to_shell(self) -> None:
         """Slot dos sinais `submit_enter_to_*` — Enter avulso, sem gate."""
@@ -669,6 +775,9 @@ class OutputPanel(QWidget):
     # brainstorm), entao esses caem direto no piso — comportamento antigo.
     # Os dois bugs que este gate existe para matar vivem no dispatch de
     # UMA linha (`/clear`, `/skill:...`, `/slash-executor ...`).
+    # A MiMo (fork do opencode) tambem resumiria o paste, mas o `mimod` sobe
+    # o CLI com o resumo de paste desligado (`disable_paste_summary`): ate
+    # este limite o texto ecoa por inteiro e o gate vale igual para ela.
     _SUBMIT_GATE_MAX_COMMAND_CHARS: int = 400
     # Quantas linhas acima do cursor ainda contam como "linha de prompt"
     # (a caixa de input do Ink quebra o paste em varias linhas).
@@ -707,20 +816,41 @@ class OutputPanel(QWidget):
         except Exception:  # noqa: BLE001 — pyte indisponivel/instavel
             return None
 
+    @staticmethod
+    def _deborder_rows(rows: list[str]) -> str:
+        """Linhas concatenadas sem a borda vertical de caixa de input.
+
+        A caixa de input da MiMo desenha `┃` + padding a esquerda de cada
+        linha; quando o paste quebra de linha, o token partido no wrap fica
+        com a borda no meio e nao aparece nem no blob por linhas nem no
+        desdobrado. Linhas sem borda saem so sem o espaco final, entao para
+        TUIs sem caixa (Kimi, Qwen, Claude) isto equivale ao desdobrado.
+        """
+        return "".join(
+            _TUI_BORDER_RIGHT_RE.sub("", _TUI_BORDER_LEFT_RE.sub("", r))
+            for r in rows
+        )
+
     def _screen_needle_count(self, needle: str) -> int | None:
         """Ocorrencias do needle na tela visivel. None = indecidivel.
 
         Alem do blob por linhas, olhamos a versao "desdobrada" (linhas
         concatenadas sem o trailing space): a TUI quebra o paste em
         qualquer coluna e um token partido no wrap nao apareceria no
-        primeiro blob.
+        primeiro blob. E a versao sem borda (`_deborder_rows`), para a
+        caixa de input da MiMo.
         """
         rows = self._screen_rows()
         if rows is None:
             return None
         joined = "\n".join(r.rstrip() for r in rows)
         dewrapped = "".join(r.rstrip() for r in rows)
-        return max(joined.count(needle), dewrapped.count(needle))
+        debordered = self._deborder_rows(rows)
+        return max(
+            joined.count(needle),
+            dewrapped.count(needle),
+            debordered.count(needle),
+        )
 
     def _needle_at_cursor(self, needle: str) -> bool:
         """O texto colado ainda esta na linha do prompt (= nao submeteu)?
@@ -744,7 +874,11 @@ class OutputPanel(QWidget):
             return False
         joined = "\n".join(r.rstrip() for r in window)
         dewrapped = "".join(r.rstrip() for r in window)
-        return needle in joined or needle in dewrapped
+        return (
+            needle in joined
+            or needle in dewrapped
+            or needle in self._deborder_rows(window)
+        )
 
     def _schedule_submit_enter(self, command: str, *, min_delay_ms: int) -> None:
         """Arma o gate de eco do Enter submissor deste dispatch."""
@@ -1002,11 +1136,24 @@ class OutputPanel(QWidget):
         emits subtle PTY bytes indefinitely (cursor, ANSI repaints), so a
         silence-based heuristic never fires AND collides with notify
         hardening. Workspace relies on the explicit 5s post-notify timer.
+        The gate is per channel, not per CLI: MiMo in T2 follows the same
+        notify-only path.
         """
         try:
             self._stream.feed(chunk.encode("utf-8", errors="replace"))
         except Exception:  # noqa: BLE001
-            return
+            # Defesa em profundidade: um escape que o pyte nao conhece pode
+            # levantar no meio do feed (o pyte ja reseta o parser antes de
+            # relancar, e o resto do chunk se perde no screen). O chunk
+            # ainda conta para render, idle, atividade e scan de fatais;
+            # antes, um `return` aqui engolia tudo isso em silencio.
+            if not self._feed_error_logged:
+                self._feed_error_logged = True
+                logger.warning(
+                    "[output_panel:%s] pyte feed falhou; render e scan seguem",
+                    self._channel,
+                    exc_info=True,
+                )
         self._has_pending_render = True
         if not self._render_timer.isActive():
             self._render_timer.start()
@@ -1043,9 +1190,10 @@ class OutputPanel(QWidget):
             and self._bytes_since_dispatch < self._EARLY_EXIT_BYTES_THRESHOLD
             and (time.monotonic() - self._dispatch_ts) < self._EARLY_EXIT_TIME_THRESHOLD_S
         ):
-            self._last_failure_reason = "EARLY_EXIT"
             self._dispatch_ts = None
-            signal_bus.terminal_force_failed.emit(self._channel, "EARLY_EXIT")
+            # Mesmo ponto de disparo do scanner: EARLY_EXIT entra no latch da
+            # janela, e um reason especifico que chegue depois ainda sai uma vez.
+            self._fire_fatal("EARLY_EXIT")
             return
         # Consome o dispatch (o comando rodou de verdade — proximo dispatch
         # reabre a janela). Sem isso, um dispatch antigo + silencio futuro
@@ -1062,9 +1210,13 @@ class OutputPanel(QWidget):
         ai-forge/rules/workflow-app-listeners.md §3 (dot vermelho +
         autocast_abort_requested -> CommandQueueWidget desliga o botao).
 
-        Idempotente por chunk: se o mesmo reason ja foi emitido nesta
-        sessao do PTY, ignora — evita re-disparar enquanto a mensagem
-        ainda esta na tela e o PTY emite ANSI repaints.
+        Idempotente por janela de erro: cada reason sai no maximo uma vez
+        entre dois `rearm_fatal_scan` (`_fired_reasons`), mesmo com a
+        mensagem repintada pelo PTY ou alternando com outro reason. Um chunk
+        emite no maximo um reason NOVO; o generico tem precedencia e, quando
+        dispara, o scan escopado so roda no proximo chunk. Um reason generico
+        ja emitido nao curto-circuita mais o scan: o 401 da MiMo no mesmo
+        chunk ainda sai.
 
         Padroes "soft" (palavras genericas de auth/rate/usage) so contam
         como crash DENTRO da janela early-crash — um crash real emite poucos
@@ -1085,10 +1237,76 @@ class OutputPanel(QWidget):
                 continue
             if not pattern.search(chunk):
                 continue
-            if self._last_failure_reason == reason:
-                return
-            self._last_failure_reason = reason
-            signal_bus.terminal_force_failed.emit(self._channel, reason)
+            if self._fatal_already_fired(reason):
+                continue
+            self._fire_fatal(reason)
+            return
+        # So alcancado sem disparo generico NOVO neste chunk.
+        self._scan_chunk_for_cli_fatal(chunk)
+
+    def _fatal_already_fired(self, reason: str) -> bool:
+        """`reason` ja saiu nesta janela de erro?
+
+        Com `_last_failure_reason` vazio a janela esta aberta, mesmo que
+        `_fired_reasons` ainda guarde nomes: zerar o atributo direto (idioma
+        dos testes de autocast) reabre a janela inteira, como o rearm.
+        """
+        last = self._last_failure_reason
+        return last is not None and (reason == last or reason in self._fired_reasons)
+
+    def _fire_fatal(self, reason: str) -> None:
+        """Emite `reason` e o guarda no latch da janela de erro.
+
+        Ponto unico de disparo do scanner (generico, escopado e early-exit).
+        Zera a cauda do scan escopado: o texto de antes do disparo nao entra
+        nos matches seguintes, qualquer que seja o reason que disparou.
+        """
+        if self._last_failure_reason is None:
+            # Janela aberta: descarta nomes que sobraram de um reset direto
+            # do atributo (o rearm ja deixa o conjunto vazio).
+            self._fired_reasons.clear()
+        self._last_failure_reason = reason
+        self._fired_reasons.add(reason)
+        self._cli_fatal_tail = ""
+        signal_bus.terminal_force_failed.emit(self._channel, reason)
+
+    def _shell_hosts_cli(self, cli: str) -> bool:
+        """O PTY deste painel hospeda `cli` agora? Falha de leitura = False.
+
+        Le `/proc` (walk dos descendentes do shell), entao so e chamado
+        quando um padrao escopado ja casou. Sem shell, ou com `/proc`
+        ilegivel ou `comm` com bytes fora de UTF-8, conta como "nao
+        hospeda": um falso negativo so devolve o caminho antigo (idle e
+        early-exit), um falso positivo pintaria vermelho no CLI errado.
+        """
+        shell = self._shell
+        if shell is None:
+            return False
+        try:
+            return bool(shell.hosts_cli(cli))
+        except (OSError, ValueError):
+            return False
+
+    def _scan_chunk_for_cli_fatal(self, chunk: str) -> None:
+        """Camada 1 escopada por CLI (`_CLI_SCOPED_FATAL_PATTERNS`).
+
+        Casa sobre `_cli_fatal_tail + chunk` sem ANSI, para pegar a frase
+        fatiada por CUP/SGR ou partida entre dois chunks, e guarda so os
+        ultimos `_CLI_FATAL_TAIL_CHARS` chars. Nao depende de `_dispatch_ts`:
+        o 401 da MiMo chega depois de kilobytes de repaint da TUI, bem fora
+        da janela early-crash. O latch por janela (`_fired_reasons`) e o mesmo
+        do scan generico; `rearm_fatal_scan` reabre.
+        """
+        text = _ANSI_ESCAPE_RE.sub("", self._cli_fatal_tail + chunk)
+        self._cli_fatal_tail = text[-_CLI_FATAL_TAIL_CHARS:]
+        for cli, reason, pattern in _CLI_SCOPED_FATAL_PATTERNS:
+            if self._fatal_already_fired(reason):
+                continue
+            if not pattern.search(text):
+                continue
+            if not self._shell_hosts_cli(cli):
+                continue
+            self._fire_fatal(reason)
             return
 
     def _on_pipeline_chunk(self, chunk: str) -> None:
@@ -1158,7 +1376,7 @@ class OutputPanel(QWidget):
     def _on_pipeline_started(self) -> None:
         self._runner_active = True
         self._idle_timer.stop()
-        self._last_failure_reason = None
+        self.rearm_fatal_scan()
         if self._shell is not None:
             try:
                 self._shell.output_received.disconnect(self._on_chunk)
@@ -1196,6 +1414,8 @@ class OutputPanel(QWidget):
         self._history_cursor = 0
         self._has_pending_render = False
         self._render_timer.stop()
+        # Screen novo, janela de erro nova: latch e cauda do scan reabrem.
+        self.rearm_fatal_scan()
 
     # ─────────────────────────────────────────────────────── Public API ─ #
 

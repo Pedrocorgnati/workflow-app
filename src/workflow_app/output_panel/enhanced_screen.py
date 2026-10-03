@@ -59,6 +59,24 @@ class EnhancedScreen(pyte.HistoryScreen):
                 self.cursor = self._saved_cursor
                 self._saved_cursor = None
 
+    def report_device_status(self, mode, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
+        """Override: tolerate the private DSR variant (pyte 0.8.2 bug).
+
+        pyte's parser dispatches ``CSI ? Ps n`` as
+        ``report_device_status(Ps, private=True)``, but the base method only
+        takes ``mode``. The TypeError makes the stream reset its parser and
+        re-raise, so the REST of the chunk never reaches the screen. MiMo
+        (an opencode fork) sends ``CSI ? 996 n`` in its first chunk, ahead of
+        ``CSI ? 2004 h``: bracketed paste never turned on for it.
+
+        The private variant is ignored with no reply. Everything else
+        delegates ``mode`` only (extra params such as ``CSI 6 ; 1 n`` would
+        also raise on the base), so the 5n/6n replies keep working.
+        """
+        if kwargs.get("private"):
+            return
+        super().report_device_status(mode)
+
     def resize(self, lines=None, columns=None) -> None:  # noqa: ANN001
         # pyte#95: super().resize() resets DECOM and margins; preserve them.
         saved_modes = set(self.mode)
