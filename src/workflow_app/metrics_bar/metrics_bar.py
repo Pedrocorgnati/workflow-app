@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -45,8 +46,15 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.app_instance import APP_SESSION_ID
+from workflow_app.config import feature_flags
 from workflow_app.config.feature_flags import instance_group_route_aware_enabled
-from workflow_app.metrics_bar.channel_llm import T2_ROSTER, T3_ROSTER, ChannelLLM
+from workflow_app.metrics_bar.channel_llm import (
+    MAIN_ROSTER,
+    T2_ROSTER,
+    T3_ROSTER,
+    ChannelLLM,
+    t2_fallback_default,
+)
 from workflow_app.metrics_bar.recovery_context import (
     RecoveryContext,
     RecoveryContextBlocked,
@@ -67,19 +75,83 @@ from workflow_app.terminal_helpers import HELPER_COMMANDS, is_helper_command
 # e e restaurada na proxima abertura do app.
 #
 # Os nomes canonicos derivam de HELPER_COMMANDS para garantir que nenhum botao
-# entre na barra sem tambem estar isento do early-exit watcher. `sonnet` e
-# `kimi-k3` sao EXCLUIDOS porque pertencem ao eixo de flags de ativacao do
-# /model, nao ao eixo de instancias de terminal.
+# entre na barra sem tambem estar isento do early-exit watcher. `sonnet`,
+# `kimi-k3` e `mimo-pro` sao EXCLUIDOS porque pertencem ao eixo de flags de
+# ativacao do /model (variantes), nao ao eixo de instancias de terminal.
+# `mimo-pro` espelha `kimi-k3` de forma defensiva: hoje nao esta em
+# HELPER_COMMANDS, entao a exclusao e no-op.
+#
+# `mimod` (launcher do CLI MiMo) entra em `_CANONICAL_INSTANCE_NAMES` no
+# import, mas so vira botao com o switch da MiMo ligado. O filtro e de RUNTIME
+# (`_enabled_instance_names`, que chama `feature_flags.mimo_v1_enabled()`),
+# para os testes monkeypatcharem um ponto so. Com o switch desligado o botao
+# nao existe (nao e so escondido), o clique devolve o toast de indisponivel e
+# a ordem persistida descarta o nome.
+_INSTANCE_EXCLUDED_ALIASES: frozenset[str] = frozenset(
+    {"cd", "/model", "/effort", "/clear", "sonnet", "kimi-k3", "mimo-pro"}
+)
 _CANONICAL_INSTANCE_NAMES = [
-    alias
-    for alias in HELPER_COMMANDS
-    if alias not in {"cd", "/model", "/effort", "/clear", "sonnet", "kimi-k3"}
+    alias for alias in HELPER_COMMANDS if alias not in _INSTANCE_EXCLUDED_ALIASES
 ]
+# Instancias que so existem com o switch da MiMo ligado (contrato D3).
+_MIMO_V1_INSTANCE_NAMES: frozenset[str] = frozenset({"mimod"})
+
+
+def _enabled_instance_names() -> list[str]:
+    """Nomes canonicos habilitados agora, na ordem de HELPER_COMMANDS.
+
+    Le o switch a cada chamada, sem cache proprio: o valor ja e congelado no
+    boot pelo `feature_flags`, e o teste troca o retorno com um monkeypatch.
+    """
+    mimo_on = feature_flags.mimo_v1_enabled()
+    return [
+        name
+        for name in _CANONICAL_INSTANCE_NAMES
+        if mimo_on or name not in _MIMO_V1_INSTANCE_NAMES
+    ]
+
+
 # Rotulo visivel no instance-group. O nome interno (comando / persistencia)
 # permanece o alias canonico; so o texto do botao muda.
 _INSTANCE_BUTTON_LABELS: dict[str, str] = {
     "qwened": "qwen",
+    "mimod": "mimo",
 }
+# Canal do ramo legado (sem snapshot route-aware): launcher de worker T3 vai
+# para o workspace xterm, launcher de worker T2 para o workspace terminal, e o
+# resto (clauded e futuros T1) cai no terminal interativo. Sem `mimod` no
+# conjunto T2, o clique legado abria o CLI MiMo no T1.
+# `mimod` e launcher de WORKER aqui, igual ao `kimid` (decisao O9): o ramo
+# legado nao tem caminho T1 proprio para a MiMo como Main LLM. A Main MiMo no
+# T1 e servida pelo caminho route-aware (o snapshot de rotas decide o pane,
+# sem olhar o nome) ou digitando `mimod` no T1; o toast de Main MiMo sem host
+# (Q3, emitido pela fila) diz isso ao operador.
+_T3_INSTANCE_LAUNCHERS: frozenset[str] = frozenset({"codex", "codex-high", "grokd"})
+_T2_INSTANCE_LAUNCHERS: frozenset[str] = frozenset({"mimod", "kimid", "qwened"})
+# Preflight do launcher MiMo. Vale SO para `mimod`: `kimid` e `clauded` sao
+# aliases do zsh, invisiveis ao processo da GUI, entao um `which` deles daria
+# falso negativo. `~/.local/bin/mimod` e o local canonico do launcher
+# (contrato D5) e cobre a sessao grafica cujo PATH nao inclui `~/.local/bin`.
+_MIMOD_LAUNCHER = "mimod"
+_MIMOD_MISSING_TOAST = (
+    "mimod nao encontrado no PATH (instale com ln -sfn "
+    "<repo>/ai-forge/scripts/mimod.sh ~/.local/bin/mimod)."
+)
+
+
+def _mimod_launcher_available() -> bool:
+    """True quando o processo da GUI enxerga o launcher `mimod`.
+
+    `shutil.which` cobre o PATH herdado; o fallback aceita
+    `~/.local/bin/mimod` como arquivo executavel. Symlink quebrado (o alvo do
+    `ln -sfn` sumiu) conta como ausente nos dois testes.
+    """
+    if shutil.which(_MIMOD_LAUNCHER):
+        return True
+    candidate = Path.home() / ".local" / "bin" / _MIMOD_LAUNCHER
+    return candidate.is_file() and os.access(candidate, os.X_OK)
+
+
 _INSTANCE_ORDER_SETTINGS_KEY = "MetricsBar/instanceOrder"
 _INSTANCE_SCHEMA_VERSION_KEY = "MetricsBar/instanceGroupSchemaVersion"
 _INSTANCE_SCHEMA_VERSION_CURRENT = 2
@@ -690,6 +762,9 @@ class MetricsBar(QWidget):
         # 2026-05-19+: `codex` reintroduzido e roteado para T3.
         # 2026-06-01+: botao `codex` inicia a variante `codex-high`.
         # 2026-06-22+: botoes `clauded2` e `kimid2` removidos (a pedido).
+        # 2026-10-02+: botao `mimod` (rotulo `mimo`, par T2) so e criado com o
+        #   switch da MiMo ligado; `_load_instance_order` ja devolve so os
+        #   nomes habilitados (`_enabled_instance_names`).
         # 2026-05-14: botoes sao reordenaveis via drag&drop (output-toolbar-center-top).
         # Ordem persiste em QSettings/_INSTANCE_ORDER_SETTINGS_KEY e e restaurada aqui.
         self._instance_order_settings = QSettings("SystemForge", "WorkflowApp")
@@ -1268,13 +1343,20 @@ class MetricsBar(QWidget):
         not ``"codex-high"``). Legacy path (flag absent/``"0"``) preserves
         the historical fixed routing byte-for-byte.
 
-        Alias indisponiveis (nao canonicos) disparam toast em vez de sinal,
-        garantindo Zero Silencio sem recorrer a estado disabled dos botoes.
+        Alias indisponiveis (nao canonicos, ou `mimod` com o switch da MiMo
+        desligado) disparam toast em vez de sinal, garantindo Zero Silencio
+        sem recorrer a estado disabled dos botoes. `mimod` passa ainda por um
+        preflight do launcher ANTES de qualquer emit (legado e route-aware):
+        launcher ausente = toast de erro com a instrucao de instalacao, nada
+        e digitado e a selecao nao muda.
         """
-        if name not in _CANONICAL_INSTANCE_NAMES:
+        if name not in _enabled_instance_names():
             self._signal_bus.toast_requested.emit(
                 f"Instancia '{name}' nao disponivel na barra.", "error"
             )
+            return
+        if name == _MIMOD_LAUNCHER and not _mimod_launcher_available():
+            self._signal_bus.toast_requested.emit(_MIMOD_MISSING_TOAST, "error")
             return
 
         self._selected_instance = index
@@ -1285,12 +1367,12 @@ class MetricsBar(QWidget):
             self._signal_bus.run_command_route_aware.emit(
                 name, self._current_route_snapshot
             )
-        elif name in {"codex", "codex-high", "grokd"}:
+        elif name in _T3_INSTANCE_LAUNCHERS:
             # T3 (workspace_xterm): codex emite o comando real "codex-high".
             command = "codex-high" if name == "codex" else name
             self._signal_bus.run_command_in_workspace_xterm.emit(command)
-        elif name in {"kimid", "qwened"}:
-            # T2 (workspace_terminal).
+        elif name in _T2_INSTANCE_LAUNCHERS:
+            # T2 (workspace_terminal): mimod, kimid, qwened.
             self._signal_bus.run_command_in_workspace_terminal.emit(name)
         else:
             # T1 (interactive terminal): clauded, claude, e futuros T1.
@@ -1314,11 +1396,13 @@ class MetricsBar(QWidget):
         - Migracao v2→v2: no-op (idempotente).
         - Fallback: ordem canonica quando JSON invalido ou schema > 2.
 
-        Mantem apenas nomes canonicos preservando a ordem do usuario; nomes
-        canonicos ausentes na persistencia (ex: depois de um upgrade que
-        adicionou um botao novo) sao anexados ao final.
+        Mantem apenas nomes canonicos HABILITADOS preservando a ordem do
+        usuario; nomes habilitados ausentes na persistencia (ex: depois de um
+        upgrade que adicionou um botao novo, ou do switch da MiMo ligado) sao
+        anexados ao final. Com o switch da MiMo desligado, `mimod` persistido
+        e descartado como qualquer nome nao canonico.
         """
-        canonical = list(_CANONICAL_INSTANCE_NAMES)
+        canonical = _enabled_instance_names()
         schema_version = self._instance_order_settings.value(
             _INSTANCE_SCHEMA_VERSION_KEY, None
         )
@@ -1739,6 +1823,10 @@ class MetricsBar(QWidget):
         # loop advances — but with no terminal write (the directive is not
         # sent). See CommandQueueWidget._dispatch_codex_command / _dispatch_kimi_main_command.
         bus.listener_helper_pulse.connect(self._on_listener_helper_pulse)
+        # Hold amarelo SEM auto-idle: o `/clear` do Main Kimi espera 5s
+        # antes de ir ao PTY. Sem o hold o autocast veria verde+verde e
+        # dispararia o proximo item (ou desligaria por arm-timeout).
+        bus.listener_hold.connect(self._on_listener_hold)
 
         # Modo Remoto removido 2026-05-12 — sem connections para
         # remote_server_started/stopped/client_connected/disconnected.
@@ -2892,6 +2980,25 @@ class MetricsBar(QWidget):
         self._maybe_schedule_helper_auto_idle(channel, "/effort")
         self._update_overall_listener()
 
+    def _on_listener_hold(self, channel: str) -> None:
+        """Segura o dot amarelo SEM armar auto-idle e SEM escrever no PTY.
+
+        Usado pelo `/clear` do Main Kimi: o paste no T1 e adiado 5s, mas o
+        autocast precisa ver busy imediatamente (senao o arm-timeout
+        desliga a fila, ou o verde+verde dispara o item seguinte). A
+        fence `_awaiting_notify` sobe para bloquear o heuristico de
+        silencio (caminho B) durante a espera. O emit real de `/clear`
+        baixa a fence (helper) e arma o auto-idle vigente.
+        """
+        dot = self._dot_for(channel)
+        if dot is None:
+            return
+        self._bump_command_epoch(channel)
+        self._release_idle_lock(channel)
+        self._awaiting_notify[channel] = True
+        dot.set_busy(True)
+        self._update_overall_listener()
+
     # Queue helpers — no notify file, just mutate CLI session state or
     # change the bash environment. All these get a deferred hardening
     # arm so the dot eventually goes green after their brief output.
@@ -2917,6 +3024,9 @@ class MetricsBar(QWidget):
     # `/clear` do T1 ficava sem cobertura nenhuma: o ponto abria verde
     # antes de o Enter submissor ter chance, o autocast disparava o item
     # seguinte e ele colava em cima (`/clear /skill:...`).
+    # A MiMo (mimocode, fork do opencode, nao do gemini-cli) herda o mesmo
+    # extra no T2 e no T1 com Main MiMo sem mudanca de codigo: e um default
+    # conservador (hipotese, o repaint pos-clear do TUI dela nao foi medido).
     _CLEAR_WORKSPACE_EXTRA_MS: int = 1_000
 
     def _maybe_schedule_helper_auto_idle(self, channel: str, cmd: str) -> None:
@@ -2956,8 +3066,9 @@ class MetricsBar(QWidget):
         diretiva antes de o gate verde+verde disparar o proximo item
         (anti command-stacking — ver `_HELPER_AUTO_IDLE_INTERACTIVE_MS`).
         `/clear` ganha o extra onde o repaint pos-clear e lento: T2 sempre
-        (o worker e sempre um fork do gemini-cli) e T1 quando o Main LLM
-        nao e Claude.
+        (kimi/qwen sao forks do gemini-cli; a MiMo, fork do opencode, herda o
+        extra como default conservador) e T1 quando o Main LLM nao e Claude
+        (Main MiMo inclusa).
         """
         if channel == "interactive":
             delay_ms = self._HELPER_AUTO_IDLE_INTERACTIVE_MS
@@ -2987,8 +3098,9 @@ class MetricsBar(QWidget):
     def _helper_auto_idle(self, channel: str, scheduled_seq: int) -> None:
         """Arm hardening on behalf of a helper command (no notify file).
 
-        Helpers (/clear /model /effort, also `cd` and `kimid`) don't write
-        notify files because they're not skills — they just mutate CLI
+        Helpers (/clear /model /effort, also `cd` and the CLI launchers such
+        as `kimid`/`mimod`) don't write notify files because they're not
+        skills — they just mutate CLI
         session state. Auto-idle waits 1s/2.5s post-dispatch then arms
         hardening WITH a 5s hardcap. The hardcap guarantees the dot turns
         green even if Kimi's TUI keeps emitting invisible cursor/CPR
@@ -3184,13 +3296,12 @@ class MetricsBar(QWidget):
     # section) + ai-forge/rules/llm-routing-div.md (channel→LLM binding).
     _RECOVERY_DELAY_MS: int = 2_000
 
-    # Roster do radio `queue-div-main-llm`. Tem que acompanhar
-    # `_MAIN_LLM_SLUGS` do main_window: um slug ausente daqui era descartado em
+    # Roster do radio `queue-div-main-llm`. Fonte unica: `channel_llm.MAIN_ROSTER`
+    # (inclui `mimo`). Tem que bater com `_MAIN_LLM_SLUGS` do main_window
+    # (igualdade travada por teste): um slug ausente daqui era descartado em
     # silencio e `self._main_llm` ficava com o Main ANTERIOR, fazendo o prompt
     # de auto-recuperacao se dirigir ao LLM errado.
-    _MAIN_LLM_SLUGS: frozenset[str] = frozenset(
-        {"claude", "codex", "kimi", "qwen", "grok"}
-    )
+    _MAIN_LLM_SLUGS: frozenset[str] = MAIN_ROSTER
 
     def _on_main_llm_changed(self, llm: str) -> None:
         """Cache which CLI occupies T1 (interactive).
@@ -3287,9 +3398,23 @@ class MetricsBar(QWidget):
         except Exception:  # noqa: BLE001 - diagnostico nunca derruba o app
             return ""
 
+    def _t2_default(self) -> str:
+        """Default do par T2 vazio: MiMo com o switch da MiMo ligado, senao Kimi.
+
+        Fonte unica `channel_llm.t2_fallback_default`, a mesma da seta azul e
+        do `route_specs`, para a barra/recovery nunca nomear um worker T2
+        diferente do que o dispatch usaria. Switch desligado = `"kimi"`, o
+        comportamento anterior byte a byte.
+        """
+        return t2_fallback_default(feature_flags.mimo_v1_enabled())
+
     def _llm_for_channel(self, channel: str) -> str:
         return llm_for_channel(
-            channel, self._main_llm, t2_llm=self._t2_llm, t3_llm=self._t3_llm
+            channel,
+            self._main_llm,
+            t2_llm=self._t2_llm,
+            t3_llm=self._t3_llm,
+            t2_default=self._t2_default(),
         )
 
     def _llm_source_for_channel(self, channel: str) -> ChannelLLM:
@@ -3300,7 +3425,11 @@ class MetricsBar(QWidget):
         este e le `.is_fallback` / `.note`.
         """
         return llm_source_for_channel(
-            channel, self._main_llm, t2_llm=self._t2_llm, t3_llm=self._t3_llm
+            channel,
+            self._main_llm,
+            t2_llm=self._t2_llm,
+            t3_llm=self._t3_llm,
+            t2_default=self._t2_default(),
         )
 
     def _schedule_recovery_prompt(self, channel: str, reason: str) -> None:
@@ -3349,6 +3478,7 @@ class MetricsBar(QWidget):
             detected_paths=extract_paths(last_command, tail),
             t2_llm=self._t2_llm,
             t3_llm=self._t3_llm,
+            t2_default=self._t2_default(),
         )
         try:
             return write_recovery_context(ctx, repo_root=repo_root)

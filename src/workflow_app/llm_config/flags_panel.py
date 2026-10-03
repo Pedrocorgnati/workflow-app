@@ -1,7 +1,10 @@
 """FlagsPanel — painel de flags MCP na aba LLM Routing (item 021).
 
 Checkboxes (um por literal canonico), com logica de disable/tooltip
-quando a flag e incompativel com o Main corrente (C-57 e C-43).
+quando a flag e incompativel com o Main corrente (C-57, C-43 e MiMo > Kimi;
+tabela `_AUTOPROXY_FLAGS_BY_MAIN`). Desabilitada e fora do payload sao a
+MESMA regra (`inactive_flags_for_main`): `checked_flags` nunca devolve flag
+cinza, mesmo marcada antes da troca de Main.
 
 Layout: duas colunas rotuladas — thinking (raciocinio mais poderoso) e
 execution (runtime de terminal). A capacidade NAO vive em
@@ -22,14 +25,14 @@ from PySide6.QtWidgets import (
 )
 
 from workflow_app.config.llm_flags import (
+    _AUTOPROXY_FLAGS_BY_MAIN,
     _EXECUTION_FLAG_ORDER,
     _FLAG_CANONICAL_ORDER,
     _FLAG_LITERAL_TO_MAIN,
     _FLAGS_BY_TERMINAL,
+    _MIMO_SUPERSEDES,
     _REDUNDANT_FLAG_MAINS,
     _THINKING_FLAG_ORDER,
-    MIMO_FLAG,
-    MIMO_SUPERSEDES_KIMI,
 )
 
 # Ordem estavel dos checkboxes na UI (canonica).
@@ -46,20 +49,85 @@ _DEFAULT_TOOLTIP = (
     "Nunca afeta /clear, /model, /effort, local-action nem itens worker."
 )
 
-# C-43 / R-40: as skills de provider do lado Kimi (`.kimi/skills/codex`) sao
-# auto-proxies do proprio Kimi. Honrar --codex sob Main Kimi produziria
-# registro falso de segunda opiniao.
-_KIMI_AUTOPROXY_TOOLTIP = (
-    "--codex desabilitado sob Main Kimi: as skills de provider do lado Kimi "
-    "sao auto-proxy, entao a flag viraria auto-consulta silenciosa em vez de "
-    "segunda opiniao explicita. Para pedir Codex de forma explicita, troque "
-    "o Main."
-)
+
+def autoproxy_tooltip(flag: str, main: str) -> str:
+    """Tooltip de uma flag desabilitada por auto-proxy sob o Main ``main``.
+
+    A tabela de quem desabilita o que e `_AUTOPROXY_FLAGS_BY_MAIN`
+    (`config/llm_flags.py`); aqui vive so o texto, um por Main. Publica
+    porque o loop legado de checkboxes do `CommandQueueWidget` mostra o
+    mesmo texto (Zero Silencio: o operador sabe por que a flag apagou).
+
+    - kimi (C-43 / R-40): as skills de provider do lado Kimi
+      (`.kimi/skills/codex`) sao auto-proxies do proprio Kimi; honrar a flag
+      do Codex sob Main Kimi produziria registro falso de segunda opiniao.
+    - mimo (MiMo > Kimi, 2026-10-02): com a MiMo no T1 nenhum caminho
+      escolhe o Kimi.
+    """
+    if main == "kimi":
+        return (
+            f"{flag} desabilitado sob Main Kimi: as skills de provider do lado Kimi "
+            "sao auto-proxy, entao a flag viraria auto-consulta silenciosa em vez de "
+            "segunda opiniao explicita. Para pedir Codex de forma explicita, troque "
+            "o Main."
+        )
+    if main == "mimo":
+        return (
+            f"{flag} desabilitado sob Main MiMo: MiMo > Kimi (2026-10-02). Com a "
+            "MiMo no T1 nenhum caminho escolhe o Kimi, e o parser v2 mandaria a "
+            "flag para a propria MiMo (auto-consulta). Para pedir Kimi de forma "
+            "explicita, troque o Main."
+        )
+    return f"{flag} desabilitado sob Main {main}."
+
 
 _KILL_SWITCH_TOOLTIP = (
     "Paridade de flags desabilitada pelo kill-switch "
     "SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0."
 )
+
+
+def _main_slug(main: str | None) -> str:
+    """Slug normalizado do Main (vazio/None cai no default ``claude``)."""
+    return main.strip().lower() if main else "claude"
+
+
+def _kill_switch_blocks(slug: str) -> bool:
+    """True quando o kill-switch de paridade derruba as flags sob ``slug``.
+
+    Escopo do switch: so Main nao-Claude (source.md:444). Sob Main Claude
+    nao existe delegacao non-Claude a frear.
+    """
+    from workflow_app.config import delegation_flags_nonclaude_enabled
+
+    return slug != "claude" and not delegation_flags_nonclaude_enabled()
+
+
+def inactive_flags_for_main(main: str | None) -> frozenset[str]:
+    """Flags do regime vigente que NAO valem sob o Main ``main``.
+
+    Fonte unica de duas coisas que nao podem divergir: o checkbox cinza no
+    `FlagsPanel` e a ausencia da flag no payload T1 (`checked_flags`). Flag
+    desabilitada que seguisse no sufixo era o defeito: um `--kimi` marcado
+    sob Main Claude continuava no payload depois do Main virar MiMo,
+    reabrindo o caminho para o Kimi que o auto-proxy MiMo > Kimi fecha.
+
+    Uniao, na precedencia do painel:
+      - kill-switch ``SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE=0`` sob Main
+        nao-Claude: todas as flags do regime vigente;
+      - auto-proxy do Main (`_AUTOPROXY_FLAGS_BY_MAIN`);
+      - flags redundantes com o Main (`_REDUNDANT_FLAG_MAINS`).
+
+    Publica porque o caminho legado de checkboxes do `CommandQueueWidget`
+    (sem `FlagsPanel` embutido) precisa do mesmo filtro.
+    """
+    slug = _main_slug(main)
+    if _kill_switch_blocks(slug):
+        return frozenset(_FLAG_ORDER)
+    redundant = frozenset(
+        flag for flag, owner in _REDUNDANT_FLAG_MAINS.items() if owner == slug
+    )
+    return _AUTOPROXY_FLAGS_BY_MAIN.get(slug, frozenset()) | redundant
 
 
 def _terminals_for_flag(flag: str) -> str:
@@ -94,6 +162,9 @@ class FlagsPanel(QWidget):
         self.setStyleSheet("background: transparent; border: none;")
         self._main_llm_resolver = main_llm_resolver
         self._checkboxes: dict[str, QCheckBox] = {}
+        # Flags fora do payload sob o ultimo Main aplicado. Vazio ate o
+        # primeiro `set_main_llm` (Main Claude sem kill-switch: nada cai).
+        self._inactive: frozenset[str] = frozenset()
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -166,8 +237,23 @@ class FlagsPanel(QWidget):
         return self._checkboxes.get(flag)
 
     def checked_flags(self) -> list[str]:
-        """Retorna as flags marcadas na ordem estavel."""
-        return [f for f in _FLAG_ORDER if self._checkboxes[f].isChecked()]
+        """Flags marcadas QUE VALEM sob o Main corrente, na ordem estavel.
+
+        E a fonte do sufixo T1 (`CommandQueueWidget._active_mcp_flags`).
+        Flag desabilitada (auto-proxy, redundante ou kill-switch) fica fora
+        mesmo marcada: sem isso um `--kimi` marcado antes da troca para Main
+        MiMo seguia no payload (MiMo > Kimi). O metodo nunca desmarca: a
+        selecao do operador volta ao payload quando o Main volta a aceitar
+        a flag.
+        """
+        return [
+            f for f in _FLAG_ORDER
+            if f not in self._inactive and self._checkboxes[f].isChecked()
+        ]
+
+    def inactive_flags(self) -> frozenset[str]:
+        """Flags fora do payload sob o ultimo Main aplicado (`set_main_llm`)."""
+        return self._inactive
 
     def refresh(self) -> None:
         """Reaplica enabled/tooltip lendo o Main do resolver injetado."""
@@ -188,35 +274,39 @@ class FlagsPanel(QWidget):
             frear quando o proprio Main ja e Claude.
           - Main claude: todas habilitadas (variantes de raciocinio nao
             redundam o CLI do T1).
-          - Main kimi: --kimi e --kimi-k3 disabled (redundantes) e --codex
-            disabled por auto-proxy (C-43/R-40).
+          - Main kimi: --kimi e --kimi-k3 disabled (redundantes); --codex e
+            --codex-ultra disabled por auto-proxy (C-43/R-40).
+          - Main mimo: --mimo e --mimo-pro disabled (redundantes); --kimi e
+            --kimi-k3 disabled (MiMo > Kimi).
           - Main codex: --codex e --codex-ultra disabled (redundantes).
           - Main qwen: --qwen disabled (redundante).
           - Main grok: --grok e --grok-xhigh disabled (redundantes).
+        O auto-proxy vem da tabela `_AUTOPROXY_FLAGS_BY_MAIN` do regime
+        vigente e tem precedencia sobre a regra de redundancia.
+
+        O conjunto desabilitado vem de `inactive_flags_for_main` e e o MESMO
+        que `checked_flags` tira do payload. Nenhum checkbox e desmarcado:
+        a marcacao sobrevive a troca de Main e volta a valer quando o Main
+        volta a aceitar a flag.
         """
-        from workflow_app.config import delegation_flags_nonclaude_enabled
+        slug = _main_slug(main)
+        inactive = inactive_flags_for_main(slug)
+        self._inactive = inactive
 
-        slug = main.strip().lower() if main else "claude"
-        ks_enabled = delegation_flags_nonclaude_enabled()
-
-        if not ks_enabled and slug != "claude":
+        if _kill_switch_blocks(slug):
             for chk in self._checkboxes.values():
                 chk.setEnabled(False)
                 chk.setToolTip(_KILL_SWITCH_TOOLTIP)
             return
 
+        autoproxy = _AUTOPROXY_FLAGS_BY_MAIN.get(slug, frozenset())
         for flag, chk in self._checkboxes.items():
-            if flag in {"--codex", "--codex-ultra"} and slug == "kimi":
-                chk.setEnabled(False)
-                chk.setToolTip(_KIMI_AUTOPROXY_TOOLTIP)
-                continue
-            redundant_main = _REDUNDANT_FLAG_MAINS.get(flag)
-            if redundant_main is not None and slug == redundant_main:
-                chk.setEnabled(False)
-                chk.setToolTip(self._tooltip_for_flag(flag, slug, disabled=True))
+            disabled = flag in inactive
+            chk.setEnabled(not disabled)
+            if flag in autoproxy:
+                chk.setToolTip(autoproxy_tooltip(flag, slug))
             else:
-                chk.setEnabled(True)
-                chk.setToolTip(self._tooltip_for_flag(flag, slug, disabled=False))
+                chk.setToolTip(self._tooltip_for_flag(flag, slug, disabled=disabled))
 
     def set_flag_states_from_mirror(self, flags: list[str]) -> None:
         """Sincroniza os checkboxes a partir de uma lista de flags ativas.
@@ -245,13 +335,19 @@ class FlagsPanel(QWidget):
         suffix = ""
         if target and terminals:
             suffix = f"\nDelega para {target}. Aceita em: {terminals}."
-        # Precedencia MiMo > Kimi (2026-10-02): com as duas marcadas o
-        # `--kimi` sai do payload; o tooltip avisa (Zero Silencio).
-        if flag == MIMO_FLAG:
-            suffix += "\nVence o --kimi quando os dois estao marcados."
-        elif flag in MIMO_SUPERSEDES_KIMI:
+        # Precedencia MiMo > Kimi (2026-10-02), pareada por coluna: com as
+        # duas do par marcadas a do Kimi sai do payload; o tooltip avisa
+        # (Zero Silencio). Pares do regime vigente em `_MIMO_SUPERSEDES`.
+        superseded = _MIMO_SUPERSEDES.get(flag)
+        if superseded:
             suffix += (
-                "\nSe --mimo tambem estiver marcado, a MiMo vence e o "
-                f"{flag} sai do payload (MiMo > Kimi)."
+                "\nVence o " + " e o ".join(sorted(superseded))
+                + " quando os dois estao marcados."
             )
+        for mimo_flag, losers in _MIMO_SUPERSEDES.items():
+            if flag in losers:
+                suffix += (
+                    f"\nSe {mimo_flag} tambem estiver marcado, a MiMo vence e o "
+                    f"{flag} sai do payload (MiMo > Kimi)."
+                )
         return _DEFAULT_TOOLTIP.format(flag=flag) + suffix

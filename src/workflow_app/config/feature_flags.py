@@ -22,6 +22,9 @@ Contrato:
   conjunto de valores que LIGAM o caminho novo, que e exatamente o oposto de
   fail-closed; `" 1 "`, `"1\n"`, `"TRUE"` e `"01"` sao valores nao reconhecidos
   e caem no legado.
+- Polaridade por switch: manda a coluna Polaridade da tabela KS-01 (secao b).
+  Os switches opt-out tem default ligado, so desligam com `"0"` e tratam valor
+  nao reconhecido como ligado. O bullet acima vale para os opt-in.
 - KS-02 / G3: desligar a flag desliga comportamento; nao reverte escrita ja feita
   em disco.
 
@@ -64,12 +67,14 @@ from typing import Final
 #     | 5 | SF_GROK_SPIKE                            | opt-in     | boot-frozen | roster sem `grok` (radio Main e worker paralelo ocultos)          |
 #     | 6 | SF_MAIN_PROVIDERS_V2                     | opt-in     | boot-frozen | radios Main = `claude`, `codex`, `kimi` (sem qwen/opus/sonnet/k3) |
 #     | 7 | SF_PARALLEL_WORKERS_V2                   | opt-in     | boot-frozen | workers = `kimi` (T2) e `codex` (T3), 2 no total                  |
-#     | 8 | SF_LLM_FLAGS_V2                          | opt-in     | boot-frozen | 3 literais: `--codex`, `--mimo` e `--kimi` (MiMo vence o Kimi)    |
+#     | 8 | SF_LLM_FLAGS_V2                          | opt-in     | boot-frozen | roster legado `--codex`, `--mimo` e `--kimi` (MiMo vence o Kimi)  |
 #     | 9 | SF_MCP_THINK_EXEC_V2                     | opt-in     | boot-frozen | action row legada Main MCP / Parallel / Dual (sem TE-01)          |
 #     |10 | removido: wrappers Kimi por variante     | -          | -           | Thinking Kimi sempre publica `/mcp:kimi-k3`                       |
+#     |11 | SF_MIMO_V1                               | opt-in     | boot-frozen | sem radio Main MiMo, sem worker MiMo, sem botao mimod             |
 #
 #     Contagem MEDIDA nesta tabela (item 006 do loop
-#     08-17-systemforge-multillm-gaps-refactor, gap C7): 9 switches VIVOS. A linha
+#     08-17-systemforge-multillm-gaps-refactor, gap C7, mais a linha 11 do
+#     plano 10-02 mimo-llm-paralela): 10 switches VIVOS. A linha
 #     do switch proprio do Router V2 (item
 #     010) foi RETIRADA — nao marcada como legada — junto com a remocao daquele
 #     regime em `command_queue/provider_router.py`. O switch dedicado aos
@@ -83,16 +88,20 @@ from typing import Final
 # (c) `SF_FLAG_PARITY_V2` — NAO EXISTE E NAO DEVE SER CRIADO
 #
 #     O comportamento de paridade de flags ja tem freio funcional proprio:
-#     `SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE` (`:98-133` na numeracao anterior
-#     a esta secao; ver o bloco daquele switch abaixo), default LIGADO e
+#     `SYSTEMFORGE_DELEGATION_FLAGS_NONCLAUDE` (ver
+#     `_resolve_delegation_flags_nonclaude` abaixo), default LIGADO e
 #     fail-open deliberado. Dois freios para o mesmo comportamento e defeito
 #     pior que o gap que eles tentariam fechar (`source.md:1256`). Qualquer
 #     proposta futura de `SF_FLAG_PARITY_V2` deve ser recusada apontando para
 #     este paragrafo e para o switch que ja cobre o caso.
 #
+#     A linha 11 (`SF_MIMO_V1`) nao e freio de paridade: e o gate das
+#     superficies TUI do CLI MiMo (radio Main, worker T2, botao `mimod`). Nao
+#     toca literal de flag nenhum e nao conflita com este paragrafo.
+#
 # (d) FAMILIAS DE LEITURA - D-005-1 RESOLVIDA POR REMOCAO
 #
-#     A familia `boot-frozen` e ativa e contem todos os 9 switches vivos da
+#     A familia `boot-frozen` e ativa e contem todos os 10 switches vivos da
 #     tabela. A familia `hot-read` permanece reconhecida para classificacao
 #     futura, mas sua lista ativa e vazia. Seu unico candidato historico,
 #     `SF_MODEL_EFFORT_EQUIV`, foi removido pelo item 002 por D-C27-2. Nenhum
@@ -105,8 +114,8 @@ from typing import Final
 #
 #     D-005-3 (`grok` entra em `SF_MAIN_PROVIDERS_V2`?) — SEM RESPOSTA. Acao
 #     nula tomada: o radio `grok` continua exclusivamente sob `SF_GROK_SPIKE`
-#     (linha 6 da tabela) e NAO foi adicionado ao roster de
-#     `SF_MAIN_PROVIDERS_V2` (linha 7). Amarrar o mesmo radio a dois switches e
+#     (linha 5 da tabela) e NAO foi adicionado ao roster de
+#     `SF_MAIN_PROVIDERS_V2` (linha 6). Amarrar o mesmo radio a dois switches e
 #     o defeito C7 (`command_queue/provider_router.py:228`); enquanto a decisao
 #     nao vier, um switch por radio e a unica configuracao que nao inventa
 #     semantica para a rodada "todos ligados" do KS-01.
@@ -122,13 +131,16 @@ from typing import Final
 #     nao legado. Filtrar a iteracao pelo switch mudaria o
 #     comportamento observavel de testes que marcam radios direto, e essa
 #     troca e decisao, nao inferencia.
+#     Excecao decidida (plano 10-02, contrato D3): a guarda de visibilidade
+#     vale SOMENTE para o slug `mimo` (linha 11). Com `SF_MIMO_V1` fora de
+#     "1" o radio MiMo fica oculto, desmarcado e inerte, e a precedencia
+#     nunca devolve `mimo`; qwen/grok/variantes seguem sem guarda.
 #
-#     D-005-5 (`tests/test_llm_config_tab.py:511-522`) — SEM RESPOSTA, DIVIDA
-#     REGISTRADA. `TestFlagsPanelSupportedFlags::test_supported_flags_count_is_seven`
-#     e `::test_supported_flags_literals` fixam 7 literais e passam a falhar sob
-#     o regime ausente de `SF_LLM_FLAGS_V2`. O arquivo esta declaradamente fora
-#     da suite executada (cerca de 16 min, `source.md:1339`), entao consertar os
-#     asserts aqui produziria correcao nao demonstravel. Nao foram tocados.
+#     D-005-5 — RESOLVIDA.
+#     `TestFlagsPanelSupportedFlags::test_supported_flags_match_kill_switch_regime`
+#     (`tests/test_llm_config_tab.py`) parametriza o conjunto fechado por
+#     regime de `SF_LLM_FLAGS_V2`; os dois testes de contagem fixa que esta
+#     divida citava nao existem mais.
 #
 # ══════════════════════════════════════════════════════════════════════ #
 
@@ -399,7 +411,9 @@ def main_providers_v2_enabled() -> bool:
 # (`use-kimi` no T2, `use-codex` no T3). Somente "1" expoe os 4 workers
 # em dois pares exclusivos (T2: kimi|qwen, T3: codex|grok). A
 # exclusividade PW-01 continua enforced nos handlers `_on_use_*_toggled`;
-# este switch decide QUEM aparece, nunca quantos ficam marcados.
+# este switch decide QUEM aparece, nunca quantos ficam marcados. O worker
+# `mimo` (T2) NAO entra por aqui: fica so sob `SF_MIMO_V1` (linha 11 do
+# KS-01), um switch por superficie (C7).
 _PARALLEL_WORKERS_V2_FLAG: Final[str] = "SF_PARALLEL_WORKERS_V2"
 
 
@@ -435,28 +449,36 @@ def parallel_workers_v2_enabled() -> bool:
 
 
 # ── Kill-switch: conjunto fechado de literais de flag (C26 / item 005) ── #
-# Item 005 do mesmo loop. Ausente = 2 literais legados (`--kimi`,
-# `--codex`, tabela C26 em source.md:1251) mais `--mimo` (a MiMo substitui
-# o Kimi, 2026-10-02). Somente "1" liga os 11 literais canonicos de
-# `_FULL_FLAG_CANONICAL_ORDER`. Consumido por `workflow_app.config.llm_flags`, que e
+# Item 005 do mesmo loop. Ausente = roster legado `_LEGACY_FLAG_ORDER`
+# (`--kimi` e `--codex`, tabela C26 em source.md:1251, mais `--mimo`, que
+# substitui o Kimi desde 2026-10-02). Somente "1" liga os literais canonicos
+# de `_FULL_FLAG_CANONICAL_ORDER`. Consumido por `workflow_app.config.llm_flags`, que e
 # um modulo puro (sem Qt) — o import de `feature_flags` a partir dele e
 # legitimo porque `config/__init__.py` e Qt-free por PEP 562.
 #
 # Familia: BOOT-FROZEN. Linha de consulta real: a expressao ternaria que
-# define `_SUPPORTED_MCP_FLAGS` em `config/llm_flags.py`, avaliada UMA vez no
-# import daquele modulo. As 5 estruturas restantes de `llm_flags` sao
-# derivadas dessa e congelam junto.
+# define `_REGIME_ORDER` em `config/llm_flags.py`, avaliada UMA vez no
+# import daquele modulo. `_SUPPORTED_MCP_FLAGS` e as estruturas restantes
+# de `llm_flags` sao derivadas dessa e congelam junto.
+#
+# `SF_MIMO_V1` (linha 11) NAO toca este conjunto (contrato D3): `--mimo` e
+# `--mimo-pro` usam o servidor MCP (API direta), nao o CLI, e nenhum dos
+# dois depende do valor da linha 11. Quem decide se cada um existe e ESTE
+# switch: `--mimo` entra nos dois regimes (`_LEGACY_FLAG_ORDER` e
+# `_FULL_FLAG_CANONICAL_ORDER`); `--mimo-pro` so no regime "1" (coluna
+# thinking, como o `--kimi-k3`, que tambem nao existe no legado).
 #
 # Pontos de congelamento por import (quem materializa o conjunto vigente em
 # estado de modulo, tornando-o imune a mutacao posterior de `os.environ`):
-#   - `llm_config/flags_panel.py:24-28` — importa `_FLAG_CANONICAL_ORDER`,
-#     `_FLAG_LITERAL_TO_MAIN`, `_FLAGS_BY_TERMINAL`, `_REDUNDANT_FLAG_MAINS` e
-#     congela a ordem da UI em `_FLAG_ORDER` (`:32`).
-#   - `command_queue/command_item_widget.py:143` — importa
-#     `_SUPPORTED_MCP_FLAGS`, usado por `render_with_mcp_flags`.
-# Os demais consumidores (`command_queue_widget.py:3592`, `:9585`, `:9661`)
-# importam DENTRO de funcao, entao leem o estado ja congelado; nao sao pontos
-# de congelamento proprios.
+#   - `llm_config/flags_panel.py` — o import de `config.llm_flags` no topo do
+#     modulo congela os mapas derivados e a ordem da UI em `_FLAG_ORDER`.
+#   - `command_queue/command_item_widget.py` — o import de modulo de
+#     `config.llm_flags` antes de `render_with_mcp_flags` congela
+#     `_SUPPORTED_MCP_FLAGS` e o supersede MiMo usados no render.
+# `command_queue_widget.py` importa DENTRO de funcao (bloco FlagsPanel de
+# `queue-div-flag`, `_active_mcp_flags_from_local`,
+# `_refresh_flag_checkboxes_state`, `_intra_command_flag_literals`), entao le
+# o estado ja congelado; nao e ponto de congelamento proprio.
 #
 # NAO usar as ancoras `command_queue/terminal_helpers.py:29-35` nem
 # `main_window.py:6664` (A005-3, A005-4): estao erradas e citar qualquer uma
@@ -498,7 +520,7 @@ def llm_flags_v2_enabled() -> bool:
 # ── Kill-switch: par Thinking/Execution do dispatch MCP (C26 / item 005) ── #
 # Item 005 do mesmo loop. Ausente = caminho unico legado
 # (action row Main MCP / Parallel / Dual). Somente "1" liga a matriz
-# `_TE_COMMANDS` com 5 pastilhas Thinking e 5 Execution (TE-01).
+# `_TE_COMMANDS` (pastilhas Thinking e Execution, TE-01).
 # Antes do item 005 esse bloco estava gateado pelo global
 # `SF_LLM_CONFIG_V2`; o gate foi MOVIDO para ca, nao duplicado.
 _MCP_THINK_EXEC_V2_FLAG: Final[str] = "SF_MCP_THINK_EXEC_V2"
@@ -535,6 +557,59 @@ def mcp_think_exec_v2_enabled() -> bool:
     return _MCP_THINK_EXEC_V2_ENABLED
 
 
+# ── Kill-switch: superficies TUI do CLI MiMo (plano 10-02 mimo-llm-paralela) ── #
+# Linha 11 do KS-01. Mesmo padrao opt-in, boot-frozen e fail-closed do item
+# 002: ausente, "0" ou valor nao reconhecido = sem MiMo no eixo Main, no
+# worker T2 e na barra de instancias. Somente "1" revela o radio
+# `queue-radio-main-mimo`, o worker `queue-chk-use-mimo` e o botao de
+# instancia `mimod`, mais o que so existe por causa deles (Main MiMo,
+# ocupante T2 `mimo`, launcher/host do CLI). Desligado, essas superficies
+# nao aparecem e nao tem efeito: nada marcado, nada persistido, nada emitido.
+# Switch proprio (C7): nenhum desses controles responde a outro switch.
+#
+# NAO gateia (contrato D3): os literais `--mimo` e `--mimo-pro`
+# (`config/llm_flags.py`; o roster e decidido pela linha 8,
+# `SF_LLM_FLAGS_V2`: `--mimo` nos dois regimes, `--mimo-pro` so no regime
+# "1"), os checkboxes de flag, as pastilhas TE `/mcp:mimo` e
+# `/mcp:mimo-pro`, o menu MCP e a persona. Esses usam o servidor MCP (API
+# direta), nao o CLI.
+# Ativacao operacional: `SF_MIMO_V1=1` na linha Exec do `.desktop`.
+_MIMO_V1_FLAG: Final[str] = "SF_MIMO_V1"
+
+
+def _resolve_mimo_v1_state(env: Mapping[str, str]) -> str:
+    """Classifica o estado do kill-switch das superficies do CLI MiMo (funcao pura)."""
+    if _MIMO_V1_FLAG not in env:
+        return STATE_ABSENT
+    # Comparacao literal, como nos irmaos opt-in: normalizar aqui alargaria
+    # o conjunto de valores que LIGAM a MiMo do CLI.
+    raw = env[_MIMO_V1_FLAG]
+    if raw == "1":
+        return STATE_ON
+    if raw == "0":
+        return STATE_OFF
+    return STATE_UNRECOGNIZED
+
+
+_MIMO_V1_STATE: Final[str] = _resolve_mimo_v1_state(os.environ)
+_MIMO_V1_ENABLED: Final[bool] = _MIMO_V1_STATE == STATE_ON
+
+
+def mimo_v1_flag_name() -> str:
+    """Nome da env var do kill-switch das superficies do CLI MiMo."""
+    return _MIMO_V1_FLAG
+
+
+def mimo_v1_state() -> str:
+    """Estado congelado no boot: `absent`, `off`, `on` ou `unrecognized`."""
+    return _MIMO_V1_STATE
+
+
+def mimo_v1_enabled() -> bool:
+    """`True` somente quando a env var foi lida como `"1"` no boot."""
+    return _MIMO_V1_ENABLED
+
+
 __all__ = [
     "STATE_ABSENT",
     "STATE_OFF",
@@ -563,6 +638,9 @@ __all__ = [
     "mcp_think_exec_v2_enabled",
     "mcp_think_exec_v2_flag_name",
     "mcp_think_exec_v2_state",
+    "mimo_v1_enabled",
+    "mimo_v1_flag_name",
+    "mimo_v1_state",
     "parallel_workers_v2_enabled",
     "parallel_workers_v2_flag_name",
     "parallel_workers_v2_state",

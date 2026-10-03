@@ -1,14 +1,15 @@
 """ScheduleAutocastDialog - modal para agendar disparo programatico do botao autocast.
 
-Layout e UX baseados no modal de temporizador do task-manager-desktop
-(subtask_pane.py::_open_timer_dialog), com selecao entre 'Data/hora final' e
-'Duracao', mas sem campos irrelevantes para workflow-app (Nome, Cor, Rotina,
-Horario fixo semanal).
+Layout e UX copiados do modal de temporizador do task-manager-desktop
+(subtask_pane.py::_open_timer_dialog): radios Data/hora final vs Duracao,
+atalhos de duracao e picker de calendario. Sem dependencia de runtime do
+task-manager (Nome, Cor, Rotina e Horario fixo semanal ficam de fora).
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QDateTime, Qt, QTime
+from PySide6.QtCore import QByteArray, QDateTime, QSize, Qt
+from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCalendarWidget,
@@ -18,11 +19,42 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QRadioButton,
     QTimeEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+# Copia local do CLOCK_SVG de task_manager_desktop.ui.icons (nao importar).
+_CLOCK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">'
+    '<circle cx="12" cy="12" r="8.4" fill="#F8FAFC" fill-opacity="0.14" '
+    'stroke="#F8FAFC" stroke-width="1.9"/>'
+    '<path d="M12 7.2v5.1l3.5 2.1" stroke="#F8FAFC" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M7.2 3.9 4.8 6.2M16.8 3.9l2.4 2.3" '
+    'stroke="#F8FAFC" stroke-width="1.8" stroke-linecap="round"/>'
+    "</svg>"
+)
+
+
+def _svg_to_icon(svg: str, size: int = 20) -> QIcon:
+    """Renderiza SVG inline em QIcon. Copia local de svg_to_icon do task-manager."""
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+    except ImportError:
+        return QIcon()
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(QSize(size, size))
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        renderer.render(painter)
+    finally:
+        painter.end()
+    return QIcon(pixmap)
 
 
 class ScheduleAutocastDialog(QDialog):
@@ -54,7 +86,6 @@ class ScheduleAutocastDialog(QDialog):
     # ---------- UI ---------- #
 
     def _build_ui(self) -> None:
-        # Styling CSS inspirado no task-manager-desktop
         self.setStyleSheet(
             "QDialog { background: #111116; }"
             "QLabel#dlgHead { font-size: 15px; font-weight: 700; color: #F8FAFC; }"
@@ -108,7 +139,6 @@ class ScheduleAutocastDialog(QDialog):
         root.addWidget(head)
         root.addSpacing(16)
 
-        # Bloco de agendamento: escolha entre data/hora final ou duracao
         schedule_box = QFrame(self)
         schedule_box.setObjectName("scheduleBox")
         schedule_box.setProperty("testid", "schedule-autocast-schedule-box")
@@ -116,7 +146,6 @@ class ScheduleAutocastDialog(QDialog):
         sched.setContentsMargins(14, 12, 14, 14)
         sched.setSpacing(0)
 
-        # Radios para escolher modo
         mode_group = QButtonGroup(self)
         mode_group.setExclusive(True)
         self._mode_datetime = QRadioButton("Data/hora final", schedule_box)
@@ -129,22 +158,26 @@ class ScheduleAutocastDialog(QDialog):
         self._mode_duration.setProperty("testid", "schedule-autocast-mode-duration")
         self._mode_duration.setAccessibleName("Agendar em X tempo a partir de agora")
         self._mode_duration.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mode_duration.setChecked(True)  # Default: duracao
+        self._mode_duration.setChecked(True)
         mode_group.addButton(self._mode_datetime)
         mode_group.addButton(self._mode_duration)
         sched.addWidget(self._mode_duration)
         sched.addWidget(self._mode_datetime)
         sched.addSpacing(12)
 
-        # Campo: data/hora final (visivel quando modo = datetime)
-        self._datetime_row = QHBoxLayout()
-        self._datetime_row.setSpacing(8)
-        lbl_dt = QLabel("DATA/HORA FINAL", self)
-        lbl_dt.setObjectName("dlgSec")
-        self._datetime_row.addWidget(lbl_dt)
-        sched.addLayout(self._datetime_row)
+        self._datetime_container = QWidget()
+        self._datetime_container.setProperty(
+            "testid", "schedule-autocast-datetime-container"
+        )
+        dt_container_layout = QVBoxLayout(self._datetime_container)
+        dt_container_layout.setContentsMargins(0, 0, 0, 0)
+        dt_container_layout.setSpacing(4)
 
-        self._end_dt = QDateTimeEdit(self)
+        lbl_dt = QLabel("DATA/HORA FINAL", self._datetime_container)
+        lbl_dt.setObjectName("dlgSec")
+        dt_container_layout.addWidget(lbl_dt)
+
+        self._end_dt = QDateTimeEdit(self._datetime_container)
         self._end_dt.setCalendarPopup(True)
         self._end_dt.setDisplayFormat("dd/MM/yyyy  HH:mm")
         self._end_dt.setDateTime(QDateTime.currentDateTime().addSecs(3600))
@@ -153,59 +186,54 @@ class ScheduleAutocastDialog(QDialog):
         dt_row.setSpacing(8)
         dt_row.addWidget(self._end_dt, 1)
 
-        # Botao picker de data (icone de calendario)
-        from task_manager_desktop.utils.icons import CLOCK_SVG, svg_to_icon
-        from PySide6.QtGui import QIcon, QSize
+        self._picker_btn = QToolButton(self._datetime_container)
+        self._picker_btn.setObjectName("datePickerBtn")
+        self._picker_btn.setProperty("testid", "schedule-autocast-datetime-picker")
+        self._picker_btn.setAccessibleName("Escolher data e hora finais")
+        self._picker_btn.setToolTip("Escolher data e hora")
+        self._picker_btn.setIcon(_svg_to_icon(_CLOCK_SVG, 19))
+        self._picker_btn.setIconSize(QSize(19, 19))
+        self._picker_btn.setFixedSize(40, 40)
+        self._picker_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        dt_row.addWidget(self._picker_btn)
+        dt_container_layout.addLayout(dt_row)
+        sched.addWidget(self._datetime_container)
 
-        picker_btn = QToolButton(self)
-        picker_btn.setObjectName("datePickerBtn")
-        picker_btn.setProperty("testid", "schedule-autocast-datetime-picker")
-        picker_btn.setAccessibleName("Escolher data e hora finais")
-        picker_btn.setToolTip("Escolher data e hora")
-        picker_btn.setIcon(svg_to_icon(CLOCK_SVG, 19))
-        picker_btn.setIconSize(QSize(19, 19))
-        picker_btn.setFixedSize(40, 40)
-        picker_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Conectar clique do botao ao calendario do QDateTimeEdit
-        picker_btn.clicked.connect(self._end_dt.setCalendarPopup)
-        dt_row.addWidget(picker_btn)
-        sched.addLayout(dt_row)
-
-        # Campo: duracao (visivel quando modo = duration)
         self._duration_container = QWidget()
         self._duration_container.setProperty("testid", "schedule-autocast-duration-container")
         dur_container_layout = QVBoxLayout(self._duration_container)
         dur_container_layout.setContentsMargins(0, 0, 0, 0)
         dur_container_layout.setSpacing(4)
 
-        lbl_duration = QLabel("DURAÇÃO", self)
+        lbl_duration = QLabel("DURAÇÃO", self._duration_container)
         lbl_duration.setObjectName("dlgSec")
         dur_container_layout.addWidget(lbl_duration)
 
         duration_row = QHBoxLayout()
         duration_row.setSpacing(8)
-        self._duration_input = QLineEdit(self)
+        self._duration_input = QLineEdit(self._duration_container)
         self._duration_input.setProperty("testid", "schedule-autocast-duration-input")
         self._duration_input.setAccessibleName("Duração em formato HH:MM:SS")
         self._duration_input.setPlaceholderText("05:00:00")
-        self._duration_input.setMaxLength(8)
+        # 7d -> "168:00:00" (9 chars); o teto antigo de 8 cortava o atalho.
+        self._duration_input.setMaxLength(9)
         self._duration_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._duration_input.setText("05:00:00")
         duration_row.addWidget(self._duration_input, 1)
 
-        # Botões de atalho para duracao
         for label, h, m in self._SHORTCUTS_DURATION:
-            shortcut = QPushButton(label, self)
+            shortcut = QPushButton(label, self._duration_container)
             shortcut.setObjectName("shortBtn")
             shortcut.setProperty("testid", f"schedule-autocast-shortcut-{label}")
             shortcut.setCursor(Qt.CursorShape.PointingHandCursor)
-            shortcut.clicked.connect(lambda _checked=False, hh=h, mm=m: self._apply_duration_shortcut(hh, mm))
+            shortcut.clicked.connect(
+                lambda _checked=False, hh=h, mm=m: self._apply_duration_shortcut(hh, mm)
+            )
             duration_row.addWidget(shortcut)
 
         dur_container_layout.addLayout(duration_row)
         sched.addWidget(self._duration_container)
 
-        # Hint de explicacao
         hint = QLabel(
             "Autocast disparará automaticamente após o tempo definido. "
             "Data/hora final permite agendar para momento específico; "
@@ -220,14 +248,12 @@ class ScheduleAutocastDialog(QDialog):
         root.addWidget(schedule_box)
         root.addSpacing(14)
 
-        # Label de erro
         self._err_label = QLabel("", self)
         self._err_label.setObjectName("errLabel")
         self._err_label.setVisible(False)
         root.addWidget(self._err_label)
         root.addSpacing(18)
 
-        # Botões OK/Cancelar
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         btn_row.addStretch(1)
@@ -244,7 +270,6 @@ class ScheduleAutocastDialog(QDialog):
         btn_row.addWidget(self._ok_btn)
         root.addLayout(btn_row)
 
-        # Atualizar visibilidade dos campos baseado no modo
         self._on_mode_changed()
         self._mode_datetime.toggled.connect(self._on_mode_changed)
         self._mode_duration.toggled.connect(self._on_mode_changed)
@@ -256,16 +281,60 @@ class ScheduleAutocastDialog(QDialog):
         self._cancel_btn.clicked.connect(self.reject)
         self._end_dt.dateTimeChanged.connect(self._refresh_ok_state)
         self._duration_input.textChanged.connect(self._refresh_ok_state)
+        self._picker_btn.clicked.connect(self._open_datetime_picker)
+
+    def _open_datetime_picker(self) -> None:
+        """Calendario + hora, copiado de subtask_pane._open_timer_dialog._open_picker."""
+        picker = QDialog(self)
+        picker.setWindowTitle("Escolher data e hora")
+        picker.setProperty("testid", "schedule-autocast-datetime-picker-dialog")
+        picker.setModal(True)
+        picker.setMinimumWidth(330)
+        picker.setStyleSheet(self.styleSheet())
+        picker_layout = QVBoxLayout(picker)
+        picker_layout.setContentsMargins(18, 18, 18, 18)
+        picker_layout.setSpacing(12)
+
+        calendar = QCalendarWidget(picker)
+        calendar.setProperty("testid", "schedule-autocast-calendar")
+        calendar.setSelectedDate(self._end_dt.dateTime().date())
+        picker_layout.addWidget(calendar)
+
+        time_edit = QTimeEdit(picker)
+        time_edit.setProperty("testid", "schedule-autocast-time-edit")
+        time_edit.setDisplayFormat("HH:mm:ss")
+        time_edit.setTime(self._end_dt.dateTime().time())
+        time_edit.setStyleSheet(
+            "QTimeEdit { background: #1C1D24; border: 1px solid #3B3D46;"
+            "border-radius: 8px; padding: 8px 10px; color: #F8FAFC;"
+            "font-size: 14px; }"
+        )
+        picker_layout.addWidget(time_edit)
+
+        picker_buttons = QHBoxLayout()
+        picker_buttons.addStretch(1)
+        picker_cancel = QPushButton("Cancelar", picker)
+        picker_cancel.setObjectName("cancelBtn")
+        picker_cancel.setProperty("testid", "schedule-autocast-picker-cancel")
+        picker_ok = QPushButton("OK", picker)
+        picker_ok.setObjectName("okBtn")
+        picker_ok.setProperty("testid", "schedule-autocast-picker-ok")
+        picker_buttons.addWidget(picker_cancel)
+        picker_buttons.addWidget(picker_ok)
+        picker_layout.addLayout(picker_buttons)
+        picker_cancel.clicked.connect(picker.reject)
+        picker_ok.clicked.connect(picker.accept)
+
+        if picker.exec() == QDialog.DialogCode.Accepted:
+            self._end_dt.setDateTime(
+                QDateTime(calendar.selectedDate(), time_edit.time())
+            )
+            self._refresh_ok_state()
 
     def _on_mode_changed(self) -> None:
         """Atualiza visibilidade dos campos baseado no modo selecionado."""
         is_datetime = self._mode_datetime.isChecked()
-        self._end_dt.setVisible(is_datetime)
-        # Esconder toda a linha do label e datetime
-        for i in range(self._datetime_row.count()):
-            self._datetime_row.itemAt(i).widget().setVisible(is_datetime)
-
-        # Esconder container de duracao quando em modo datetime
+        self._datetime_container.setVisible(is_datetime)
         self._duration_container.setVisible(not is_datetime)
         self._refresh_ok_state()
 
@@ -300,11 +369,9 @@ class ScheduleAutocastDialog(QDialog):
         is_valid = False
 
         if is_datetime:
-            # Data/hora final: deve ser no futuro
             now = QDateTime.currentDateTime()
             is_valid = self._end_dt.dateTime() > now
         else:
-            # Duracao: deve ser > 0
             duration = self._parse_duration_text(self._duration_input.text())
             is_valid = duration is not None and duration > 0
 
@@ -316,7 +383,6 @@ class ScheduleAutocastDialog(QDialog):
         is_datetime = self._mode_datetime.isChecked()
 
         if is_datetime:
-            # Validar que data/hora final é no futuro
             now = QDateTime.currentDateTime()
             end_dt = self._end_dt.dateTime()
             if end_dt <= now:
@@ -324,14 +390,14 @@ class ScheduleAutocastDialog(QDialog):
                 self._err_label.setVisible(True)
                 return
             self.accept()
-        else:
-            # Validar duracao
-            duration = self._parse_duration_text(self._duration_input.text())
-            if duration is None or duration <= 0:
-                self._err_label.setText("Duração inválida (formato: HH:MM:SS, deve ser > 0)")
-                self._err_label.setVisible(True)
-                return
-            self.accept()
+            return
+
+        duration = self._parse_duration_text(self._duration_input.text())
+        if duration is None or duration <= 0:
+            self._err_label.setText("Duração inválida (formato: HH:MM:SS, deve ser > 0)")
+            self._err_label.setVisible(True)
+            return
+        self.accept()
 
     # ---------- API publica ---------- #
 

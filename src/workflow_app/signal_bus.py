@@ -196,11 +196,12 @@ class SignalBus(QObject):
     # Emitted whenever the Main LLM radio (queue-div-main-llm) changes.
     # Lets MetricsBar know which CLI occupies T1 (interactive) so the
     # red-listener auto-recovery prompt is phrased for the right agent.
-    # Values: "claude" | "codex" | "kimi" | "qwen" | "grok".
+    # Values: "claude" | "codex" | "mimo" | "kimi" | "qwen" | "grok"
+    # ("mimo" so aparece com o radio Main MiMo habilitado pelo switch da MiMo).
     # T2/T3 NAO sao fixos por canal (revogado 2026-08-19, gap C24): a ocupacao
     # real dos pares trafega no sinal `worker_occupancy_changed` logo abaixo.
     # See ai-forge/rules/llm-routing-div.md.
-    main_llm_changed = Signal(str)           # "claude" | "codex" | "kimi" | "qwen" | "grok"
+    main_llm_changed = Signal(str)  # "claude" | "codex" | "mimo" | "kimi" | "qwen" | "grok"
 
     # --- Worker occupancy routing (CommandQueueWidget → MetricsBar) ---
     # Emitido sempre que a ocupacao real dos pares de worker muda (toggle de
@@ -210,7 +211,7 @@ class SignalBus(QObject):
     # combinacoes possiveis sob SF_PARALLEL_WORKERS_V2=1.
     #
     # Contrato:
-    #   - t2_llm em {"kimi", "qwen", ""}; t3_llm em {"codex", "grok", ""}.
+    #   - t2_llm em {"mimo", "kimi", "qwen", ""}; t3_llm em {"codex", "grok", ""}.
     #   - "" significa PAR SEM WORKER MARCADO (estado legitimo), nunca
     #     "desconhecido".
     #   - "Desconhecido" NAO trafega no sinal: e a AUSENCIA de emissao, e o
@@ -260,6 +261,11 @@ class SignalBus(QObject):
     # terminal write, so the autocast loop advances exactly as it does for
     # Claude. channel values: "interactive" | "workspace" | "workspace_xterm".
     listener_helper_pulse = Signal(str)  # channel
+    # Hold amarelo sem auto-idle e sem escrita no PTY. Usado quando o
+    # `/clear` do Main Kimi e adiado 5s antes de ir ao terminal: o
+    # autocast precisa ver busy imediatamente, e o heuristico de silencio
+    # nao pode pintar verde durante a espera. channel: mesmos valores.
+    listener_hold = Signal(str)  # channel
 
     # Emitted by MetricsBar._enter_authoritative_idle() — the SINGLE chokepoint
     # every green/idle path funnels through (notify-armed soft timer, hardcap,

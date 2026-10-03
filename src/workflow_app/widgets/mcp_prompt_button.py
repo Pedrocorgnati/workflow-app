@@ -1,8 +1,9 @@
 """
 MCPPromptButton — Botao canonico para disparo de prompts MCP.
 
-Aceita button_type Claude/Codex/Kimi (legacy) + type-selector-radio-input
-(seed-driven brainstorm; T2 loop 05-21-implantation-tasklist-aba-brainstorm).
+Aceita button_type Claude/Codex/Kimi (legacy), MiMo (2026-10-02) e
+type-selector-radio-input (seed-driven brainstorm; T2 loop
+05-21-implantation-tasklist-aba-brainstorm).
 Aceita action legacy send/queue/config + 7 literals pt-BR canonicos.
 
 Uso seed-driven (brainstorm grade):
@@ -55,7 +56,7 @@ from workflow_app.signal_bus import signal_bus
 
 logger = logging.getLogger(__name__)
 
-ButtonType = Literal["Claude", "Codex", "Kimi", "type-selector-radio-input"]
+ButtonType = Literal["Claude", "Codex", "MiMo", "Kimi", "type-selector-radio-input"]
 #: Vocabulario de action: ABERTO desde a Task 29.
 #:
 #: Era um `Literal[...]` de 15 membros -- a QUARTA copia da lista de actions,
@@ -76,6 +77,7 @@ ActionType = str
 VALID_BUTTON_TYPES: set[str] = {
     "Claude",
     "Codex",
+    "MiMo",
     "Kimi",
     "type-selector-radio-input",
 }
@@ -120,23 +122,30 @@ SEED_TARGET_TERMINAL_RUNTIME_SENTINEL: str = "depende-do-radio"
 BUTTON_V_PADDING_PX = 1
 
 # Cores canonicas conforme mcp-flow-implantation-base-archive.md §4:
-# Claude=laranja, Codex=roxo, Kimi=azul, type-selector-radio-input=verde.
-# Fix T021 loop 05-21-implantation-tasklist-aba-brainstorm.
+# Claude=laranja, Codex=roxo, MiMo=teal, Kimi=azul,
+# type-selector-radio-input=verde. Fix T021 loop
+# 05-21-implantation-tasklist-aba-brainstorm. O teal da MiMo (2026-10-02) e
+# hipotese de paleta: so precisa nao colidir com as outras quatro. Todo tipo
+# de `VALID_BUTTON_TYPES` precisa de entrada nas tres tabelas, senao o
+# `_sync_visual_state` levanta KeyError ao montar o botao.
 _TYPE_BG: dict[str, str] = {
     "Claude": "#C2410C",  # laranja escuro (Tailwind orange-700)
     "Codex":  "#6D28D9",  # roxo (Tailwind violet-700)
+    "MiMo":   "#0F766E",  # teal (Tailwind teal-700)
     "Kimi":   "#1D4ED8",  # azul (Tailwind blue-700)
     "type-selector-radio-input": "#15803D",  # verde (Tailwind green-700)
 }
 _TYPE_FG: dict[str, str] = {
     "Claude": "#FAFAFA",
     "Codex":  "#FAFAFA",
+    "MiMo":   "#FAFAFA",
     "Kimi":   "#FAFAFA",
     "type-selector-radio-input": "#FAFAFA",
 }
 _TYPE_BORDER: dict[str, str] = {
     "Claude": "#EA580C",  # orange-600
     "Codex":  "#7C3AED",  # violet-600
+    "MiMo":   "#0D9488",  # teal-600
     "Kimi":   "#2563EB",  # blue-600
     "type-selector-radio-input": "#16A34A",  # green-600
 }
@@ -472,7 +481,7 @@ class MCPPromptButton(QPushButton):
         self._recheck_pending: bool = False
 
         # Radio state getter (T7): callable opcional que retorna o provider
-        # ativo ("Claude"/"Kimi"/"Codex") quando button_type=
+        # ativo ("Claude"/"MiMo"/"Kimi"/"Codex") quando button_type=
         # type-selector-radio-input. Armazenado como WeakMethod quando e
         # bound method (evita ciclo MainWindow <-> button). Fallback direto
         # quando e funcao livre ou lambda (impossivel weakref).
@@ -547,7 +556,7 @@ class MCPPromptButton(QPushButton):
         # Aplica setEnabled inicial para button_type=Codex fixo: se T3 nao
         # estiver visivel, botao nasce disabled com tooltip da variante curta.
         # Em button_type=type-selector-radio-input o botao SEMPRE nasce
-        # habilitado (radio pode mover para Claude/Kimi) e o gate roda no
+        # habilitado (radio pode mover para Claude/MiMo/Kimi) e o gate roda no
         # clique.
         if self._button_type == "Codex":
             alive = self._is_codex_alive_cached()
@@ -870,7 +879,7 @@ class MCPPromptButton(QPushButton):
         retorna button_type direto. Radio: chama o getter (resolve
         WeakMethod) ou default "Claude" quando getter ausente/invalido.
         """
-        if self._button_type in ("Claude", "Kimi", "Codex"):
+        if self._button_type in ("Claude", "MiMo", "Kimi", "Codex"):
             return self._button_type
         if self._button_type == "type-selector-radio-input":
             ref = self._radio_state_getter_ref
@@ -885,10 +894,16 @@ class MCPPromptButton(QPushButton):
                 value = fn()
             except Exception:  # noqa: BLE001 - getter falho cai no default seguro
                 return "Claude"
-            value_norm = str(value or "").strip().capitalize()
-            if value_norm in ("Claude", "Kimi", "Codex"):
-                return value_norm
-            return "Claude"
+            # Mapa explicito em vez de `.capitalize()`: o rotulo "MiMo" tem
+            # caixa mista, e `"mimo".capitalize()` daria "Mimo", que cairia
+            # no default "Claude" (a degradacao silenciosa que o Main MiMo
+            # nao pode ter). Para claude/kimi/codex o resultado e o mesmo.
+            return {
+                "claude": "Claude",
+                "mimo": "MiMo",
+                "kimi": "Kimi",
+                "codex": "Codex",
+            }.get(str(value or "").strip().lower(), "Claude")
         return "Claude"
 
     def _block_codex_unavailable(self, reason: str = "t3_missing") -> str:

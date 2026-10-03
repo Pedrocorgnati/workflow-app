@@ -21,8 +21,8 @@ Isolation contract:
     ~/.workflow-app/ for the three IPC notify JSON files.
   - OutputPanel and XtermOutputPanel inject WF_APP_SESSION_ID=<id> into
     the PTY environment so every Bash subprocess the embedded CLI starts
-    (Claude in T1, Kimi in T2, Codex in T3) writes the notify payload to
-    the correct instance subdirectory.
+    (Main LLM in T1, MiMo/Kimi/Qwen in T2, Codex/Grok in T3) writes the
+    notify payload to the correct instance subdirectory.
   - notify-terminal-idle.py reads WF_APP_SESSION_ID from env and resolves
     the target directory; it falls back to "session-default" when the var
     is absent (headless CI / manual invocation outside a PTY).

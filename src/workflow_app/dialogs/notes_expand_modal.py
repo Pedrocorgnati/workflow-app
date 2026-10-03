@@ -10,38 +10,64 @@ do footer — o caller faz `notes_input.setText(modal.text())` no accept.
 Cada modal nasce ligado ao texto de uma instancia especifica de footer
 (passado como `initial_text`), evitando vazamento de estado entre os dois
 footers (terminal-interactive-notes e terminal-workspace-notes).
+
+Header de paths: o caller passa `path_sources` (label, testid, bg, hover,
+resolver). Clicar num botao chama o resolver e insere o valor no cursor do
+editor, em vez de publicar no terminal como o botao de origem faz. Resolver
+devolve None quando o valor nao existe — o toast de aviso e responsabilidade
+dele (Zero Silencio), o modal apenas nao insere nada.
 """
 
 from __future__ import annotations
 
-from PySide6.QtGui import QKeySequence, QShortcut
+from collections.abc import Callable, Sequence
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QHBoxLayout,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
+    QWidget,
 )
+
+# (label, testid, bg, hover, resolver)
+PathSource = tuple[str, str, str, str, Callable[[], "str | None"]]
 
 
 class NotesExpandModal(QDialog):
     """Modal de visualizacao/edicao de uma anotacao de terminal."""
 
-    def __init__(self, testid: str, initial_text: str = "", parent=None) -> None:
+    def __init__(
+        self,
+        testid: str,
+        initial_text: str = "",
+        path_sources: Sequence[PathSource] = (),
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Anotacao")
         self.setProperty("testid", f"{testid}-expand-modal")
         self.setModal(True)
         self.setMinimumSize(560, 360)
-        self._setup_ui(initial_text)
+        self._setup_ui(initial_text, path_sources)
 
-    def _setup_ui(self, initial_text: str) -> None:
+    def _setup_ui(self, initial_text: str, path_sources: Sequence[PathSource]) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(20, 16, 20, 16)
 
+        if path_sources:
+            layout.addWidget(self._build_paths_header(path_sources))
+
         self._editor = QPlainTextEdit()
         self._editor.setProperty("testid", "notes-expand-editor")
         self._editor.setPlainText(initial_text)
+        # Cursor no fim: os botoes do header anexam ao texto ja existente.
+        self._editor.moveCursor(QTextCursor.MoveOperation.End)
         self._editor.setPlaceholderText("anotacoes")
         self._editor.setStyleSheet(
             "QPlainTextEdit {"
@@ -87,6 +113,39 @@ class NotesExpandModal(QDialog):
         save_shortcut_enter = QShortcut(QKeySequence("Ctrl+Enter"), self)
         save_shortcut_enter.activated.connect(self.accept)
 
+        self._editor.setFocus()
+
+    def _build_paths_header(self, path_sources: Sequence[PathSource]) -> QWidget:
+        header = QWidget()
+        header.setProperty("testid", "notes-expand-paths-header")
+        lay = QHBoxLayout(header)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        for label, testid, bg, hover, resolver in path_sources:
+            btn = QPushButton(label)
+            btn.setProperty("testid", testid)
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("Insere o path no cursor da anotacao")
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {bg}; color: #FAFAFA;"
+                "  border: none; border-radius: 5px;"
+                "  font-size: 11px; font-weight: 700; padding: 0 10px; }"
+                f"QPushButton:hover {{ background-color: {hover}; }}"
+                f"QPushButton:pressed {{ background-color: {hover}; }}"
+            )
+            btn.clicked.connect(
+                lambda _checked=False, r=resolver: self._insert_resolved(r)
+            )
+            lay.addWidget(btn)
+        lay.addStretch(1)
+        return header
+
+    def _insert_resolved(self, resolver: Callable[[], "str | None"]) -> None:
+        value = resolver()
+        if not value:
+            return
+        self._editor.insertPlainText(value)
         self._editor.setFocus()
 
     def text(self) -> str:

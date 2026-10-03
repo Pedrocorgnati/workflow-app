@@ -191,11 +191,18 @@ class CommandSpec:
     effort: EffortLevel = EffortLevel.STANDARD    # Claude Code /effort level
     testid: str = ""                              # data-testid override for queue item widget
     blocked_reason: str = ""                      # If set, item renders as ERRO with this message
-    kimi_eligible: bool = False                   # True if this spec came from a kimi_eligible loop item
+    kimi_eligible: bool = False                   # elegibilidade T2 compartilhada Kimi|Qwen|MiMo; nome mantido por compat com items[].kimi_eligible
     kind: Literal["slash", "local-action"] = "slash"  # Dispatch mode: external slash command vs in-process Python action
     local_action_id: Optional[str] = None         # Identifier into local-actions registry (only when kind=="local-action")
-    force_main_llm: bool = True                  # When True, forces CLAUDE (green arrow); when False, allows parallel workers (blue arrow)
-    is_prompt: bool = True                      # When True, sends text raw without command transformations (no /slash-executor, /skill:, etc.)
+    # Os dois campos abaixo sao OPT-IN do dialogo "Adicionar comando" (checkboxes
+    # queue-add-main-llm-N / queue-add-prompt-N), que os passa EXPLICITOS. O
+    # default precisa ser False: todo produtor de pipeline (load_pipeline, loops,
+    # DCP, botoes de fila) cria CommandSpec sem eles. Com default True, cada item
+    # virava "prompt raw" — o step/autocast publicava `/comando` cru sob Main
+    # Kimi/Qwen/Codex/Grok e o eixo Worker nunca reivindicava item nenhum
+    # (ai-forge/rules/main-llm-publish.md §9, single-arrow-multifunction.md §7 D-8).
+    force_main_llm: bool = False                 # When True, forces CLAUDE (green arrow); when False, allows parallel workers (blue arrow)
+    is_prompt: bool = False                      # When True, sends text raw without command transformations (no /slash-executor, /skill:, etc.)
     flags_boolean: list[str] = field(default_factory=list)
     flags_with_value: list[FlagSpec] = field(default_factory=list)
     # Correlacao de loop (Task 15). None para todo comando fora de loop —

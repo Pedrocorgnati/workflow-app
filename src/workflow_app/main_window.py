@@ -305,26 +305,68 @@ def _check_supplemental_agent_path(agent_path: str, root: Path, rotulo: str) -> 
 # (fragil a i18n + refactor de label, cf. hardening §1/§2 da task).
 _BRAINSTORM_PROVIDER_LABELS: dict[str, str] = {
     "claude": "Claude",
+    "mimo": "MiMo",
     "kimi": "Kimi",
     "codex": "Codex",
 }
 _BRAINSTORM_PROVIDER_SLUGS: frozenset[str] = frozenset(_BRAINSTORM_PROVIDER_LABELS)
 
 # Roster COMPLETO do Main LLM (`queue-div-main-llm`), superset do roster de
-# brainstorm. Os botoes de brainstorm continuam falando so Claude/Kimi/Codex
-# porque `MCPPromptButton._resolve_provider` so conhece esses tres; mas
+# brainstorm. Os botoes de brainstorm falam so os rotulos de
+# `_BRAINSTORM_PROVIDER_LABELS`, os unicos que
+# `MCPPromptButton._resolve_provider` conhece (mapa explicito: "MiMo" nao
+# sai de `str.capitalize()`); mas
 # `_current_llm_provider()` NAO pode achatar qwen/grok em "claude": achatar
 # faz o app pastear comando de Claude enquanto o radio marcado diz Qwen
 # (violacao de Zero Silencio). Quem nao suporta o slug degrada explicitamente
-# no proprio consumidor, nunca na fonte.
+# no proprio consumidor, nunca na fonte. O conjunto de slugs espelha
+# `channel_llm.MAIN_ROSTER` e `MetricsBar._MAIN_LLM_SLUGS` (igualdade travada
+# por teste): sem "mimo" aqui, Main MiMo seria clampado para claude.
 _MAIN_LLM_LABELS: dict[str, str] = {
     "claude": "Claude",
+    "mimo": "MiMo",
     "kimi": "Kimi",
     "codex": "Codex",
     "qwen": "Qwen",
     "grok": "Grok",
 }
 _MAIN_LLM_SLUGS: frozenset[str] = frozenset(_MAIN_LLM_LABELS)
+
+#: Mains sem linha legada em `mcp_commands` (pill MCP / Parallel / Dual): o CLI
+#: mimocode, fork do opencode, nao tem /skill:claude|codex|dual nem servidores
+#: MCP. Com um desses Mains a pill legada emite toast warning em vez de colar
+#: comando (Zero Silencio), e o tooltip avisa a indisponibilidade. A matriz
+#: Thinking/Execution (`_TE_COMMANDS`) continua valendo para eles.
+_MCP_LEGACY_UNSUPPORTED_MAINS: frozenset[str] = frozenset({"mimo"})
+
+#: Toast da pill legada (Main MCP / Parallel / Dual) com Main em
+#: `_MCP_LEGACY_UNSUPPORTED_MAINS`: avisa e NAO cola comando.
+_MCP_LEGACY_UNSUPPORTED_TOAST = (
+    "Acao MCP legada indisponivel com Main MiMo: o CLI MiMo nao tem "
+    "/skill:claude|codex|dual nem servidores MCP. Use a matriz "
+    "Thinking/Execution ou troque o Main LLM."
+)
+
+#: Testids das alternativas da matriz Thinking/Execution (TE), na ordem das
+#: colunas thinking/execution de `queue-div-flag` (MiMo antes de Kimi).
+#: Reservados nos dois sitios que materializam personas MCP
+#: (`_sync_mcp_persona_checkboxes` e `_build_mcp_column`): sem a reserva, uma
+#: persona com testid colidente ocupa o slot de uma alternativa do select.
+#: Paridade com as chaves de `_TE_COMMANDS` travada por teste.
+_TE_ACTION_TESTIDS: tuple[str, ...] = (
+    "output-mcp-action-thinking-fable",
+    "output-mcp-action-thinking-opus",
+    "output-mcp-action-thinking-codex-ultra",
+    "output-mcp-action-thinking-mimo-pro",
+    "output-mcp-action-thinking-kimi",
+    "output-mcp-action-thinking-grok-xhigh",
+    "output-mcp-action-execution-grok",
+    "output-mcp-action-execution-sonnet",
+    "output-mcp-action-execution-mimo",
+    "output-mcp-action-execution-kimi",
+    "output-mcp-action-execution-qwen",
+    "output-mcp-action-execution-codex",
+)
 
 # Indices das secoes de `output-toolbar-section-stack`.
 # de secao tem conteudo de flow responsivo (altura real != sizeHint) e todas passam pelo teto
@@ -335,7 +377,8 @@ _MAIN_LLM_SLUGS: frozenset[str] = frozenset(_MAIN_LLM_LABELS)
 # 3=mcps, 4=brainstorm. A antiga secao unica `MCP & BRAINSTORM` (index 2) foi
 # dissolvida: suas duas sub-abas viraram secoes de primeiro nivel, nas duas
 # ultimas posicoes. LLM Routing entra no indice 6 quando
-# SF_LLM_CONFIG_V2 esta ativo. Consumidos por `_sync_flow_section_height()`.
+# `llm_config_v2_enabled()` e verdadeiro. Consumidos por
+# `_sync_flow_section_height()`.
 _TOOLBAR_SECTION_COMMAND_SEQUENCE = 0
 _TOOLBAR_SECTION_TERMINAL_INSERTIONS = 1
 _TOOLBAR_SECTION_AGENTES = 2
@@ -348,8 +391,9 @@ _TOOLBAR_SECTION_LLM_ROUTING = 6
 def _initial_toolbar_section_index() -> int:
     """Aba inicial de toda instancia nova, sem persistencia entre sessoes.
 
-    LLM ROUTING quando `SF_LLM_CONFIG_V2` expoe a pagina. No layout legado a
-    div de routing ja vive na top-row, entao o fallback e COMMAND SEQUENCE.
+    LLM ROUTING quando `llm_config_v2_enabled()` expoe a pagina. No layout
+    legado a div de routing ja vive na top-row, entao o fallback e COMMAND
+    SEQUENCE.
     """
     if llm_config_v2_enabled():
         return _TOOLBAR_SECTION_LLM_ROUTING
@@ -749,7 +793,7 @@ Acessar o repositorio remoto e o ambiente de producao do projeto exibido em metr
 FASE 1 — Inventario de acessos
 1. Resolver projeto ativo: ler .claude/projects/{slug}.json a partir de app_state.config (workspace_root, project_dir, hosting, database, target_stack).
 2. Listar credenciais disponiveis em credentials.* (github, ssh, vercel, railway, expo_eas, supabase, sentry, dns, cloudflare, hosting_platform, docker_registry, mcp_servers). Mascarar valores em log ({first10}***{last4}).
-3. Listar MCPs habilitados consultando .mcp.json + credentials.mcp_servers (Tavily, Firecrawl, Perplexity, Playwright, Axe-core, Supabase, Codex, Kimi).
+3. Listar MCPs habilitados consultando .mcp.json + credentials.mcp_servers (Tavily, Firecrawl, Perplexity, Playwright, Axe-core, Supabase, Codex, MiMo, Kimi).
 4. Identificar deploy target (Vercel/Railway/Hostinger/Hostgator/Expo/static) a partir de config.hosting.
 
 FASE 2 — Acesso remoto
@@ -1708,8 +1752,9 @@ class MainWindow(QMainWindow):
         _section_stack.addWidget(_brainstorm_column)                  # 4 = brainstorm
         _section_stack.addWidget(_corgly_column)                      # 5 = corgly
 
-        # SF_LLM_CONFIG_V2 adiciona uma unica pagina LLM Routing ao fim do
-        # seletor. TERMINAL INSERTIONS permanece na posicao original (indice 1).
+        # `llm_config_v2_enabled()` adiciona uma unica pagina LLM Routing ao
+        # fim do seletor. TERMINAL INSERTIONS permanece na posicao original
+        # (indice 1).
         # Nao existe uma pagina LLM Config vazia em paralelo.
         _llm_routing_widget = None
         if llm_config_v2_enabled():
@@ -1797,7 +1842,8 @@ class MainWindow(QMainWindow):
         # Worker | MCP Flags) para esta linha. Ancorado no topo: a coluna do
         # meio agora cresce com o conteudo do stack e nao deve esticar os
         # vizinhos junto.
-        # Com SF_LLM_CONFIG_V2="1", _llm_box foi reparenteado para LLM Routing.
+        # Com `llm_config_v2_enabled()`, _llm_box foi reparenteado para LLM
+        # Routing.
         # Nao adicionar na top-row.
         if not llm_config_v2_enabled():
             _top_row_layout.addWidget(                                                 # llm-routing
@@ -1919,7 +1965,8 @@ class MainWindow(QMainWindow):
         )
         self._terminal_splitter.addWidget(self._interactive_wrapper)
 
-        # Bottom/Right: Workspace terminal (Kimi / paste target for blue ▶)
+        # Bottom/Right: Workspace terminal (worker T2 MiMo/Kimi/Qwen / paste
+        # target for blue ▶)
         self._workspace_wrapper = QWidget()
         workspace_layout = QVBoxLayout(self._workspace_wrapper)
         workspace_layout.setContentsMargins(0, 0, 0, 0)
@@ -1932,8 +1979,9 @@ class MainWindow(QMainWindow):
         self._workspace_terminal_splitter = QSplitter(Qt.Vertical, parent=self._workspace_wrapper)
         self._workspace_terminal_splitter.setProperty("testid", "terminal-workspace-splitter")
 
-        # Child 0 = pyte (T2/Kimi, colapsavel). Child 1 = wrapper do T3/Codex
-        # (barra CODEX + pyte). Os indices seguem os mesmos: `_apply_workspace_split`
+        # Child 0 = pyte (T2, worker MiMo/Kimi/Qwen, colapsavel). Child 1 =
+        # wrapper do T3/Codex (barra CODEX + pyte). Os indices seguem os
+        # mesmos: `_apply_workspace_split`
         # continua raciocinando em [T2, T3].
         # 2026-06-01: os tres terminais (T1/T2/T3) usam o mesmo engine pyte
         # (OutputPanel). T3 difere apenas no canal logico "workspace_xterm"
@@ -2448,6 +2496,8 @@ class MainWindow(QMainWindow):
         _MCP_TEST_PROMPT = (
             "/mcp:codex ping test — verificar se MCP Codex esta ativo. "
             "Apenas responda: \"MCP Codex OK — modelo gpt-5.5, pronto.\" Nada mais.\n"
+            "/mcp:mimo ping test — verificar se MCP MiMo esta ativo. "
+            "Apenas responda: \"MCP MiMo OK — modelo mimo-v2.6-pro, pronto.\" Nada mais.\n"
             "/mcp:kimi ping test — verificar se MCP Kimi esta ativo. "
             "Apenas responda: \"MCP Kimi OK — modelo kimi-code/kimi-for-coding, pronto.\" Nada mais."
         )
@@ -2488,7 +2538,7 @@ class MainWindow(QMainWindow):
         # Entradas padrão. Usadas se QSettings nao tiver entries.
         _DEFAULT_ENTRIES = [
             {"label": "MCP-test",        "path": "ai-forge/custom-prompts/prompts-subtab/mcp-test.md",
-             "description": "Pinga MCP Codex e Kimi para verificar conexão"},
+             "description": "Pinga MCP Codex, MiMo e Kimi para verificar conexão"},
             {"label": "Online Review",   "path": "ai-forge/custom-prompts/prompts-subtab/online-review.md",
              "description": "Auditoria completa do remoto e produção do projeto ativo"},
             {"label": "Next Module",     "path": "ai-forge/custom-prompts/prompts-subtab/next-module.md",
@@ -2523,6 +2573,8 @@ class MainWindow(QMainWindow):
              "description": "Atualiza o BD Hostinger do systemforge-dashboard"},
             {"label": "SF Deploy",       "path": "ai-forge/custom-prompts/prompts-subtab/systemforge-hostinger-deploy.md",
              "description": "Valida, commita e publica o systemforge-dashboard"},
+            {"label": "SF 503",          "path": "ai-forge/custom-prompts/prompts-subtab/systemforge-fix-503.md",
+             "description": "Diagnostica e corrige erro 503 do systemforge-dashboard na Hostinger"},
             {"label": "Corgly DB",       "path": "ai-forge/custom-prompts/prompts-subtab/corgly-db-update.md",
              "description": "Atualiza o banco de produção do Corgly na Hostinger"},
             {"label": "Corgly Deploy",   "path": "ai-forge/custom-prompts/prompts-subtab/corgly-hostinger-deploy.md",
@@ -2612,9 +2664,27 @@ class MainWindow(QMainWindow):
                 _lbl = self._prompt_label_for_discovered_file(
                     Path(_prompts_dir_abs) / _fname, _fallback_lbl
                 )
+                # Os atalhos operacionais do SystemForge Dashboard formam um
+                # bloco fixo: SF DB, SF Deploy e SF 503. QSettings antigos nao
+                # conhecem o terceiro item, portanto a reconciliacao precisa
+                # inseri-lo depois de SF Deploy em vez de anexa-lo ao fim.
                 _idx = len(self._prompt_entries)
+                if _fname == "systemforge-fix-503.md":
+                    _anchor_path = (
+                        "ai-forge/custom-prompts/prompts-subtab/"
+                        "systemforge-hostinger-deploy.md"
+                    )
+                    _anchor_idx = next(
+                        (
+                            i for i, entry in enumerate(self._prompt_entries)
+                            if entry.get("path") == _anchor_path
+                        ),
+                        None,
+                    )
+                    if _anchor_idx is not None:
+                        _idx = _anchor_idx + 1
                 _bg, _hv = _PROMPT_PALETTE[_idx % len(_PROMPT_PALETTE)]
-                self._prompt_entries.append({
+                self._prompt_entries.insert(_idx, {
                     "label": _lbl,
                     "path": _rel,
                     "description": "",
@@ -2751,7 +2821,9 @@ class MainWindow(QMainWindow):
         ] + paths_extras
         # MCP column (output-toolbar-mcp): os 9 botoes legados continuam sendo
         # criados para preservar o contrato de action_widgets, mas a aba MCPs
-        # renderiza radio Claude/Kimi/Codex + 3 acoes.
+        # renderiza so as acoes Main MCP/Parallel/Dual do Main LLM de
+        # queue-div-main-llm (os radios de provider foram eliminados; Main
+        # MiMo cai no toast de `_MCP_LEGACY_UNSUPPORTED_MAINS`).
         self._mcp_column_btns = action_widgets[4:13]
         # rules: dcp+meta-feeding+cmd+terminal+listeners+cascade-bug+indicators+prompt+add-rules
         _rules_btns = workflow_app_widgets[1:]
@@ -3515,19 +3587,7 @@ class MainWindow(QMainWindow):
             return []
 
         if llm_config_v2_enabled():
-            _action_testids = [
-                "output-mcp-action-thinking-fable",
-                "output-mcp-action-thinking-opus",
-                "output-mcp-action-thinking-codex-ultra",
-                "output-mcp-action-thinking-kimi",
-                "output-mcp-action-thinking-grok-xhigh",
-                "output-mcp-action-execution-grok",
-                "output-mcp-action-execution-sonnet",
-                "output-mcp-action-execution-mimo",
-                "output-mcp-action-execution-kimi",
-                "output-mcp-action-execution-qwen",
-                "output-mcp-action-execution-codex",
-            ]
+            _action_testids = list(_TE_ACTION_TESTIDS)
         else:
             _action_testids = [
                 "output-mcp-action-main",
@@ -3606,6 +3666,9 @@ class MainWindow(QMainWindow):
         - `output-toolbar-mcp`: personas/agentes + 3 botoes Main MCP/Parallel/Dual.
           A combinacao substitui a antiga matriz 3x3:
           Claude -> T1/linha laranja, Kimi -> T2/linha azul, Codex -> T3/linha roxa.
+          Main MiMo nao tem linha legada em `mcp_commands` (o CLI MiMo nao tem
+          /skill: nem MCP): a pill emite toast warning e nao cola comando
+          (`_MCP_LEGACY_UNSUPPORTED_MAINS`); a matriz Thinking/Execution vale.
         - `output-toolbar-brainstorm`: picker de .md + grade de botoes que publicam
           "<label> <path-do-md>" no terminal roteado (T1/T2/T3).
 
@@ -3668,9 +3731,12 @@ class MainWindow(QMainWindow):
         self._mcp_legacy_buttons_holder = legacy_holder
 
         mcp_commands: dict[str, dict[str, tuple[str, int]]] = {
+            # Parallel do Main Claude = MiMo (Q9: MiMo substitui o Kimi; D1
+            # MiMo > Kimi). O /mcp:mimo e API sem disco: o contexto vai por
+            # `files`. Nao existe linha "mimo" aqui (sem skill-mimo).
             "claude": {
                 "main": ("/mcp:codex", 1),
-                "parallel": ("/mcp:kimi", 1),
+                "parallel": ("/mcp:mimo", 1),
                 "dual": ("/mcp:dual", 1),
             },
             "kimi": {
@@ -3871,19 +3937,7 @@ class MainWindow(QMainWindow):
             testid for _lbl, testid, _prompt, _cat in persona_specs
         }
         if llm_config_v2_enabled():
-            _action_testids = [
-                "output-mcp-action-thinking-fable",
-                "output-mcp-action-thinking-opus",
-                "output-mcp-action-thinking-codex-ultra",
-                "output-mcp-action-thinking-kimi",
-                "output-mcp-action-thinking-grok-xhigh",
-                "output-mcp-action-execution-grok",
-                "output-mcp-action-execution-sonnet",
-                "output-mcp-action-execution-mimo",
-                "output-mcp-action-execution-kimi",
-                "output-mcp-action-execution-qwen",
-                "output-mcp-action-execution-codex",
-            ]
+            _action_testids = list(_TE_ACTION_TESTIDS)
         else:
             _action_testids = [
                 "output-mcp-action-main",
@@ -3997,8 +4051,8 @@ class MainWindow(QMainWindow):
         # Item 023: action row com divisao Thinking/Execution (TE-01) sob
         # kill-switch ligado; legado Main/Parallel/Dual sob kill-switch off.
         # Item 005 (C26): o kill-switch em questao passou a ser o dedicado
-        # `SF_MCP_THINK_EXEC_V2` — o gate foi MOVIDO do global
-        # `SF_LLM_CONFIG_V2`, nao duplicado. Ausente/off = caminho legado
+        # `mcp_think_exec_v2_enabled()` — o gate foi MOVIDO do global
+        # `llm_config_v2_enabled()`, nao duplicado. Ausente/off = caminho legado
         # Main MCP / Parallel / Dual; "1" = matriz `_TE_COMMANDS` (select
         # Thinking + select Execution, mesmas alternativas das colunas de
         # `queue-div-flag`).
@@ -4040,10 +4094,13 @@ class MainWindow(QMainWindow):
 
         if mcp_think_exec_v2_enabled():
             # TE-01: matriz fixa por alternativa do select, independente do Main LLM.
+            # thinking-mimo-pro NAO tem gate do switch da MiMo (contrato D3: o
+            # switch so esconde radio/checkbox de worker e o botao mimod).
             _TE_COMMANDS: dict[str, str] = {
                 "output-mcp-action-thinking-fable": "/mcp:fable",
                 "output-mcp-action-thinking-opus": "/mcp:claude-ultra",
                 "output-mcp-action-thinking-codex-ultra": "/mcp:codex-ultra",
+                "output-mcp-action-thinking-mimo-pro": "/mcp:mimo-pro",
                 "output-mcp-action-thinking-kimi": "/mcp:kimi-k3",
                 "output-mcp-action-thinking-grok-xhigh": "/mcp:grok-xhigh",
                 "output-mcp-action-execution-grok": "/mcp:grok",
@@ -4121,6 +4178,8 @@ class MainWindow(QMainWindow):
                      _TE_COMMANDS["output-mcp-action-thinking-opus"]),
                     ("codex-ultra", "output-mcp-action-thinking-codex-ultra",
                      _TE_COMMANDS["output-mcp-action-thinking-codex-ultra"]),
+                    ("mimo-pro", "output-mcp-action-thinking-mimo-pro",
+                     _TE_COMMANDS["output-mcp-action-thinking-mimo-pro"]),
                     ("kimi-k3", "output-mcp-action-thinking-kimi",
                      _TE_COMMANDS["output-mcp-action-thinking-kimi"]),
                     ("grok-xhigh", "output-mcp-action-thinking-grok-xhigh",
@@ -4181,6 +4240,14 @@ class MainWindow(QMainWindow):
 
             def _on_mcp_action(action_id: str) -> None:
                 provider = self._current_llm_provider()
+                if provider in _MCP_LEGACY_UNSUPPORTED_MAINS:
+                    # Main MiMo: sem linha legada. Avisa e NAO cola comando
+                    # (Zero Silencio); nunca cai no fallback "claude", que
+                    # colaria /mcp:codex dentro do mimocode.
+                    signal_bus.toast_requested.emit(
+                        _MCP_LEGACY_UNSUPPORTED_TOAST, "warning"
+                    )
+                    return
                 if provider not in mcp_commands:
                     provider = "claude"
                 base_text, _legacy_terminal = mcp_commands[provider][action_id]
@@ -4323,11 +4390,36 @@ class MainWindow(QMainWindow):
         "/corgly:corgly2-optimize-phrases",
         "/clear",
     )
+    # Fila da revisao integral de substantivos do corgly-desktop. Cada etapa
+    # roda em um contexto limpo, igual ao contrato do botao `corgly2-all`.
+    _SUBSTANTIVES_ALL_QUEUE: tuple[str, ...] = (
+        "/corgly-desktop:1-subastantives-next-word",
+        "/clear",
+        "/corgly-desktop:2-subastantives-identify",
+        "/clear",
+        "/corgly-desktop:3-substantive-base",
+        "/clear",
+        "/corgly-desktop:4-substantive-polissemia",
+        "/clear",
+        "/corgly-desktop:5-substantives-examples",
+        "/clear",
+        "/corgly-desktop:6-substantives-translation",
+        "/clear",
+        "/corgly-desktop:7-substantives-checkboxes",
+        "/clear",
+        "/corgly-desktop:8-substantives-finalize",
+        "/clear",
+    )
 
     @staticmethod
     def _corgly_commands_root() -> Path:
         """Canonical parent-owned Corgly command directory."""
         return _SYSTEMFORGE_PATH / ".claude" / "commands" / "corgly"
+
+    @staticmethod
+    def _corgly_desktop_commands_root() -> Path:
+        """Canonical command directory for the corgly-desktop workflow."""
+        return _SYSTEMFORGE_PATH / ".claude" / "commands" / "corgly-desktop"
 
     @staticmethod
     def _corgly_data_root() -> Path:
@@ -4365,9 +4457,27 @@ class MainWindow(QMainWindow):
             )
         return specs
 
+    def _substantives_all_specs(self) -> list[CommandSpec]:
+        """Specs das oito etapas de substantivos, intercaladas com `/clear`."""
+        return [
+            CommandSpec(
+                name=name,
+                model=ModelName.OPUS,
+                interaction_type=InteractionType.AUTO,
+                position=position,
+                effort=EffortLevel.HIGH,
+                config_path="",
+            )
+            for position, name in enumerate(self._SUBSTANTIVES_ALL_QUEUE, start=1)
+        ]
+
     def _enqueue_corgly2_all(self) -> None:
         """Renderiza a cadeia Corgly 2.0 em `queue-command-list`."""
         signal_bus.pipeline_ready.emit(self._corgly2_all_specs())
+
+    def _enqueue_substantives_all(self) -> None:
+        """Renderiza o ciclo de substantivos em `queue-command-list`."""
+        signal_bus.pipeline_ready.emit(self._substantives_all_specs())
 
     def _make_corgly2_all_button(self) -> QPushButton:
         """Botão de fila, não inserção: mesma div dos comandos Corgly 2.0."""
@@ -4382,6 +4492,23 @@ class MainWindow(QMainWindow):
             + "\n".join(self._CORGLY2_ALL_QUEUE)
         )
         btn.clicked.connect(lambda _checked=False: self._enqueue_corgly2_all())
+        return btn
+
+    def _make_substantives_all_button(self) -> QPushButton:
+        """Botao que enfileira o ciclo completo da subaba corgly-desktop."""
+        btn = QPushButton("SUBSTANTIVES")
+        btn.setProperty("testid", "output-btn-corgly-substantives")
+        btn.setProperty("corgly_pipeline", True)
+        btn.setProperty("corgly_accepts_class", False)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(_SECTION_BTN_STYLE)
+        btn.setToolTip(
+            "Enfileira em queue-command-list, nesta ordem:\n"
+            + "\n".join(self._SUBSTANTIVES_ALL_QUEUE)
+        )
+        btn.clicked.connect(
+            lambda _checked=False: self._enqueue_substantives_all()
+        )
         return btn
 
     def _corgly_command_with_selected_class(
@@ -4514,6 +4641,7 @@ class MainWindow(QMainWindow):
         col_layout.setSpacing(4)
 
         command_root = self._corgly_commands_root()
+        desktop_command_root = self._corgly_desktop_commands_root()
         corgly_root = self._corgly_data_root()
         invalid: list[str] = []
         command_files: list[Path] = []
@@ -4527,6 +4655,11 @@ class MainWindow(QMainWindow):
             )
         else:
             invalid.append(f"raiz ausente: {command_root}")
+        desktop_command_files: list[Path] = []
+        if desktop_command_root.is_dir():
+            desktop_command_files = sorted(desktop_command_root.rglob("*.md"))
+        else:
+            invalid.append(f"raiz ausente: {desktop_command_root}")
 
         tabs = QTabWidget()
         tabs.setProperty("testid", "output-toolbar-corgly-subtabs")
@@ -4541,10 +4674,9 @@ class MainWindow(QMainWindow):
             "QTabBar::tab:hover:!selected { background: #2D2D30; color: #D4D4D8; }"
         )
 
-        # Os comandos de curso ocupam DUAS sub-abas irmas: `corgly` (curso
-        # legado de 100 aulas) e `corgly2` (curso redesenhado de 300 aulas).
-        # A particao e o prefixo `corgly2-` do arquivo do comando — mesmo
-        # criterio que ja separava o bloco 2.0 dentro da aba `classes`.
+        # Os comandos de curso ocupam tres sub-abas irmas: `corgly` (curso
+        # legado), `corgly2` (curso redesenhado) e `corgly-desktop` (fluxos da
+        # aplicacao). A terceira usa sua propria raiz de comandos.
         corgly_page, flow, flow_host = self._make_corgly_command_page(
             page_testid="output-toolbar-corgly-subtab-corgly",
             flow_testid="output-toolbar-corgly-flow",
@@ -4555,11 +4687,20 @@ class MainWindow(QMainWindow):
                 flow_testid="output-toolbar-corgly2-flow",
             )
         )
+        desktop_page, desktop_flow, desktop_flow_host = (
+            self._make_corgly_command_page(
+                page_testid="output-toolbar-corgly-subtab-corgly-desktop",
+                flow_testid="output-toolbar-corgly-desktop-flow",
+            )
+        )
 
         self._corgly_buttons: list[QPushButton] = []
         self._corgly2_buttons: list[QPushButton] = []
+        self._corgly_desktop_buttons: list[QPushButton] = []
         all_btn = self._make_corgly2_all_button()
         self._corgly2_all_button = all_btn
+        substantives_btn = self._make_substantives_all_button()
+        self._corgly_substantives_button = substantives_btn
         for command_file in command_files:
             rel = command_file.relative_to(command_root)
             try:
@@ -4612,8 +4753,50 @@ class MainWindow(QMainWindow):
                 flow.addWidget(btn)
             self._corgly_buttons.append(btn)
 
+        for command_file in desktop_command_files:
+            rel = command_file.relative_to(desktop_command_root)
+            try:
+                body = command_file.read_text(encoding="utf-8")
+                if not body.startswith("---\n"):
+                    raise ValueError("frontmatter inicial ausente")
+                marker = body.find("\n---", 4)
+                if marker < 0:
+                    raise ValueError("frontmatter sem fechamento")
+                metadata = yaml.safe_load(body[4:marker])
+                if not isinstance(metadata, dict) or not metadata.get("description"):
+                    raise ValueError("description ausente no frontmatter")
+            except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
+                invalid.append(f"corgly-desktop/{rel.as_posix()}: {exc}")
+                continue
+
+            slug_parts = rel.with_suffix("").parts
+            slash = "/corgly-desktop:" + ":".join(slug_parts)
+            testid_suffix = "-".join(slug_parts)
+            label = " ".join(slug_parts).replace("-", " ").upper()
+            btn = QPushButton(label)
+            btn.setProperty(
+                "testid", f"output-btn-corgly-desktop-{testid_suffix}"
+            )
+            btn.setProperty("corgly_slash", slash)
+            btn.setProperty("corgly_accepts_class", False)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(_SECTION_BTN_STYLE)
+            btn.setToolTip(
+                f"Insere sem Enter: {slash}\nRaiz de comandos: {desktop_command_root}"
+            )
+            btn.clicked.connect(
+                lambda _checked=False, command=slash: (
+                    self._publish_insertion_llm_aware(command)
+                )
+            )
+            desktop_flow.addWidget(btn)
+            self._corgly_desktop_buttons.append(btn)
+
         # A cadeia `CORGLY2 ALL` fecha a aba 2.0, depois dos comandos dela.
         corgly2_flow.addWidget(all_btn)
+        # O ciclo de substantivos fecha a aba depois de todos os comandos
+        # individuais descobertos dinamicamente em `corgly-desktop`.
+        desktop_flow.addWidget(substantives_btn)
 
         selector_host = QWidget()
         selector_host.setProperty("testid", "output-toolbar-corgly-class-selector")
@@ -4660,7 +4843,9 @@ class MainWindow(QMainWindow):
 
         empty = QLabel("Nenhum comando Corgly valido foi encontrado.")
         empty.setProperty("testid", "output-toolbar-corgly-empty")
-        empty.setVisible(not self._corgly_buttons)
+        empty.setVisible(
+            not self._corgly_buttons and not self._corgly_desktop_buttons
+        )
         error = QLabel("Catalogo Corgly parcial: " + "; ".join(invalid))
         error.setProperty("testid", "output-toolbar-corgly-error")
         error.setWordWrap(True)
@@ -4670,6 +4855,7 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(corgly_page, "corgly")
         tabs.addTab(corgly2_page, "corgly2")
+        tabs.addTab(desktop_page, "corgly-desktop")
 
         strategy_page = QWidget()
         strategy_page.setProperty(
@@ -4780,6 +4966,7 @@ class MainWindow(QMainWindow):
         column.installEventFilter(self)
         flow_host.installEventFilter(self)
         corgly2_flow_host.installEventFilter(self)
+        desktop_flow_host.installEventFilter(self)
         strategy_page.installEventFilter(self)
         rules_page.installEventFilter(self)
         tabs.currentChanged.connect(lambda _index: self._sync_flow_section_height())
@@ -4815,7 +5002,7 @@ class MainWindow(QMainWindow):
         return False
 
     def _current_llm_provider(self) -> str:
-        """Fonte de verdade UNICA do Main LLM (`claude|kimi|codex|qwen|grok`).
+        """Fonte de verdade UNICA do Main LLM (`claude|mimo|kimi|codex|qwen|grok`).
 
         Le `queue-div-main-llm` via `CommandQueueWidget.current_main_llm()` e
         normaliza para slug minusculo. Substitui os dois radios de provider
@@ -4825,10 +5012,10 @@ class MainWindow(QMainWindow):
         (I2.2). Nunca levanta excecao: valor fora do roster canonico ou ausencia
         do `_command_queue` cai em "claude".
 
-        O clamp e contra `_MAIN_LLM_SLUGS` (5 slugs), NAO contra o roster de
-        brainstorm (3): achatar qwen/grok em "claude" aqui faria o app pastear
-        comando de Claude com o radio marcado em Qwen. Consumidor que so fala
-        Claude/Kimi/Codex degrada no proprio ponto de consumo
+        O clamp e contra `_MAIN_LLM_SLUGS` (roster completo do Main), NAO contra
+        `_BRAINSTORM_PROVIDER_LABELS`: achatar qwen/grok em "claude" aqui faria
+        o app pastear comando de Claude com o radio marcado em Qwen. Consumidor
+        que so fala Claude/MiMo/Kimi/Codex degrada no proprio ponto de consumo
         (`_get_brainstorm_runtime_provider`).
         """
         cq = getattr(self, "_command_queue", None)
@@ -4859,6 +5046,10 @@ class MainWindow(QMainWindow):
             base_text = ""
         label = _MAIN_LLM_LABELS.get(provider, "Claude")
         suffix = f"\nComando atual: {base_text.strip()}" if base_text else ""
+        if provider in _MCP_LEGACY_UNSUPPORTED_MAINS:
+            suffix += (
+                "\nIndisponivel com Main MiMo (sem /skill: nem MCP no CLI MiMo)."
+            )
         return (
             "Publica a acao MCP do Main LLM selecionado em queue-div-main-llm "
             "no terminal selecionado pelos radios de rota dos headers "
@@ -4867,7 +5058,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_main_llm_changed(self, provider: str) -> None:
-        """Slot de `signal_bus.main_llm_changed` (`claude|kimi|codex`).
+        """Slot de `signal_bus.main_llm_changed` (`claude|mimo|kimi|codex|qwen|grok`).
 
         Substitui a sincronizacao que antes vinha do `buttonToggled` dos dois
         radios de provider eliminados. O estado em si nao precisa mais ser
@@ -4923,14 +5114,16 @@ class MainWindow(QMainWindow):
         """Getter canonico do provider runtime dos botoes de brainstorm (T7).
 
         Deriva de `_current_llm_provider()` (queue-div-main-llm) e devolve o
-        nome CAPITALIZADO ("Claude"/"Kimi"/"Codex") que bate com o contrato
-        esperado por `MCPPromptButton._resolve_provider` para botoes
+        rotulo de exibicao ("Claude"/"MiMo"/"Kimi"/"Codex") que bate com o
+        contrato esperado por `MCPPromptButton._resolve_provider` para botoes
         button_type=type-selector-radio-input (I2.2b: a traducao slug ->
-        rotulo continua sendo responsabilidade de _BRAINSTORM_PROVIDER_LABELS).
-        Default "Claude" em qualquer caminho degradado — inclusive Main=Qwen e
-        Main=Grok, que existem em `_MAIN_LLM_SLUGS` mas nao tem persona de
-        brainstorm correspondente. Este e o ponto canonico de degradacao: a
-        fonte (`_current_llm_provider`) preserva o slug real.
+        rotulo continua sendo responsabilidade de _BRAINSTORM_PROVIDER_LABELS;
+        "MiMo" nao sai de `str.capitalize()`, por isso o mapa e explicito).
+        Main=MiMo tem rotulo proprio e NAO degrada. Default "Claude" em
+        qualquer caminho degradado — so Main=Qwen e Main=Grok, que existem em
+        `_MAIN_LLM_SLUGS` mas nao tem persona de brainstorm correspondente.
+        Este e o ponto canonico de degradacao: a fonte
+        (`_current_llm_provider`) preserva o slug real.
         """
         slug_norm = self._current_llm_provider()
         if slug_norm in _BRAINSTORM_PROVIDER_LABELS:
@@ -5853,8 +6046,9 @@ class MainWindow(QMainWindow):
             # da task-004 do loop 05-21-implantation-tasklist-aba-brainstorm)
             # protege contra mutacao concorrente durante a montagem do prompt.
             if button_type == "type-selector-radio-input":
-                # Main=Qwen/Grok nao tem persona de brainstorm: degradar para
+                # So Main=Qwen/Grok degradam: sem persona de brainstorm, viram
                 # "Claude" AQUI (mesma regra de _get_brainstorm_runtime_provider).
+                # Main=MiMo tem rotulo proprio ("MiMo") e nao degrada.
                 # Sem isso o fallback devolvia o literal
                 # "type-selector-radio-input" como nome de provider.
                 resolved_slug = self._current_llm_provider()
@@ -5869,8 +6063,9 @@ class MainWindow(QMainWindow):
 
             # O slug CRU (`resolved_slug`) continua governando o mapa de
             # terminal abaixo, mas quem de fato executa e o provider de
-            # `resolved_type`: para Main LLM qwen/grok o rotulo degrada
-            # para "Claude" e o slug nao. Gravar o slug cru aqui escrevia
+            # `resolved_type`: so para Main LLM qwen/grok o rotulo degrada
+            # para "Claude" e o slug nao (mimo grava "mimo": rotulo proprio,
+            # "MiMo".lower()). Gravar o slug cru aqui escrevia
             # `resolved_provider="qwen"` num despacho que saiu inteiro por
             # Claude -- a degradacao que este par de campos existe para
             # medir ficava invisivel exatamente no caso que a motivou.
@@ -5968,8 +6163,10 @@ class MainWindow(QMainWindow):
                 # comportamento legado baseado no target_path do payload.
                 target_terminal = payload.get("target_path")
                 if button_type == "type-selector-radio-input":
+                    # mimo herda o T2 do kimi (worker T2 MiMo/Kimi/Qwen).
                     target_terminal = {
                         "claude": "terminal-interactive-output",
+                        "mimo": "terminal-workspace-output",
                         "kimi": "terminal-workspace-output",
                         "codex": "terminal-codex-output",
                     }.get(resolved_slug, "terminal-interactive-output")
@@ -6499,6 +6696,7 @@ class MainWindow(QMainWindow):
         "estrategista-delegador": "Build",
         "systemforge-db-update": "commit",
         "systemforge-hostinger-deploy": "commit",
+        "systemforge-fix-503": "commit",
         "corgly-db-update": "commit",
         "corgly-hostinger-deploy": "commit",
         "generated-command-list-comparison-whit-rules": "Review",
@@ -7623,19 +7821,9 @@ class MainWindow(QMainWindow):
             return btn
 
         def _on_json_path() -> None:
-            project_cfg = app_state.project_config
-            if not project_cfg:
-                signal_bus.toast_requested.emit(
-                    "Nenhum projeto carregado. Selecione um project.json no anexo project.",
-                    "warning",
-                )
+            rel = self._resolve_json_path_value()
+            if rel is None:
                 return
-            abs_config = project_cfg.config_path
-            project_dir = str(project_cfg.project_dir)
-            try:
-                rel = os.path.relpath(abs_config, project_dir)
-            except ValueError:
-                rel = abs_config
             QApplication.clipboard().setText(rel)
             # Task 6 (loop 05-13-workflow-app-layout-2): roteamento T1/T2.
             self._publish_to_terminal(rel)
@@ -7644,15 +7832,9 @@ class MainWindow(QMainWindow):
             )
 
         def _on_ws_path() -> None:
-            project_cfg = app_state.project_config
-            if not project_cfg:
-                signal_bus.toast_requested.emit(
-                    "workspace_root indisponivel: nenhum projeto carregado."
-                    " Selecione o project.json via queue-btn-json-path.",
-                    "warning",
-                )
+            ws = self._resolve_ws_path_value()
+            if ws is None:
                 return
-            ws = project_cfg.workspace_root
             QApplication.clipboard().setText(ws)
             # Task 6 (loop 05-13-workflow-app-layout-2): roteamento T1/T2.
             self._publish_to_terminal(ws)
@@ -7661,20 +7843,8 @@ class MainWindow(QMainWindow):
             )
 
         def _on_loop_path() -> None:
-            loop_cfg = app_state.loop_config
-            if not loop_cfg:
-                signal_bus.toast_requested.emit(
-                    "Loop anexado ausente: carregue um _LOOP-CONFIG.json para"
-                    " usar queue-btn-loop-path.",
-                    "warning",
-                )
-                return
-            loop_path = str(loop_cfg.config_path or "")
-            if not loop_path:
-                signal_bus.toast_requested.emit(
-                    "Loop anexado sem caminho. Recarregue o _LOOP-CONFIG.json",
-                    "warning",
-                )
+            loop_path = self._resolve_loop_path_value()
+            if loop_path is None:
                 return
             QApplication.clipboard().setText(loop_path)
             self._publish_to_terminal(loop_path)
@@ -7683,13 +7853,8 @@ class MainWindow(QMainWindow):
             )
 
         def _on_brainstorm_path() -> None:
-            md_path = (self._brainstorm_md_path or "").strip()
-            if not md_path:
-                signal_bus.toast_requested.emit(
-                    "Brainstorm .md nao carregado: selecione um arquivo no"
-                    " brainstorm-md-picker antes de usar queue-btn-brainstorm-path.",
-                    "warning",
-                )
+            md_path = self._resolve_brainstorm_path_value()
+            if md_path is None:
                 return
             QApplication.clipboard().setText(md_path)
             self._publish_to_terminal(md_path)
@@ -8009,7 +8174,7 @@ class MainWindow(QMainWindow):
             "#EC4899", "#DB2777", "#BE185D",
             "Cola o path ai-forge/rules/llm-routing-div.md no terminal\n"
             "(regras canonicas da queue-div-llm-routing: Main LLM x Parallel\n"
-            "Worker, dispatch Claude/Codex/Kimi, supressao de /model e /effort)",
+            "Worker, dispatch Claude/Codex/MiMo/Kimi, supressao de /model e /effort)",
         )
         llm_routing_rules_btn.clicked.connect(
             _paste_path("ai-forge/rules/llm-routing-div.md")
@@ -8043,7 +8208,7 @@ class MainWindow(QMainWindow):
             "#F472B6", "#EC4899", "#DB2777",
             "Cola o path ai-forge/rules/single-arrow-multifunction.md no terminal\n"
             "(regras do botao unico per-item da queue: provider router como\n"
-            "autoridade, cor/destino por provider Claude/Kimi/Codex, paridade\n"
+            "autoridade, cor/destino por provider Claude/MiMo/Kimi/Codex, paridade\n"
             "clique/step/autocast e divergencias conhecidas)",
         )
         single_arrow_rules_btn.clicked.connect(
@@ -9294,19 +9459,8 @@ class MainWindow(QMainWindow):
 
         def _make_handler(field: str):
             def _h() -> None:
-                if not app_state.has_config or not app_state.config:
-                    signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
-                    return
-                cfg = app_state.config
-                if field == "github_ssh":
-                    val = (cfg.raw.get("basic_flow") or {}).get("github_ssh", "") or ""
-                else:
-                    val = getattr(cfg, field, "") or ""
-                val = val.strip()
-                if not val:
-                    signal_bus.toast_requested.emit(
-                        f"{field} nao configurado em project.json", "warning",
-                    )
+                val = self._resolve_basic_flow_field_value(field)
+                if val is None:
                     return
                 QApplication.clipboard().setText(val)
                 self._publish_to_terminal(val)
@@ -9360,6 +9514,98 @@ class MainWindow(QMainWindow):
         analyse_btn.clicked.connect(_on_analyse_docs)
         btns.append(analyse_btn)
         return btns
+
+    # Resolvers de path compartilhados entre os botoes do toolbar (que publicam
+    # no terminal) e o header do NotesExpandModal (que insere no editor).
+    # Contrato: devolvem o valor pronto ou None — no None o toast warning ja
+    # foi emitido aqui (Zero Silencio), o caller apenas retorna.
+
+    def _resolve_json_path_value(self) -> str | None:
+        project_cfg = app_state.project_config
+        if not project_cfg:
+            signal_bus.toast_requested.emit(
+                "Nenhum projeto carregado. Selecione um project.json no anexo project.",
+                "warning",
+            )
+            return None
+        abs_config = project_cfg.config_path
+        try:
+            return os.path.relpath(abs_config, str(project_cfg.project_dir))
+        except ValueError:
+            return abs_config
+
+    def _resolve_ws_path_value(self) -> str | None:
+        project_cfg = app_state.project_config
+        if not project_cfg:
+            signal_bus.toast_requested.emit(
+                "workspace_root indisponivel: nenhum projeto carregado."
+                " Selecione o project.json via queue-btn-json-path.",
+                "warning",
+            )
+            return None
+        return project_cfg.workspace_root
+
+    def _resolve_loop_path_value(self) -> str | None:
+        loop_cfg = app_state.loop_config
+        if not loop_cfg:
+            signal_bus.toast_requested.emit(
+                "Loop anexado ausente: carregue um _LOOP-CONFIG.json para"
+                " usar queue-btn-loop-path.",
+                "warning",
+            )
+            return None
+        loop_path = str(loop_cfg.config_path or "")
+        if not loop_path:
+            signal_bus.toast_requested.emit(
+                "Loop anexado sem caminho. Recarregue o _LOOP-CONFIG.json",
+                "warning",
+            )
+            return None
+        return loop_path
+
+    def _resolve_brainstorm_path_value(self) -> str | None:
+        md_path = (self._brainstorm_md_path or "").strip()
+        if not md_path:
+            signal_bus.toast_requested.emit(
+                "Brainstorm .md nao carregado: selecione um arquivo no"
+                " brainstorm-md-picker antes de usar queue-btn-brainstorm-path.",
+                "warning",
+            )
+            return None
+        return md_path
+
+    def _resolve_basic_flow_field_value(self, field: str) -> str | None:
+        if not app_state.has_config or not app_state.config:
+            signal_bus.toast_requested.emit("Nenhum projeto carregado.", "warning")
+            return None
+        cfg = app_state.config
+        if field == "github_ssh":
+            val = (cfg.raw.get("basic_flow") or {}).get("github_ssh", "") or ""
+        else:
+            val = getattr(cfg, field, "") or ""
+        val = val.strip()
+        if not val:
+            signal_bus.toast_requested.emit(
+                f"{field} nao configurado em project.json", "warning",
+            )
+            return None
+        return val
+
+    def _notes_modal_path_sources(self) -> list[tuple]:
+        """Botoes do header do NotesExpandModal: (label, testid, bg, hover,
+        resolver). Mesmos testids e cores dos botoes de origem no toolbar."""
+        return [
+            ("JSON", "queue-btn-json-path", "#D97706", "#B45309",
+             self._resolve_json_path_value),
+            ("WS", "queue-btn-ws-path", "#059669", "#047857",
+             self._resolve_ws_path_value),
+            ("docs", "output-btn-docs-path", "#10B981", "#047857",
+             lambda: self._resolve_basic_flow_field_value("docs_root")),
+            ("loop path", "queue-btn-loop-path", "#0284C7", "#0369A1",
+             self._resolve_loop_path_value),
+            ("brainstorm md", "queue-btn-brainstorm-path", "#7C3AED", "#6D28D9",
+             self._resolve_brainstorm_path_value),
+        ]
 
     def _build_repo_rules_button(self) -> QPushButton:
         """Botao 'repo rules' da linha de baixo da sub-aba paths & IDs.
@@ -9493,12 +9739,24 @@ class MainWindow(QMainWindow):
         def _open_notes_modal() -> None:
             from workflow_app.dialogs.notes_expand_modal import NotesExpandModal
 
-            modal = NotesExpandModal(testid, notes_input.text(), parent=self)
-            if modal.exec() == QDialog.DialogCode.Accepted:
-                notes_input.setText(modal.text())
+            modal = NotesExpandModal(
+                testid,
+                notes_input.text(),
+                path_sources=self._notes_modal_path_sources(),
+                parent=self,
+            )
+            accepted = modal.exec() == QDialog.DialogCode.Accepted
+            text = modal.text()
+            # O header do modal repete testids do toolbar (queue-btn-json-path
+            # etc.); sem deleteLater o dialog fica filho do MainWindow e os
+            # duplicados aparecem em findChildren.
+            modal.deleteLater()
+            if accepted:
+                notes_input.setText(text)
                 notes_input.setFocus()
 
         expand_btn = QPushButton()
+        expand_btn.setProperty("testid", f"{testid}-btn-expand")
         expand_icon_path = _ASSETS_DIR / "expand.svg"
         expand_icon = self._load_tinted_svg_icon(expand_icon_path, "#FAFAFA")
         if expand_icon is not None:

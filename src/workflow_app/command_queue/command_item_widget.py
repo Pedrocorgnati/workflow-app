@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from workflow_app.command_queue.kimi_whitelist import adapt_to_kimi, is_kimi_compatible
+from workflow_app.command_queue.kimi_whitelist import adapt_to_kimi, is_t2_eligible
 from workflow_app.command_queue.provider_router import (
     _SESSION_DIRECTIVES,
     Provider,
@@ -53,16 +53,17 @@ _STATUS_SYMBOL: dict[CommandStatus, str] = {
 # Botao unico adaptavel (source.md secao 9): cor/tooltip/destino derivam do
 # provider efetivo. Pares (cor, cor_hover) por provider.
 #
-# A cor segue o TERMINAL, nao a identidade do LLM: T2 (familia Kimi|Qwen) e
-# sempre azul (`single-arrow-multifunction.md` seta azul). Qwen nao ganha cor
-# propria — Parallel Worker Qwen ocupa o mesmo T2 do Kimi.
-_T2_BLUE: tuple[str, str] = ("#3B82F6", "#93C5FD")  # azul -> T2 (Kimi e Qwen)
+# A cor segue o TERMINAL, nao a identidade do LLM: T2 (familia Kimi|Qwen|MiMo)
+# e sempre azul (`single-arrow-multifunction.md` seta azul). Qwen e MiMo nao
+# ganham cor propria — Parallel Worker Qwen/MiMo ocupa o mesmo T2 do Kimi.
+_T2_BLUE: tuple[str, str] = ("#3B82F6", "#93C5FD")  # azul -> T2 (Kimi, Qwen e MiMo)
 _PROVIDER_BTN_STYLE: dict[Provider, tuple[str, str]] = {
     Provider.CLAUDE: ("#22C55E", "#86EFAC"),  # verde  -> T1
     Provider.KIMI:   _T2_BLUE,                # azul   -> T2
     Provider.CODEX:  ("#A855F7", "#D8B4FE"),  # roxo   -> T3
     Provider.QWEN:   _T2_BLUE,                # azul   -> T2 (mesmo terminal do Kimi)
     Provider.GROK:   ("#EF4444", "#FCA5A5"),  # vermelho -> T3-grok
+    Provider.MIMO:   _T2_BLUE,                # azul   -> T2 (mesmo terminal do Kimi)
 }
 _PROVIDER_LABEL: dict[Provider, str] = {
     Provider.CLAUDE: "Claude",
@@ -70,6 +71,7 @@ _PROVIDER_LABEL: dict[Provider, str] = {
     Provider.CODEX:  "Codex worker",
     Provider.QWEN:   "Qwen worker",
     Provider.GROK:   "Grok worker",
+    Provider.MIMO:   "MiMo worker",
 }
 _PROVIDER_DEST: dict[Provider, str] = {
     Provider.CLAUDE: "T1 terminal-interactive",
@@ -77,6 +79,7 @@ _PROVIDER_DEST: dict[Provider, str] = {
     Provider.CODEX:  "T3 terminal-codex-output",
     Provider.QWEN:   "T2 terminal-workspace (qwen)",
     Provider.GROK:   "T3 terminal-codex-output (grok)",
+    Provider.MIMO:   "T2 terminal-workspace (mimo)",
 }
 # Cinza do estado Desabilitado (item nao executavel / recalculo falhou).
 _PROVIDER_DISABLED_COLOR = "#52525B"
@@ -146,8 +149,7 @@ def _format_command_label(name: str, config_path: str, *, max_lines: int = 3) ->
 # queue-chk-use-*). Conjunto FECHADO canonico em config.llm_flags; qualquer
 # token fora e ignorado (Zero Assumido, MF-01, MF-02).
 from workflow_app.config.llm_flags import (
-    MIMO_FLAG,
-    MIMO_SUPERSEDES_KIMI,
+    _MIMO_SUPERSEDES,
     _SUPPORTED_MCP_FLAGS,
 )
 
@@ -181,9 +183,10 @@ def render_with_mcp_flags(
       - provider CLAUDE (T1): anexa as flags de `active_flags` (apenas literais
         suportados, dedupadas, ordem de entrada preservada) ao final da base.
       - Precedencia MiMo > Kimi (2026-10-02): com `--mimo` ativa, `--kimi`
-        sai do sufixo. O parser v2 dos comandos nao roda o Kimi quando as
-        duas vem juntas; o payload reflete isso em vez de carregar literal
-        morto.
+        sai do sufixo; --mimo-pro tira o --kimi-k3 (supersede pareado, pares
+        do regime vigente em `_MIMO_SUPERSEDES`). Pares cruzados nao se
+        tiram. O parser v2 dos comandos nao roda o Kimi quando as duas vem
+        juntas; o payload reflete isso em vez de carregar literal morto.
       - provider None (Desabilitado) ou active_flags vazio / sem literal suportado:
         retorna `spec.name` sem sufixo (regressao zero).
 
@@ -217,9 +220,11 @@ def render_with_mcp_flags(
         if flag in _SUPPORTED_MCP_FLAGS and flag not in suffix_flags:
             suffix_flags.append(flag)
 
-    # Precedencia MiMo > Kimi: a MiMo substitui o Kimi na lane T2.
-    if MIMO_FLAG in suffix_flags:
-        suffix_flags = [f for f in suffix_flags if f not in MIMO_SUPERSEDES_KIMI]
+    # Precedencia MiMo > Kimi: a MiMo substitui o Kimi na lane T2, par a par
+    # (`--mimo` tira `--kimi`, `--mimo-pro` tira `--kimi-k3`).
+    for mimo_flag, superseded in _MIMO_SUPERSEDES.items():
+        if mimo_flag in suffix_flags:
+            suffix_flags = [f for f in suffix_flags if f not in superseded]
 
     if not suffix_flags:
         return base
@@ -343,15 +348,16 @@ class CommandItemWidget(QWidget):
         # handlers _on_run_clicked/reset_to_pending continuam operando sobre o
         # MESMO QPushButton — nao existe um segundo botao de execucao.
         self._run_btn = self._exec_btn
-        # Elegibilidade worker (eixo estatico identico a regra legada do
-        # _kimi_btn): whitelist Kimi OR spec.kimi_eligible, exceto local-action.
-        # Consumido pelo gate de play-next do queue widget via
-        # is_worker_arrow_visible(); o queue widget pode ocultar (Main Kimi) via
-        # set_worker_arrow_visible(False). Distinto da COR do botao, que segue o
-        # provider efetivo (resolver).
-        self._worker_arrow_visible = (
-            not _is_local_action
-            and (is_kimi_compatible(self._spec.name) or self._spec.kimi_eligible)
+        # Elegibilidade worker (eixo estatico, mesma regra do _kimi_btn do
+        # queue widget): elegibilidade T2 compartilhada (whitelist Kimi OR
+        # spec.kimi_eligible, `is_t2_eligible`), exceto local-action. Comando
+        # de geracao de imagem nunca e T2, nem com kimi_eligible: so o worker
+        # Codex gera pixels. Consumido pelo gate de play-next do queue widget
+        # via is_worker_arrow_visible(); o queue widget pode ocultar (Main
+        # Kimi) via set_worker_arrow_visible(False). Distinto da COR do botao,
+        # que segue o provider efetivo (resolver).
+        self._worker_arrow_visible = not _is_local_action and is_t2_eligible(
+            self._spec.name, kimi_eligible=self._spec.kimi_eligible
         )
 
         # Copy button (blue clipboard icon) — copies the full command line
