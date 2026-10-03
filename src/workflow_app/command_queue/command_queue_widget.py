@@ -9392,8 +9392,11 @@ class CommandQueueWidget(QWidget):
         item.run_in_terminal_requested.connect(
             lambda cmd, it=item: self._on_single_button_green_dispatch(it, cmd)
         )
-        item.run_in_kimi_terminal_requested.connect(self._dispatch_blue_arrow)
-        item.run_in_kimi_terminal_requested.connect(self._on_run_command)
+        # Item 008: slot unico da seta azul; `_on_run_command` so roda quando o
+        # dispatch devolve True (mark-as-sent gated, igual a seta verde).
+        item.run_in_kimi_terminal_requested.connect(
+            lambda cmd, it=item: self._on_single_button_blue_dispatch(it, cmd, runtime="kimi")
+        )
         # Fix D-5: local-action roda in-process; o queue widget e dono do
         # dispatch + toast (nunca cola `spec.name` no T1 — invariante 8).
         item.run_local_action_requested.connect(
@@ -9412,11 +9415,10 @@ class CommandQueueWidget(QWidget):
         item.run_in_codex_terminal_requested.connect(
             lambda cmd, it=item: self._on_single_button_codex_dispatch(it, cmd)
         )
-        # Rota propria da MiMo (T2, item 007): mark-as-sent fica no slot,
-        # depois do envio confirmado pelo host guard fail-closed. Nao passa
-        # pelo `_dispatch_blue_arrow` do Kimi/Qwen (caminho antigo preservado).
+        # Rota MiMo pelo slot unico (item 008): mark-as-sent so depois do
+        # envio confirmado pelo host guard fail-closed.
         item.run_in_mimo_terminal_requested.connect(
-            lambda cmd, it=item: self._on_single_button_mimo_dispatch(it, cmd)
+            lambda cmd, it=item: self._on_single_button_blue_dispatch(it, cmd, runtime="mimo")
         )
         item.sent_state_changed.connect(self._on_item_sent_state_changed)
         # --force Kimi pode estar ativo no momento da criacao do item: aplica
@@ -9481,20 +9483,30 @@ class CommandQueueWidget(QWidget):
         if self._dispatch_codex_command(cmd_text):
             item._mark_as_sent()
 
-    def _on_single_button_mimo_dispatch(
-        self, item: CommandItemWidget, cmd_text: str
+    def _on_single_button_blue_dispatch(
+        self, item: CommandItemWidget, payload: str, *, runtime: str
     ) -> None:
-        """Slot do botao unico (azul) para a MiMo/T2 (rota propria, item 007).
+        """Slot unico das setas azuis do T2 (Kimi, Qwen e MiMo) por clique.
 
-        So marca o item como enviado quando `_dispatch_mimo_blue_arrow` devolve
-        True (host guard fail-closed passou E o payload foi emitido ao T2). Em
-        qualquer abort (ocupacao errada, processo mimo ausente, PTY nao
-        inspecionavel, payload com "!`") o item permanece pendente e o toast do
-        dispatcher e o feedback visivel (Zero Silencio). Espelha
-        `_on_single_button_codex_dispatch`; label e highlight usam o texto
-        original do item (`cmd_text`), como a seta verde."""
-        if self._dispatch_mimo_blue_arrow(cmd_text):
-            self._on_run_command(cmd_text)
+        Unico consumidor dos sinais `run_in_kimi_terminal_requested` (Kimi e
+        Qwen compartilham o sinal Kimi) e `run_in_mimo_terminal_requested`.
+        Escolhe o dispatcher pelo `runtime` (validado: fora de "kimi"/"mimo"
+        levanta ValueError) e so chama `_on_run_command` e marca o item como
+        enviado quando o dispatcher devolve True (payload emitido ao T2; na
+        MiMo, so depois do host guard fail-closed). Em qualquer abort o item
+        permanece pendente e o toast do dispatcher e o feedback visivel (Zero
+        Silencio). Label e highlight usam o texto original do item
+        (`payload`), como a seta verde."""
+        if runtime == "mimo":
+            sent = self._dispatch_mimo_blue_arrow(payload)
+        elif runtime == "kimi":
+            sent = self._dispatch_blue_arrow(payload)
+        else:
+            raise ValueError(
+                f"runtime de seta azul invalido: {runtime!r} (esperado 'kimi' ou 'mimo')"
+            )
+        if sent:
+            self._on_run_command(payload)
             item._mark_as_sent()
 
     def _on_item_sent_state_changed(self, _is_sent: bool) -> None:
@@ -9506,6 +9518,39 @@ class CommandQueueWidget(QWidget):
     # Extra delay added when the previous workspace dispatch was /clear:
     # Kimi takes longer to repaint the prompt after a full TUI clear.
     _KIMI_AFTER_CLEAR_EXTRA_DELAY_MS: int = 2_000
+    # Item 008 (decisao de 2026-10-03): delay da seta azul MiMo em PTY, sem
+    # medicao previa; ajuste futuro de E2E mexe SO nestas duas constantes.
+    _MIMO_BLUE_ARROW_DEFAULT_DELAY_MS: int = 1_000
+    _MIMO_AFTER_CLEAR_EXTRA_DELAY_MS: int = 2_000
+    # /clear publicado no T2 MiMo: um espaco final e nenhum inicial, mesmo
+    # contrato do CLI mimocode que o payload da seta azul segue (item 006).
+    _MIMO_CLEAR_COMMAND: str = "/clear "
+
+    # Tabela de delays da seta azul do T2 por ocupante: (base, extra pos-clear).
+    # Kimi e Qwen compartilham as constantes KIMI; MiMo tem as proprias.
+    _T2_BLUE_ARROW_DELAYS_MS: dict[str, tuple[int, int]] = {
+        "kimi": (_KIMI_BLUE_ARROW_DEFAULT_DELAY_MS, _KIMI_AFTER_CLEAR_EXTRA_DELAY_MS),
+        "qwen": (_KIMI_BLUE_ARROW_DEFAULT_DELAY_MS, _KIMI_AFTER_CLEAR_EXTRA_DELAY_MS),
+        "mimo": (_MIMO_BLUE_ARROW_DEFAULT_DELAY_MS, _MIMO_AFTER_CLEAR_EXTRA_DELAY_MS),
+    }
+
+    def _consume_t2_blue_arrow_delay_ms(self, occupant: str) -> int:
+        """Le o delay da seta azul do T2 na tabela e consome a flag after-clear.
+
+        Ocupante fora da tabela (inclusive "") usa a linha "kimi": fallback
+        intencional que preserva o delay de hoje; ocupante novo do T2 entra na
+        tabela. Devolve `base + extra` quando
+        `self._last_workspace_dispatch_was_clear` (apos /clear), senao `base`;
+        em ambos os casos a flag volta para False (consumida). Chamado so no
+        ponto de emissao, depois dos aborts de cada dispatcher — emissao
+        abortada nao consome a flag.
+        """
+        base, extra = self._T2_BLUE_ARROW_DELAYS_MS.get(
+            occupant, self._T2_BLUE_ARROW_DELAYS_MS["kimi"]
+        )
+        after_clear = self._last_workspace_dispatch_was_clear
+        self._last_workspace_dispatch_was_clear = False  # consumed
+        return base + extra if after_clear else base
 
     def _prepare_mimo_blue_arrow(self, cmd_text: str) -> str | None:
         """Gates recusaveis da seta azul MiMo; devolve o payload ou None.
@@ -9550,23 +9595,17 @@ class CommandQueueWidget(QWidget):
           2. `_ensure_t2_mimo_host()` (fail-closed) -> False ja com toast;
           3. builder (recusa de "!`" -> ValueError) -> toast `warning` + False.
 
-        Delay igual ao do `_dispatch_blue_arrow`: `_KIMI_BLUE_ARROW_DEFAULT_DELAY_MS`,
-        mais `_KIMI_AFTER_CLEAR_EXTRA_DELAY_MS` quando a ultima dispatch do
-        workspace foi /clear (flag consumida aqui para False). O retorno bool e a
-        definicao de "envio confirmado" usada pelo slot
-        `_on_single_button_mimo_dispatch` (mark-as-sent gated, mesma semantica de
-        `_dispatch_codex_command`)."""
+        Delay vindo da linha "mimo" da tabela `_T2_BLUE_ARROW_DELAYS_MS`:
+        `_MIMO_BLUE_ARROW_DEFAULT_DELAY_MS`, mais
+        `_MIMO_AFTER_CLEAR_EXTRA_DELAY_MS` quando a ultima dispatch do
+        workspace foi /clear (flag consumida no ponto de emissao). O retorno
+        bool e a definicao de "envio confirmado" usada pelo slot
+        `_on_single_button_blue_dispatch` com runtime="mimo" (mark-as-sent
+        gated, mesma semantica de `_dispatch_codex_command`)."""
         payload = self._prepare_mimo_blue_arrow(cmd_text)
         if payload is None:
             return False
-        if self._last_workspace_dispatch_was_clear:
-            delay = (
-                self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
-                + self._KIMI_AFTER_CLEAR_EXTRA_DELAY_MS
-            )
-            self._last_workspace_dispatch_was_clear = False  # consumed
-        else:
-            delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+        delay = self._consume_t2_blue_arrow_delay_ms("mimo")
         dispatch_telemetry.open_dispatch(
             route="blue-arrow",
             channel="workspace",
@@ -9578,7 +9617,7 @@ class CommandQueueWidget(QWidget):
         signal_bus.kimi_blue_arrow_dispatched.emit(payload, delay)
         return True
 
-    def _dispatch_blue_arrow(self, kimi_prompt: str) -> None:
+    def _dispatch_blue_arrow(self, kimi_prompt: str) -> bool:
         """Forward a blue-arrow click to `kimi_blue_arrow_dispatched` with
         the right delay. Handler do par T2 inteiro (Worker Kimi e Worker
         Qwen): o clique per-item e o step convergem aqui via
@@ -9595,13 +9634,16 @@ class CommandQueueWidget(QWidget):
         entao na pratica o `_on_kimi_clicked` ja nem emite; este guard e
         defense-in-depth no proprio dispatcher (deliverable da task) para
         garantir que nenhum payload vazio chegue ao T2 sem feedback visivel.
+
+        Contrato de retorno: False = abort sem emissao; True = payload emitido
+        ao T2 (gate de mark-as-sent dos slots da seta azul).
         """
         if not kimi_prompt or not kimi_prompt.strip():
             signal_bus.toast_requested.emit(
                 "Worker Kimi: adaptacao retornou texto vazio — dispatch abortado.",
                 "warning",
             )
-            return
+            return False
         # FIX-011 Opt 1: roteia o worker pelo executor universal (contrato de
         # finalizacao do listener) quando aplicavel — fecha o stuck-yellow do
         # caso 011 sem tocar `adapt_to_kimi`. Idempotente para o payload de
@@ -9610,14 +9652,7 @@ class CommandQueueWidget(QWidget):
         t2, _ = self._resolve_worker_occupancy()
         if t2 == "qwen":
             kimi_prompt = self._build_qwen_slash_executor_invocation(kimi_prompt)
-        if self._last_workspace_dispatch_was_clear:
-            delay = (
-                self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
-                + self._KIMI_AFTER_CLEAR_EXTRA_DELAY_MS
-            )
-            self._last_workspace_dispatch_was_clear = False  # consumed
-        else:
-            delay = self._KIMI_BLUE_ARROW_DEFAULT_DELAY_MS
+        delay = self._consume_t2_blue_arrow_delay_ms(t2)
         dispatch_telemetry.open_dispatch(
             route="blue-arrow",
             channel="workspace",
@@ -9627,6 +9662,7 @@ class CommandQueueWidget(QWidget):
         )
         self._last_dispatch_head["workspace"] = self._command_head(kimi_prompt)
         signal_bus.kimi_blue_arrow_dispatched.emit(kimi_prompt, delay)
+        return True
 
     # ───────────────────── Listener recovery dispatch ───────────────────── #
     # Loop 06-01-listener-recovery-command, TASK 08. A command queue vira a dona
@@ -13164,10 +13200,12 @@ class CommandQueueWidget(QWidget):
             return
         head = cmd_text.strip().split(None, 1)[0].lower()
         # Item 020: T2 family = kimi OR qwen; T3 family = codex OR grok.
+        # Item 008: MiMo entra na familia T2.
         _t2_active = (
             self._use_kimi_chk.isChecked()
             or (getattr(self, "_use_qwen_chk", None) is not None
                 and self._use_qwen_chk.isChecked())
+            or self._is_mimo_worker_live()
         )
         _t3_active = (
             (getattr(self, "_use_codex_chk", None) is not None
@@ -13176,7 +13214,14 @@ class CommandQueueWidget(QWidget):
                 and self._use_grok_chk.isChecked())
         )
         if head == "/clear" and _t2_active:
-            self._publish_to_terminal("workspace", route="mirror-clear/t2", text=cmd_text)
+            # Item 008: a MiMo recebe _MIMO_CLEAR_COMMAND (espaco final);
+            # kimi e qwen seguem com o /clear cru.
+            _t2_text = (
+                self._MIMO_CLEAR_COMMAND
+                if self._resolve_worker_occupancy()[0] == "mimo"
+                else cmd_text
+            )
+            self._publish_to_terminal("workspace", route="mirror-clear/t2", text=_t2_text)
             self._last_workspace_dispatch_was_clear = True
         if head == "/clear" and _t3_active:
             # Fix D-7: mesmo gate de prontidao do T3 que o step path
@@ -13890,7 +13935,8 @@ class CommandQueueWidget(QWidget):
             getattr(self, "_use_grok_chk", None) is not None
             and self._use_grok_chk.isChecked()
         )
-        _t2_active = _kimi_on or _qwen_on
+        # Item 008: MiMo entra na familia T2.
+        _t2_active = _kimi_on or _qwen_on or self._is_mimo_worker_live()
         _t3_active = _codex_on or _grok_on
         clear_both = (
             cmd_head == "/clear"
@@ -13899,7 +13945,14 @@ class CommandQueueWidget(QWidget):
         if clear_both:
             self._publish_to_terminal("interactive", route="step/clear-both", text=cmd_text)
             if _t2_active:
-                self._publish_to_terminal("workspace", route="step/clear-both", text=cmd_text)
+                # Item 008: MiMo publica _MIMO_CLEAR_COMMAND (espaco final);
+                # kimi e qwen seguem com o /clear cru.
+                _t2_text = (
+                    self._MIMO_CLEAR_COMMAND
+                    if self._resolve_worker_occupancy()[0] == "mimo"
+                    else cmd_text
+                )
+                self._publish_to_terminal("workspace", route="step/clear-both", text=_t2_text)
                 self._last_workspace_dispatch_was_clear = True
             if _t3_active:
                 # task 006 finding F3 — mesmo gate de terminal alvo nao pronto
