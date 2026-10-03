@@ -79,6 +79,7 @@ from workflow_app.command_queue.command_queue_widget import (
 from workflow_app.command_queue.command_queue_widget import (
     enable_height_for_width as _enable_height_for_width_impl,
 )
+from workflow_app.config import feature_flags
 from workflow_app.config.app_state import app_state
 from workflow_app.config.config_bar import ConfigBar
 from workflow_app.config.config_parser import parse_config
@@ -93,6 +94,7 @@ from workflow_app.delivery.lock_bridge import (
 )
 from workflow_app.domain import CommandSpec, EffortLevel, InteractionType, ModelName
 from workflow_app.errors import ConfigError
+from workflow_app.metrics_bar import channel_llm
 from workflow_app.metrics_bar.metrics_bar import MetricsBar
 from workflow_app.output_panel.output_panel import OutputPanel
 from workflow_app.runtime_paths import workflow_app_assets_dir
@@ -7646,8 +7648,9 @@ class MainWindow(QMainWindow):
     ) -> HeterogeneousInsertionReport:
         """Render all requested variants first, then publish best-effort.
 
-        T1 uses Main LLM/interactive, T2 uses Kimi/workspace and T3 uses
-        Codex/workspace_xterm. No branch sends Enter or falls back to another
+        T1 uses Main LLM/interactive, T2 usa o ocupante vivo do par T2
+        (mimo|kimi|qwen; par vazio -> `channel_llm.t2_fallback_default`)/workspace
+        and T3 uses Codex/workspace_xterm. No branch sends Enter or falls back to another
         route. A render failure is atomic; a sink failure is isolated.
         """
         snapshot = self._capture_terminal_route_snapshot()
@@ -7673,7 +7676,16 @@ class MainWindow(QMainWindow):
         if snapshot.t1:
             route_specs.append(("T1", cq.current_main_llm(), "interactive"))
         if snapshot.t2:
-            route_specs.append(("T2", "kimi", "workspace"))
+            # Item 009: o T2 segue o ocupante vivo do par T2, nao Kimi fixo.
+            occ = cq._resolve_worker_occupancy()[0]
+            t2_llm = (
+                occ
+                if occ in channel_llm.T2_ROSTER
+                else channel_llm.t2_fallback_default(
+                    feature_flags.mimo_v1_enabled()
+                )
+            )
+            route_specs.append(("T2", t2_llm, "workspace"))
         if snapshot.t3:
             route_specs.append(("T3", "codex", "workspace_xterm"))
 

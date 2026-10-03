@@ -9552,7 +9552,9 @@ class CommandQueueWidget(QWidget):
         self._last_workspace_dispatch_was_clear = False  # consumed
         return base + extra if after_clear else base
 
-    def _prepare_mimo_blue_arrow(self, cmd_text: str) -> str | None:
+    def _prepare_mimo_blue_arrow(
+        self, cmd_text: str, *, recovery_mode: bool = False
+    ) -> str | None:
         """Gates recusaveis da seta azul MiMo; devolve o payload ou None.
 
         Sem efeito colateral alem do toast de recusa: nao publica, nao abre
@@ -9565,6 +9567,11 @@ class CommandQueueWidget(QWidget):
           1. texto vazio/so espacos -> toast `warning` + None;
           2. `_ensure_t2_mimo_host()` (fail-closed) -> None ja com toast;
           3. builder (recusa de "!`" -> ValueError) -> toast `warning` + None.
+
+        `recovery_mode=True` (so o recovery do canal workspace, item 009) faz
+        o builder injetar `--recovery-mode` logo apos
+        `--delegation-runtime=mimo`; o default False mantem byte a byte o
+        payload do clique, do step e do slot do item 008.
         """
         if not cmd_text or not cmd_text.strip():
             signal_bus.toast_requested.emit(
@@ -9575,7 +9582,9 @@ class CommandQueueWidget(QWidget):
         if not self._ensure_t2_mimo_host():
             return None
         try:
-            return self._build_mimo_slash_executor_invocation(cmd_text)
+            return self._build_mimo_slash_executor_invocation(
+                cmd_text, recovery_mode=recovery_mode
+            )
         except ValueError as exc:
             signal_bus.toast_requested.emit(
                 f"Worker MiMo: {exc} - dispatch abortado.",
@@ -9583,7 +9592,9 @@ class CommandQueueWidget(QWidget):
             )
             return None
 
-    def _dispatch_mimo_blue_arrow(self, cmd_text: str) -> bool:
+    def _dispatch_mimo_blue_arrow(
+        self, cmd_text: str, *, recovery_mode: bool = False
+    ) -> bool:
         """Despacha a seta azul da MiMo ao T2; True so quando publicou o payload.
 
         Caminho PROPRIO da MiMo (item 007): nao passa por `_dispatch_blue_arrow`
@@ -9601,8 +9612,15 @@ class CommandQueueWidget(QWidget):
         workspace foi /clear (flag consumida no ponto de emissao). O retorno
         bool e a definicao de "envio confirmado" usada pelo slot
         `_on_single_button_blue_dispatch` com runtime="mimo" (mark-as-sent
-        gated, mesma semantica de `_dispatch_codex_command`)."""
-        payload = self._prepare_mimo_blue_arrow(cmd_text)
+        gated, mesma semantica de `_dispatch_codex_command`).
+
+        `recovery_mode` e repassado a `_prepare_mimo_blue_arrow`: True so no
+        recovery do canal workspace (item 009), que injeta `--recovery-mode`
+        logo apos `--delegation-runtime=mimo`; o default False mantem byte a
+        byte o payload do clique, do step e do slot do item 008."""
+        payload = self._prepare_mimo_blue_arrow(
+            cmd_text, recovery_mode=recovery_mode
+        )
         if payload is None:
             return False
         delay = self._consume_t2_blue_arrow_delay_ms("mimo")
@@ -10061,7 +10079,9 @@ class CommandQueueWidget(QWidget):
           - interactive + Kimi   -> /skill:slash-executor + slash cru;
           - interactive + Qwen   -> /slash-executor + slash cru;
           - interactive + Grok   -> /slash-executor --delegation-runtime=grok + slash;
-          - workspace            -> Kimi/Qwen blue-arrow (kimi_blue_arrow_dispatched, T2);
+          - workspace            -> MiMo (/slash-executor --delegation-runtime=mimo,
+                                    host guard; recusa -> BLOCKED) ou Kimi/Qwen
+                                    blue-arrow (kimi_blue_arrow_dispatched, T2);
           - workspace_xterm      -> Codex envelope OU Grok `/slash-executor` nativo.
 
         O canal e marcado busy pelo CAMINHO EXISTENTE: o MetricsBar ja conecta
@@ -10104,13 +10124,26 @@ class CommandQueueWidget(QWidget):
             # T2 Parallel Worker: seta azul (TASK 09). Qwen no T2 usa o
             # slash nativo `/slash-executor`; Kimi permanece `/skill:`.
             t2, _ = self._resolve_worker_occupancy()
-            builder = (
-                self._build_qwen_slash_executor_invocation
-                if t2 == "qwen"
-                else self._build_kimi_slash_executor_invocation
-            )
-            payload = builder(base, recovery_mode=True)
-            self._dispatch_blue_arrow(payload)
+            if t2 == "mimo":
+                # MiMo no T2 (item 009): caminho proprio da seta azul MiMo,
+                # com o host guard fail-closed. Recusa (host ausente ou
+                # payload recusado pelo builder) nao publica nada e fecha o
+                # canal em BLOCKED, igual as demais recusas do recovery.
+                if not self._dispatch_mimo_blue_arrow(base, recovery_mode=True):
+                    self._reject_recovery_command(
+                        channel,
+                        "Auto-recuperacao abortada: T2 MiMo recusou o envio "
+                        "(host guard fail-closed ou payload recusado).",
+                    )
+                    return
+            else:
+                builder = (
+                    self._build_qwen_slash_executor_invocation
+                    if t2 == "qwen"
+                    else self._build_kimi_slash_executor_invocation
+                )
+                payload = builder(base, recovery_mode=True)
+                self._dispatch_blue_arrow(payload)
         elif channel == "workspace_xterm":
             # T3 Parallel Worker: Codex envelope por default; Grok usa o
             # mesmo builder nativo do Main (`/slash-executor`), nunca o
@@ -11807,7 +11840,7 @@ class CommandQueueWidget(QWidget):
         adaptacao de publicacao por Main LLM. Contrato/invariantes:
         blacksmith/brainstorm-mcp/06-15-insertions-subtab-llm-routing.md §6/§8.1.
 
-        `llm`: "claude" | "codex" | "kimi" | "qwen" | "grok".
+        `llm`: "claude" | "codex" | "kimi" | "qwen" | "grok" | "mimo".
         `mode`: "insert" (insercao, nunca pulsa) | "dispatch" (fila, pode pulsar).
         """
         head = cls._command_head(text)
@@ -11955,6 +11988,77 @@ class CommandQueueWidget(QWidget):
                 ),
                 listener_channel=listener_channel,
             )
+
+        if llm == "mimo":
+            # Espelho do ramo grok (item 009): executor nativo
+            # `/slash-executor --delegation-runtime=mimo`. O builder recusa "!`"
+            # com ValueError; aqui vira abort_reason sem toast (metodo puro). O
+            # espaco final do builder e o contrato do CLI MiMo e vale nos dois
+            # modos (`insert` cola sem Enter).
+            build_executor = cls._build_mimo_slash_executor_invocation
+            if cls._starts_with_invocation(
+                head, cls._GROK_SLASH_EXECUTOR_INVOCATION
+            ):
+                if cls._MIMO_SHELL_EXPANSION_TOKEN in text:
+                    return RenderedInsertion(
+                        text=None,
+                        abort_reason=(
+                            f'MiMo: payload slash com "'
+                            f'{cls._MIMO_SHELL_EXPANSION_TOKEN}" recusado '
+                            "(expansao de shell do CLI MiMo)"
+                        ),
+                    )
+                return RenderedInsertion(
+                    text=text, listener_channel=listener_channel
+                )
+            try:
+                if head.startswith("/skill:"):
+                    rewritten = build_executor(text)
+                    if rewritten.lstrip().startswith("/skill:"):
+                        return RenderedInsertion(
+                            text=None,
+                            abort_reason=(
+                                "/skill: nao e dialeto do CLI MiMo — "
+                                "reescreva como /slash-executor"
+                            ),
+                        )
+                    return RenderedInsertion(
+                        text=rewritten, listener_channel=listener_channel
+                    )
+                if slug in cls._CUSTOM_PROMPT_DIRECTIVES:
+                    if cls._resolve_custom_prompt_file(slug) is None:
+                        return RenderedInsertion(
+                            text=None,
+                            abort_reason=(
+                                f"custom-prompt '{slug}' nao encontrado em "
+                                "ai-forge/custom-prompts/"
+                            ),
+                        )
+                    return RenderedInsertion(
+                        text=build_executor(text),
+                        listener_channel=listener_channel,
+                    )
+                has_command = cls._resolve_claude_command_file(slug) is not None
+                has_skill = cls._resolve_skill_target(slug)
+                if slug and not has_command and not has_skill:
+                    return RenderedInsertion(
+                        text=None,
+                        abort_reason=(
+                            f"comando/skill '{slug}' nao encontrado em "
+                            ".claude/commands/ ou .agents/skills/"
+                        ),
+                    )
+                return RenderedInsertion(
+                    text=build_executor(
+                        text,
+                        recovery_mode=(
+                            cls._normalized_slash_slug(text) == cls._RECOVERY_SLUG
+                        ),
+                    ),
+                    listener_channel=listener_channel,
+                )
+            except ValueError as exc:
+                return RenderedInsertion(text=None, abort_reason=f"MiMo: {exc}")
 
         if llm == "codex":
             if head.startswith("/skill:"):
