@@ -17,16 +17,18 @@ Modulo PURO (sem Qt, sem dependencia de runtime). Toda fonte de
 nao-determinismo (timestamp) e injetavel para testabilidade.
 
 Fonte canonica do binding canal->LLM: ai-forge/rules/llm-routing-div.md
-(interactive=Main LLM, workspace=worker marcado do par T2, workspace_xterm=
-worker marcado do par T3). A resolucao delega a
+(interactive=Main LLM, workspace=worker marcado do par T2 - mimo|kimi|qwen,
+workspace_xterm=worker marcado do par T3). A resolucao delega a
 `metrics_bar/channel_llm.resolve_channel_llm` - o mapa constante que vivia
 aqui foi removido em 2026-08-19 (gap C24): no roster expandido ele
 gravava `- llm: kimi` para um T2 rodando Qwen, mandando o agente de
 recuperacao diagnosticar a CLI errada. Aqui, ao contrario de
 `recovery_prompt.llm_for_channel`, canal nao mapeado retorna `INDISPONIVEL`
 (contrato diagnostico: nunca inferir, nunca omitir). Quando o valor vem do
-default legado em vez da ocupacao real, a linha `- llm:` carrega a marca de
-fallback entre parenteses - degradar e permitido, mentir nao.
+default do par em vez da ocupacao real, a linha `- llm:` carrega a marca de
+fallback entre parenteses - degradar e permitido, mentir nao. O default do
+par T2 vem de `RecoveryContext.t2_default` (`channel_llm.t2_fallback_default`:
+mimo com a MiMo habilitada, kimi legado sem ela; `None` = kimi).
 """
 
 from __future__ import annotations
@@ -41,8 +43,8 @@ from pathlib import Path
 # Redator canonico do workflow-app (modulo puro, sem Qt). Reusado aqui de
 # proposito: um quarto dialeto de mascara divergiria dos outros tres com o
 # tempo, e o snapshot de recuperacao e exatamente onde uma divergencia
-# vazaria segredo. Redige por FORMATO (PEM/JWT/Bearer/sk-), nao por nome de
-# campo, que e o unico criterio que sobrevive a um output de terminal cru.
+# vazaria segredo. Redige por FORMATO (PEM/JWT/Bearer/sk-/tp-), nao por nome
+# de campo, que e o unico criterio que sobrevive a um output de terminal cru.
 from workflow_app.create_agent_prompt import redact_secrets
 from workflow_app.metrics_bar.channel_llm import (
     ChannelLLM,
@@ -101,14 +103,17 @@ def llm_for_channel(
     *,
     t2_llm: str | None = None,
     t3_llm: str | None = None,
+    t2_default: str | None = None,
 ) -> str:
     """Resolve qual LLM ocupa o canal, para fins diagnosticos.
 
-    workspace       -> worker marcado do par T2 (kimi|qwen); sem ocupacao
-                       conhecida, default legado `kimi`
+    workspace       -> worker marcado do par T2 (mimo|kimi|qwen); sem
+                       ocupacao conhecida, `t2_default` (mimo com a MiMo
+                       habilitada; `None` = default legado `kimi`)
     workspace_xterm -> worker marcado do par T3 (codex|grok); sem ocupacao
                        conhecida, default legado `codex`
-    interactive     -> main_llm (claude|codex|kimi|qwen|grok); default claude
+    interactive     -> main_llm (qualquer slug de `channel_llm.MAIN_ROSTER`,
+                       mimo incluso); default claude
     qualquer outro  -> INDISPONIVEL (nunca inferir)
 
     O roster do canal interactive acompanha o roster do radio Main; um Main
@@ -119,7 +124,7 @@ def llm_for_channel(
     `llm_source_for_channel` e escreve a marca de fallback.
     """
     return llm_source_for_channel(
-        channel, main_llm, t2_llm=t2_llm, t3_llm=t3_llm
+        channel, main_llm, t2_llm=t2_llm, t3_llm=t3_llm, t2_default=t2_default
     ).llm
 
 
@@ -129,6 +134,7 @@ def llm_source_for_channel(
     *,
     t2_llm: str | None = None,
     t3_llm: str | None = None,
+    t2_default: str | None = None,
 ) -> ChannelLLM:
     """Igual a `llm_for_channel`, mas devolve o resultado TIPADO.
 
@@ -141,6 +147,7 @@ def llm_source_for_channel(
         main_llm=main_llm,
         t2_llm=t2_llm,
         t3_llm=t3_llm,
+        t2_default=t2_default,
         unmapped=UNAVAILABLE,
     )
 
@@ -169,9 +176,10 @@ def mask_output(snippet: str | None) -> str:
     recuperacao como `You've hit ***2 AM`. Um recovery lendo isso e cego, e um
     recovery cego e proibido pela FASE 2 de `/tools:listener-recovery`.
 
-    Contrato atual: aplicar `redact_secrets` (PEM, JWT, Bearer, `sk-`) sobre o
-    texto e devolver o resto em claro, truncando pelo INICIO quando passa de
-    `_MAX_EXCERPT_CHARS` — a cauda e onde vive o erro que derrubou o canal.
+    Contrato atual: aplicar `redact_secrets` (PEM, JWT, Bearer, `sk-`, `tp-`
+    do Token Plan MiMo) sobre o texto e devolver o resto em claro, truncando
+    pelo INICIO quando passa de `_MAX_EXCERPT_CHARS` — a cauda e onde vive o
+    erro que derrubou o canal.
 
     Ausencia continua virando `INDISPONIVEL` (Zero Silencio): nunca omitir.
     """
@@ -247,9 +255,14 @@ class RecoveryContext:
     # de proposito: construcao posicional existente continua valida.
     # `None` = a MetricsBar nunca recebeu `worker_occupancy_changed`;
     # `""` = o par existe e esta legitimamente vazio. Os dois caem no default
-    # legado, mas geram marcas de fallback DISTINTAS no render.
+    # do par, mas geram marcas de fallback DISTINTAS no render.
     t2_llm: str | None = None
     t3_llm: str | None = None
+    # Default do par T2 sem ocupacao viva, calculado pelo chamador com
+    # `channel_llm.t2_fallback_default(feature_flags.mimo_v1_enabled())`.
+    # DEPOIS de t3_llm pelo mesmo motivo (compatibilidade posicional);
+    # `None` = default legado kimi, byte a byte igual ao snapshot pre-MiMo.
+    t2_default: str | None = None
 
 
 def render_context(ctx: RecoveryContext, *, when: datetime) -> str:
@@ -260,11 +273,15 @@ def render_context(ctx: RecoveryContext, *, when: datetime) -> str:
     when_utc = when.astimezone(timezone.utc)
     timestamp = when_utc.isoformat().replace("+00:00", "Z")
     resolved = llm_source_for_channel(
-        ctx.channel, ctx.main_llm, t2_llm=ctx.t2_llm, t3_llm=ctx.t3_llm
+        ctx.channel,
+        ctx.main_llm,
+        t2_llm=ctx.t2_llm,
+        t3_llm=ctx.t3_llm,
+        t2_default=ctx.t2_default,
     )
     # Zero Silencio: fallback nunca vira certeza. O valor fica ANTES do
     # parenteses para o agente de recuperacao continuar tendo um destinatario
-    # acionavel; a marca diz que ele e default legado, e qual dos dois casos.
+    # acionavel; a marca diz que ele e default do par, e qual dos dois casos.
     llm = resolved.llm
     if resolved.is_fallback and resolved.note:
         llm = f"{resolved.llm} ({resolved.note})"

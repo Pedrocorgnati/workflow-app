@@ -5,7 +5,8 @@ source.md lines 450-469 (item 013).
 
 This module implements the transport layer that carries a delegation intent
 (declared by item 011's semantic delegation contract) to the target provider
-(Kimi or Codex), using the MCP envelope from item 004.
+(Kimi or Codex; Qwen, Grok and MiMo are refused with an explicit failure in
+`delegate_command`), using the MCP envelope from item 004.
 
 Responsibilities:
   1. Receive delegation intent (target provider + command + flags).
@@ -90,7 +91,7 @@ def format_delegation_degraded_warning(
 
     Args:
         step_id: identificador da etapa delegada (C-46).
-        provider: provider alvo (kimi, codex, grok, qwen).
+        provider: provider alvo (kimi, codex, grok, qwen, mimo).
         reason: um de `DELEGATION_DEGRADED_REASONS`; valores fora do enum
             ainda sao emitidos (fail-open), mas o caller deve preferir os
             reason codes canonicos.
@@ -253,7 +254,10 @@ def delegate_command(
 
     Args:
         spec: The command specification to delegate.
-        provider: Target provider (KIMI or CODEX). CLAUDE is rejected.
+        provider: Target provider (kimi, codex, grok, qwen, mimo). Only KIMI
+            and CODEX are delivered; QWEN, GROK and MIMO return ok=False with
+            `unknown-delegation-target:<slug>` (dormant path: a future T2
+            caller must add MIMO explicitly). CLAUDE is rejected.
         active_flags: Active MCP feature flags for the envelope.
         step_id: Correlatable step identifier (C-46).
         dispatch_fn: Optional callable that performs the actual dispatch.

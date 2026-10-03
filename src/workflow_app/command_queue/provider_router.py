@@ -4,11 +4,12 @@ Provider router — pure decision module for the single multifunction queue arro
 Source of truth: blacksmith/loop-archives/06-02-seta-unica-multi-llm-queue/source.md
 secao 7.1 (contrato) + secao 11 (matriz) + secao 12 (impacto por arquivo).
 
-Centraliza a decisao de provider (Claude/Kimi/Codex) de UM item da fila numa
-funcao PURA e testavel. Segunda etapa do defense-in-depth (source.md secao 13:
-router depois da whitelist, antes da UI). O widget (`command_queue_widget.py`,
-task 004) consome `classify_provider` para colorir o botao unico e escolher o
-terminal de destino, mas NUNCA delega a decisao a frontmatter ou a matrix DCP.
+Centraliza a decisao de provider (Claude/Kimi/Qwen/MiMo/Codex/Grok) de UM item
+da fila numa funcao PURA e testavel. Segunda etapa do defense-in-depth
+(source.md secao 13: router depois da whitelist, antes da UI). O widget
+(`command_queue_widget.py`, task 004) consome `classify_provider` para colorir
+o botao unico e escolher o terminal de destino, mas NUNCA delega a decisao a
+frontmatter ou a matrix DCP.
 
 Invariantes preservadas (source.md secao 5):
   - Inv 2 (regime unico): o eixo Worker e avaliado ANTES do eixo Main-LLM.
@@ -41,7 +42,12 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from workflow_app.command_queue.codex_whitelist import is_codex_compatible
-from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible
+from workflow_app.command_queue.kimi_whitelist import is_kimi_compatible  # noqa: F401 (snapshot)
+from workflow_app.command_queue.kimi_whitelist import is_t2_eligible as _is_t2_eligible
+
+# `is_kimi_compatible` nao e mais chamado aqui (a regra T2 usa `is_t2_eligible`),
+# mas o snapshot legado (tests/fixtures/llm_config_legacy_snapshot.json) trava o
+# nome em `dir(provider_router)`: o import fica, com noqa, como superficie.
 
 if TYPE_CHECKING:
     # Tipagem apenas: importar em runtime acoplaria o router pure ao modulo de
@@ -82,25 +88,22 @@ _SESSION_DIRECTIVES: frozenset[str] = frozenset(
 # | kimi      | kimi     | kimi                                             |
 # | codex     | codex    | codex                                            |
 # | qwen      | qwen     | qwen                                             |
+# | grok      | grok     | grok                                             |
+# | mimo      | mimo     | mimo                                             |
 # | (outro)   | unknown  | unknown                                          |
 # +-----------+----------+--------------------------------------------------+
 #
-# Regra de roteamento com Main (item 010):
-#   1. local-action / diretiva de sessao -> CLAUDE (precede tudo).
-#   2. Familia do comando == familia do Main -> CLAUDE (T1 roda o Main).
-#   3. Kimi worker ativo E (kimi_eligible OU is_kimi_compatible) -> KIMI.
-#   4. Codex worker ativo E is_codex_compatible -> CODEX.
-#   5. Fallback -> CLAUDE.
-#
-# A etapa 2 e a mudanca do item 010: o Main selecionado agora participa da
-# decisao. Antes, main_llm era campo de telemetria ignorado pelo router.
+# A regra "familia do comando == familia do Main -> CLAUDE" do item 010 (Router
+# V2) foi REVOGADA pela decisao D3 (gap C7): o Main nao participa da decisao e,
+# na colisao Main == Worker, o worker vence. O contrato vigente das regras esta
+# na docstring de `classify_provider`.
 #
 # --------------------------------------------------------------------------- #
 # Gap C4 — degenerada POR DESIGN, nao mapeamento pela metade                    #
 # (item 003 do loop 08-17-systemforge-multillm-gaps-refactor)                   #
 # --------------------------------------------------------------------------- #
 #
-# (a) Os 5 pares 1:1 abaixo (familia == variante para todo provider) sao
+# (a) Os pares 1:1 abaixo (um por membro de `Provider`; familia == variante) sao
 #     INTENCIONAIS. Nao ha familia com duas variantes hoje porque nao ha dois
 #     providers com identidade de comando compartilhada; o eixo variante existe
 #     no formato do valor, nao nos dados.
@@ -118,24 +121,37 @@ _SESSION_DIRECTIVES: frozenset[str] = frozenset(
 #     integral do item 004; nada dele foi criado aqui.
 #
 # (d) Evidencia de que o retorno degenerado nunca e observado com entrada de
-#     variante: os dois unicos produtores de `main_llm` so emitem os 5 slugs de
-#     provider — `_resolve_interactive_main_llm` (`command_queue_widget.py`,
-#     codex|qwen|grok|kimi|claude) e `_current_llm_provider` (`main_window.py`,
-#     com clamp contra `_MAIN_LLM_SLUGS`). Nenhum slug de variante (`opus`,
-#     `sonnet`, `kimi-k3`) alcanca `_classify_family_variant`.
+#     variante: os dois unicos produtores de `main_llm` so emitem slugs de
+#     provider (valores de `Provider`), nunca o slug cru de radio.
+#     `_resolve_interactive_main_llm` (`command_queue_widget.py`) devolve so a
+#     familia de `_MAIN_LLM_VARIANTS` (ou `claude`) e `_current_llm_provider`
+#     (`main_window.py`) faz clamp contra `_MAIN_LLM_SLUGS` (fora dele, `claude`).
+#     Nenhum slug de variante (`opus`, `sonnet`, `kimi-k3`, `mimo-pro`) alcanca
+#     `_classify_family_variant`. A fila so emite `mimo` com o slug em
+#     `_MAIN_LLM_VARIANTS` e em `_MAIN_LLM_PRECEDENCE` e o radio Main MiMo
+#     marcado, o que so e possivel sob `feature_flags.mimo_v1_enabled()`
+#     (switch desligado: radio ausente, ou oculto, desmarcado e inerte); o
+#     `main_window.py` so repassa `mimo` se o slug tambem estiver em
+#     `_MAIN_LLM_SLUGS`. Faltando qualquer dessas pecas, nenhum dos dois
+#     produtores emite `mimo`.
 #
 # MF-01 (nenhuma flag e redundante sob Main claude, porque `opus`/`sonnet` sao
 # variantes de claude e nao providers proprios) JA esta garantido em outro
-# ponto: `_REDUNDANT_FLAG_MAINS` em `workflow_app/config/llm_flags.py:69`, que
-# omite deliberadamente `--opus`/`--sonnet` e carrega o comentario
-# correspondente (consumidor unico: `llm_config/flags_panel.py`). Guard novo
-# aqui seria redundante e nao foi criado.
+# ponto: `_FULL_REDUNDANT_FLAG_MAINS` / `_REDUNDANT_FLAG_MAINS` em
+# `workflow_app/config/llm_flags.py`, que omitem deliberadamente as variantes
+# de claude (`--fable`/`--opus`/`--sonnet`) e carregam o comentario
+# correspondente. Consumidores: `FlagsPanel.set_main_llm`
+# (`llm_config/flags_panel.py`) le a tabela; o caminho legado de
+# `_refresh_flag_checkboxes_state` (`command_queue_widget.py`, sem painel)
+# tambem habilita todas as flags sob Main claude. Guard novo aqui seria
+# redundante e nao foi criado.
 _PROVIDER_FAMILIES: dict[str, tuple[str, str]] = {
     "claude": ("claude", "claude"),
     "kimi": ("kimi", "kimi"),
     "codex": ("codex", "codex"),
     "qwen": ("qwen", "qwen"),
     "grok": ("grok", "grok"),
+    "mimo": ("mimo", "mimo"),
 }
 
 
@@ -151,21 +167,37 @@ class Provider(str, Enum):
     CODEX = "codex"
     QWEN = "qwen"
     GROK = "grok"
+    MIMO = "mimo"
+
+
+# Ocupantes do T2 (seta azul, terminal-workspace): Kimi, Qwen e MiMo dividem a
+# elegibilidade (`kimi_whitelist.is_t2_eligible`) e o terminal. Privado + PEP 562
+# (`__getattr__`) pelo mesmo motivo de `classify_family_variant`: o snapshot
+# legado trava `dir(provider_router)`.
+_T2_PROVIDERS: frozenset[Provider] = frozenset(
+    {Provider.KIMI, Provider.QWEN, Provider.MIMO}
+)
 
 
 @dataclass(frozen=True)
 class RoutingState:
     """Estado de roteamento avaliado no momento do clique.
 
-    `kimi_worker_enabled` / `codex_worker_enabled` sao os checkboxes de worker
-    (T2/T3). `main_llm` e o Main LLM do T1 ("claude" | "kimi" | "codex" |
-    "qwen").
+    `kimi_worker_enabled` / `qwen_worker_enabled` / `mimo_worker_enabled` sao
+    os checkboxes do T2 e `codex_worker_enabled` / `grok_worker_enabled` os do
+    T3. `main_llm` e o Main LLM do T1 ("claude" | "kimi" | "codex" | "qwen" |
+    "grok" | "mimo").
 
-    No modo LEGADO (default) `main_llm` NAO participa da classificacao
-    (invariante 2: o eixo Worker decide; o Main-LLM no T1 e sempre o fallback
-    verde/T1) e existe so para UI/telemetria. No modo ROUTER V2 (item 010, atras
-    de kill-switch) ele passa a participar: familia do comando == familia do
-    Main -> T1. Ver `classify_provider` para o contrato completo dos dois modos.
+    `main_llm` NAO participa da classificacao (invariante 2: o eixo Worker
+    decide; o Main-LLM no T1 e sempre o fallback verde/T1) e existe so para
+    UI/telemetria. O modo ROUTER V2 (item 010) foi revogado pela decisao D3.
+
+    Os campos novos entram com default False e DEPOIS dos tres posicionais: o
+    snapshot legado constroi `RoutingState(kimi, codex, main_llm)` e tem de
+    continuar identico. O unico produtor previsto de `mimo_worker_enabled` e
+    `_resolve_item_provider` (command_queue_widget), que so pode marca-lo com
+    `feature_flags.mimo_v1_enabled()` verdadeiro (kill switch opt-in, congelado
+    no boot); o router nao le o switch.
     """
 
     kimi_worker_enabled: bool
@@ -173,6 +205,7 @@ class RoutingState:
     main_llm: str
     qwen_worker_enabled: bool = False
     grok_worker_enabled: bool = False
+    mimo_worker_enabled: bool = False
 
 
 def normalize_command_name(name: str) -> str:
@@ -200,7 +233,7 @@ def _classify_family_variant(provider_name: str) -> tuple[str, str]:
 
 
 def __getattr__(name: str) -> object:
-    """Preserva o nome publico `classify_family_variant` sem entrar em `dir()`.
+    """Preserva `classify_family_variant` e `T2_PROVIDERS` sem entrar em `dir()`.
 
     O item 010 criou `classify_family_variant` como funcao publica. O snapshot
     legado (`tests/fixtures/llm_config_legacy_snapshot.json`) trava a superficie
@@ -209,9 +242,13 @@ def __getattr__(name: str) -> object:
     contrato. PEP 562 concilia os dois: o acesso por atributo continua
     funcionando para quem depender do nome publico, mas o nome nao aparece em
     `dir()` (o `__getattr__` em si comeca com `_` e e filtrado pelo snapshot).
+    `T2_PROVIDERS` (MiMo, 2026-10-02) segue o mesmo caminho; `from
+    provider_router import T2_PROVIDERS` tambem passa por aqui.
     """
     if name == "classify_family_variant":
         return _classify_family_variant
+    if name == "T2_PROVIDERS":
+        return _T2_PROVIDERS
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -223,14 +260,18 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
       0. `is_prompt=True` -> CLAUDE (prompt simples, texto raw sem transformacoes)
       1. `force_main_llm=True` -> CLAUDE (verde/T1), ignora workers
       2. `spec.kind == "local-action"` -> CLAUDE (invariante 8: nunca a worker).
-      3. Diretiva `/clear` | `/model` | `/effort` -> CLAUDE (nao elegivel a
-         worker por whitelist; equivale ao fallback da regra 7).
+      3. Diretiva `/clear` | `/model` | `/effort` | `/reasoning` -> CLAUDE (nao
+         elegivel a worker por whitelist; equivale ao fallback da regra 8).
       4. Nenhum worker ativo -> CLAUDE.
-      5. Kimi worker ativo E (kimi_eligible OU is_kimi_compatible) -> KIMI.
-      5b. Qwen worker ativo E a mesma elegibilidade T2 -> QWEN (apos Kimi, PW-02).
+      5. Elegibilidade T2 (`is_t2_eligible`: kimi_eligible OU whitelist Kimi, e
+         NUNCA geracao de imagem) com ordem fixa dentro do T2:
+         5c. MiMo worker ativo -> MIMO (Q9, 2026-10-02: MiMo vence o Kimi em
+             toda duvida; avaliada PRIMEIRO no T2 para a ordem ser total);
+         5.  Kimi worker ativo -> KIMI;
+         5b. Qwen worker ativo -> QWEN (apos Kimi, PW-02).
       6. Codex worker ativo E is_codex_compatible -> CODEX.
       6b. Grok worker ativo E is_codex_compatible -> GROK (apos Codex, PW-02).
-      7. Kimi e Codex elegiveis ao mesmo tempo -> Kimi vence (regra 5 precede a 6).
+      7. T2 e T3 elegiveis ao mesmo tempo -> T2 vence (regra 5 precede a 6).
       8. Sem elegibilidade worker -> CLAUDE.
 
     Prompts simples (`is_prompt=True`) sempre roteiam para T1 sem passar por
@@ -252,7 +293,8 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
     contradizia ``ai-forge/rules/llm-routing-div.md``, que trata "avaliar o eixo
     Main antes do eixo Worker" como anti-pattern.
 
-    A ordem de avaliacao das regras 5/5b/6/6b/7/8 nao mudou com a revogacao.
+    A ordem de avaliacao das regras 5/5b/6/6b/7/8 nao mudou com a revogacao. A
+    regra 5c (MiMo) entrou em 2026-10-02 na frente de 5/5b, dentro do T2.
 
     Assume ``spec`` e ``state`` nao-None (contrato; entrada invalida e
     comportamento indefinido).
@@ -280,19 +322,26 @@ def classify_provider(spec: "CommandSpec", state: RoutingState) -> Provider:
         and not state.codex_worker_enabled
         and not state.qwen_worker_enabled
         and not state.grok_worker_enabled
+        and not state.mimo_worker_enabled
     ):
         # Regra 3 legada: sem nenhum worker ativo, so existe o destino Claude/T1.
         return Provider.CLAUDE
 
-    # Regra 5 (+ 7): Kimi tem precedencia (familia T2). is_kimi_compatible OU
-    # o flag herdado kimi_eligible do item de loop ja basta.
-    if state.kimi_worker_enabled and (spec.kimi_eligible or is_kimi_compatible(name)):
-        return Provider.KIMI
-
-    # Regra 5b: Qwen worker (familia T2, apos Kimi — PW-02).
-    # Mesma elegibilidade que Kimi (kimi_eligible OU is_kimi_compatible).
-    if state.qwen_worker_enabled and (spec.kimi_eligible or is_kimi_compatible(name)):
-        return Provider.QWEN
+    # Regra 5 (+ 7): o T2 tem precedencia sobre o T3. Elegibilidade unica e
+    # compartilhada pelos ocupantes de `_T2_PROVIDERS` (whitelist Kimi OU o flag
+    # herdado kimi_eligible do item de loop), com o gate de imagem dentro dela.
+    if _is_t2_eligible(name, kimi_eligible=spec.kimi_eligible):
+        # Regra 5c: MiMo vence Kimi e Qwen (Q9, 2026-10-02). Avaliada primeiro:
+        # depois da 5b, Kimi e Qwen venceriam a MiMo; guardar so a 5 deixaria a
+        # ordem ciclica (MiMo > Kimi > Qwen > MiMo).
+        if state.mimo_worker_enabled:
+            return Provider.MIMO
+        # Regra 5: Kimi (transitorio ate a retirada).
+        if state.kimi_worker_enabled:
+            return Provider.KIMI
+        # Regra 5b: Qwen (apos Kimi, PW-02).
+        if state.qwen_worker_enabled:
+            return Provider.QWEN
 
     # Regra 6: Codex (familia T3) so quando T2 nao venceu acima.
     if state.codex_worker_enabled and is_codex_compatible(name):

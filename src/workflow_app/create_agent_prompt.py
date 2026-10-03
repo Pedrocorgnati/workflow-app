@@ -40,6 +40,15 @@ _FORBIDDEN_CODEPOINTS: Final[frozenset[str]] = frozenset(
 
 # High-confidence secret patterns (never echo the matched value in errors).
 _RE_SK: Final[re.Pattern[str]] = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
+# MiMo Token Plan key: ``tp-`` followed by a long alphanumeric run (the one
+# observed shape carries 48; the 40 floor is a margin, hypothesis: stable
+# format). Same ASCII lookbehind as the ``mimo-token-plan`` class of
+# ``.claude/hooks/pretool-bash-secrets.sh``: it keeps ``http-``, ``ftp-``,
+# ``smtp-`` and ``stp-`` out (the ``t`` there follows an ASCII letter) and,
+# unlike ``\b``, which is Unicode-aware in ``str`` patterns, it still catches
+# a key glued to an accented letter. The body also accepts uppercase:
+# redaction may cover more than the hook blocks, never less.
+_RE_TP: Final[re.Pattern[str]] = re.compile(r"(?<![A-Za-z0-9_])tp-[A-Za-z0-9]{40,}")
 _RE_BEARER: Final[re.Pattern[str]] = re.compile(
     r"(?i)\bBearer\s+[A-Za-z0-9._\-]{8,}"
 )
@@ -233,8 +242,8 @@ def redact_secrets(value: str) -> str:
     Counterpart of :func:`_contains_secret_pattern` for the paths that must
     still surface a message (host errors, dialog feedback) instead of
     rejecting the input. Order matters: PEM blocks first (coarsest), then the
-    dangling-header shape, then JWT, Bearer and ``sk-`` so a longer match is
-    never split by a shorter one.
+    dangling-header shape, then JWT, Bearer, ``sk-`` and ``tp-`` (MiMo Token
+    Plan) so a longer match is never split by a shorter one.
 
     A PEM match covers the key material, not just the banner: the body and the
     END marker are removed with the header.
@@ -242,13 +251,22 @@ def redact_secrets(value: str) -> str:
     if not value:
         return value
     text = value
-    for pattern in (_RE_PEM_BLOCK, _RE_PEM_DANGLING, _RE_JWT, _RE_BEARER, _RE_SK):
+    for pattern in (
+        _RE_PEM_BLOCK,
+        _RE_PEM_DANGLING,
+        _RE_JWT,
+        _RE_BEARER,
+        _RE_SK,
+        _RE_TP,
+    ):
         text = pattern.sub("[REDACTED]", text)
     return text
 
 
 def _contains_secret_pattern(value: str) -> bool:
     if _RE_SK.search(value):
+        return True
+    if _RE_TP.search(value):
         return True
     if _RE_BEARER.search(value):
         return True

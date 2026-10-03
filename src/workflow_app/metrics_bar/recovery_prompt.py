@@ -13,9 +13,12 @@ so escalar para relatorio ou pergunta em ultimo caso.
 Fonte canonica do fluxo: ai-forge/rules/workflow-app-listeners.md (secao de
 auto-recuperacao) + ai-forge/rules/llm-routing-div.md (canal->LLM).
 Binding canal->LLM: interactive=Main LLM (radio), workspace=worker marcado do
-par T2, workspace_xterm=worker marcado do par T3 - com FALLBACK MARCADO no
-texto quando a ocupacao do par ainda nao chegou. A resolucao nao mora mais
-aqui: delega a `metrics_bar/channel_llm.resolve_channel_llm` (gap C24).
+par T2 (mimo|kimi|qwen), workspace_xterm=worker marcado do par T3 - com
+FALLBACK MARCADO no texto quando a ocupacao do par ainda nao chegou. A
+resolucao nao mora mais aqui: delega a
+`metrics_bar/channel_llm.resolve_channel_llm` (gap C24), inclusive o default
+do par T2 vazio, que o chamador passa por `t2_default`
+(`channel_llm.t2_fallback_default`).
 
 Modulo PURO (sem Qt, sem IO) para ser trivialmente testavel.
 """
@@ -24,6 +27,8 @@ from __future__ import annotations
 
 from workflow_app.metrics_bar.channel_llm import (
     MAIN_ROSTER,
+    T2_ROSTER,
+    T3_ROSTER,
     ChannelLLM,
     resolve_channel_llm,
 )
@@ -56,15 +61,17 @@ def llm_for_channel(
     *,
     t2_llm: str | None = None,
     t3_llm: str | None = None,
+    t2_default: str | None = None,
 ) -> str:
     """Resolve qual LLM ocupa o canal (delega ao resolver unico).
 
-    workspace       -> worker marcado do par T2 (kimi|qwen); sem ocupacao
-                       conhecida, cai no default legado `kimi`.
+    workspace       -> worker marcado do par T2 (mimo|kimi|qwen); sem
+                       ocupacao conhecida, cai em `t2_default` (mimo com a
+                       MiMo habilitada; `None` = default legado `kimi`).
     workspace_xterm -> worker marcado do par T3 (codex|grok); sem ocupacao
                        conhecida, cai no default legado `codex`.
-    interactive     -> Main LLM (radio queue-div-main-llm):
-                       claude|codex|kimi|qwen|grok
+    interactive     -> Main LLM (radio queue-div-main-llm): qualquer slug de
+                       `channel_llm.MAIN_ROSTER`
     qualquer outro  -> "claude" (o prompt SEMPRE precisa de um destinatario;
                        contrato deliberadamente divergente do de
                        `recovery_context.llm_for_channel`, que devolve
@@ -80,6 +87,7 @@ def llm_for_channel(
         main_llm=main_llm,
         t2_llm=t2_llm,
         t3_llm=t3_llm,
+        t2_default=t2_default,
         unmapped="claude",
     ).llm
 
@@ -90,6 +98,7 @@ def llm_source_for_channel(
     *,
     t2_llm: str | None = None,
     t3_llm: str | None = None,
+    t2_default: str | None = None,
 ) -> ChannelLLM:
     """Igual a `llm_for_channel`, mas devolve o resultado TIPADO.
 
@@ -102,6 +111,7 @@ def llm_source_for_channel(
         main_llm=main_llm,
         t2_llm=t2_llm,
         t3_llm=t3_llm,
+        t2_default=t2_default,
         unmapped="claude",
     )
 
@@ -187,10 +197,11 @@ _REASON_HINTS: dict[str, str] = {
 def _ask_clause(llm: str, channel: str) -> str:
     """Clausula da alternativa PERGUNTAR — mecanismo por LLM.
 
-    Qwen e Grok caem DE PROPOSITO no ramo generico (bloco azul + marcador
-    `>>> PERGUNTA AO OPERADOR <<<`): nenhum dos dois tem `/tools:auq-interview`,
-    que e um slash-command Claude. Registrado explicitamente para que a
-    ausencia deles no ramo `claude` nao pareca omissao de C24.
+    MiMo, Qwen e Grok caem DE PROPOSITO no ramo generico (bloco azul +
+    marcador `>>> PERGUNTA AO OPERADOR <<<`): nenhum deles tem
+    `/tools:auq-interview`, que e um slash-command Claude. Registrado
+    explicitamente para que a ausencia deles no ramo `claude` nao pareca
+    omissao de C24.
     """
     if llm == "claude":
         return (
@@ -229,8 +240,8 @@ def build_recovery_prompt(
     """Monta o prompt de auto-recuperacao colado no terminal que falhou.
 
     Args:
-        llm: agente que ocupa o terminal — qualquer slug de `MAIN_ROSTER`
-            ("claude" | "codex" | "kimi" | "qwen" | "grok").
+        llm: agente que ocupa o terminal — qualquer slug de `MAIN_ROSTER`,
+            `T2_ROSTER` ou `T3_ROSTER` (claude, codex, mimo, kimi, qwen, grok).
         reason: motivo da falha (ex: BLOCKED, RESSALVAS, VERIFY_FAILED).
         channel: "interactive" | "workspace" | "workspace_xterm".
         llm_source: resultado tipado de `llm_source_for_channel`, quando o
@@ -244,10 +255,12 @@ def build_recovery_prompt(
     """
     if channel not in _VALID_CHANNELS:
         channel = "interactive"
-    # Roster completo (inclui qwen e grok). O clamp anterior a
-    # ("claude", "codex", "kimi") era C24 reaparecendo DENTRO do builder: um
-    # Qwen corretamente resolvido no T2 ainda viraria "claude" aqui.
-    if llm not in MAIN_ROSTER:
+    # Uniao dos rosters dos tres canais (Main + par T2 + par T3), nao so o
+    # Main. O clamp anterior a ("claude", "codex", "kimi") era C24
+    # reaparecendo DENTRO do builder: um Qwen corretamente resolvido no T2
+    # ainda viraria "claude" aqui. A uniao impede que um slug valido de par
+    # (ex.: mimo no T2) volte a ser clampado se um dia faltar no Main.
+    if llm not in (MAIN_ROSTER | T2_ROSTER | T3_ROSTER):
         llm = "claude"
     reason = (reason or "FAILURE").strip() or "FAILURE"
     fallback_note = ""

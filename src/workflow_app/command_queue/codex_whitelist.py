@@ -15,10 +15,13 @@ review/audit commands that are KEEP_CLAUDE for Kimi.
 
 A second, distinct axis exists: CAPABILITY EXCLUSIVITY. `/pictures-create` is
 whitelisted not for adversarial wiring but because Codex is the ONLY LLM in the
-queue (Claude/Kimi/Codex) with image generation (gpt-image-1) — Claude/Kimi
-cannot execute its core task (producing pixels) at all. Same publish format
-(slash-executor), highest %Codex in progress.md, different reason. See
-blacksmith/claude-to-codex/progress.md (linha 14 + nota de eixo).
+queue with image generation (gpt-image-1) — Claude, Kimi, Qwen and MiMo cannot
+execute its core task (producing pixels) at all (`/mcp:mimo --expect-images`
+exits 8). Same publish format (slash-executor), highest %Codex in progress.md,
+different reason. See blacksmith/claude-to-codex/progress.md (linha 14 + nota
+de eixo). The T2 side enforces the same rule at routing time:
+`kimi_whitelist.is_t2_eligible` never admits an image-generation command, not
+even with the inherited `kimi_eligible` flag.
 
 Publication: this module decides eligibility only. The Codex worker publishes a
 whitelisted command to T3 via the existing `_build_codex_slash_executor_prompt`
@@ -68,8 +71,8 @@ CODEX_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
 })
 
 # ── Regra de capacidade exclusiva: GERACAO DE IMAGEM ──────────────────────── #
-# Comandos que CRIAM imagem no repositorio. Entre Claude/Kimi/Codex, SO o Codex
-# gera pixel (GPT Image: gpt-image-2/gpt-image-1/DALL-E). Por isso esta regra e
+# Comandos que CRIAM imagem no repositorio. Entre Claude/Kimi/Qwen/MiMo/Codex, SO
+# o Codex gera pixel (GPT Image: gpt-image-2/gpt-image-1/DALL-E). Por isso esta regra e
 # AUTOMATICA e nao-negociavel (progress.md, Rubrica "Capacidade exclusiva"):
 #   1. % Codex = 100 (o maior possivel) — nao ha duvida nem deliberacao;
 #   2. qualquer LLM que NAO seja o Codex, roteada para gerar imagem, DEVE FALHAR
@@ -110,10 +113,12 @@ def is_image_generation_command(command_name: str) -> bool:
     """Return True if this slash-command CREATES images in the repository.
 
     Capability-exclusivity rule: only the Codex worker can generate pixels
-    (Claude/Kimi cannot). Such commands are auto-scored 100 and MUST fail when
-    routed to any non-Codex LLM (the command's own Gate de Capacidade enforces
-    the runtime side; this helper lets callers detect the class). Always a strict
-    subset of `is_codex_compatible` (every image-gen command is Codex-compatible).
+    (Claude, Kimi, Qwen and MiMo cannot; `kimi_whitelist.is_t2_eligible` uses
+    this helper to keep them off the T2). Such commands are auto-scored 100 and
+    MUST fail when routed to any non-Codex LLM (the command's own Gate de
+    Capacidade enforces the runtime side; this helper lets callers detect the
+    class). Always a strict subset of `is_codex_compatible` (every image-gen
+    command is Codex-compatible).
     """
     if not command_name or not command_name.strip():
         return False

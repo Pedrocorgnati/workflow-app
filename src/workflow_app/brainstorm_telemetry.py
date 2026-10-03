@@ -6,6 +6,8 @@ inteiro persistia exatamente UM evento estruturado: o `t3_publish_failed` do
 handler. Consequencia pratica: nao existe base para decidir aposentadoria de
 botao (G14), "zero uso" nao distingue botao nunca clicado de botao clicado e
 BLOQUEADO, e a degradacao qwen/grok -> Claude do radio de provider e invisivel.
+(A MiMo nao entra nessa degradacao: com Main MiMo o radio resolve para o
+rotulo proprio `MiMo` e o evento grava `mimo`, nunca `claude`.)
 
 Este modulo espelha o precedente vivo `dispatch_telemetry.py` (sidecar JSONL
 por PID em `~/.workflow-app/logs`, `_lock`, `_seq`, `except OSError: pass`,
@@ -39,7 +41,7 @@ por PID em `~/.workflow-app/logs`, `_lock`, `_seq`, `except OSError: pass`,
      ampliavel: quando uma classe nova aparecer, ela entra la.
    - O que E garantido: nenhum valor multi-linha e persistido inteiro,
      nenhum valor passa de `_MAX_VALUE_CHARS`, nenhum path absoluto
-     sobrevive e as 13 classes do hook de segredos sao mascaradas.
+     sobrevive e toda classe do hook de segredos e mascarada.
 
 ## Mascaramento: por FORMATO, nunca por nome de chave
 
@@ -59,7 +61,7 @@ Bearer`). Ficam
 DESCOBERTAS sete: `sbp_` (supabase-pat), `ghp_` (github-pat), `ghs_`
 (github-app-secret), `vcp_` (vercel-token), `rly_` (railway-pat), `password=`
 e `secret=`. Este modulo NAO herda aquela promessa: `_SECRET_PATTERNS` abaixo
-reimplementa as 13 classes do hook explicitamente, mais o email (que o hook nao
+reimplementa cada classe do hook explicitamente, mais o email (que o hook nao
 tem e o precedente tem).
 
 A verificacao nao vive so aqui: `tests/test_brainstorm_telemetry.py`
@@ -221,7 +223,7 @@ _REASONS_BY_EVENT: dict[str, frozenset[str]] = {
 # Mascaramento por FORMATO
 # ---------------------------------------------------------------------------
 
-#: As 13 classes de `.claude/hooks/pretool-bash-secrets.sh`, reimplementadas
+#: As classes de `.claude/hooks/pretool-bash-secrets.sh`, reimplementadas
 #: aqui de proposito (ver o bloco "Paridade" na docstring do modulo), mais o
 #: email. Cada entrada e (padrao, rotulo) -- o rotulo entra na substituicao
 #: para que o sidecar diga O QUE foi mascarado sem dizer qual valor era.
@@ -234,6 +236,14 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"ghs_[A-Za-z0-9]{36,}"), "github-app-secret"),
     (re.compile(r"vcp_[A-Za-z0-9]{30,}"), "vercel-token"),
     (re.compile(r"rly_[A-Za-z0-9]{20,}"), "railway-pat"),
+    # Chave do Token Plan MiMo (`tp-` + alfanumericos longos; o piso 40 e
+    # margem, hipotese de formato estavel), classe que o hook ganhou depois da
+    # medicao original. Mesmo lookbehind ASCII do hook: deixa http-/ftp-/smtp-/
+    # stp- de fora (ali o `t` segue letra) e, ao contrario de `\b`, que e
+    # Unicode, nao poupa `tp-` colado a letra acentuada, que o hook bloqueia.
+    # Charset mais largo que o do hook (aceita maiusculas) e rotulo identico:
+    # aqui pode mascarar mais do que o hook bloqueia, nunca menos.
+    (re.compile(r"(?<![A-Za-z0-9_])tp-[A-Za-z0-9]{40,}"), "mimo-token-plan"),
     (
         re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
         "jwt",
@@ -244,7 +254,7 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)secret=[^\s'\"]{8,}"), "secret-inline"),
     # Generico de atribuicao: `TAVILY_API_KEY=tvly-...`, `apiToken: abc...`.
     # O hook so conhece `password=` e `secret=`; segredo de terceiro com
-    # prefixo proprio (tvly-, SG., xoxb-) nao casa nenhum dos 13 padroes e
+    # prefixo proprio (tvly-, SG., xoxb-) nao casa nenhum padrao do hook e
     # chegava intacto ao JSONL. Aqui o gatilho e o NOME a esquerda do `=`,
     # que e o que esses valores tem em comum.
     (
@@ -518,8 +528,9 @@ def record_click_blocked(
     """Clique que terminou em `_on_clicked` ANTES do `emit`.
 
     Nao ha `resolved_provider` aqui de proposito: a resolucao qwen/grok ->
-    Claude acontece no handler, que este caminho nunca alcanca. Gravar o
-    requisitado como se fosse resolvido inventaria uma resolucao.
+    Claude (e a de Main MiMo, que fica `mimo` sem degradar) acontece no
+    handler, que este caminho nunca alcanca. Gravar o requisitado como se
+    fosse resolvido inventaria uma resolucao.
     """
     try:
         return _emit_record(EVENT_CLICK_BLOCKED, reason, {
@@ -559,7 +570,8 @@ def record_dispatch(
     `requested_provider` e o `button_type` CRU que chegou no payload (inclusive
     o literal `type-selector-radio-input`); `resolved_provider` e o valor
     calculado no handler. So o par mede a degradacao: so o resolvido apaga o
-    pedido, so o pedido esconde a queda.
+    pedido, so o pedido esconde a queda. Main MiMo nao degrada: o resolvido
+    sai `mimo` (rotulo proprio `MiMo` no handler), nunca `claude`.
     """
     try:
         return _emit_record(EVENT_DISPATCH, reason, {

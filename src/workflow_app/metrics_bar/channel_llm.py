@@ -2,11 +2,11 @@
 
 Fonte canonica do binding: `ai-forge/rules/llm-routing-div.md` secao 2.
 
-    | canal             | terminal | LLM                                      |
-    |-------------------|----------|------------------------------------------|
-    | interactive       | T1       | Main LLM (radio `queue-div-main-llm`)    |
-    | workspace         | T2       | worker marcado do par T2: kimi | qwen    |
-    | workspace_xterm   | T3       | worker marcado do par T3: codex | grok   |
+    | canal             | terminal | LLM                                          |
+    |-------------------|----------|----------------------------------------------|
+    | interactive       | T1       | Main LLM (radio `queue-div-main-llm`)        |
+    | workspace         | T2       | worker marcado do par T2: mimo | kimi | qwen |
+    | workspace_xterm   | T3       | worker marcado do par T3: codex | grok       |
 
 Por que este modulo existe (gap C24, 2026-08-19). `recovery_prompt.py` e
 `recovery_context.py` carregavam, cada um, uma COPIA do mapa constante
@@ -19,6 +19,15 @@ Duas copias do mesmo mapa ja divergiram uma vez; corrigi-las em duplicata
 reintroduziria o defeito por construcao. Aqui o mapa deixa de existir: os dois
 consumidores delegam a `resolve_channel_llm`.
 
+MiMo (2026-10-02). Com `feature_flags.mimo_v1_enabled()` falso o checkbox
+mimo do par T2 e o radio Main mimo nem existem, e o par T2 vazio continua
+caindo no default legado (kimi) byte a byte. Com o switch ligado, a MiMo vence
+o Kimi tambem no fallback: `t2_fallback_default(True)` devolve "mimo". Este
+modulo nao le o switch (continua puro): o chamador avalia
+`feature_flags.mimo_v1_enabled()` e repassa o resultado por `t2_default`.
+`t2_fallback_default` e a FONTE UNICA desse default para todo consumidor do
+par T2 vazio (barra/recovery, `route_specs` da insercao, seta azul).
+
 Modulo PURO (sem Qt, sem IO) para ser trivialmente testavel.
 """
 
@@ -29,7 +38,7 @@ from dataclasses import dataclass, field
 # Rosters por par. Um valor fora do roster do par NUNCA e aceito como ocupacao
 # viva daquele terminal: `t2_llm="codex"` e dado corrompido, nao um T2 rodando
 # Codex, e deve cair no fallback em vez de vazar para o snapshot.
-T2_ROSTER: frozenset[str] = frozenset({"kimi", "qwen"})
+T2_ROSTER: frozenset[str] = frozenset({"mimo", "kimi", "qwen"})
 T3_ROSTER: frozenset[str] = frozenset({"codex", "grok"})
 
 # Defaults de FALLBACK - nao binding de pane. O nome importa: eram exatamente
@@ -37,13 +46,29 @@ T3_ROSTER: frozenset[str] = frozenset({"codex", "grok"})
 # consumidores, e trata-los como binding e o defeito C24.
 LEGACY_T2_DEFAULT = "kimi"
 LEGACY_T3_DEFAULT = "codex"
+# Default do par T2 vazio com a MiMo habilitada (MiMo > Kimi). Nao substitui
+# LEGACY_T2_DEFAULT: a escolha entre os dois e de `t2_fallback_default`.
+MIMO_T2_DEFAULT = "mimo"
 
 # Roster do radio Main (T1). Espelha `MetricsBar._MAIN_LLM_SLUGS` e
-# `_MAIN_LLM_SLUGS` do main_window: um slug ausente daqui e clampado para
-# "claude", e o artefato de recuperacao passa a nomear o agente errado.
+# `_MAIN_LLM_SLUGS` do main_window (igualdade travada por teste): um slug
+# ausente daqui e clampado para "claude", e o artefato de recuperacao passa a
+# nomear o agente errado.
 MAIN_ROSTER: frozenset[str] = frozenset(
-    {"claude", "codex", "kimi", "qwen", "grok"}
+    {"claude", "codex", "mimo", "kimi", "qwen", "grok"}
 )
+
+
+def t2_fallback_default(mimo_enabled: bool) -> str:
+    """Default do par T2 quando nao ha ocupacao viva (sem sinal ou par vazio).
+
+    `mimo_enabled` e o valor de `feature_flags.mimo_v1_enabled()` avaliado
+    pelo CHAMADOR (este modulo nao le env). Ligado -> "mimo" (MiMo > Kimi);
+    desligado -> o default legado "kimi", byte a byte igual ao comportamento
+    anterior a MiMo.
+    """
+    return MIMO_T2_DEFAULT if mimo_enabled else LEGACY_T2_DEFAULT
+
 
 # Marca canonica de fallback, reusada LITERALMENTE por recovery_context
 # (linha `- llm:`), recovery_prompt (cabecalho) e metrics_bar (toast). Um
@@ -76,9 +101,10 @@ class ChannelLLM:
       esta legitimamente VAZIO (nenhum worker marcado).
     - ``"unmapped"``            -> canal fora dos tres canonicos.
 
-    Os dois fallbacks devolvem o MESMO llm (o default legado) e precisam ser
-    distinguiveis mesmo assim: "nao sei" e "sei que esta vazio" pedem acoes
-    diferentes do operador.
+    Os dois fallbacks devolvem o MESMO llm (o default do par: no T2,
+    `t2_fallback_default` - mimo com a MiMo habilitada, kimi legado sem ela;
+    no T3, codex) e precisam ser distinguiveis mesmo assim: "nao sei" e "sei
+    que esta vazio" pedem acoes diferentes do operador.
     """
 
     llm: str
@@ -128,6 +154,7 @@ def resolve_channel_llm(
     main_llm: str | None = None,
     t2_llm: str | None = None,
     t3_llm: str | None = None,
+    t2_default: str | None = None,
     unmapped: str = "claude",
 ) -> ChannelLLM:
     """Resolve qual LLM ocupa `channel`, com a origem do valor declarada.
@@ -135,9 +162,14 @@ def resolve_channel_llm(
     Args:
         channel: "interactive" | "workspace" | "workspace_xterm".
         main_llm: Main LLM do radio (T1). Fora de `MAIN_ROSTER` -> "claude".
-        t2_llm: ocupacao do par T2. `None` = sinal nunca recebido; `""` = par
-            vazio; valor fora de `T2_ROSTER` e tratado como par vazio.
+        t2_llm: ocupacao do par T2 (mimo | kimi | qwen). `None` = sinal nunca
+            recebido; `""` = par vazio; valor fora de `T2_ROSTER` e tratado
+            como par vazio.
         t3_llm: simetrico para o par T3.
+        t2_default: default dos dois fallbacks do par T2, normalmente
+            `t2_fallback_default(feature_flags.mimo_v1_enabled())`. `None` ou
+            valor fora de `T2_ROSTER` -> `LEGACY_T2_DEFAULT` (comportamento
+            anterior a MiMo, byte a byte).
         unmapped: valor devolvido para canal fora dos tres canonicos. Injetado
             pelo chamador porque os dois consumidores divergem DE PROPOSITO:
             `recovery_prompt` sempre precisa de um destinatario ("claude"),
@@ -150,7 +182,12 @@ def resolve_channel_llm(
         llm = main_llm if main_llm in MAIN_ROSTER else "claude"
         return _stamp(ChannelLLM(llm, "live"), channel)
     if channel == "workspace":
-        return _resolve_pair(channel, t2_llm, T2_ROSTER, LEGACY_T2_DEFAULT)
+        default = (
+            t2_default
+            if t2_default is not None and t2_default in T2_ROSTER
+            else LEGACY_T2_DEFAULT
+        )
+        return _resolve_pair(channel, t2_llm, T2_ROSTER, default)
     if channel == "workspace_xterm":
         return _resolve_pair(channel, t3_llm, T3_ROSTER, LEGACY_T3_DEFAULT)
     return _stamp(ChannelLLM(unmapped, "unmapped"), channel)

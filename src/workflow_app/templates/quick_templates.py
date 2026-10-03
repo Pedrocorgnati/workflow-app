@@ -520,13 +520,19 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
     _spec("/effort high",                    _O, _A, 11),
     _spec("/intake-review:create-gaplist",   _O, _A, 12, effort=EffortLevel.HIGH),
 
-    # Bloco 2.5: Codex adversarial review da gaplist (programatico, skip_prompt)
+    # Bloco 2.5: MiMo Pro adversarial review da gaplist (programatico, skip_prompt).
+    # /mcp:mimo-pro e API sem disco: o executor anexa os artefatos via --file;
+    # o project.json do item so resolve {wbs_root} e nunca vai em --file.
     _spec(
-        "/mcp:codex revisar a gaplist gerada por /intake-review:create-gaplist "
-        "(output/wbs/{slug}/intake-review/gaplist.md). Topic_type=decision. Level 2 "
-        "primary+secondary (senior-qa-architect + senior-adversarial). Identifique: "
+        "/mcp:mimo-pro --agent ai-forge/MCP/agents/revisar-qa-rules.md "
+        "--file {wbs_root}/intake-review/INTAKE-CHECKLIST.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-COMPARE.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-PROGRESS.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-TASKS/TASK-*.md "
+        "--topic \"Revisar a gaplist gerada por /intake-review:create-gaplist. "
+        "Topic_type=decision. Lente QA senior + adversarial. Identifique: "
         "(a) gaps do INTAKE que ficaram fora da gaplist, (b) priorizacao P0/P1/P2 "
-        "inconsistente, (c) tasks com escopo ambiguo ou criterio de aceite fraco.",
+        "inconsistente, (c) tasks com escopo ambiguo ou criterio de aceite fraco.\"",
         _S, _A, 13),
 
     # Bloco 3a.1: execucao P0 blockers — primeira passada (Opus / high)
@@ -562,13 +568,18 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
     _spec("/effort low",                        _O, _A, 33),
     _spec("/intake-review:execute-gaplist-p2",  _O, _A, 34, effort=EffortLevel.LOW),
 
-    # Bloco 3.5: Codex adversarial review pos-execucao (programatico)
+    # Bloco 3.5: MiMo Pro adversarial review pos-execucao (programatico).
+    # Sem disco: o executor anexa via --file o PROGRESS e os arquivos do
+    # workspace que as tasks executadas tocaram (nunca .env*/credenciais).
     _spec(
-        "/mcp:codex revisar o estado do workspace apos execucao completa da "
-        "gaplist (P0+P1+P2). Topic_type=decision. Level 2 primary+secondary "
-        "(senior-qa-architect + senior-adversarial). Identifique: (a) regressoes "
-        "introduzidas, (b) INTAKE items ainda nao cobertos no codigo, (c) testes "
-        "ou docs desatualizados frente ao codigo novo.",
+        "/mcp:mimo-pro --agent ai-forge/MCP/agents/revisar-qa-rules.md "
+        "--file {wbs_root}/intake-review/INTAKE-CHECKLIST.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-PROGRESS.md "
+        "--file <arquivos do workspace alterados pelas tasks da gaplist> "
+        "--topic \"Revisar o estado do workspace apos execucao completa da "
+        "gaplist (P0+P1+P2). Topic_type=decision. Lente QA senior + adversarial. "
+        "Identifique: (a) regressoes introduzidas, (b) INTAKE items ainda nao "
+        "cobertos no codigo, (c) testes ou docs desatualizados frente ao codigo novo.\"",
         _S, _A, 35),
 
     # Bloco 3.6: validacao de stack completa antes do veredito
@@ -593,12 +604,12 @@ TEMPLATE_INTAKE_REVIEW: list[CommandSpec] = [
     _spec("/intake-review:clear",            _H, _A, 45, optional=True, effort=EffortLevel.LOW),
 ]
 
-# ─── Intake MAX Review (versao deep — Opus/MAX + Codex adversarial + gates) ── #
+# ─── Intake MAX Review (versao deep — Opus/MAX + MiMo Pro adversarial + gates) ── #
 # Clone do TEMPLATE_INTAKE_REVIEW com effort 1-2 graus acima em cada comando
 # (excecao do /intake-review:clear final — mantido Sonnet/LOW por instrucao direta).
 #
 # Ajustes sobre o clone naive (analise Level 2 primary+secondary):
-#  - /mcp:codex recebe argumento explicito (skip_prompt implicito via topic),
+#  - /mcp:mimo-pro recebe argumento explicito (skip_prompt implicito via topic),
 #    caso contrario entraria em modo interativo e quebraria a fila.
 #  - list-improove em HIGH (satura antes do MAX — comando criativo/inferencial).
 #
@@ -643,14 +654,20 @@ TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
     _spec("/clear",                          _O, _A,  8),
     _spec("/intake-review:create-gaplist",   _O, _A,  9, effort=EffortLevel.MAX),
 
-    # Bloco 2.5: Codex adversarial review da gaplist (programatico, skip_prompt)
+    # Bloco 2.5: MiMo Pro adversarial review da gaplist (programatico, skip_prompt).
+    # /mcp:mimo-pro e API sem disco: o executor anexa os artefatos via --file;
+    # o project.json do item so resolve {wbs_root} e nunca vai em --file.
     _spec(
-        "/mcp:codex revisar a gaplist gerada por /intake-review:create-gaplist "
-        "(output/wbs/{slug}/intake-review/gaplist.md). Topic_type=decision. Level 2 "
-        "primary+secondary (senior-qa-architect + senior-adversarial). Identifique: "
+        "/mcp:mimo-pro --agent ai-forge/MCP/agents/revisar-qa-rules.md "
+        "--file {wbs_root}/intake-review/INTAKE-CHECKLIST.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-COMPARE.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-PROGRESS.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-TASKS/TASK-*.md "
+        "--topic \"Revisar a gaplist gerada por /intake-review:create-gaplist. "
+        "Topic_type=decision. Lente QA senior + adversarial. Identifique: "
         "(a) gaps do INTAKE que ficaram fora da gaplist, (b) priorizacao P0/P1/P2 "
         "inconsistente, (c) tasks com escopo ambiguo ou criterio de aceite fraco. "
-        "Retorne findings acionaveis antes da execucao.",
+        "Retorne findings acionaveis antes da execucao.\"",
         _O, _A, 10, effort=EffortLevel.MAX),
 
     # Bloco 3a.1: execucao P0 blockers — primeira passada
@@ -677,14 +694,19 @@ TEMPLATE_INTAKE_MAX_REVIEW: list[CommandSpec] = [
     _spec("/effort high",                       _O, _A, 21),
     _spec("/intake-review:execute-gaplist-p2",  _O, _A, 22, effort=EffortLevel.HIGH),
 
-    # Bloco 3.5: Codex adversarial review pos-execucao (programatico)
+    # Bloco 3.5: MiMo Pro adversarial review pos-execucao (programatico).
+    # Sem disco: o executor anexa via --file o PROGRESS e os arquivos do
+    # workspace que as tasks executadas tocaram (nunca .env*/credenciais).
     _spec(
-        "/mcp:codex revisar o estado do workspace apos execucao completa da "
-        "gaplist (P0+P1+P2). Topic_type=decision. Level 2 primary+secondary "
-        "(senior-qa-architect + senior-adversarial). Identifique: (a) regressoes "
-        "introduzidas, (b) INTAKE items ainda nao cobertos no codigo, (c) testes "
-        "ou docs desatualizados frente ao codigo novo. Retorne lista de acoes "
-        "residuais para o review-executed.",
+        "/mcp:mimo-pro --agent ai-forge/MCP/agents/revisar-qa-rules.md "
+        "--file {wbs_root}/intake-review/INTAKE-CHECKLIST.md "
+        "--file {wbs_root}/intake-review/INTAKE-REVIEW-PROGRESS.md "
+        "--file <arquivos do workspace alterados pelas tasks da gaplist> "
+        "--topic \"Revisar o estado do workspace apos execucao completa da "
+        "gaplist (P0+P1+P2). Topic_type=decision. Lente QA senior + adversarial. "
+        "Identifique: (a) regressoes introduzidas, (b) INTAKE items ainda nao "
+        "cobertos no codigo, (c) testes ou docs desatualizados frente ao codigo "
+        "novo. Retorne lista de acoes residuais para o review-executed.\"",
         _O, _A, 23, effort=EffortLevel.MAX),
 
     # Bloco 3.6: validacao de stack completa antes do veredito
@@ -1013,8 +1035,9 @@ TEMPLATE_BLOG: list[CommandSpec] = _inject_clears([
 # Cada chamada de generate-briefs avanca para a proxima `wave_alvo` pendente.
 #
 # Total: 4 + 14×N + 2 itens. Com N=3 default: 48 itens. Cada item e um slash-
-# command atomico Kimi-compat — o seletor "queue-div-main-llm" (Claude/Codex/Kimi)
-# do widget despacha um a um sem que nenhum item recursivamente orquestre N etapas.
+# command atomico Kimi-compat — o seletor "queue-div-main-llm" (Claude/Codex/MiMo/
+# Kimi) do widget despacha um a um sem que nenhum item recursivamente orquestre N
+# etapas.
 #
 # N e editavel via constante abaixo. Subir N aumenta linearmente a fila e o
 # tempo total; baixar reduz o pacote produzido por clique (e o "estoque" gerado).

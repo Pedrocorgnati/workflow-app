@@ -1,10 +1,16 @@
 """
-Kimi compatibility — whitelist + Claude→Kimi prompt adapter.
+Kimi compatibility — whitelist + Claude→Kimi prompt adapter + elegibilidade T2.
 
 Source of truth: blacksmith/claude-to-kimi/progress.md (37 commands
 classified as KIMI_OK or KIMI_PREFERRED). Commands listed here are eligible
 for execution in the Kimi CLI running on the workspace terminal, instead of
 the Claude Code interactive terminal.
+
+A whitelist abaixo e tambem a elegibilidade T2 COMPARTILHADA: Kimi, Qwen e
+MiMo ocupam o mesmo terminal-workspace e usam a mesma whitelist, via
+`is_t2_eligible` (que acrescenta o gate de geracao de imagem). O nome do modulo
+e o de `CommandSpec.kimi_eligible` ficam por compatibilidade; `adapt_to_kimi`
+e so do Kimi (a MiMo e o Qwen recebem o comando sem adaptacao).
 
 Adapter rationale: Kimi does not know SystemForge slash-commands, but the
 prompt template lives at .claude/commands/{slug}.md and is readable from the
@@ -15,6 +21,8 @@ the original arguments verbatim.
 from __future__ import annotations
 
 import shlex
+
+from workflow_app.command_queue.codex_whitelist import is_image_generation_command
 
 # Commands with %Kimi >= KIMI_THRESHOLD in blacksmith/claude-to-kimi/progress.md.
 # Threshold lowered to 54 to accommodate forced whitelisting of
@@ -137,9 +145,9 @@ KIMI_COMPATIBLE_COMMANDS: frozenset[str] = frozenset({
     "/loop:reconcile-check",        # 54 (KEEP_CLAUDE; whitelist via --approved override)
     "/loop:integration",                       # 54 (KEEP_CLAUDE; whitelist via --approved override)
     "/loop:iteraction:review-executed-loop",  # 54 (KEEP_CLAUDE; whitelist via --approved override)
-    # Loop iteration_template — lane worker Kimi (2026-08-18, SC93/SC94).
-    # A seta unica destes dois vira azul (T2) quando o Parallel Worker Kimi
-    # esta ligado; regra 4 de provider_router.classify_provider.
+    # Loop iteration_template — lane worker T2 (2026-08-18, SC93/SC94).
+    # A seta unica destes dois vira azul (T2) quando um Parallel Worker T2
+    # (Kimi|Qwen|MiMo) esta ligado; regra 5 de provider_router.classify_provider.
     "/loop:iteraction:create-task",   # 73 (KIMI_OK — delegate determinista por kind, zero AskUser, zero Codex)
     "/loop:iteraction:execute-task",  # 65 (KEEP_CLAUDE por <70; whitelist via --approved override do owner)
     # Meta — cmd hardening
@@ -214,6 +222,19 @@ def is_kimi_compatible(command_name: str) -> bool:
         return False
     head = command_name.strip().split(None, 1)[0]
     return head in KIMI_COMPATIBLE_COMMANDS
+
+
+def is_t2_eligible(command_name: str, *, kimi_eligible: bool = False) -> bool:
+    """Return True if this command may run on a T2 worker (Kimi, Qwen or MiMo).
+
+    Shared T2 eligibility: the Kimi whitelist OR the inherited `kimi_eligible`
+    flag of a loop item. Image generation is never T2-eligible, not even with
+    the flag: only the Codex worker generates pixels (capability exclusivity,
+    `codex_whitelist.IMAGE_GENERATION_COMMANDS`).
+    """
+    if is_image_generation_command(command_name):
+        return False
+    return kimi_eligible or is_kimi_compatible(command_name)
 
 
 def adapt_to_kimi(command_text: str) -> str:

@@ -577,6 +577,67 @@ def _resolve_item_commands(
     return None
 
 
+def _reduce_to_simple_loop_cmds(canonical_cmds: list[str]) -> list[str]:
+    """Reduce a canonical per-item `/loop` command block to the simple-loop shape.
+
+    `queue-btn-loop-simple` skips `/loop:iteraction:review-created-task` and
+    `/loop:iteraction:review-executed-task` — the second's work is absorbed
+    inline by the `--simple-loop` badge documented in
+    `.claude/commands/loop/iteraction/execute-task.md` (PASSO 5.5); the first
+    is simply dropped, since `/loop:iteraction:create-task` runs as-is and
+    needs no review before `execute-task`. This only changes which command
+    strings are dispatched for THIS run; the underlying
+    `_LOOP-CONFIG.json`/`progress.md` state is untouched, so switching between
+    `queue-btn-loop` and `queue-btn-loop-simple` mid-loop is always safe —
+    whichever checkpoints already exist (from either mode) satisfy both
+    commands' idempotency gates transparently.
+
+    Keeps only `/loop:iteraction:create-task` (unchanged, no badge) and
+    `/loop:iteraction:execute-task` (with `--simple-loop` appended) entries
+    back-to-back, NO `/clear` between the two, drops every other entry from
+    `canonical_cmds` (including bare `/clear`/`/model`/`/effort` directives
+    already present in the canonical list), and appends a single trailing
+    `/clear`. Returns `[]` when neither entry is present (caller falls back
+    to the same wrapper path used for any other empty `canonical_cmds`).
+
+    A trailing `/clear` here can end up immediately adjacent to the next
+    item's leading `/clear` separator when `daily_loop.clear_between_items`
+    is `True` — `build_loop_specs` collapses consecutive `/clear` entries in
+    the final spec list, so callers don't need to special-case that here.
+    """
+    kept: list[str] = []
+    for cmd in canonical_cmds:
+        head = cmd.split(" ", 1)[0]
+        if head == "/loop:iteraction:create-task":
+            kept.append(cmd)
+        elif head == "/loop:iteraction:execute-task":
+            kept.append(f"{cmd} --simple-loop")
+    if kept:
+        kept.append("/clear")
+    return kept
+
+
+def _collapse_consecutive_clear(specs: list["CommandSpec"]) -> list["CommandSpec"]:
+    """Drop a `/clear` CommandSpec that immediately follows another `/clear`.
+
+    Only `queue-btn-loop-simple` can produce this today: a reduced item's own
+    trailing `/clear` (from `_reduce_to_simple_loop_cmds`) landing right next
+    to the `clear_between_items` separator emitted before the next item. Both
+    specs are bare directives (no `loop_context`), so dropping the second one
+    is always safe — it never discards an iteraction command.
+    """
+    collapsed: list[CommandSpec] = []
+    for spec in specs:
+        if (
+            collapsed
+            and spec.name == "/clear"
+            and collapsed[-1].name == "/clear"
+        ):
+            continue
+        collapsed.append(spec)
+    return collapsed
+
+
 def _resolve_item_expanded_commands(
     daily_loop: dict[str, Any], item_id: str
 ) -> list[str] | None:
@@ -1173,7 +1234,7 @@ def _warn_silent_fallback_if_items_index_populated(
 # Canonical per-iteration command tokens for rocksmash mode (B6 2026-05-19).
 # The loader validates that, when raw_config["mode"] == "rocksmash", each
 # iteration item's `commands` list contains exactly these four tokens (in
-# this order), with any /clear|/model|/effort directives stripped before the
+# this order), with any /clear|/model|/effort|/reasoning directives stripped before the
 # comparison. Producers (/loop:create-structure, /loop:integration) must
 # write this exact 4-tuple per item; auto-upgrade of legacy 2-tuple loops
 # (do + review-done only) is covered by /legacy:* + B12 backfill.
@@ -1217,14 +1278,14 @@ def _nullable_mode(raw_config: dict[str, Any]) -> str | None:
 
 
 def _strip_directives(cmds: list[str]) -> list[str]:
-    """Remove /clear, /model X, /effort Y directives from a command list."""
+    """Remove /clear, /model X, /effort Y, /reasoning Z directives from a command list."""
     out: list[str] = []
     for c in cmds:
         c = str(c).strip()
         if not c:
             continue
         head = c.split(" ", 1)[0]
-        if head in ("/clear", "/model", "/effort"):
+        if head in ("/clear", "/model", "/effort", "/reasoning"):
             continue
         out.append(c)
     return out
@@ -1238,7 +1299,7 @@ def assert_rocksmash_iteration_shape(
     Behavior:
       - Noop unless ``is_rocksmash_mode(raw_config)`` returns True.
       - For every item with ``kind == "iteration"`` (or missing kind, treated
-        as iteration), strip /clear/model/effort directives and assert the
+        as iteration), strip /clear/model/effort/reasoning directives and assert the
         remaining tokens are exactly the 4 canonical tokens (matched by their
         first whitespace-separated word, so per-iteration ``--task <path>``
         suffixes are accepted).
@@ -1337,7 +1398,7 @@ def assert_mkt_assets_iteration_shape(
     Behavior:
       - Noop unless ``is_mkt_assets_mode(raw_config)`` returns True.
       - For every item with ``kind == "iteration"`` (or missing kind, treated
-        as iteration), strip /clear/model/effort directives and assert every
+        as iteration), strip /clear/model/effort/reasoning directives and assert every
         remaining per-iteration token belongs to the ``/mkt-assets:`` namespace
         (matched by its first whitespace-separated word). This is what prevents
         a mkt-assets button from dispatching a command that "falls into the
@@ -2175,6 +2236,7 @@ def build_loop_specs(
     loop_root: Path | str,
     *,
     project_workspace_root: Path | str | None = None,
+    simple: bool = False,
 ) -> list[CommandSpec]:
     """Expand a `/loop`-flavoured `_LOOP-CONFIG.json` + PROGRESS.md into a queue.
 
@@ -2188,6 +2250,21 @@ def build_loop_specs(
             daily-loop schema as the legacy daily-loop pipeline).
         loop_root:  resolved filesystem path of
             `blacksmith/loop-archives/{slug}/`.
+        simple: quando True (`queue-btn-loop-simple`), reduz o bloco
+            per-item de `canonical_cmds` para apenas
+            `/loop:iteraction:create-task` +
+            `/loop:iteraction:execute-task --simple-loop` + um `/clear`
+            final, descartando `/loop:iteraction:review-created-task`,
+            `/loop:iteraction:review-executed-task` e qualquer `/clear`
+            intermediario da lista canonica. Nao toca `_LOOP-CONFIG.json`
+            nem `progress.md` — apenas filtra quais comandos sao
+            despachados para este run; o schema de estado persistido
+            continua identico ao do modo normal (badge `--simple-loop` em
+            `.claude/commands/loop/iteraction/execute-task.md` absorve o
+            trabalho de `/loop:iteraction:review-executed-task`). So se
+            aplica ao ramo `canonical_cmds` (materializado por
+            `/loop:integration`); o ramo `expanded_cmds`
+            (`cmd_complexity=single` / `--cmd-single`) nunca e filtrado.
 
     Returns:
         list[CommandSpec] ready for `signal_bus.pipeline_ready.emit(...)`.
@@ -2365,6 +2442,7 @@ def build_loop_specs(
 
         _raise_if_ambiguous(daily_loop, item.item_id)
         canonical_cmds = _resolve_item_commands(daily_loop, item.item_id)
+        is_iteration_cmds = bool(canonical_cmds)
         if canonical_cmds:
             canonical_cmds = _rewrite_bare_relative_md_tokens(
                 canonical_cmds,
@@ -2372,9 +2450,13 @@ def build_loop_specs(
                 workspace_root_path,
                 item.item_id,
             )
+        if simple and is_iteration_cmds and canonical_cmds:
+            canonical_cmds = _reduce_to_simple_loop_cmds(canonical_cmds)
         if not canonical_cmds:
             # Path 2 (2026-05-17 fix Pitfall 7): cmd_complexity=single items
             # tem commands=[] por contrato e expanded_commands populado.
+            # (simple=True nunca chega aqui vindo de is_iteration_cmds=True,
+            # entao o ramo --cmd-single abaixo nunca e filtrado.)
             expanded_cmds = _resolve_item_expanded_commands(
                 daily_loop, item.item_id
             )
@@ -2466,6 +2548,9 @@ def build_loop_specs(
     # criaria um segundo reviewer mutante depois do selo global. A deteccao usa
     # a fila efetivamente expandida (nao apenas o JSON), preservando o fallback
     # legado quando o closer nao foi emitido entre os itens pendentes.
+    if simple:
+        specs = _collapse_consecutive_clear(specs)
+
     canonical_reconcile = f"/loop:reconcile-check --name {slug}"
     canonical_closer = f"/loop:iteraction:review-executed-loop --name {slug}"
     if (

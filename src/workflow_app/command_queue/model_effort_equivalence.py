@@ -14,7 +14,7 @@ modelo/effort que nao valia para aquela etapa.
 Contrato (decisao D-C27-2, 2026-08-17)
 --------------------------------------
 - `claude` -> identidade. Nenhum spec e alterado, adicionado ou removido.
-- `codex`, `kimi`, `qwen`, `grok` -> as linhas `/model` e `/effort` sao
+- `codex`, `kimi`, `qwen`, `grok`, `mimo` -> as linhas `/model` e `/effort` sao
   REMOVIDAS no enqueue. Nenhum desses CLIs expoe diretiva TEXTUAL de modelo ou
   reasoning; nao ha para onde traduzir.
 - Main desconhecido -> identidade (fail-open: nunca APAGAR diretiva por causa
@@ -54,8 +54,17 @@ Nao pela fila, e sim no BOOT do processo (ou no config do CLI):
 
   - Codex: `codex -m gpt-5.6-sol -c model_reasoning_effort=high`, ou os
     wrappers `~/.local/bin/codex-high` / `codex-xhigh`, ou `~/.codex/config.toml`.
-  - Kimi: `~/.kimi/config.toml` (`default_model`, `default_thinking`).
+  - Kimi: `~/.kimi-code/config.toml` (`default_model`; thinking em `[thinking]`).
   - Qwen / Grok: `~/.qwen/settings.json` / `~/.grok/config.toml`.
+  - MiMo: no boot do launcher `mimod` (`ai-forge/scripts/mimod.sh`), que repassa
+    UM unico `-m`: o ultimo `-m`/`--model` do argv (`-m X`, `--model X`, `-m=X`,
+    `--model=X` ou `-mX`) ou, sem ele, `${MIMOD_MODEL:-xiaomi-token-plan-sgp/mimo-v2.6-pro}`
+    (`-m` repetido derruba o TUI com `TypeError: A.split`); no config
+    `~/.config/mimocode/mimocode.json` (`model`, `small_model`); ou, headless,
+    `~/.mimocode/bin/mimo run -m xiaomi-token-plan-sgp/<modelo> --variant <effort>`.
+    Modelo sempre pelo id do Token Plan (`xiaomi-token-plan-sgp/<modelo>`, nunca
+    `xiaomi/<modelo>`). Docs e botoes digitam `mimod` (ou o binario pelo caminho),
+    nunca o `mimo` do zsh do operador, que e uma funcao que abre o dialogo TB2.
 
 A tabela de equivalencia boot-time (com os slugs reais e a procedencia de cada
 celula) vive em `ai-forge/rules/llm-routing-div.md` §14.1. Ensinar o LAUNCHER a
@@ -83,12 +92,14 @@ from workflow_app.domain import CommandSpec
 
 #: Mains sem diretiva TEXTUAL de modelo/effort: as linhas somem da fila.
 #:
-#: Os quatro estao aqui pela MESMA razao empirica, so que descoberta em datas
+#: Todos estao aqui pela MESMA razao empirica, so que descoberta em datas
 #: diferentes: `qwen`/`grok` nunca tiveram seletor; `codex`/`kimi` tem seletor,
 #: mas so como picker interativo que ignora argumento (evidencia no docstring do
-#: modulo). Adicionar um LLM sem diretiva textual equivale a inseri-lo aqui.
+#: modulo); `mimo` (2026-10-02) nao tem `/model`, `/effort` nem `/reasoning`
+#: entre os builtins do TUI, so os pickers `/models` e `/variants` e o toggle
+#: `/thinking`. Adicionar um LLM sem diretiva textual equivale a inseri-lo aqui.
 PROVIDERS_WITHOUT_MODEL_DIRECTIVES: frozenset[str] = frozenset(
-    {"codex", "kimi", "qwen", "grok"}
+    {"codex", "kimi", "qwen", "grok", "mimo"}
 )
 
 #: Unico Main cujo CLI aceita `/model X` e `/effort Y` como texto.
@@ -177,17 +188,22 @@ def is_foreign_directive(name: str) -> bool:
 def is_suppressed_directive(name: str, main_llm: str) -> bool:
     """True se `name` sera suprimida (pulso, nada no PTY) sob `main_llm`.
 
-    Item 012 (R-J5): predicado PURO que espelha EXATAMENTE o que os cinco
-    dispatchers ja fazem, para que o badge de dialeto da UI diga a MESMA
+    Item 012 (R-J5): predicado PURO que espelha EXATAMENTE o guard de
+    diretiva dos dispatchers, para que o badge de dialeto da UI diga a MESMA
     verdade que o dispatch. Um `if` duplicado dentro do widget divergiria dos
     dispatchers na proxima mudanca de dialeto; um predicado unico nao pode.
 
     Mapa dos dispatchers:
       - `main_llm == "claude"` -> `_dispatch_green_arrow` / caminho raw do T1
         guardam com `is_foreign_directive` (fail-open: so residuo comprovado);
-      - qualquer outro Main (`codex`, `kimi`, `qwen`, `grok`) -> os quatro
-        `_dispatch_*_main_command` guardam com `is_directive_line` (fecha em
-        toda diretiva, porque nenhum CLI nao-Claude tem equivalente textual).
+      - qualquer outro Main -> `is_directive_line` (fecha em toda diretiva,
+        porque nenhum CLI nao-Claude tem equivalente textual). Todo dispatcher
+        de Main nao-Claude (`_dispatch_codex_command`, os
+        `_dispatch_*_main_command`) TEM de testar `is_directive_line` antes de
+        qualquer ramo que publique no PTY ou aborte (`/clear` cru, gate de
+        runtime ou de host, resolucao de slug): e essa ordem que mantem este
+        predicado verdadeiro. A obrigacao vale tambem para o despacho do Main
+        `mimo`.
 
     Nao decide nada e nao bloqueia nada: e leitura pura, consumida pelo badge
     (Zero Silencio) e por teste. O dispatch continua sendo a autoridade.
