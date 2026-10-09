@@ -18,8 +18,12 @@ The compiled ``prompt_text`` carries, as readable text:
    for the criterion and the effective regexes.
 
 Everything else stays on disk and is read lazily by the target runtime.
-The premise verified by D-36 is that every target (Grok, Qwen, Kimi, Codex)
-is a local CLI with filesystem access.
+The premise verified by D-36 is that every target (Grok, Qwen, Kimi, Codex,
+MiMo) is a local CLI with filesystem access. MiMo arrives via the ``mimod``
+launcher (TUI ``mimocode``, binary ``~/.mimocode/bin/mimo``) with disk tools
+(bash, edit) auto-approved through
+``MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS=1``; contract in
+``ai-forge/rules/mimo-code-cli-contract.md``.
 
 Revoked contract: until item 007 of loop ``08-17-systemforge-multillm-gaps-refactor``
 this module returned the whole body (frontmatter stripped) with the arguments

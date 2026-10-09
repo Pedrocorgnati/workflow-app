@@ -14,6 +14,7 @@ Criteria (from task-013):
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -370,6 +371,20 @@ class TestBuildTopic:
 # --------------------------------------------------------------------------- #
 
 
+# Payload que cumpre o contrato JSON-first completo do kernel (C-53):
+# parsed_is_empty exige os campos escalares e as tres listas.
+_CONTRACT_STDOUT = json.dumps({
+    "provider": "codex",
+    "model": "gpt-5.3-codex-spark",
+    "verdict": "approve",
+    "summary": "ok",
+    "confidence": "high",
+    "findings": [],
+    "recommendations": [],
+    "risks": [],
+})
+
+
 class TestKernelDispatchIntegration:
     """Envelope -> kernel outcome -> TransportResult integration."""
 
@@ -438,7 +453,7 @@ class TestKernelDispatchIntegration:
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/local/bin/{name}")
 
         class FakeProc:
-            stdout = '{"verdict": "approve", "summary": "ok"}'
+            stdout = _CONTRACT_STDOUT
             stderr = ""
             returncode = 0
 
@@ -479,7 +494,7 @@ class TestKernelDispatchIntegration:
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/local/bin/{name}")
 
         class FakeProc:
-            stdout = '{"ok": true}'
+            stdout = _CONTRACT_STDOUT
             stderr = ""
             returncode = 0
 

@@ -328,5 +328,25 @@ class TestPreviewNoBotaoLoop:
         assert rec["queue_id"] is None
         # Sem fila nao ha queue_id — e sem queue_id nao se inventa evento.
         assert widget._last_resume_event is None
+        # Com [!] restante o loop NAO esta concluido: aviso, nunca "concluido".
+        avisos = [m for m, lvl in toasts if lvl == "warning"]
+        assert avisos and "1 falho(s)" in avisos[0] and "012" in avisos[0]
+        assert "NAO concluido" in avisos[0]
+        assert not any("loop concluido" in m for m, _ in toasts)
+
+    def test_loop_todo_feito_diz_concluido(self, widget, tmp_path):
+        from workflow_app.config.app_state import app_state
+
+        _anexa_loop(
+            tmp_path,
+            _progress(LINHA_FEITA),
+            cfg=_config(ids=("011",)),
+        )
+        try:
+            toasts, pipelines = _clica(widget)
+        finally:
+            app_state.clear_all()
+
+        assert pipelines == []
         infos = [m for m, lvl in toasts if lvl == "info"]
-        assert infos and "1 falho(s)" in infos[0]
+        assert infos and "loop concluido" in infos[0]

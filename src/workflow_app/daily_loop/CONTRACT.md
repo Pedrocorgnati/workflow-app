@@ -383,6 +383,7 @@ Tres comandos canonicos produzem e mantem o shape `daily_loop.buckets[*].items[*
 Producers complementares (escrevem auditoria, nunca o shape autoritario):
 
 - `/loop:individual-analysis` — grava `items_index[NNN].model`, `items_index[NNN].effort`, `items_index[NNN].kimi_eligible` (FASE 2). Nao toca `buckets[*].items[*].commands`.
+- `items_index[NNN].kimi_eligible` (leitura T2 compartilhada) — a elegibilidade T2 e compartilhada por Kimi, Qwen e MiMo (`provider_router._T2_PROVIDERS = {KIMI, QWEN, MIMO}`; em `domain.py` o campo carrega o comentario "elegibilidade T2 compartilhada Kimi|Qwen|MiMo; nome mantido por compat"); o nome do campo nao muda (compat com `items[].kimi_eligible`) e o ocupante vivo do T2 vem do radio T2 do workflow-app, nao do JSON do loop. Nenhum producer muda por isso.
 - `/loop:mark-type` — rotula `daily_loop.task_types[NNN]` (modo `--both`). Nao toca `commands`.
 - `/loop:check-tasks-and-cmd` — gate de re-rotulagem para items ambiguous. Nao toca `commands` autoritarios.
 

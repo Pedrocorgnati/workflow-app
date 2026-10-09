@@ -7737,6 +7737,20 @@ class CommandQueueWidget(QWidget):
 
         if not specs:
             self._record_loop_resume(slug, preview, "empty")
+            if preview is not None and preview.failed_count:
+                # Zero `[ ]` com `[!]` restante NAO e loop concluido: e loop
+                # parado. Dizer "concluido" aqui levava o operador a achar que
+                # a finalizacao ja tinha rodado (caso 10-03-corgly-desktop:
+                # 018/019 deferidos como [!] sem nunca executar).
+                signal_bus.toast_requested.emit(
+                    f"Loop {slug} NAO concluido: nenhum item pendente [ ], "
+                    f"mas {preview.failed_count} item(ns) falho(s)/deferido(s) "
+                    f"[!]: {', '.join(preview.failed_ids)}. Estado: "
+                    f"{preview.summary_line()}. Para retomar, vire a linha do "
+                    "item para [ ] no PROGRESS.md e clique em Loop de novo.",
+                    "warning",
+                )
+                return
             concluido = (
                 f" Estado: {preview.summary_line()}." if preview is not None else ""
             )
@@ -9910,6 +9924,14 @@ class CommandQueueWidget(QWidget):
            ``~/.claude.json``); variavel de ambiente,
            apenas como ultimo sinal e nunca como fonte canonica.
 
+        **Excecao: chave ORCH ``None`` (MiMo).** Provider cuja entrada em
+        ``_ORCH_PROVIDER_SOURCES`` traz chave ORCH ``None`` pula o project.json:
+        o launcher ``mimod`` nunca le ``credentials.mcp_servers.mimo`` e aborta
+        sem o auth.json do mimocode ou sem ``XIAOMI_API_KEY``/``MIMO_API_KEY``.
+        Aprovar pelo project.json liberaria um despacho que o CLI recusa
+        (aprovacao calada). So a config local e as envs contam, e a mensagem de
+        ausente omite a clausula do project.json.
+
         A config local do CLI conta como credencial porque e assim que os CLIs
         deste host de fato autenticam. Exigir a env var reprovaria provider
         perfeitamente autenticado, que e falso-negativo, nao fail-closed. Ja
@@ -9935,7 +9957,7 @@ class CommandQueueWidget(QWidget):
                 f"{', '.join(binaries)} encontrado no PATH ou em ~/.local/bin."
             )
 
-        if self._orch_credential_in_project_json(cred_key):
+        if cred_key is not None and self._orch_credential_in_project_json(cred_key):
             return None
         for rel in config_paths:
             if os.path.exists(os.path.expanduser(rel)):
@@ -9944,6 +9966,11 @@ class CommandQueueWidget(QWidget):
             if os.environ.get(key, "").strip():
                 return None
 
+        if cred_key is None:
+            return (
+                f"Credencial ORCH do Main LLM '{main_llm}' ausente: nenhuma config "
+                f"local ({', '.join(config_paths)}) e nenhuma de {', '.join(env_keys)}."
+            )
         return (
             f"Credencial ORCH do Main LLM '{main_llm}' ausente: nada em "
             f"credentials.mcp_servers.{cred_key} do project.json, nenhuma config "
@@ -9951,8 +9978,10 @@ class CommandQueueWidget(QWidget):
         )
 
     # provider -> (binarios aceitos, chave ORCH, configs locais do CLI, envs de fallback)
+    # Chave ORCH `None` = o CLI nao le o project.json; o preflight pula essa
+    # fonte e so aceita config local ou env (excecao documentada em PF-01).
     _ORCH_PROVIDER_SOURCES: dict[
-        str, tuple[tuple[str, ...], str, tuple[str, ...], tuple[str, ...]]
+        str, tuple[tuple[str, ...], str | None, tuple[str, ...], tuple[str, ...]]
     ] = {
         "claude": (
             ("claude", "clauded"),
@@ -9990,10 +10019,11 @@ class CommandQueueWidget(QWidget):
         # preflight so faz sentido para o launcher que o app de fato digita.
         # Auth do CLI: `XIAOMI_API_KEY` (alias `MIMO_API_KEY`, mesmo segredo
         # do Token Plan) ou o auth.json do mimocode, conferido so por
-        # existencia (nunca lido).
+        # existencia (nunca lido). Chave ORCH `None`: o `mimod.sh` nao le
+        # `credentials.mcp_servers.mimo`, entao o project.json nao aprova.
         "mimo": (
             ("mimod",),
-            "mimo",
+            None,
             ("~/.local/share/mimocode/auth.json",),
             ("XIAOMI_API_KEY", "MIMO_API_KEY"),
         ),

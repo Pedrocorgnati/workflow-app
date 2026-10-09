@@ -1483,14 +1483,29 @@ class TestGrokPublicExposure:
     item 025 (C-58). O teste grok_spike_gate_default_off e preservado.
     """
 
-    def test_grok_spike_gate_default_off(self):
+    def test_grok_spike_gate_default_off(self, monkeypatch):
         """Feature gate SF_GROK_SPIKE desligado por default."""
+        # Default = variavel ausente no boot. O gate congela no import e o host
+        # do operador pode exportar SF_GROK_SPIKE=1: simula o boot sem a env var.
+        from workflow_app.config import feature_flags
         from workflow_app.config.feature_flags import grok_spike_enabled
+        boot_state = feature_flags._resolve_grok_spike_state({})
+        assert boot_state == feature_flags.STATE_ABSENT
+        monkeypatch.setattr(feature_flags, "_GROK_SPIKE_STATE", boot_state)
+        monkeypatch.setattr(
+            feature_flags, "_GROK_SPIKE_ENABLED", boot_state == feature_flags.STATE_ON
+        )
         assert grok_spike_enabled() is False
 
-    def test_grok_spike_not_active_when_gate_off(self):
+    def test_grok_spike_not_active_when_gate_off(self, monkeypatch):
         """is_grok_spike_active() retorna False com gate desligado."""
+        from workflow_app.config import feature_flags
         from workflow_app.llm_config.grok_spike import is_grok_spike_active
+        boot_state = feature_flags._resolve_grok_spike_state({})
+        monkeypatch.setattr(feature_flags, "_GROK_SPIKE_STATE", boot_state)
+        monkeypatch.setattr(
+            feature_flags, "_GROK_SPIKE_ENABLED", boot_state == feature_flags.STATE_ON
+        )
         assert is_grok_spike_active() is False
 
     def test_grok_radio_hidden_when_gate_off(self, qapp):

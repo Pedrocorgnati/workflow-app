@@ -507,6 +507,7 @@ class TestPublishInsertionLlmAware:
             ("output-btn-corgly-change-vocabulary-order", "output-toolbar-corgly-flow"),
             ("output-btn-corgly-enrich-vocabulary", "output-toolbar-corgly-flow"),
             ("output-btn-corgly-clean-progress", "output-toolbar-corgly-flow"),
+            ("output-btn-corgly-create-homework", "output-toolbar-corgly-flow"),
             ("output-btn-corgly-picture-parts", "output-toolbar-corgly-flow"),
             (
                 "output-btn-corgly-corgly2-divide-vocabulary",
@@ -574,6 +575,7 @@ class TestPublishInsertionLlmAware:
             (f'/corgly:change-vocabulary-order "{filename}"',),
             (f'/corgly:enrich-vocabulary "{filename}"',),
             ("/corgly:clean-progress",),
+            (f'/corgly:create-homework "{filename}"',),
             (f'/corgly:picture-parts "{filename}"',),
             ("/corgly:corgly2-divide-vocabulary",),
             ("/corgly:corgly2-look4translation",),

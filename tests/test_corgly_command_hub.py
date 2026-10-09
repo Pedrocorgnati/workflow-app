@@ -27,8 +27,10 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("clean-progress.md", "/corgly:clean-progress"),
     ("cmd/autocast-put.md", "/corgly:cmd:autocast-put"),
     ("corgly2-divide-vocabulary.md", "/corgly:corgly2-divide-vocabulary"),
+    ("corgly2-look4translation.md", "/corgly:corgly2-look4translation"),
     ("corgly2-optimize-phrases.md", "/corgly:corgly2-optimize-phrases"),
     ("corgly2-put-false-friends.md", "/corgly:corgly2-put-false-friends"),
+    ("create-homework.md", "/corgly:create-homework"),
     ("dual-update.md", "/corgly:dual-update"),
     ("enrich-vocabulary.md", "/corgly:enrich-vocabulary"),
     ("funny-rebase.md", "/corgly:funny-rebase"),
@@ -37,8 +39,10 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("mcp/grok.md", "/corgly:mcp:grok"),
     ("mcp/kimi.md", "/corgly:mcp:kimi"),
     ("mcp/mimo.md", "/corgly:mcp:mimo"),
+    ("picture-parts.md", "/corgly:picture-parts"),
     ("questions-rebase.md", "/corgly:questions-rebase"),
     ("tools/auq-interview.md", "/corgly:tools:auq-interview"),
+    ("update-vocab-layout.md", "/corgly:update-vocab-layout"),
     ("vocab-text-review.md", "/corgly:vocab-text-review"),
 )
 
